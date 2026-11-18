@@ -1,6 +1,6 @@
 --- nvidia/nvidia_pci.c.orig	2026-11-17 19:37:40.086213000 +0000
 +++ nvidia/nvidia_pci.c	2026-11-17 19:39:02.498659000 +0000
-@@ -346,10 +346,17 @@
+@@ -346,10 +346,19 @@
  MODULE_VERSION(nvidia, 1);
  
  MODULE_DEPEND(nvidia, mem, 1, 1, 1);
@@ -15,6 +15,9 @@
 +#else
  MODULE_DEPEND(nvidia, linux, 1, 1, 1);
 +#endif
- #if defined(NVCPU_X86_64)
+-#if defined(NVCPU_X86_64)
++/* nvidia.ko calls linux_common's symbols directly: the kernel linker
++ * only resolves from a module's own dependencies, not theirs. */
++#if defined(NVCPU_X86_64) || defined(__aarch64__)
  MODULE_DEPEND(nvidia, linux_common, 1, 1, 1);
  #endif

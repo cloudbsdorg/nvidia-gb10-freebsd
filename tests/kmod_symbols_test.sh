@@ -121,30 +121,14 @@ append_defined_syms() {
 
 nm "$KERNEL" > /dev/null 2>&1 || fail "cannot read symbols of running kernel $KERNEL"
 append_defined_syms "$KERNEL" "$TMPD/defined"
-# The dependency module files are required, not optional: on this arm64
-# kernel the MODULE_DEPEND name linux64elf is registered by linux64.ko
-# (sys/arm64/linux/linux_sysvec.c: DECLARE_MODULE_TIED(linux64elf, ...))
-# and linux64elf itself depends on linux_common (linux_common.ko). A
-# missing file fails the test instead of printing a note.
-# Time:  O(M) loop iterations for M dependency modules checked.
-# Space: O(1) in this shell.
-for m in linux64 linux_common; do
-	[ -f "$KDIR/$m.ko" ] || fail "no $KDIR/$m.ko: dependency module of nvidia.ko missing from the running kernel's directory"
-	append_defined_syms "$KDIR/$m.ko" "$TMPD/defined"
-done
-sort -u "$TMPD/defined" -o "$TMPD/defined"
-
-# Time:  O(U log U + D log D) for the two sorts and the comm(1) merge,
-#        U undefined and D defined symbols.
-# Space: O(U + D) across the scratch files.
-comm -23 "$TMPD/undef" "$TMPD/defined" > "$TMPD/unresolved"
-if [ -s "$TMPD/unresolved" ]; then
-	sed 's/^/unresolved symbol: /' "$TMPD/unresolved"
-	fail "$(wc -l < "$TMPD/unresolved" | tr -d '[:space:]') undefined symbols resolve neither in $KERNEL nor in $KDIR/linux64.ko or linux_common.ko"
-fi
-echo "unresolved: 0"
-
-# (c) dependency names embedded in nvidia.ko (see header comment).
+# (c) dependency names embedded in nvidia.ko (see header comment), read
+# BEFORE the symbol check: the kernel linker resolves a module's undefined
+# symbols only from the kernel and the module's DIRECT dependencies
+# (linker_file_lookup_symbol() does not follow a dependency's own
+# dependencies), so the defined set below must be built from exactly the
+# declared ones. A symbol that only an undeclared module defines (2026-11-18:
+# linux_device_register_handler, in linux_common.ko, which nvidia.ko did not
+# declare) fails kldload with "symbol ... undefined" and must fail here.
 # nm runs into a file first: in a pipe an nm failure would be hidden by
 # the pipeline's last-stage status, and only a file keeps nm's own
 # failure checkable instead of masquerading as "no dependencies".
@@ -158,12 +142,43 @@ echo "deps: $(tr '\n' ' ' < "$TMPD/deps")"
 # Exact set, not membership: an extra dependency (a regression putting
 # back MODULE_DEPEND(nvidia, linux) - no such module on arm64) or a
 # missing one must both fail here, before kldload could.
-printf 'linux64elf\nmem\n' > "$TMPD/deps-want"
+printf 'linux64elf\nlinux_common\nmem\n' > "$TMPD/deps-want"
 if cmp -s "$TMPD/deps" "$TMPD/deps-want"; then
-	echo "deps ok: exactly linux64elf mem"
+	echo "deps ok: exactly linux64elf linux_common mem"
 else
-	fail "dependency set is not exactly {linux64elf, mem}: got [$(tr '\n' ' ' < "$TMPD/deps")]"
+	fail "dependency set is not exactly {linux64elf, linux_common, mem}: got [$(tr '\n' ' ' < "$TMPD/deps")]"
 fi
+
+# Symbols from the kernel and from each DECLARED dependency's file. On this
+# arm64 kernel the module name linux64elf is registered by linux64.ko
+# (sys/arm64/linux/linux_sysvec.c: DECLARE_MODULE_TIED(linux64elf, ...));
+# any other name is <name>.ko. A dependency with no file must be compiled
+# into the kernel (mem is, in GENERIC), so its symbols are the kernel's.
+# Time:  O(P) loop iterations for P declared dependencies.
+# Space: O(1) in this shell.
+while IFS= read -r dep; do
+	case $dep in
+	linux64elf) f=linux64 ;;
+	*) f=$dep ;;
+	esac
+	if [ -f "$KDIR/$f.ko" ]; then
+		append_defined_syms "$KDIR/$f.ko" "$TMPD/defined"
+	elif [ "$dep" != mem ]; then
+		fail "no $KDIR/$f.ko for declared dependency $dep"
+	fi
+done < "$TMPD/deps"
+sort -u "$TMPD/defined" -o "$TMPD/defined"
+
+# Time:  O(U log U + D log D) for the two sorts and the comm(1) merge,
+#        U undefined and D defined symbols.
+# Space: O(U + D) across the scratch files.
+comm -23 "$TMPD/undef" "$TMPD/defined" > "$TMPD/unresolved"
+if [ -s "$TMPD/unresolved" ]; then
+	sed 's/^/unresolved symbol: /' "$TMPD/unresolved"
+	fail "$(wc -l < "$TMPD/unresolved" | tr -d '[:space:]') undefined symbols resolve neither in $KERNEL nor in a declared dependency"
+fi
+echo "unresolved: 0"
+
 
 # (d) BTI/PAC GNU property note on the core+stubs object.
 # Time:  O(N) for N readelf note lines (two grep passes).
