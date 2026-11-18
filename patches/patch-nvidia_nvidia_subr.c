@@ -113,7 +113,7 @@
  
      return VM_MEMATTR_UNCACHEABLE;
  }
-@@ -1530,7 +1604,49 @@
+@@ -1530,7 +1604,59 @@
      sx_xunlock(&nvffp->fops_sx);
  
      return status;
@@ -129,12 +129,18 @@
 + * for a device BAR / MMIO hole) is non-NULL - across all ranges - and
 + * hand the two counts to gb10_range_class() (gb10_memattr.h): no managed
 + * RAM page -> GB10_RANGE_BAR, every page managed RAM -> GB10_RANGE_RAM,
-+ * both (within one range or across ranges) -> GB10_RANGE_MIXED.  An
-+ * empty area walks no step and classifies as BAR, which keeps the
-+ * attribute such an mmap gets today.  gb10_range_action()
++ * both (within one range or across ranges) -> GB10_RANGE_MIXED.  The walk
++ * stops at the first page that makes the area MIXED - the verdict
++ * cannot change back, and one vm_phys_paddr_to_vm_page() lookup per
++ * page (a binary search over the physical-memory segments) is the cost
++ * of the walk, so a large mmap stops paying it once the answer is
++ * known.  An empty area walks no step and classifies as BAR, which
++ * keeps the attribute such an mmap gets today.  gb10_range_action()
 + * (gb10_memattr.h) turns the kind into the action the caller takes.
 + *
-+ * Time:  O(area bytes / PAGE_SIZE) page lookups.
++ * Time:  O(area bytes / PAGE_SIZE) page lookups in the worst case (an
++ *        all-RAM or all-BAR area); a mixed area stops at its first
++ *        mixed page.
 + * Space: O(1).
 + */
 +static enum gb10_range
@@ -154,6 +160,10 @@
 +            pages++;
 +            if (vm_phys_paddr_to_vm_page(pa) != NULL)
 +                ram_pages++;
++            /* both kinds seen: the area is mixed, and no later page
++             * can undo that - stop here (see the cost note above) */
++            if (ram_pages > 0 && ram_pages < pages)
++                return (GB10_RANGE_MIXED);
 +        }
 +    }
 +
@@ -163,7 +173,7 @@
  
  int nvidia_mmap_dev_single(
      nv_freebsd_file_private_t *nvffp,
-@@ -1583,10 +1699,85 @@
+@@ -1583,10 +1709,85 @@
      {
          goto free_sglist;
      }
@@ -172,11 +182,11 @@
 +    /*
 +     * The mmap usually covers PCIe BAR pages (device registers or a
 +     * framebuffer), but it can also cover managed system RAM, and one
-+     * attribute must never cross that line: a BAR attribute on a managed
-+     * RAM page rewrites the page's direct-map alias to match
-+     * (pmap_page_set_memattr -> pv_memattr outlives the mapping), and
-+     * every later unaligned kernel access to a Device-nGnRE RAM page then
-+     * faults - the Track #1908 hazard.  Classify the area first with
++     * attribute must never cross that line: a non-write-back attribute
++     * on managed RAM puts a mismatched alias beside the pages'
++     * write-back direct map, with no cache maintenance (nothing on
++     * this path rewrites the direct map itself) - the Track #1908
++     * hazard.  Classify the area first with
 +     * gb10_memarea_kind() above and let gb10_range_action()
 +     * (gb10_memattr.h) pick the policy:
 +     *
@@ -249,7 +259,7 @@
  
      status = NV_OK;
  
-@@ -2414,6 +2605,12 @@
+@@ -2414,6 +2615,12 @@
              return;
          }
      }
@@ -262,7 +272,7 @@
      {
          const sc_softc_t *sc = sc_get_softc(0, SC_KERNEL_CONSOLE);
  
-@@ -2440,6 +2637,7 @@
+@@ -2440,6 +2647,7 @@
              }
          }
      }

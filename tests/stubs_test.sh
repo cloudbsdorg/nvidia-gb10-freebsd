@@ -23,6 +23,9 @@
 #       first bool stub is given a deliberately wrong return type, which
 #       must be rejected
 #   (c) build-stubs.sh prints "still undefined vs OS layer: 0"
+#   (d) a relative GB10_WORK is refused: build-stubs.sh cds into the ogkm
+#       copy before it compiles, so a relative work root would break the
+#       build and leave a stray directory behind (pass-3 u09 #1)
 #
 # Run: sh tests/stubs_test.sh
 
@@ -145,6 +148,19 @@ else
 	else
 		ok "(b) wrong return type is rejected by the -Werror compile"
 	fi
+fi
+
+# (d) A relative GB10_WORK is refused before anything is created.
+rc=0
+(
+	CDPATH= cd -- "$TESTROOT" || exit 1
+	GB10_WORK=relative-work sh "$BUILD" > "$TESTROOT/out-d" 2> "$TESTROOT/err-d"
+) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'must be an absolute path' "$TESTROOT/err-d" \
+    && [ ! -e "$TESTROOT/relative-work" ]; then
+	ok "(d) relative GB10_WORK: refused, nothing created"
+else
+	fail "(d) relative GB10_WORK: rc=$rc err=$(tail -n 1 "$TESTROOT/err-d" 2>/dev/null) created=$([ -e "$TESTROOT/relative-work" ] && echo yes || echo no)"
 fi
 
 printf 'passed: %s failed: %s\n' "$PASSED" "$FAILED"

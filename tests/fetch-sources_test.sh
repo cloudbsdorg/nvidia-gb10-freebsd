@@ -528,13 +528,61 @@ grep -q '^GIT_CONFIG_NOSYSTEM=1$' "$git_env_dump" || st=1
 grep -q '^GIT_COMMON_DIR=' "$git_env_dump" && st=1
 report "s: inherited GIT_COMMON_DIR stripped by git_safe before the git child" "$st"
 
+# t. a URL whose last path segment is not a usable file name must be
+#    refused BEFORE DESTDIR is created or anything is fetched (pass-3 u02
+#    #4): the tarball path is $destdir/${url##*/}, so a basename of ".."
+#    makes the .part path $destdir/...part and the mv target $destdir/.. -
+#    the download lands in DESTDIR's parent. Runs a private copy of the
+#    scripts with a bad SOURCES, like cases q/r.
+mkdir -p "$test_dir/badrepo-t/scripts" || exit 1
+cp "$repo/scripts/fetch-sources.sh" "$repo/scripts/lib.sh" \
+	"$test_dir/badrepo-t/scripts/" || exit 1
+{
+	printf 'nvidia_freebsd_url https://example.invalid/..\n'
+	printf 'nvidia_freebsd_sha256 %s\n' "$good_sha"
+	printf 'ogkm_repo %s\n' "$ogkm_repo"
+	printf 'ogkm_tag %s\n' "$ogkm_tag"
+	printf 'ogkm_commit %s\n' "$good_commit"
+} > "$test_dir/badrepo-t/SOURCES"
+printf '%s\n' "$good_sha" > "$sha_answer"
+printf '%s\n' "$good_commit" > "$git_answer"
+dest=$test_dir/dest-t
+rc=0
+sh "$test_dir/badrepo-t/scripts/fetch-sources.sh" "$dest" > "$out" 2> "$err" || rc=$?
+st=0
+[ "$rc" -eq 1 ] || st=1
+grep -q "usable file name" "$err" || st=1
+[ ! -e "$dest" ] || st=1
+report "t: URL basename '..': exit 1 before DESTDIR is created, 'usable file name' on stderr" "$st"
+
+# u. same gate, empty basename (URL ending in '/'): refused before
+#    anything is written; the tarball path would be $destdir/ itself.
+mkdir -p "$test_dir/badrepo-u/scripts" || exit 1
+cp "$repo/scripts/fetch-sources.sh" "$repo/scripts/lib.sh" \
+	"$test_dir/badrepo-u/scripts/" || exit 1
+{
+	printf 'nvidia_freebsd_url https://example.invalid/dir/\n'
+	printf 'nvidia_freebsd_sha256 %s\n' "$good_sha"
+	printf 'ogkm_repo %s\n' "$ogkm_repo"
+	printf 'ogkm_tag %s\n' "$ogkm_tag"
+	printf 'ogkm_commit %s\n' "$good_commit"
+} > "$test_dir/badrepo-u/SOURCES"
+dest=$test_dir/dest-u
+rc=0
+sh "$test_dir/badrepo-u/scripts/fetch-sources.sh" "$dest" > "$out" 2> "$err" || rc=$?
+st=0
+[ "$rc" -eq 1 ] || st=1
+grep -q "usable file name" "$err" || st=1
+[ ! -e "$dest" ] || st=1
+report "u: URL with an empty basename (trailing /): exit 1 before DESTDIR is created" "$st"
+
 if [ "$fails" -gt 0 ]; then
-    echo "$fails of 19 cases failed"
+    echo "$fails of 21 cases failed"
     echo "--- last stdout ---"
     cat "$out"
     echo "--- last stderr ---"
     cat "$err"
     exit 1
 fi
-echo "all 19 cases passed"
+echo "all 21 cases passed"
 exit 0

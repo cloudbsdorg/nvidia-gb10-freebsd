@@ -31,6 +31,13 @@
 #       $WORK/logs is refused with exit 1 and nothing is written there;
 #   (e) a symlinked LOG inside $WORK/logs is refused before anything is
 #       written through the link.
+#   (f) an inherited MAKEFLAGS must not reach make (pass-3 u13 #1): with
+#       MAKEFLAGS=-n exported, build-firmware.sh must still really build
+#       the module. Before the fix make dry-ran (exit 0, nothing built)
+#       and the script reported the size and sha256 of the EARLIER run's
+#       .ko - an artifact this run did not produce. The .ko is removed
+#       before the build, so a dry-run build leaves nothing to report and
+#       must fail.
 #
 # Usage: tests/firmware_test.sh [TREE]
 #   TREE  prepared working tree; defaults to
@@ -74,15 +81,17 @@ fail() {
 }
 
 # Unpredictable scratch directories ($WORK/tmp is $HOME/work/gb10/tmp unless
-# GB10_WORK says otherwise). All three names are initialised EMPTY and the
+# GB10_WORK says otherwise). All four names are initialised EMPTY and the
 # trap is installed BEFORE the first mktemp, so no signal can orphan a
-# scratch dir or a scratch log and the cleanup never runs rm on an unset
-# name. HUP/QUIT/INT/TERM exit 128+signo (129/131/130/143) and let the EXIT
-# trap clean up, instead of a combined trap that cleans up and RETURNS (the
-# script would carry on after a signal).
+# scratch dir, a scratch log or the symlinked LOG of case (e) and the
+# cleanup never runs rm on an unset name. HUP/QUIT/INT/TERM exit 128+signo
+# (129/131/130/143) and let the EXIT trap clean up, instead of a combined
+# trap that cleans up and RETURNS (the script would carry on after a
+# signal).
 TMPD=''
 SCRATCHD=''
 BUILDLOG=''
+SYMLOG=''
 # cleanup - remove exactly this run's scratch files on every exit path.
 # Time:  O(F) cleanup for F scratch files, once per run.
 # Space: O(1) in this shell.
@@ -95,6 +104,9 @@ cleanup() {
 	fi
 	if [ -n "$BUILDLOG" ]; then
 		rm -f -- "$BUILDLOG"
+	fi
+	if [ -n "$SYMLOG" ]; then
+		rm -f -- "$SYMLOG"
 	fi
 }
 trap cleanup EXIT
@@ -351,6 +363,21 @@ if [ "$rc" -eq 1 ] && grep -q 'refusing LOG.*symlink' "$TMPD/e.out" &&
 	ok "(e) symlinked LOG refused: rc=1, 'symlink', target untouched"
 else
 	fail "(e) symlinked LOG: rc=$rc target=$([ -f "$TMPD/sym-target.log" ] && echo written || echo untouched) out=$(tail -1 "$TMPD/e.out" 2>/dev/null)"
+fi
+
+# (f) An inherited MAKEFLAGS must not reach make (pass-3 u13 #1): with
+# MAKEFLAGS=-n exported, build-firmware.sh must still really build the
+# module. Before the fix make dry-ran (exit 0, nothing built) and the
+# script reported the EARLIER run's .ko - an artifact this run did not
+# produce. The .ko is removed before the build, so a dry-run build leaves
+# nothing to report and must fail instead.
+rm -f -- "$KO"
+rc=0
+MAKEFLAGS=-n sh "$BUILD" "$TREE" "$BUILDLOG" >"$TMPD/f.out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && [ -s "$KO" ] && grep -q 'sha256' "$TMPD/f.out"; then
+	ok "(f) MAKEFLAGS=-n inherited: the module is really rebuilt (flags stripped, stale .ko removed first)"
+else
+	fail "(f) MAKEFLAGS=-n: rc=$rc ko=$([ -s "$KO" ] && echo present || echo missing) out=$(tail -n 1 "$TMPD/f.out" 2>/dev/null)"
 fi
 
 echo "passed: $PASSED failed: $FAILED"

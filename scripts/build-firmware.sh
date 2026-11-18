@@ -29,6 +29,11 @@
 # when LOG is unsafe (a symlink, or its directory does not resolve under
 # $WORK/logs), 2 when TREE/firmware/gsp_ga10x is missing, 0 on success
 # after printing "nvidia_gsp_ga10x_fw.ko: <size> bytes, sha256 <x>".
+# A stale .ko is removed before the build and make runs under
+# `env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR
+# -u MAKEOBJDIRPREFIX`, so an inherited MAKEFLAGS=-i/-n cannot turn the
+# build into a no-op that still reports an earlier run's artifact
+# (pass-3 u13 #1).
 # The log is never /tmp; scratch files stay under $WORK/tmp.
 
 set -eu
@@ -69,7 +74,18 @@ export TMPDIR
 
 KO=$TREE/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
 
-if ! make -C "$TREE/firmware/gsp_ga10x" \
+# Remove a stale .ko first (pass-3 u13 #1): the build runs in place in the
+# tree, so without this an earlier run's module would still be there for
+# the size and sha256 report below - even when this run built nothing.
+rm -f -- "$KO"
+
+# make runs under `env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR
+# -u MAKEOBJDIRPREFIX` (pass-3 u13 #1): an inherited MAKEFLAGS=-i (errors
+# ignored) or -n (dry run) from a parent make or a CI wrapper would
+# otherwise turn this build into a no-op that still reports success, and
+# MAKEOBJDIR(PREFIX) would move the objects out of the tree.
+if ! env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX \
+    make -C "$TREE/firmware/gsp_ga10x" \
     MACHINE=arm64 MACHINE_ARCH=aarch64 \
     SYSDIR="$SYSDIR" \
     all > "$LOG" 2>&1; then

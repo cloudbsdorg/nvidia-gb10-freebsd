@@ -13,7 +13,9 @@
 #         ${GB10_WORK:-$HOME/work/gb10}/logs/build-rmcore-<UTC>.log
 #
 # Environment:
-#   GB10_WORK work root holding sources/, build/, logs/ and tmp/
+#   GB10_WORK work root holding sources/, build/, logs/ and tmp/; it must
+#             be an ABSOLUTE path (the build cd's into the copied tree
+#             before it writes the marker and OUT)
 #   GB10_TEST_HOOKS
 #             set to 1 to let the three test hooks below be taken from the
 #             environment; without it they are ignored and the repo's own
@@ -58,7 +60,11 @@
 # to OUT. Prints OUT's size and sha256, and — when a prepared OS-layer tree
 # with objects exists ($GB10_WORK/build/tree/nvidia/*.o) — the number of
 # symbols undefined in OUT that the OS layer does not define. Exits 1 if
-# gmake fails or produces no object. Nothing is written outside $GB10_WORK
+# gmake fails, produces no object, or produces an object WITHOUT the
+# AArch64 BTI property note (FreeBSD 16 arm64 links every kmod with
+# -zbti-report=error, so such an object can never link into nvidia.ko:
+# the check happens here, before the marker says "state done", not later
+# in another script). Nothing is written outside $GB10_WORK
 # (and an explicit OUT/LOG) and /tmp is never used.
 
 set -eu
@@ -69,6 +75,19 @@ export PATH LC_ALL
 
 OGKMDIR=open-gpu-kernel-modules-580.178.04
 WORK=${GB10_WORK:-$HOME/work/gb10}
+# GB10_WORK must be an ABSOLUTE path: the build below cd's into the copied
+# tree and writes $BUILDDIR/$MARKER.new and $OUT relative to the new
+# directory, so a relative work root turns a good build into a failure at
+# the redirect (and leaves the scratch behind). Refusing beats
+# absolutising, and it closes the leading-'-' case as well: a work root
+# beginning with '-' would be read as an option by rm(1) and head(1).
+case $WORK in
+/*) ;;
+*)
+	echo "build-rmcore: GB10_WORK must be an absolute path: $WORK" >&2
+	exit 1
+	;;
+esac
 SRC=$WORK/sources/$OGKMDIR
 BUILDDIR=$WORK/build/ogkm
 MARKER=.gb10-ogkm
@@ -258,6 +277,19 @@ fi
 OBJ=_out/FreeBSD_aarch64/nv-kernel.o
 if [ ! -f "$OBJ" ]; then
 	echo "build-rmcore: gmake exited 0 but $BUILDDIR/src/nvidia/$OBJ is missing; see $LOG" >&2
+	exit 1
+fi
+
+# Positive evidence of branch protection before the marker may say "state
+# done" (pass-3 u09 #2): FreeBSD 16 arm64 links every kmod with
+# -zbti-report=error, so an object without the AArch64 BTI property note
+# cannot link into nvidia.ko at all - and the failure would otherwise
+# surface in another script, after this one had already claimed the core
+# was ready. The note is checked case-insensitively: readelf prints it as
+# "aarch64 feature: BTI, PAC, GCS" (LLVM 21) or "AArch64 feature: ..."
+# (older tools), and both spellings must be accepted.
+if ! readelf -n "$OBJ" 2>/dev/null | grep -qi 'AArch64 feature: BTI'; then
+	echo "build-rmcore: $OBJ lacks the AArch64 BTI property note; rebuild with -mbranch-protection=standard and keep .note.gnu.property" >&2
 	exit 1
 fi
 

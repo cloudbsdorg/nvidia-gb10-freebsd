@@ -36,9 +36,11 @@ sources_get() {
 # never into the symbol lists (a warning line merged with 2>&1 would be
 # parsed as a symbol name). Scratch files live in one mktemp(1) directory
 # inside <scratch-dir> (never fixed names, which collide between concurrent
-# runs and can be pre-planted) and are removed on every return path. Two
-# sorted lists plus comm(1) write the set difference to a file whose status
-# is checked; the count is wc -l of that file, so a failed comm can never
+# runs and can be pre-planted) and are removed on every return path. The two
+# symbol lists are produced by separate awk and sort steps, each with its
+# status checked (a pipeline would hide every stage's status but the last
+# one's), and comm(1) then writes the set difference to a file whose status
+# is checked; the count is wc -l of that file, so a failed step can never
 # read as a count of 0. `--` ends the option list for comm(1) and sort(1)
 # (FreeBSD nm(1) rejects `--`, so its paths are given without it).
 # Time:  O(U log U + D log D) to sort U undefined and D defined symbols,
@@ -73,8 +75,33 @@ count_missing() {
 		echo "count_missing: nm failed on $_osdir objects; cannot count defined symbols" >&2
 		return 1
 	fi
-	awk '{ print $NF }' < "$_t/nmu" | sort -u -- > "$_t/undef"
-	awk 'NF == 3 { print $3 }' < "$_t/nmd" | sort -u -- > "$_t/def"
+	# The awk and sort stages run as SEPARATE steps writing files, each
+	# with its own status checked (pass-3 u02 #3): in a pipeline only
+	# the last stage's status is visible, so a failed awk would be lost
+	# completely and a failed sort (ENOSPC) would leave the list empty
+	# or short - either reads as a count that is too low or 0, i.e.
+	# "nothing is missing" when in fact nothing was checked. Same rule
+	# as the comm fix below.
+	if ! awk '{ print $NF }' < "$_t/nmu" > "$_t/u.raw"; then
+		rm -rf -- "$_t"
+		echo "count_missing: awk failed on the undefined-symbol list" >&2
+		return 1
+	fi
+	if ! sort -u -o "$_t/undef" -- "$_t/u.raw"; then
+		rm -rf -- "$_t"
+		echo "count_missing: sort failed on the undefined-symbol list" >&2
+		return 1
+	fi
+	if ! awk 'NF == 3 { print $3 }' < "$_t/nmd" > "$_t/d.raw"; then
+		rm -rf -- "$_t"
+		echo "count_missing: awk failed on the defined-symbol list" >&2
+		return 1
+	fi
+	if ! sort -u -o "$_t/def" -- "$_t/d.raw"; then
+		rm -rf -- "$_t"
+		echo "count_missing: sort failed on the defined-symbol list" >&2
+		return 1
+	fi
 	# comm's status must be checked: piped straight into `awk END{print NR}`
 	# a failed comm (unreadable scratch, ENOSPC) would print "0" and read
 	# as "nothing is missing". Write the difference to a file, check the
@@ -259,6 +286,11 @@ git_tree_has_no_extra_files() {
 # every --- / +++ header path in <patch-file> is safe to hand to
 # `patch -p0`: relative (never absolute) and holding no `..` component, so
 # the patch cannot reach a file outside the directory patch(1) runs in.
+# A header path is cut off at the first TAB - where patch(1) itself ends
+# the file name and the timestamp begins - and any blank that remains
+# after that cut is refused: patch(1) keeps spaces in a name up to the
+# TAB, so a name like "existing dir/../../evil<TAB>date" would hide its
+# .. components from a first-blank cut (pass-3 u02 #2).
 # Any other header path (including /dev/null) is refused, and so is any
 # `*** ` or `Index:` header line: patch(1) takes file names from those two
 # forms as well, so a path in them would bypass the ---/+++ gate. None of
@@ -270,6 +302,7 @@ git_tree_has_no_extra_files() {
 patch_headers_safe() {
 	_ph_file=$1
 	_ph_bad=0
+	_ph_tab=$(printf '\t')
 	while IFS= read -r _ph_line || [ -n "${_ph_line:-}" ]; do
 		_ph_p=
 		case $_ph_line in
@@ -278,8 +311,19 @@ patch_headers_safe() {
 		'+++ '*) _ph_p=${_ph_line#+++ } ;;
 		esac
 		[ -n "$_ph_p" ] || continue
-		# cut a trailing timestamp ("--- a/b.c<TAB>2026-...") off.
-		_ph_p=${_ph_p%%[[:blank:]]*}
+		# Cut a trailing timestamp ("--- a/b.c<TAB>2026-...") off at
+		# the TAB ONLY: patch(1) keeps spaces in a file name up to
+		# the TAB, so cutting at the first blank would check only
+		# the first word of "existing dir/../../evil<TAB>date" and
+		# miss the .. components patch(1) would then follow out of
+		# the tree (pass-3 u02 #2). Any blank that remains after the
+		# TAB cut is part of the path patch(1) uses; refuse it -
+		# fail closed (none of this repo's patches has a space in a
+		# header path).
+		_ph_p=${_ph_p%%"$_ph_tab"*}
+		case $_ph_p in
+		*[[:blank:]]*) _ph_bad=1 ;;
+		esac
 		case $_ph_p in
 		/*) _ph_bad=1 ;;
 		esac

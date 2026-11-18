@@ -36,6 +36,17 @@ LC_ALL=C
 export PATH LC_ALL
 
 WORK=${GB10_WORK:-$HOME/work/gb10}
+# GB10_WORK must be an ABSOLUTE path: the build below cd's into the ogkm
+# copy before it compiles and links, so a relative work root would break
+# the build and could leave a stray directory behind (pass-3 u09 #1).
+# Refusing beats absolutising, and it closes the leading-'-' case too.
+case $WORK in
+/*) ;;
+*)
+	echo "build-stubs: GB10_WORK must be an absolute path: $WORK" >&2
+	exit 1
+	;;
+esac
 export TMPDIR="$WORK/tmp"
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

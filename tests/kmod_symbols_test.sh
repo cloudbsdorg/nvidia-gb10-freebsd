@@ -42,6 +42,15 @@
 #       AArch64 GNU property note with BTI and PAC: FreeBSD 16 arm64
 #       links every kmod with -zbti-report=error, and ld -r only emits
 #       GNU_PROPERTY_AARCH64_FEATURE_1_BTI when every input has it.
+#   (e) freshness: the nvidia.ko checked here must come from the CURRENT
+#       patches. TREE/.prepared must say "state done" (line 2), every
+#       entry of its manifest (each applied patch's name and sha256, and
+#       the copied src/ additions) must match the file in the repo right
+#       now, and nvidia.ko must be NEWER than .prepared. Without this a
+#       stale .ko from older patches passes every other check here
+#       (pass-3 u12 item 3). Two controls prove the check can fail: a
+#       nvidia.ko with an old timestamp and a .prepared whose manifest
+#       hash no longer matches the repo are both refused.
 #
 # Usage: tests/kmod_symbols_test.sh [TREE]
 #   TREE  prepared working tree; defaults to ${GB10_WORK:-$HOME/work/gb10}/build/tree
@@ -59,6 +68,8 @@ export PATH LC_ALL
 WORK=${GB10_WORK:-$HOME/work/gb10}
 TREE=${1:-$WORK/build/tree}
 KO=$TREE/nvidia/nvidia.ko
+TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
 
 fail() {
 	echo "FAIL: $*" >&2
@@ -81,6 +92,115 @@ trap 'exit 129' HUP
 trap 'exit 131' QUIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# fresh_reason <tree> <repo>: print why <tree>'s nvidia.ko is not fresh;
+# print nothing and return 0 when it is fresh; return 1 when it is not.
+# A tree is fresh when its .prepared says "state done", every manifest
+# entry (an applied patch's name and sha256, or a copied src/ addition)
+# still matches the file in the repo, and nvidia.ko is newer than
+# .prepared. Everything the check reads is read from files, never from a
+# pipeline, so a failed command cannot read as "no problems".
+# Limits: "newer" is an mtime comparison, so it catches a forgotten rebuild,
+# not a deliberately touched file; and only files in the manifest are
+# compared, so a patch added to patches/ after the tree was prepared is
+# not noticed here (prepare-tree.sh's own checks cover that).
+# Time:  O(P) manifest entries, one sha256 run each.
+# Space: O(P) manifest lines in the scratch file.
+fresh_reason() {
+	_fr_tree=$1
+	_fr_repo=$2
+	_fr_prep=$_fr_tree/.prepared
+	_fr_ko=$_fr_tree/nvidia/nvidia.ko
+	if [ ! -f "$_fr_prep" ]; then
+		echo "no $_fr_prep: run scripts/prepare-tree.sh first"
+		return 1
+	fi
+	if [ "$(sed -n '2p' "$_fr_prep" 2>/dev/null)" != "state done" ]; then
+		echo "$_fr_prep does not say 'state done'"
+		return 1
+	fi
+	if ! sed -n '3,$p' "$_fr_prep" > "$TMPD/fr-manifest" 2>/dev/null; then
+		echo "cannot read the manifest from $_fr_prep"
+		return 1
+	fi
+	if [ ! -s "$TMPD/fr-manifest" ]; then
+		echo "$_fr_prep carries no manifest lines"
+		return 1
+	fi
+	while read -r _fr_name _fr_sha; do
+		[ -n "$_fr_name" ] || continue
+		case $_fr_name in
+		patch-*) _fr_src=$_fr_repo/patches/$_fr_name ;;
+		src/*) _fr_src=$_fr_repo/$_fr_name ;;
+		*)
+			echo "unknown manifest entry: $_fr_name"
+			return 1
+			;;
+		esac
+		if [ ! -f "$_fr_src" ]; then
+			echo "the manifest names $_fr_name but $_fr_src does not exist"
+			return 1
+		fi
+		if ! _fr_now=$(sha256 -q "$_fr_src"); then
+			echo "cannot hash $_fr_src"
+			return 1
+		fi
+		if [ "$_fr_now" != "$_fr_sha" ]; then
+			echo "$_fr_name changed since the tree was prepared (manifest $_fr_sha, now $_fr_now)"
+			return 1
+		fi
+	done < "$TMPD/fr-manifest"
+	if [ ! "$_fr_ko" -nt "$_fr_prep" ]; then
+		echo "$_fr_ko is not newer than $_fr_prep: it predates the prepared tree"
+		return 1
+	fi
+	return 0
+}
+
+# (e) freshness of the nvidia.ko this test checks.
+# A non-zero status is stale even with no reason printed: "could not
+# finish the check" must never read as fresh.
+_fr_rc=0
+_fr_reason=$(fresh_reason "$TREE" "$REPO") || _fr_rc=$?
+if [ "$_fr_rc" -ne 0 ] || [ -n "$_fr_reason" ]; then
+	[ -n "$_fr_reason" ] || _fr_reason="freshness check failed (status $_fr_rc)"
+	fail "stale artifacts: $_fr_reason (rerun scripts/prepare-tree.sh and scripts/build-shim.sh)"
+fi
+echo "fresh: .prepared says state done, its manifest matches patches/ and src/, nvidia.ko is newer than .prepared"
+
+# (e-control-1) Falsifiability: a nvidia.ko that PREDATES .prepared must be
+# refused. The scratch tree holds a copy of the real .prepared and a copy
+# of nvidia.ko with an old timestamp - everything else is identical, so
+# only the age of the module can be what fails.
+STALE=$TMPD/stale-tree
+mkdir -p "$STALE/nvidia"
+cp "$TREE/.prepared" "$STALE/.prepared"
+cp "$KO" "$STALE/nvidia/nvidia.ko"
+touch -t 202501010000 "$STALE/nvidia/nvidia.ko"
+_fr_rc=0
+_fr_out=$(fresh_reason "$STALE" "$REPO") || _fr_rc=$?
+if [ "$_fr_rc" -ne 0 ]; then
+	echo "freshness control: a stale nvidia.ko is refused: $_fr_out"
+else
+	fail "(e-control-1) a stale nvidia.ko passes the freshness check"
+fi
+
+# (e-control-2) Falsifiability: a .prepared whose manifest hash no longer
+# matches the repo's file must be refused - the patches changed after the
+# tree was prepared.
+BAD=$TMPD/bad-manifest-tree
+mkdir -p "$BAD/nvidia"
+awk 'NR == 3 { sub(/[0-9a-f]+$/, "0000000000000000000000000000000000000000000000000000000000000000") } { print }' \
+	"$TREE/.prepared" > "$BAD/.prepared"
+cp "$KO" "$BAD/nvidia/nvidia.ko"
+touch "$BAD/nvidia/nvidia.ko"
+_fr_rc=0
+_fr_out=$(fresh_reason "$BAD" "$REPO") || _fr_rc=$?
+if [ "$_fr_rc" -ne 0 ]; then
+	echo "freshness control: a changed patch hash is refused: $_fr_out"
+else
+	fail "(e-control-2) a changed patch hash passes the freshness check"
+fi
 
 # (a) ELF header: AArch64 machine, DYN (shared object) type. The .ko is
 # DYN, not REL: bsd.kmod.mk links the intermediate nvidia.kld (REL, from

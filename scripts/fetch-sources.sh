@@ -15,9 +15,10 @@
 #   already be a symlink.
 #   Every pin read from SOURCES is format-checked before it is used (sha256
 #   64 lowercase hex, commit 40 lowercase hex, tag one word of
-#   [A-Za-z0-9._-], URLs https://): a SOURCES mistake - this repo's threat
-#   model - fails closed instead of comparing "" = "" or building a path out
-#   of a tag.
+#   [A-Za-z0-9._-], URLs https://, and the URL's last path segment a usable
+#   file name - not empty, "." or "..", only [A-Za-z0-9._+-]): a SOURCES
+#   mistake - this repo's threat model - fails closed instead of comparing
+#   "" = "" or building a path out of a tag.
 #
 # Test hooks: FETCH, GIT, SHA256. They are honoured ONLY when
 # GB10_TEST_HOOKS=1, and then only as a single word of [A-Za-z0-9_./-]; each
@@ -99,6 +100,20 @@ esac
 case $url in
 https://?*) ;;
 *) die "SOURCES: nvidia_freebsd_url is not an https:// URL: $url" ;;
+esac
+# The tarball path below is built as $destdir/${url##*/}, so the URL's last
+# path segment must be a usable file name (pass-3 u02 #4): with a basename
+# of "..", the .part path becomes $destdir/...part and the final
+# `mv -- part "$destdir/.."` puts the download into DESTDIR's PARENT,
+# contradicting the header's "nothing is written outside DESTDIR". One
+# case refuses an empty basename (a URL ending in /), the path dots "." and
+# "..", and any character outside [A-Za-z0-9._+-] (LC_ALL=C is exported
+# above, so the ranges are ASCII); a '/' cannot survive ${url##*/} but is
+# outside the charset anyway.
+case ${url##*/} in
+''|.|..|*[!A-Za-z0-9._+-]*)
+    die "SOURCES: nvidia_freebsd_url has no usable file name: $url"
+    ;;
 esac
 case $ogkm_repo in
 https://?*) ;;

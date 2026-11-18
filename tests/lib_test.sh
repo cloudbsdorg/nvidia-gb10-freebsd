@@ -19,11 +19,24 @@
 #   (i) nm warning on stderr:            stderr is kept out of the symbol
 #                                        lists, so a warning line is never
 #                                        counted as a missing symbol
+#   (s) awk stage fails (canned stub):   rc 1, error on stderr, no count
+#                                        printed (pass-3 u02 #3: in a
+#                                        pipeline the awk failure was lost
+#                                        and the count read as 0)
+#   (t) sort stage fails (canned stub):  rc 1, error on stderr, no count
+#                                        printed
 # patch_headers_safe cases:
 #   (j) unified diff:                    accepted, rc 0
 #   (k) `Index:` header line:            refused, rc 1 (patch(1) takes file
 #                                        names from Index: lines too)
 #   (l) `*** ` header line:              refused, rc 1
+#   (u) `--- existing dir/../../evil<TAB>date`: refused, rc 1 (pass-3 u02
+#                                        #2: the path is cut at the TAB
+#                                        only - patch(1) keeps spaces up to
+#                                        the TAB - and any blank that
+#                                        remains is refused)
+#   (v) `--- nvidia/a.c<TAB>timestamp`:  accepted, rc 0 (the TAB cut must
+#                                        not break the repo's own headers)
 # test_hook cases (direct units for the gate fetch-sources/prepare-tree/
 # build-rmcore rely on; pass-2 u02 #9):
 #   (m) hooks disabled:                  fixed path printed even when the
@@ -112,12 +125,14 @@ printf 'not an ELF object\n' > "$cm_obj"
 # replaced by the canned stub below wherever its behaviour matters.
 printf 'not an ELF object\n' > "$cm_osdir/a.o"
 
-# run_fake_nm <fail-mode u|d|w|none> <count_missing args...>: run count_missing
-# with a stub nm(1) first on PATH. The stub answers nm -u with two undefined
-# symbols (foo, bar) and nm --defined-only with one defined symbol (foo), so
-# the expected count is 1 (bar); fail mode u/d makes that invocation exit 1;
-# mode w makes the -u invocation print a warning line on stderr while still
-# succeeding (stderr must not pollute the symbol lists).
+# run_fake_nm <fail-mode u|d|w|A|S|none> <count_missing args...>: run
+# count_missing with stub tools first on PATH. The nm stub answers nm -u with
+# two undefined symbols (foo, bar) and nm --defined-only with one defined
+# symbol (foo), so the expected count is 1 (bar); fail mode u/d makes that
+# invocation exit 1; mode w makes the -u invocation print a warning line on
+# stderr while still succeeding (stderr must not pollute the symbol lists).
+# Modes A/S make the stub awk(1)/sort(1) (created further below, pass-3 u02
+# #3 cases) fail instead of passing through to the real tool.
 # Time:  O(1) in this shell plus count_missing's own cost.
 # Space: O(1).
 run_fake_nm() {
@@ -129,6 +144,8 @@ run_fake_nm() {
 		u) FAKE_NM_FAIL_U=1; export FAKE_NM_FAIL_U ;;
 		d) FAKE_NM_FAIL_D=1; export FAKE_NM_FAIL_D ;;
 		w) FAKE_NM_WARN=1; export FAKE_NM_WARN ;;
+		A) FAKE_AWK_FAIL=1; export FAKE_AWK_FAIL ;;
+		S) FAKE_SORT_FAIL=1; export FAKE_SORT_FAIL ;;
 		esac
 		count_missing "$@"
 	)
@@ -382,6 +399,86 @@ if [ "$rc" -eq 1 ] && [ -z "$val" ] && grep -q 'refusing test hook TH_PROBE' "$h
 	ok "(r) test_hook: newlines-only value: rc 1, nothing printed"
 else
 	fail "(r) test_hook: newlines-only value: rc=$rc val=$val"
+fi
+
+# --- count_missing pipeline status (pass-3 u02 #3) -------------------------
+# The awk and sort stages must run as separate checked steps: in a pipeline
+# only the LAST stage's status is visible, so a failed awk was lost entirely
+# and a failed sort left the list empty - either read as a count of 0, i.e.
+# "nothing is missing" when nothing was checked. The stubs pass through to
+# the real tools unless their fail flag is set.
+cat > "$TESTROOT/bin/awk" <<'EOF'
+#!/bin/sh
+# Stub awk(1) for the count_missing pipeline-status cases.
+# Time:  O(1) flag check, then exec.  Space: O(1).
+if [ "${FAKE_AWK_FAIL:-0}" = 1 ]; then
+	echo "awk: stub failure" >&2
+	exit 1
+fi
+exec /usr/bin/awk "$@"
+EOF
+cat > "$TESTROOT/bin/sort" <<'EOF'
+#!/bin/sh
+# Stub sort(1) for the count_missing pipeline-status cases.
+# Time:  O(1) flag check, then exec.  Space: O(1).
+if [ "${FAKE_SORT_FAIL:-0}" = 1 ]; then
+	echo "sort: stub failure" >&2
+	exit 1
+fi
+exec /usr/bin/sort "$@"
+EOF
+chmod +x "$TESTROOT/bin/awk" "$TESTROOT/bin/sort" || exit 1
+
+# (s) the awk stage fails: rc 1, error on stderr, no count printed. Before
+#     the separate-steps fix, awk's failure was invisible (the pipeline's
+#     status is sort's) and the count printed as 0.
+rc=0
+val=$(run_fake_nm A "$cm_obj" "$cm_osdir" "$cm_scratch" 2>"$cm_err") || rc=$?
+if [ "$rc" -eq 1 ] && [ -z "$val" ] && grep -q "count_missing" "$cm_err"; then
+	ok "(s) count_missing: awk stage failure: rc 1, error on stderr"
+else
+	fail "(s) count_missing: awk stage failure: rc=$rc val=$val err=$(head -n 1 "$cm_err" 2>/dev/null)"
+fi
+
+# (t) the sort stage fails: rc 1, error on stderr, no count printed. Before
+#     the fix, sort's failure was not checked either and the empty list
+#     read as a count of 0.
+rc=0
+val=$(run_fake_nm S "$cm_obj" "$cm_osdir" "$cm_scratch" 2>"$cm_err") || rc=$?
+if [ "$rc" -eq 1 ] && [ -z "$val" ] && grep -q "count_missing" "$cm_err"; then
+	ok "(t) count_missing: sort stage failure: rc 1, error on stderr"
+else
+	fail "(t) count_missing: sort stage failure: rc=$rc val=$val err=$(head -n 1 "$cm_err" 2>/dev/null)"
+fi
+
+# --- patch_headers_safe TAB handling (pass-3 u02 #2) -----------------------
+# patch(1) keeps spaces in a header path up to the TAB, so the gate must cut
+# a trailing timestamp at the TAB only and refuse any path that still holds
+# a blank: cutting at the first blank checked only "existing" of
+# "existing dir/../../evil<TAB>date" (rc 0) while `patch -C -p0` reported
+# "Creating file existing dir/../../evil" - a path that leaves the tree.
+ph_tab_evil=$TESTROOT/patch-tab-evil
+ph_tab_ok=$TESTROOT/patch-tab-ok
+printf -- '--- existing dir/../../evil\t2026-01-01\n+++ existing dir/../../evil\t2026-01-01\n' > "$ph_tab_evil"
+printf -- '--- nvidia/a.c\t2026-11-18 03:47:39.099320000 +0000\n+++ nvidia/a.c\t2026-11-18 03:48:37.282784000 +0000\n' > "$ph_tab_ok"
+
+# (u) a path with a space hiding ../.. before the TAB timestamp: refused.
+rc=0
+patch_headers_safe "$ph_tab_evil" || rc=$?
+if [ "$rc" -eq 1 ]; then
+	ok "(u) patch_headers_safe: 'existing dir/../../evil<TAB>date' refused"
+else
+	fail "(u) patch_headers_safe: TAB-masked .. path accepted: rc=$rc"
+fi
+
+# (v) an ordinary header with a TAB timestamp (the repo's own patch format):
+#     still accepted - the TAB cut must not over-refuse.
+rc=0
+patch_headers_safe "$ph_tab_ok" || rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "(v) patch_headers_safe: TAB-timestamp header accepted"
+else
+	fail "(v) patch_headers_safe: TAB-timestamp header refused: rc=$rc"
 fi
 
 echo "passed: $PASSED failed: $FAILED"

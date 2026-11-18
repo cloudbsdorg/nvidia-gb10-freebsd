@@ -294,13 +294,13 @@
 +    /*
 +     * The range is usually a PCIe BAR, but the closed core can also hand
 +     * os_map_kernel_space() managed system RAM, and one attribute must
-+     * never cross that line: a BAR attribute on a managed RAM page
-+     * rewrites the page's direct-map alias to match (pmap_page_set_memattr
-+     * -> pv_memattr outlives the mapping), and every later unaligned
-+     * kernel access to a Device-nGnRE RAM page then faults - the Track
-+     * #1908 hazard.  So classify the range first with
-+     * gb10_range_kind_of() above and let gb10_range_action()
-+     * (gb10_memattr.h) pick the policy:
++     * never cross that line.  arm64's pmap_mapdev_attr() maps through
++     * pmap_kenter() (subr_devmap.c): no direct-map rewrite, no pv_memattr
++     * change, no cache maintenance (amd64's changes the DMAP attribute
++     * itself), so an uncached or Device attribute on RAM leaves a
++     * mismatched alias beside the write-back direct map - the Track #1908
++     * hazard.  So classify the range first with gb10_range_kind_of() above
++     * and let gb10_range_action() (gb10_memattr.h) pick the policy:
 +     *
 +     *   system RAM  gb10_ram_memattr(): cached and default stay
 +     *               write-back, uncached and write-combined become

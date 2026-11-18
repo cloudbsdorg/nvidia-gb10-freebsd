@@ -18,7 +18,7 @@
 # nv-kernel.o is a real ELF object (built with cc) with exactly one
 # undefined symbol, and a fake prepared OS-layer tree holds one real
 # object that does not define it, so the undefined-symbol report is
-# exercised too. Twelve cases:
+# exercised too. Eighteen cases:
 #   (a) commit mismatch:  refused, exit 1, build dir not created
 #   (b) foreign build dir: existing build/ogkm without the .gb10-ogkm
 #                         marker is refused, exit 1, left intact
@@ -53,6 +53,14 @@
 #                         patch-src_nvidia_Makefile exits 1
 #   (l) stray files:      a pinned checkout with an untracked file is
 #                         refused, exit 1, no build dir
+#   (q) relative GB10_WORK: refused, exit 1, 'must be an absolute path',
+#                         nothing created (pass-3 u09 #1: a relative WORK
+#                         breaks after the script cd's into the build copy)
+#   (r) note-less core object: the built object must carry the AArch64
+#                         BTI property note before the marker may say
+#                         "state done" (pass-3 u09 #2); an object without
+#                         the note is refused, exit 1, the marker stays
+#                         "state building" and no OUT is written
 #
 # Run: sh tests/build-rmcore_test.sh
 
@@ -142,9 +150,16 @@ printf 'ogkm_commit %s\n' "0000000000000000000000000000000000000000" \
 
 # Real ELF stand-ins: the fake nv-kernel.o has exactly one undefined
 # symbol (rmcore_missing_1); the fake OS-layer object does not define it.
+# The fake core object is compiled with -mbranch-protection=standard so it
+# carries the AArch64 BTI/PAC property note that build-rmcore.sh now
+# requires before "state done" (pass-3 u09 #2); the second copy, built
+# WITHOUT the flag, is the note-less object case (r) must refuse.
 printf 'extern int rmcore_missing_1(void);\nint f(void) { return rmcore_missing_1(); }\n' \
 	> "$TESTROOT/fake-kernel.c"
-cc -c -fno-stack-protector -o "$TESTROOT/fake-nv-kernel.o" "$TESTROOT/fake-kernel.c"
+cc -c -fno-stack-protector -mbranch-protection=standard \
+	-o "$TESTROOT/fake-nv-kernel.o" "$TESTROOT/fake-kernel.c"
+cc -c -fno-stack-protector \
+	-o "$TESTROOT/fake-nv-kernel-nonote.o" "$TESTROOT/fake-kernel.c"
 printf 'int rmcore_defined_here = 1;\nvoid osf(void) {}\n' > "$TESTROOT/fake-os.c"
 cc -c -fno-stack-protector -o "$TESTROOT/fake-os.o" "$TESTROOT/fake-os.c"
 
@@ -486,6 +501,56 @@ if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/gmake-env" ] && [ ! -s "$TESTROOT/gmake-en
 	ok "(p) MAKEFLAGS/GNUMAKEFLAGS/MFLAGS/MAKELEVEL do not reach gmake"
 else
 	fail "(p) make flags: rc=$rc gmake-env=$(cat "$TESTROOT/gmake-env" 2>/dev/null) err=$(cat "$TESTROOT/err-p" 2>/dev/null)"
+fi
+
+# (q) a relative GB10_WORK must be refused: the script cd's into the
+# build copy before it writes the marker and the OUT, so a relative WORK
+# turns a good build into a failure at the redirect (and leaks the
+# scratch). Refusing beats absolutising, and it also closes the
+# leading-'-' case. Run from a scratch cwd so a stray relative directory
+# would be visible.
+mkdir -p "$TESTROOT/cwd-q"
+rc=0
+(
+	CDPATH= cd -- "$TESTROOT/cwd-q" || exit 1
+	GB10_WORK=work-q SOURCES="$TESTROOT/SOURCES-good" \
+		GMAKE="$TESTROOT/fake-gmake-ok" \
+		sh "$SCRIPT" >"$TESTROOT/out-q" 2>"$TESTROOT/err-q"
+) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'must be an absolute path' "$TESTROOT/err-q" \
+    && [ ! -e "$TESTROOT/cwd-q/work-q" ]; then
+	ok "(q) relative GB10_WORK: exit 1, 'must be an absolute path', nothing created"
+else
+	fail "(q) relative GB10_WORK: rc=$rc err=$(cat "$TESTROOT/err-q" 2>/dev/null) created=$([ -e "$TESTROOT/cwd-q/work-q" ] && echo yes || echo no)"
+fi
+
+# (r) the built core object must carry the AArch64 BTI property note
+# before the marker may say "state done" (pass-3 u09 #2): FreeBSD 16
+# arm64 links every kmod with -zbti-report=error, so an object without
+# the note cannot link into nvidia.ko later - and a toolchain regression
+# must fail HERE, not in another script. The fake gmake leaves behind an
+# object built WITHOUT -mbranch-protection=standard.
+cat > "$TESTROOT/fake-gmake-nonote" <<EOF
+#!/bin/sh
+mkdir -p _out/FreeBSD_aarch64
+cp "$TESTROOT/fake-nv-kernel-nonote.o" _out/FreeBSD_aarch64/nv-kernel.o
+exit 0
+EOF
+chmod +x "$TESTROOT/fake-gmake-nonote"
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	GMAKE="$TESTROOT/fake-gmake-nonote" \
+	sh "$SCRIPT" "$TESTROOT/out-r.o" "$TESTROOT/log-r" \
+	>"$TESTROOT/out-r" 2>"$TESTROOT/err-r" || rc=$?
+r_ok=1
+[ "$rc" -eq 1 ] || r_ok=0
+grep -qi 'BTI' "$TESTROOT/err-r" || r_ok=0
+[ ! -e "$TESTROOT/out-r.o" ] || r_ok=0
+grep -q '^state done$' "$TESTROOT/build/ogkm/.gb10-ogkm" 2>/dev/null && r_ok=0
+if [ "$r_ok" -eq 1 ]; then
+	ok "(r) core object without the BTI property note: exit 1, marker not 'state done', no OUT"
+else
+	fail "(r) note-less object: rc=$rc err=$(cat "$TESTROOT/err-r" 2>/dev/null) out-r=$([ -e "$TESTROOT/out-r.o" ] && echo yes || echo no) marker=$(sed -n 2p "$TESTROOT/build/ogkm/.gb10-ogkm" 2>/dev/null)"
 fi
 
 echo "passed: $PASSED failed: $FAILED"
