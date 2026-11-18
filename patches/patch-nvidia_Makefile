@@ -1,0 +1,14 @@
+--- nvidia/Makefile.orig	2026-11-17 09:54:40.669183000 +0000
++++ nvidia/Makefile	2026-11-17 09:54:40.672444000 +0000
+@@ -15,7 +15,10 @@
+ SRCS=		${NVIDIA_SOURCES}
+ SRCS+=		acpi_if.h bus_if.h device_if.h opt_acpi.h pci_if.h vnode_if.h
+ CFLAGS+=	-I. -I../common/inc -DNV_VERSION_STRING=\"580.178.04\"
+-CFLAGS+=	-D__KERNEL__ -DNVRM -DFSP_DETACH_STRING_H  -Wno-unused-function -Wuninitialized -O2 -fno-strict-aliasing    -ffreestanding -mno-red-zone -mcmodel=kernel       -UDEBUG -U_DEBUG -DNDEBUG
++CFLAGS+=	-D__KERNEL__ -DNVRM -DFSP_DETACH_STRING_H  -Wno-unused-function -Wuninitialized -O2 -fno-strict-aliasing    -ffreestanding       -UDEBUG -U_DEBUG -DNDEBUG
++.if ${MACHINE_CPUARCH} != "aarch64"
++CFLAGS+=	-mno-red-zone -mcmodel=kernel
++.endif
+ CFLAGS+=	-DNV_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
+ CFLAGS+=	-DNV_KERNEL_INTERFACE_LAYER
+ 
