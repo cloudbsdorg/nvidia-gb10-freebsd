@@ -1,0 +1,10 @@
+--- src/nvidia/Makefile.orig	2026-11-17 14:30:33.618398000 +0000
++++ src/nvidia/Makefile	2026-11-17 14:30:33.620865000 +0000
+@@ -220,7 +220,6 @@
+ 	$(call quiet_cmd,OBJCOPY) \
+ 	  --localize-symbol=memset \
+ 	  --localize-symbol=memcpy \
+-	  --remove-section=.note.gnu.property \
+ 	  $@
+ 
+ .PHONY: clean
