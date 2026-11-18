@@ -1,6 +1,31 @@
 --- nvidia-drm/nvidia-drm-gem-nvkms-memory.c.orig
 +++ nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-@@ -94,11 +94,27 @@
+@@ -78,8 +78,23 @@
+        return ret;
+     }
+ 
+-    return drm_gem_mmap_obj(&nv_gem->base,
++    ret = drm_gem_mmap_obj(&nv_gem->base,
+                 drm_vma_node_size(&nv_gem->base.vma_node) << PAGE_SHIFT, vma);
++#if !defined(NV_LINUX)
++    /*
++     * Video memory is reached through a PCIe BAR and must be mapped
++     * write-combining, as Linux's drm_gem_mmap_obj() does.  On FreeBSD the
++     * mapping kept a write-back attribute: harmless on x86, where the BAR's
++     * MTRR makes it uncached, but on arm64 the CPU then caches the BAR, so
++     * writes never reach video memory (amp001, 2026-11-18: a dumb buffer
++     * read back zeros through a fresh mapping; DTrace showed every page set
++     * VM_MEMATTR_WRITE_BACK).  System-memory objects keep their attribute.
++     */
++    if (ret == 0 && nv_nvkms_memory->pages_count == 0) {
++        vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
++    }
++#endif
++    return ret;
+ }
+ 
+ static vm_fault_t __nv_drm_gem_nvkms_handle_vma_fault(
+@@ -94,11 +109,27 @@
      unsigned long page_offset, pfn;
      vm_fault_t ret;
  
@@ -28,7 +53,7 @@
  #if defined(NV_LINUX)
          /*
           * FreeBSD doesn't set pgoff. We instead have pfn be the base physical
-@@ -108,10 +124,12 @@
+@@ -108,10 +139,12 @@
           * vmf->virtual_address. Then we turn the virtual address
           * into a physical page number.
           */

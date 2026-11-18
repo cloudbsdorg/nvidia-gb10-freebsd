@@ -18,7 +18,8 @@
 #       page_offset = (address - vma->vm_start) >> PAGE_SHIFT
 #   (b) not read vmf->pgoff for it;
 #   (c) have no BUG_ON on page_offset (a user-reachable panic);
-#   (d) for the nvkms handler, add page_offset to the video-memory pfn.
+#   (d) for the nvkms handler, add page_offset to the video-memory pfn;
+#   (e) the nvkms mmap must set the video-memory mapping write-combining.
 #
 # The checks run against NVIDIA's pristine source (they MUST fail there: the
 # test proves it can see the defect) and against the prepared tree (they
@@ -56,7 +57,7 @@ body() {
 	# unifdef exits 1 when it changed something, 0 when not, 2 on error.
 	[ $? -le 1 ] || return 1
 	awk -v f="$2" '
-		index($0, f) == 1 || index($0, "static vm_fault_t " f) == 1 { on = 1 }
+		!on && (index($0, f "(") == 1 || ($1 == "static" && index($0, " " f "(") > 0)) { on = 1 }
 		on { print }
 		on && /^}$/ { exit }
 	' "$TMPD/unifdef.c" > "$3"
@@ -91,9 +92,11 @@ done
 
 # Red controls: NVIDIA's pristine source has the defect; the check must see it.
 r=$(check "$PRISTINE/$NVKMS" __nv_drm_gem_nvkms_handle_vma_fault yes)
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
 [ -n "$r" ] && ok "control: pristine nvkms handler is flagged ($r)" \
     || bad "control: pristine nvkms handler passed - the check cannot see the defect"
 r=$(check "$PRISTINE/$USERM" __nv_drm_gem_user_memory_handle_vma_fault no)
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
 [ -n "$r" ] && ok "control: pristine user-memory handler is flagged ($r)" \
     || bad "control: pristine user-memory handler passed - the check cannot see the defect"
 
@@ -104,6 +107,21 @@ r=$(check "$TREE/$NVKMS" __nv_drm_gem_nvkms_handle_vma_fault yes)
 r=$(check "$TREE/$USERM" __nv_drm_gem_user_memory_handle_vma_fault no)
 [ -z "$r" ] && ok "user-memory handler: index from the address, no BUG_ON" \
     || bad "user-memory handler: $r"
+
+# (e) the video-memory mmap must ask for write-combining on FreeBSD: a
+# write-back attribute on a BAR is cached on arm64 (no MTRRs), so writes
+# never reach video memory (amp001, 2026-11-18).
+wc_check() {
+	body "$1" __nv_drm_gem_nvkms_mmap "$TMPD/mmap.c" || { echo "cannot extract __nv_drm_gem_nvkms_mmap"; return; }
+	grep -Eq 'vm_page_prot[[:space:]]*=[[:space:]]*pgprot_writecombine' "$TMPD/mmap.c" \
+	    || echo "__nv_drm_gem_nvkms_mmap: video-memory mapping not write-combining"
+}
+r=$(wc_check "$PRISTINE/$NVKMS")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: pristine mmap is flagged ($r)" \
+    || bad "control: pristine mmap passed - the check cannot see the defect"
+r=$(wc_check "$TREE/$NVKMS")
+[ -z "$r" ] && ok "nvkms mmap: video memory mapped write-combining" || bad "nvkms mmap: $r"
 
 echo "passed: $passed failed: $failed"
 [ "$failed" -eq 0 ]
