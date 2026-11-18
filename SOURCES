@@ -3,3 +3,6 @@ nvidia_freebsd_sha256 5d9f704562f43f05e30b2c99964b3b3ff6397740bbb4ebb61840b48352
 ogkm_repo https://github.com/NVIDIA/open-gpu-kernel-modules.git
 ogkm_tag 580.178.04
 ogkm_commit c8e699821c23e4335bf23330a54a23d15cfb95e9
+nvidia_linux_aarch64_url https://download.nvidia.com/XFree86/Linux-aarch64/580.178.04/NVIDIA-Linux-aarch64-580.178.04.run
+nvidia_linux_aarch64_sha256 ef59ec5d24850e12d6f7550ec1f7cf84db53a84ce9c63eb3ba55ef5ed0c4f049
+nvidia_linux_aarch64_skip 1186

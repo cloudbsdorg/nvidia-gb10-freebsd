@@ -1,0 +1,22 @@
+--- nvidia-modeset/Makefile.orig
++++ nvidia-modeset/Makefile
+@@ -6,6 +6,19 @@
+ NVIDIA_MODESET_KERNEL = nv-modeset-kernel.o
+ 
+ OBJS += ${NVIDIA_MODESET_KERNEL}
++
++# The symbols nvidia-drm.ko calls in this module (see the same note in
++# ../nvidia/Makefile): exported by name on arm64.
++.if ${MACHINE_CPUARCH} == "aarch64"
++EXPORT_SYMS=	nvKmsKapiGetFunctionsTable \
++		nvKmsKapiF16ToF32 \
++		nvKmsKapiF32ToF16 \
++		nvKmsKapiF32Add \
++		nvKmsKapiF32Mul \
++		nvKmsKapiF32Div \
++		nvKmsKapiF32ToUI32RMinMag \
++		nvKmsKapiUI32ToF32
++.endif
+ NO_OBJ = true
+ 
+ clean:

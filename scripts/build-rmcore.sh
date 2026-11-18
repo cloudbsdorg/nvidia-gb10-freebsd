@@ -4,13 +4,20 @@
 #
 # build-rmcore.sh - build NVIDIA's open RM core (src/nvidia of
 # open-gpu-kernel-modules 580.178.04, MIT) as an aarch64 FreeBSD object, to
-# replace the prebuilt amd64 nv-kernel.o in the OS-layer tree.
+# replace the prebuilt amd64 nv-kernel.o in the OS-layer tree. The same
+# script builds the open modeset core (src/nvidia-modeset), which
+# replaces NVIDIA's prebuilt amd64 nv-modeset-kernel.o.
 #
-# Usage: scripts/build-rmcore.sh [OUT] [LOG]
-#   OUT   where to copy the built nv-kernel.o; defaults to
-#         ${GB10_WORK:-$HOME/work/gb10}/build/nv-kernel-aarch64.o
+# Usage: scripts/build-rmcore.sh [--core=nvidia|nvidia-modeset] [OUT] [LOG]
+#   --core   the core to build: nvidia (the RM core, the default) or
+#            nvidia-modeset (the open modeset core). The core may also be
+#            named by its bare word as the first argument
+#            (nvidia-modeset), the form the README's build recipe uses.
+#   OUT   where to copy the built object; defaults to
+#         ${GB10_WORK:-$HOME/work/gb10}/build/nv-kernel-aarch64.o (nvidia)
+#         or .../build/nv-modeset-kernel-aarch64.o (nvidia-modeset)
 #   LOG   gmake output log; defaults to
-#         ${GB10_WORK:-$HOME/work/gb10}/logs/build-rmcore-<UTC>.log
+#         ${GB10_WORK:-$HOME/work/gb10}/logs/build-rmcore-<core>-<UTC>.log
 #
 # Environment:
 #   GB10_WORK work root holding sources/, build/, logs/ and tmp/; it must
@@ -49,17 +56,21 @@
 # failure the patch name is printed and the script exits 1, exactly like
 # prepare-tree.sh does). This run's scratch is an unpredictable mktemp(1)
 # directory under $GB10_WORK/tmp and TMPDIR points at it. Then builds
-# src/nvidia with TARGET_OS=FreeBSD
+# src/$CORE with TARGET_OS=FreeBSD
 # TARGET_ARCH=aarch64 (the core's own aarch64 kernel flags), CFLAGS passed
 # through the environment as '-Wall -mbranch-protection=standard' so every
 # core object carries the BTI/PAC GNU property note (see the gmake call
 # below for why it must be the environment), and a neutral build stamp,
 # NV_BUILD_USER=cloudbsd and
 # NV_BUILD_HOST=build (both `?=` in utils.mk), so no internal user or host
-# name is embedded in the object, and copies _out/FreeBSD_aarch64/nv-kernel.o
+# name is embedded in the object, and copies
+# _out/FreeBSD_aarch64/$COREOBJ
 # to OUT. Prints OUT's size and sha256, and — when a prepared OS-layer tree
-# with objects exists ($GB10_WORK/build/tree/nvidia/*.o) — the number of
-# symbols undefined in OUT that the OS layer does not define. Exits 1 if
+# with objects exists ($GB10_WORK/build/tree/$CORE/*.o) — the number of
+# symbols undefined in OUT that the OS layer does not define (for the
+# modeset core the tree's own nv-modeset-kernel.o is one of those objects
+# once the tree has been built against the core, so the number then reads
+# 0). Exits 1 if
 # gmake fails, produces no object, or produces an object WITHOUT the
 # AArch64 BTI property note (FreeBSD 16 arm64 links every kmod with
 # -zbti-report=error, so such an object can never link into nvidia.ko:
@@ -91,7 +102,84 @@ esac
 SRC=$WORK/sources/$OGKMDIR
 BUILDDIR=$WORK/build/ogkm
 MARKER=.gb10-ogkm
-OSOBJDIR=$WORK/build/tree/nvidia
+
+# The core to build. Both cores come from the same pinned checkout and are
+# built with the same flags; they differ in the directory built, the object
+# produced, the default OUT and the Makefile that must not strip the
+# property note. The ogkm Makefile patch (patch-src_nvidia_Makefile) is
+# required for the nvidia core only: src/nvidia/Makefile strips
+# .note.gnu.property, src/nvidia-modeset/Makefile does not.
+CORE=nvidia
+usage() {
+	echo "usage: build-rmcore.sh [--core=nvidia|nvidia-modeset] [OUT] [LOG]" >&2
+}
+while [ $# -gt 0 ]; do
+	case $1 in
+	--core=*)
+		CORE=${1#--core=}
+		shift
+		;;
+	--core)
+		if [ $# -lt 2 ]; then
+			echo "build-rmcore: --core needs a core name" >&2
+			usage
+			exit 1
+		fi
+		CORE=$2
+		shift 2
+		;;
+	--)
+		shift
+		break
+		;;
+	-*)
+		echo "build-rmcore: unknown option: $1" >&2
+		usage
+		exit 1
+		;;
+	*)
+		break
+		;;
+	esac
+done
+# The core may also be named by its bare word as the first argument: the
+# README's build recipe is one line, and "nvidia" and "nvidia-modeset" are
+# not plausible OUT paths.
+if [ $# -gt 0 ]; then
+	case $1 in
+	nvidia|nvidia-modeset)
+		CORE=$1
+		shift
+		;;
+	esac
+fi
+
+if [ $# -gt 2 ]; then
+	usage
+	exit 1
+fi
+
+case $CORE in
+nvidia)
+	COREDIR=src/nvidia
+	COREOBJ=nv-kernel.o
+	OUTDEF=$WORK/build/nv-kernel-aarch64.o
+	OSOBJDIR=$WORK/build/tree/nvidia
+	REQPATCH=patch-src_nvidia_Makefile
+	;;
+nvidia-modeset)
+	COREDIR=src/nvidia-modeset
+	COREOBJ=nv-modeset-kernel.o
+	OUTDEF=$WORK/build/nv-modeset-kernel-aarch64.o
+	OSOBJDIR=$WORK/build/tree/nvidia-modeset
+	REQPATCH=
+	;;
+*)
+	echo "build-rmcore: unknown core: $CORE (nvidia or nvidia-modeset)" >&2
+	usage
+	exit 1
+	;;
+esac
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$SCRIPTDIR/.." && pwd)
@@ -108,23 +196,19 @@ GMAKE=$(test_hook build-rmcore GMAKE /usr/local/bin/gmake) || exit 1
 # GB10_TEST_HOOKS=1, validated and announced by test_hook. Without it the
 # repo's own patches are used, whatever the environment says.
 OGKMPATCHDIR=$(test_hook build-rmcore OGKM_PATCHES "$REPO/patches/ogkm") || exit 1
-# The ogkm Makefile patch is load-bearing: it drops the objcopy step that
-# removes .note.gnu.property, without which the BTI/PAC property notes this
-# build exists to produce are stripped back out of the object. Require it
-# to be present up front; that it applies is enforced by apply_patches
-# below (exit 1 on failure).
-if [ ! -f "$OGKMPATCHDIR/patch-src_nvidia_Makefile" ]; then
-	echo "build-rmcore: required patch missing: $OGKMPATCHDIR/patch-src_nvidia_Makefile" >&2
+# The ogkm Makefile patch is load-bearing for the nvidia core: it drops the
+# objcopy step that removes .note.gnu.property, without which the BTI/PAC
+# property notes this build exists to produce are stripped back out of the
+# object. Require it to be present up front (for that core only; the
+# modeset core's Makefile does not strip the note); that it applies is
+# enforced by apply_patches below (exit 1 on failure).
+if [ -n "$REQPATCH" ] && [ ! -f "$OGKMPATCHDIR/$REQPATCH" ]; then
+	echo "build-rmcore: required patch missing: $OGKMPATCHDIR/$REQPATCH" >&2
 	exit 1
 fi
 
-if [ $# -gt 2 ]; then
-	echo "usage: build-rmcore.sh [OUT] [LOG]" >&2
-	exit 1
-fi
-
-OUT=${1:-$WORK/build/nv-kernel-aarch64.o}
-LOG=${2:-$WORK/logs/build-rmcore-$(date -u +%Y%m%dT%H%M%SZ).log}
+OUT=${1:-$OUTDEF}
+LOG=${2:-$WORK/logs/build-rmcore-$CORE-$(date -u +%Y%m%dT%H%M%SZ).log}
 # The build below cd's into the copied tree; a relative OUT/LOG must still
 # resolve against the caller's directory, so make both absolute now.
 case $OUT in /*) ;; *) OUT=$PWD/$OUT ;; esac
@@ -243,10 +327,10 @@ apply_patches() {
 }
 apply_patches
 # The BTI/PAC property notes are what -zbti-report=error checks, so a tree in
-# which the Makefile still strips them would build an nvidia.ko that cannot
-# link. Refuse it here rather than after a long build.
-if grep -q -- '--remove-section=.note.gnu.property' "$BUILDDIR/src/nvidia/Makefile"; then
-	echo "build-rmcore: src/nvidia/Makefile still strips .note.gnu.property after patching" >&2
+# which the core's Makefile still strips them would build an object that
+# cannot link. Refuse it here rather than after a long build.
+if grep -q -- '--remove-section=.note.gnu.property' "$BUILDDIR/$COREDIR/Makefile"; then
+	echo "build-rmcore: $COREDIR/Makefile still strips .note.gnu.property after patching" >&2
 	exit 1
 fi
 
@@ -257,26 +341,32 @@ if [ "$JOBS" -lt 1 ]; then
 	JOBS=1
 fi
 
-cd "$BUILDDIR/src/nvidia"
+cd "$BUILDDIR/$COREDIR"
 # CFLAGS goes through the environment, never the gmake command line:
 # utils.mk is `CFLAGS ?= -Wall` with `+=` appends after it, so an
 # environment CFLAGS keeps every core flag and adds
 # -mbranch-protection=standard (BTI+PAC property notes in every object,
 # which the -zbti-report=error kmod link on FreeBSD 16 arm64 requires),
 # while a command-line CFLAGS would replace all of NVIDIA's flags.
+# LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64 tells utils.mk which emulation
+# ld.lld must use: it has entries for FreeBSD/x86 and FreeBSD/x86_64 but
+# none for FreeBSD/aarch64, so the ld.lld -r --format=binary link of the
+# modeset core's shader blobs would fail with "target emulation unknown".
+# It is passed for the nvidia core too, which has no such link: harmless.
 if ! env -u MAKEFLAGS -u GNUMAKEFLAGS -u MFLAGS -u MAKELEVEL \
 	CFLAGS='-Wall -mbranch-protection=standard' \
 	nice -n 10 "$GMAKE" -j"$JOBS" \
 	TARGET_OS=FreeBSD TARGET_ARCH=aarch64 \
 	CC=cc CXX=c++ LD=ld.lld OBJCOPY=llvm-objcopy \
-	NV_BUILD_USER=cloudbsd NV_BUILD_HOST=build > "$LOG" 2>&1; then
+	NV_BUILD_USER=cloudbsd NV_BUILD_HOST=build \
+	LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf > "$LOG" 2>&1; then
 	echo "build-rmcore: gmake failed; see $LOG" >&2
 	exit 1
 fi
 
-OBJ=_out/FreeBSD_aarch64/nv-kernel.o
+OBJ=_out/FreeBSD_aarch64/$COREOBJ
 if [ ! -f "$OBJ" ]; then
-	echo "build-rmcore: gmake exited 0 but $BUILDDIR/src/nvidia/$OBJ is missing; see $LOG" >&2
+	echo "build-rmcore: gmake exited 0 but $BUILDDIR/$COREDIR/$OBJ is missing; see $LOG" >&2
 	exit 1
 fi
 
@@ -304,7 +394,7 @@ mv "$BUILDDIR/$MARKER.new" "$BUILDDIR/$MARKER"
 
 mkdir -p "$(dirname "$OUT")"
 cp "$OBJ" "$OUT"
-printf 'nv-kernel.o: %s bytes, sha256 %s\n' \
+printf '%s: %s bytes, sha256 %s\n' "$COREOBJ" \
 	"$(stat -f %z "$OUT")" "$(sha256 -q "$OUT")"
 # Under set -e a failing command substitution would exit here, after a good
 # build; report it instead (the symbol check is in kmod_symbols_test.sh).

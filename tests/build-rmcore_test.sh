@@ -61,6 +61,25 @@
 #                         "state done" (pass-3 u09 #2); an object without
 #                         the note is refused, exit 1, the marker stays
 #                         "state building" and no OUT is written
+#   (s) modeset core:     with --core=nvidia-modeset the core built is
+#                         open-gpu-kernel-modules' src/nvidia-modeset,
+#                         the object is nv-modeset-kernel.o, gmake runs in
+#                         the copy's src/nvidia-modeset, and
+#                         LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf
+#                         is passed to gmake (utils.mk has no FreeBSD/aarch64
+#                         entry, so ld.lld -r --format=binary for the shader
+#                         blobs would fail with "target emulation unknown")
+#   (t) modeset core:     the required ogkm Makefile patch applies to the
+#                         nvidia core ONLY, so a modeset build with an
+#                         OGKM_PATCHES dir that does not hold it must
+#                         still succeed
+#   (u) modeset core:     the default OUT of a modeset build is
+#                         $GB10_WORK/build/nv-modeset-kernel-aarch64.o
+#   (v) modeset core:     the core may also be named by its bare word as
+#                         the first argument (nvidia-modeset), the form
+#                         the README and the round brief use
+#   (w) unknown core:     an unknown core name is refused, exit 1, and
+#                         nothing is built
 #
 # Run: sh tests/build-rmcore_test.sh
 
@@ -117,8 +136,12 @@ fi
 # known commit. hooksPath is pointed at an empty dir and --no-verify is
 # used so no host git hook (e.g. the commit review gate) fires in tests.
 SRC="$TESTROOT/sources/$OGKMDIR"
-mkdir -p "$SRC/src/nvidia"
+mkdir -p "$SRC/src/nvidia" "$SRC/src/nvidia-modeset"
 printf 'int dummy(void) { return 0; }\n' > "$SRC/src/nvidia/dummy.c"
+printf 'int dummy(void) { return 0; }\n' > "$SRC/src/nvidia-modeset/dummy.c"
+# The modeset core's Makefile is not patched by this repo (it does not strip
+# .note.gnu.property), so it only has to exist and hold no objcopy step.
+printf '.PHONY: clean\n' > "$SRC/src/nvidia-modeset/Makefile"
 # src/nvidia/Makefile must hold the exact pre-image of the repo's real
 # required patch (patches/ogkm/patch-src_nvidia_Makefile removes the
 # --remove-section=.note.gnu.property line), so the success cases apply
@@ -138,7 +161,8 @@ cat >> "$SRC/src/nvidia/Makefile" <<'MKEOF'
 .PHONY: clean
 MKEOF
 git -C "$SRC" init -q
-git -C "$SRC" add src/nvidia/dummy.c src/nvidia/Makefile
+git -C "$SRC" add src/nvidia/dummy.c src/nvidia/Makefile \
+	src/nvidia-modeset/dummy.c src/nvidia-modeset/Makefile
 git -C "$SRC" -c core.hooksPath="$TESTROOT/hooks-empty" \
 	-c user.email=test@example.invalid -c user.name=test \
 	commit -q --no-verify -m "fake ogkm"
@@ -164,14 +188,21 @@ printf 'int rmcore_defined_here = 1;\nvoid osf(void) {}\n' > "$TESTROOT/fake-os.
 cc -c -fno-stack-protector -o "$TESTROOT/fake-os.o" "$TESTROOT/fake-os.c"
 
 # Fake gmakes. The good one records its cwd and arguments for case (d)
-# and leaves a real ELF at the path the script copies from.
+# and leaves a real ELF at the path the script copies from. It is core
+# aware: the object it leaves is named after the core it was run in
+# (nv-kernel.o in src/nvidia, nv-modeset-kernel.o in src/nvidia-modeset),
+# because that is the name the script looks for.
 cat > "$TESTROOT/fake-gmake-ok" <<EOF
 #!/bin/sh
 pwd > "$TESTROOT/gmake-cwd"
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$TESTROOT/gmake-args"
 echo "fake gmake ran"
+case \$(basename "\$PWD") in
+nvidia-modeset) obj=nv-modeset-kernel.o ;;
+*) obj=nv-kernel.o ;;
+esac
 mkdir -p _out/FreeBSD_aarch64
-cp "$TESTROOT/fake-nv-kernel.o" _out/FreeBSD_aarch64/nv-kernel.o
+cp "$TESTROOT/fake-nv-kernel.o" "_out/FreeBSD_aarch64/\$obj"
 exit 0
 EOF
 cat > "$TESTROOT/fake-gmake-fail" <<EOF
@@ -250,7 +281,8 @@ grep -q '^undefined not in OS layer: 1$' "$TESTROOT/out-d" || d_ok=0
 grep -q 'fake gmake ran' "$TESTROOT/log-d" || d_ok=0
 [ "$(cat "$TESTROOT/gmake-cwd")" = "$TESTROOT/build/ogkm/src/nvidia" ] || d_ok=0
 for flag in TARGET_OS=FreeBSD TARGET_ARCH=aarch64 CC=cc CXX=c++ LD=ld.lld \
-    OBJCOPY=llvm-objcopy NV_BUILD_USER=cloudbsd NV_BUILD_HOST=build; do
+    OBJCOPY=llvm-objcopy NV_BUILD_USER=cloudbsd NV_BUILD_HOST=build \
+    LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf; do
 	grep -qx -- "$flag" "$TESTROOT/gmake-args" || d_ok=0
 done
 # The marker must say who wrote it and that the copy is complete.
@@ -551,6 +583,92 @@ if [ "$r_ok" -eq 1 ]; then
 	ok "(r) core object without the BTI property note: exit 1, marker not 'state done', no OUT"
 else
 	fail "(r) note-less object: rc=$rc err=$(cat "$TESTROOT/err-r" 2>/dev/null) out-r=$([ -e "$TESTROOT/out-r.o" ] && echo yes || echo no) marker=$(sed -n 2p "$TESTROOT/build/ogkm/.gb10-ogkm" 2>/dev/null)"
+fi
+
+# (s) the modeset core: the same script builds open-gpu-kernel-modules'
+# src/nvidia-modeset, the object is nv-modeset-kernel.o, gmake runs in the
+# copy's src/nvidia-modeset, and the LD emulation flag for FreeBSD/aarch64
+# is passed to gmake - utils.mk has no FreeBSD/aarch64 entry, so ld.lld -r
+# --format=binary (the shader blobs) would fail with "target emulation
+# unknown" without it.
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	GMAKE="$TESTROOT/fake-gmake-ok" \
+	sh "$SCRIPT" --core=nvidia-modeset "$TESTROOT/out-s.o" "$TESTROOT/log-s" \
+	>"$TESTROOT/out-s" 2>"$TESTROOT/err-s" || rc=$?
+s_ok=1
+[ "$rc" -eq 0 ] || s_ok=0
+[ -f "$TESTROOT/out-s.o" ] || s_ok=0
+grep -Eq '^nv-modeset-kernel\.o: [0-9]+ bytes, sha256 [0-9a-f]{64}$' \
+	"$TESTROOT/out-s" || s_ok=0
+[ "$(cat "$TESTROOT/gmake-cwd")" = "$TESTROOT/build/ogkm/src/nvidia-modeset" ] \
+	|| s_ok=0
+grep -qx -- 'LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf' \
+	"$TESTROOT/gmake-args" || s_ok=0
+grep -qx -- 'TARGET_ARCH=aarch64' "$TESTROOT/gmake-args" || s_ok=0
+# The BTI note check applies to the modeset core too: the object is the
+# same note-carrying stand-in, and the marker must say the copy is done.
+grep -q '^state done$' "$TESTROOT/build/ogkm/.gb10-ogkm" || s_ok=0
+if [ "$s_ok" -eq 1 ]; then
+	ok "(s) modeset core: src/nvidia-modeset built, nv-modeset-kernel.o copied, LD emulation flag passed"
+else
+	fail "(s) modeset core: rc=$rc out=$(cat "$TESTROOT/out-s" 2>/dev/null) err=$(cat "$TESTROOT/err-s" 2>/dev/null) cwd=$(cat "$TESTROOT/gmake-cwd" 2>/dev/null)"
+fi
+
+# (t) the required ogkm Makefile patch applies to the nvidia core only: a
+# modeset build with an OGKM_PATCHES dir that does not hold it must still
+# succeed (case (k) proves the nvidia core refuses such a dir).
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	OGKM_PATCHES="$TESTROOT/patches-empty" \
+	GMAKE="$TESTROOT/fake-gmake-ok" \
+	sh "$SCRIPT" --core=nvidia-modeset "$TESTROOT/out-t.o" "$TESTROOT/log-t" \
+	>"$TESTROOT/out-t" 2>"$TESTROOT/err-t" || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/out-t.o" ] \
+    && ! grep -q 'required patch missing' "$TESTROOT/err-t"; then
+	ok "(t) modeset core: the nvidia-core Makefile patch is not required"
+else
+	fail "(t) modeset core without the ogkm patch: rc=$rc err=$(cat "$TESTROOT/err-t" 2>/dev/null)"
+fi
+
+# (u) the default OUT of a modeset build is
+# $GB10_WORK/build/nv-modeset-kernel-aarch64.o.
+rm -f "$TESTROOT/build/nv-modeset-kernel-aarch64.o"
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	GMAKE="$TESTROOT/fake-gmake-ok" \
+	sh "$SCRIPT" --core=nvidia-modeset >"$TESTROOT/out-u" 2>"$TESTROOT/err-u" || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/nv-modeset-kernel-aarch64.o" ]; then
+	ok "(u) modeset core: default OUT is build/nv-modeset-kernel-aarch64.o"
+else
+	fail "(u) modeset default OUT: rc=$rc err=$(cat "$TESTROOT/err-u" 2>/dev/null)"
+fi
+
+# (v) the core may also be named by its bare word as the first argument.
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	GMAKE="$TESTROOT/fake-gmake-ok" \
+	sh "$SCRIPT" nvidia-modeset "$TESTROOT/out-v.o" "$TESTROOT/log-v" \
+	>"$TESTROOT/out-v" 2>"$TESTROOT/err-v" || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/out-v.o" ] \
+    && [ "$(cat "$TESTROOT/gmake-cwd")" = "$TESTROOT/build/ogkm/src/nvidia-modeset" ]; then
+	ok "(v) modeset core: named by its bare word as the first argument"
+else
+	fail "(v) bare-word core: rc=$rc err=$(cat "$TESTROOT/err-v" 2>/dev/null)"
+fi
+
+# (w) an unknown core name is refused, and nothing is built.
+rc=0
+GB10_WORK="$TESTROOT" SOURCES="$TESTROOT/SOURCES-good" \
+	GMAKE="$TESTROOT/fake-gmake-ok" \
+	sh "$SCRIPT" --core=nvidia-drm "$TESTROOT/out-w.o" "$TESTROOT/log-w" \
+	>"$TESTROOT/out-w" 2>"$TESTROOT/err-w" || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'usage:' "$TESTROOT/err-w" \
+    && grep -q 'unknown core' "$TESTROOT/err-w" \
+    && [ ! -e "$TESTROOT/out-w.o" ]; then
+	ok "(w) unknown core name: exit 1 with a usage message, nothing built"
+else
+	fail "(w) unknown core: rc=$rc err=$(cat "$TESTROOT/err-w" 2>/dev/null)"
 fi
 
 echo "passed: $PASSED failed: $FAILED"

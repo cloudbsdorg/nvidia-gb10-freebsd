@@ -1,6 +1,6 @@
---- nvidia/Makefile.orig	2026-11-17 09:54:40.669183000 +0000
-+++ nvidia/Makefile	2026-11-17 09:54:40.672444000 +0000
-@@ -15,7 +15,10 @@
+--- nvidia/Makefile.orig
++++ nvidia/Makefile
+@@ -15,10 +15,27 @@
  SRCS=		${NVIDIA_SOURCES}
  SRCS+=		acpi_if.h bus_if.h device_if.h opt_acpi.h pci_if.h vnode_if.h
  CFLAGS+=	-I. -I../common/inc -DNV_VERSION_STRING=\"580.178.04\"
@@ -12,3 +12,20 @@
  CFLAGS+=	-DNV_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
  CFLAGS+=	-DNV_KERNEL_INTERFACE_LAYER
  
++# The symbols nvidia-modeset.ko and nvidia-drm.ko take from this module.
++# bsd.kmod.mk exports nothing unless EXPORT_SYMS names it, and arm64 kernel
++# modules are shared objects whose undefined symbols resolve only against
++# exported ones.
++.if ${MACHINE_CPUARCH} == "aarch64"
++EXPORT_SYMS=	nvidia_devclass \
++		nvidia_get_rm_ops \
++		nv_kthread_q_init \
++		nv_kthread_q_item_init \
++		nv_kthread_q_schedule_q_item \
++		nv_kthread_q_flush \
++		nv_kthread_q_stop
++.endif
++
+ include ../common/optional-cflags.mk
+ 
+ OBJS+=		${RMOBJ}
