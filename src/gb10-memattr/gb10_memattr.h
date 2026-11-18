@@ -82,7 +82,7 @@ enum gb10_memattr {
  * nvidia_os.c).
  *
  *   request         altra = 0        altra = 1
- *   CACHED          WRITE_BACK       DEVICE
+ *   CACHED          WRITE_BACK       WRITE_BACK
  *   UNCACHED        DEVICE           DEVICE
  *   DEFAULT (BAR)   DEVICE           DEVICE
  *   WRITECOMBINED   NORMAL_NC        DEVICE
@@ -98,13 +98,16 @@ gb10_bar_memattr(unsigned caching_class, int altra)
 	switch (caching_class) {
 	case GB10_CACHING_CACHED:
 		/*
-		 * A cacheable Normal-WB mapping of a BAR is the worst case
-		 * of the unsafe Normal accesses on Ampere Altra (#1908), so
-		 * there a CACHED BAR request falls back to Device-nGnRE like
-		 * every other class; a coherent system (e.g. GB10) keeps the
-		 * write-back attribute the request asked for.
+		 * The open core asks for CACHED only for ordinary memory, never
+		 * for a PCIe BAR: firmware tables (ACPI and SMBIOS, cached
+		 * because osInitObjOS() sets
+		 * PDB_PROP_OS_CACHED_MEMORY_MAPPINGS_FOR_ACPI_TABLE, osunix.c:37)
+		 * and coherent system memory (kernel_fifo_gm107.c:1331,
+		 * ADDR_SYSMEM with a coherent CPU mapping). Write-back is the
+		 * only right attribute for those, on Altra too: Device would
+		 * make the byte-packed table reads take alignment faults.
 		 */
-		return (altra ? GB10_ATTR_DEVICE : GB10_ATTR_WRITE_BACK);
+		return (GB10_ATTR_WRITE_BACK);
 	case GB10_CACHING_UNCACHED:
 	case GB10_CACHING_DEFAULT:
 		/*

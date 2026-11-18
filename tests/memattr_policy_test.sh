@@ -127,7 +127,7 @@ main(void)
 	check("CACHED/altra=0",        gb10_bar_memattr(GB10_CACHING_CACHED, 0),
 	    GB10_ATTR_WRITE_BACK);
 	check("CACHED/altra=1",        gb10_bar_memattr(GB10_CACHING_CACHED, 1),
-	    GB10_ATTR_DEVICE);
+	    GB10_ATTR_WRITE_BACK);
 	check("UNCACHED/altra=0",      gb10_bar_memattr(GB10_CACHING_UNCACHED, 0),
 	    GB10_ATTR_DEVICE);
 	check("UNCACHED/altra=1",      gb10_bar_memattr(GB10_CACHING_UNCACHED, 1),
