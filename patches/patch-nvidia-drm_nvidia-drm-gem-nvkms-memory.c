@@ -64,7 +64,7 @@
 +    unsigned long fictitious = 0, pages = 0;
 +    int error;
 +
-+    if (end <= start || (start & PAGE_MASK) != 0) {
++    if (end <= start || (start & (PAGE_SIZE - 1)) != 0) {
 +        NV_DRM_DEV_LOG_ERR(nv_dev,
 +            "Video memory window 0x%llx-0x%llx is not page aligned",
 +            (unsigned long long)start, (unsigned long long)end);

@@ -165,6 +165,15 @@ pages_check() {
 	    || { echo "__nv_drm_gem_nvkms_bsd_pages_register: no PG_FICTITIOUS probe before registering (overlap would panic)"; return; }
 	grep -Eq 'VM_PAGE_TO_PHYS\(m\) == pa' "$TMPD/reg.c" \
 	    || { echo "__nv_drm_gem_nvkms_bsd_pages_register: probe does not compare the page's physical address (uninitialised amd64 array entries)"; return; }
+	# (f5) nvidia-drm is built against linuxkpi, whose page.h redefines
+	# PAGE_MASK the Linux way, ~(PAGE_SIZE - 1): "x & PAGE_MASK" is the page
+	# address, not the offset, so an alignment test written with it refuses
+	# every window (test boot 4, 2026-11-19: "is not page aligned" for
+	# 0x3000101b0000, and the dumb buffer create failed with EINVAL)
+	if grep -Eq '&[[:space:](]*PAGE_MASK' "$TMPD/reg.c"; then
+		echo "__nv_drm_gem_nvkms_bsd_pages_register: tests alignment with PAGE_MASK, which linuxkpi defines as ~(PAGE_SIZE - 1)"
+		return
+	fi
 	if grep -q 'EEXIST' "$TMPD/reg.c"; then
 		echo "__nv_drm_gem_nvkms_bsd_pages_register: handles EEXIST, which vm_phys_fictitious_reg_range never returns"
 		return
@@ -206,6 +215,18 @@ r=$(pages_check "$TMPD/mutant3.c")
 case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
 [ -n "$r" ] && ok "control: mutant trusting PG_FICTITIOUS alone is flagged ($r)" \
     || bad "control: mutant trusting PG_FICTITIOUS alone passed"
+# mutant: the alignment test written with linuxkpi's PAGE_MASK (test boot 4)
+sed 's/(start \& (PAGE_SIZE - 1)) != 0/(start \& PAGE_MASK) != 0/' "$TREE/$NVKMS" > "$TMPD/mutant4.c"
+r=$(pages_check "$TMPD/mutant4.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant testing alignment with PAGE_MASK is flagged ($r)" \
+    || bad "control: mutant testing alignment with PAGE_MASK passed"
+# mutant: the same, parenthesised
+sed 's/(start \& (PAGE_SIZE - 1)) != 0/(start \& (PAGE_MASK)) != 0/' "$TREE/$NVKMS" > "$TMPD/mutant5.c"
+r=$(pages_check "$TMPD/mutant5.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant with a parenthesised PAGE_MASK is flagged ($r)" \
+    || bad "control: mutant with a parenthesised PAGE_MASK passed"
 r=$(pages_check "$TREE/$NVKMS")
 [ -z "$r" ] && ok "nvkms map/free: video memory registered as vm_pages, unregistered before unmap, in-use check" \
     || bad "nvkms map/free: $r"
