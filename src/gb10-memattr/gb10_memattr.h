@@ -82,7 +82,7 @@ enum gb10_memattr {
  * nvidia_os.c).
  *
  *   request         altra = 0        altra = 1
- *   CACHED          WRITE_BACK       WRITE_BACK
+ *   CACHED          DEVICE           DEVICE      (a BAR is never cacheable)
  *   UNCACHED        DEVICE           DEVICE
  *   DEFAULT (BAR)   DEVICE           DEVICE
  *   WRITECOMBINED   NORMAL_NC        DEVICE
@@ -98,16 +98,28 @@ gb10_bar_memattr(unsigned caching_class, int altra)
 	switch (caching_class) {
 	case GB10_CACHING_CACHED:
 		/*
-		 * The open core asks for CACHED only for ordinary memory, never
-		 * for a PCIe BAR: firmware tables (ACPI and SMBIOS, cached
-		 * because osInitObjOS() sets
-		 * PDB_PROP_OS_CACHED_MEMORY_MAPPINGS_FOR_ACPI_TABLE, osunix.c:37)
-		 * and coherent system memory (kernel_fifo_gm107.c:1331,
-		 * ADDR_SYSMEM with a coherent CPU mapping). Write-back is the
-		 * only right attribute for those, on Altra too: Device would
-		 * make the byte-packed table reads take alignment faults.
+		 * The open core does ask for CACHED on a PCIe BAR: osMapGPU()
+		 * (src/nvidia/arch/nvalloc/unix/src/os.c) maps BAR0 for a user
+		 * client with modeFlag NV_FALSE == NV_MEMORY_CACHED, and that
+		 * is the 64 KB USERMODE register window every Vulkan and CUDA
+		 * process maps first (observed 2026-11-19: pa 0x40bb0000 =
+		 * BAR0+0xbb0000, caching 0).  x86 gets away with write-back
+		 * there because the MTRRs make the BAR uncached anyway; arm64
+		 * has no MTRR, and on Ampere Altra a cacheable load from a
+		 * register page is a synchronous external abort (ESR
+		 * 0x92000410 -> SIGBUS BUS_OBJERR, the vulkaninfo crash of
+		 * Track #2101).  A BAR is never cacheable on arm64: CACHED
+		 * on a BAR is Device-nGnRE, like UNCACHED.  The other CACHED
+		 * mappings the RM can ask for (SMBIOS and ACPI tables, a
+		 * coherent-link framebuffer window) do not happen on FreeBSD
+		 * arm64 today: os_get_smbios_header(),
+		 * os_get_acpi_rsdp_from_uefi() and os_numa_memblock_size()
+		 * return NOT_SUPPORTED.  Those pages are not vm_phys-managed
+		 * either (firmware regions are excluded from phys_avail), so
+		 * the range check would call them a BAR.  Implementing any of
+		 * those needs a third range kind (firmware or coherent window,
+		 * Normal write-back) before this cell applies to them.
 		 */
-		return (GB10_ATTR_WRITE_BACK);
 	case GB10_CACHING_UNCACHED:
 	case GB10_CACHING_DEFAULT:
 		/*

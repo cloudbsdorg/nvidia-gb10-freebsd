@@ -307,9 +307,9 @@
 +     *               Normal non-cacheable, and a class x86 rejects here
 +     *               fails the mapping as it does there.
 +     *   BAR         gb10_bar_memattr() (see os_arm64_altra_device_wc
-+     *               above): cached stays write-back except on Ampere
-+     *               Altra; uncached and the default class become
-+     *               Device-nGnRE; write-combined becomes Normal
++     *               above): cached, uncached and the default class
++     *               become Device-nGnRE (a BAR is never cacheable on
++     *               arm64); write-combined becomes Normal
 +     *               non-cacheable - arm64's write-combining attribute -
 +     *               except on Altra, where Normal accesses to BARs are
 +     *               unsafe (#1908) and it becomes Device-nGnRE too.

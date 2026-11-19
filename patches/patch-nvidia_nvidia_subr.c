@@ -173,7 +173,7 @@
  
  int nvidia_mmap_dev_single(
      nv_freebsd_file_private_t *nvffp,
-@@ -1583,10 +1709,85 @@
+@@ -1583,10 +1709,86 @@
      {
          goto free_sglist;
      }
@@ -194,10 +194,11 @@
 +     *               system-memory policy (see flush_cpu_cache() above):
 +     *               never gb10_bar_memattr() on managed pages.
 +     *   BAR         gb10_bar_memattr() (see os_arm64_bar_wc_init() in
-+     *               nvidia_os.c): Device-nGnRE for uncached and default,
++     *               nvidia_os.c): Device-nGnRE for cached, uncached
++     *               and default (a BAR is never cacheable on arm64),
 +     *               Normal non-cacheable - arm64's write-combining
 +     *               attribute - for write-combined except on Altra,
-+     *               write-back for cached, and EINVAL for a caching
++     *               and EINVAL for a caching
 +     *               class the policy does not know.  The Normal
 +     *               non-cacheable attribute _convert_caching_to_attr()
 +     *               would return for uncached and write-combined BAR

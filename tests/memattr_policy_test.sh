@@ -12,7 +12,7 @@
 # ${GB10_WORK:-$HOME/work/gb10}/tmp and checks:
 #   (a) every cell of the BAR policy table, both altra values:
 #         request          BAR, not Altra  BAR, Altra
-#         CACHED           WRITE_BACK      DEVICE
+#         CACHED           DEVICE          DEVICE  (a BAR is never cacheable)
 #         UNCACHED         DEVICE          DEVICE
 #         DEFAULT (a BAR)  DEVICE          DEVICE
 #         WRITECOMBINED    NORMAL_NC       DEVICE
@@ -125,9 +125,9 @@ main(void)
 
 	/* (a) policy table, both altra values */
 	check("CACHED/altra=0",        gb10_bar_memattr(GB10_CACHING_CACHED, 0),
-	    GB10_ATTR_WRITE_BACK);
+	    GB10_ATTR_DEVICE);
 	check("CACHED/altra=1",        gb10_bar_memattr(GB10_CACHING_CACHED, 1),
-	    GB10_ATTR_WRITE_BACK);
+	    GB10_ATTR_DEVICE);
 	check("UNCACHED/altra=0",      gb10_bar_memattr(GB10_CACHING_UNCACHED, 0),
 	    GB10_ATTR_DEVICE);
 	check("UNCACHED/altra=1",      gb10_bar_memattr(GB10_CACHING_UNCACHED, 1),
