@@ -18,7 +18,7 @@ small source files of our own, and the tests.
 | `nvidia.ko` loads and attaches to the GPU | works |
 | GSP firmware module (`nvidia_gsp_ga10x_fw.ko`), GSP boots | works |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
-| CUDA | not tried yet |
+| CUDA | not yet: `nvidia.ko` now exports the UVM interface (below); the clean-room `nvidia-uvm.ko` is in progress |
 | `nvidia-modeset.ko` (display output from the NVIDIA card) | builds, not loaded yet |
 | `nvidia-drm.ko` (DRM/KMS on the NVIDIA card) | builds, not loaded yet |
 
@@ -151,6 +151,36 @@ Loading the driver takes the display hardware over from the UEFI framebuffer, so
 NVIDIA card goes dark until `nvidia-modeset` and `nvidia-drm` are loaded (both build, but
 neither has ever been loaded). A console or desktop on another GPU is not affected.
 
+## The UVM interface in nvidia.ko
+
+CUDA needs `nvidia-uvm.ko`, a separate kernel module that is a client of the resource
+manager (RM) inside `nvidia.ko`. NVIDIA's FreeBSD OS layer does not export the kernel
+interface that module needs, although the open RM core already contains the implementation
+("gpu-ops"). `src/gb10-uvm/nv-uvm-interface.[ch]`, built into `nvidia.ko`, adds it:
+
+- the `nvUvmInterface*` entry points, each a wrapper that allocates an RM stack and calls
+  the matching gpu-ops function of the core; `nvidia.ko` exports them
+  (`patches/patch-nvidia_Makefile`, `EXPORT_SYMS`) for `nvidia-uvm.ko` to link against;
+- GPU lookup by UUID (`nvUvmInterfaceRegisterGpu`): opens each attached device so RM knows its
+  UUID, keeps the open reference on the match and raises RM's external-kernel-client count;
+  returns the PCI `device_t` and the DMA window the OS layer recorded;
+- the callback table UVM installs (`nvUvmInterfaceRegisterUvmCallbacks`); removing it waits
+  for every callback in flight;
+- the interrupt order UVM needs: `nvidia_intr()` runs UVM's top half before `rm_isr()`, and
+  stops copying MMU faults itself while a UVM table is installed (RM fills UVM's shadow buffer);
+  `nv_schedule_uvm_isr`, the hook RM calls, runs the same top half;
+- suspend and resume: UVM is told before RM's standby (it may veto) and after RM's resume;
+- the two RM stacks the lock-free fault calls use, allocated by `nvUvmInterfaceInitFaultInfo`.
+
+Three MIT-licensed interface headers of the open RM core that the FreeBSD tarball does not
+ship (`nv_uvm_types.h`, `nv_uvm_user_types.h`, `nvgputypes.h`) are copied into the tree by
+`scripts/prepare-tree.sh` from the pinned checkout and recorded in the tree's manifest as
+`ogkm:<path>`. `tests/uvm_glue_test.sh` checks the exports, the structure layouts against the
+UVM specification, the interrupt order and the manifest.
+
+The module itself lives in its own repository (`nvidia-uvm-freebsd`), written clean-room
+from a specification; this repository holds only the `nvidia.ko` side.
+
 ## nvidia-smi
 
 Not built here. NVIDIA's Linux arm64 `nvidia-smi` of the same version runs through the
@@ -179,6 +209,7 @@ payload line from the installer's header with `head -c 4096 <installer>.run | gr
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
+| `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 
 ## Licence

@@ -45,10 +45,10 @@
 # the run is in flight; at the very end it is rewritten via a temp file and
 # mv(1) to "state done" followed by each
 # applied patch's name and sha256, and after the patches the repo's own
-# src/ additions are copied in and recorded the same way: currently
-# src/gb10-memattr/gb10_memattr.h (the arm64 PCIe BAR memory-attribute
-# policy header) to TREE/nvidia/gb10_memattr.h, so the patched nvidia_os.c
-# and nvidia_subr.c can #include "gb10_memattr.h" with no Makefile change.
+# src/ additions are copied in and recorded the same way (copy_repo_src
+# below): the arm64 PCIe BAR memory-attribute policy header to
+# TREE/nvidia/gb10_memattr.h, the UVM interface glue (src/gb10-uvm) and the
+# three MIT interface headers it needs from the open RM core checkout.
 # Nothing is written outside TREE and /tmp is never used.
 
 set -eu
@@ -142,18 +142,39 @@ apply_patches() {
 
 # copy_repo_src - copy the repo's own source additions into TREE and record
 # each in the manifest temp file that finalize_marker folds into .prepared.
-# Today that is one file, the arm64 BAR memory-attribute policy header,
-# which goes to TREE/nvidia/ beside the sources that include it. A missing
-# file fails the run loudly (set -e): silently skipping it would only break
-# the build later in a less obvious way.
-# Time:  O(F) copy and sha256 runs for F added files (today F=1).
+# They go to TREE/nvidia/ beside the sources that include them: the arm64
+# BAR memory-attribute policy header (src/gb10-memattr) and the UVM
+# interface of the OS layer (src/gb10-uvm, built into nvidia.ko through
+# patch-nvidia_nvidia-sources.mk). The UVM glue also needs three of the
+# open RM core's own MIT-licensed interface headers that NVIDIA's FreeBSD
+# tarball does not ship (nv_uvm_types.h, nv_uvm_user_types.h,
+# nvgputypes.h): they are copied from the pinned open-gpu-kernel-modules
+# checkout that scripts/fetch-sources.sh verified, and recorded in the
+# manifest as "ogkm:<path in that checkout>" so tests/kmod_symbols_test.sh
+# can re-hash them. A missing file fails the run loudly (set -e): silently
+# skipping it would only break the build later in a less obvious way.
+# Time:  O(F) copy and sha256 runs for F added files.
 # Space: O(F) manifest lines.
 copy_repo_src() {
+	_ogkm=$WORK/sources/open-gpu-kernel-modules-580.178.04
 	mkdir -p "$TREE/nvidia"
-	cp "$REPO/src/gb10-memattr/gb10_memattr.h" "$TREE/nvidia/gb10_memattr.h"
-	printf '%s  %s\n' "src/gb10-memattr/gb10_memattr.h" \
-	    "$(sha256 -q "$REPO/src/gb10-memattr/gb10_memattr.h")" \
-	    >> "$TREE/.prepared.patches"
+	for _f in src/gb10-memattr/gb10_memattr.h \
+	    src/gb10-uvm/nv-uvm-interface.h src/gb10-uvm/nv-uvm-interface.c; do
+		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
+		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
+		    >> "$TREE/.prepared.patches"
+	done
+	for _f in src/nvidia/interface/nv_uvm_types.h \
+	    src/nvidia/interface/nv_uvm_user_types.h \
+	    src/common/sdk/nvidia/inc/nvgputypes.h; do
+		if [ ! -f "$_ogkm/$_f" ]; then
+			echo "prepare-tree: missing $_ogkm/$_f (run scripts/fetch-sources.sh)" >&2
+			exit 1
+		fi
+		cp "$_ogkm/$_f" "$TREE/nvidia/$(basename "$_f")"
+		printf 'ogkm:%s  %s\n' "$_f" "$(sha256 -q "$_ogkm/$_f")" \
+		    >> "$TREE/.prepared.patches"
+	done
 }
 
 # finalize_marker - rewrite TREE/.prepared at the very end: the gb10 marker

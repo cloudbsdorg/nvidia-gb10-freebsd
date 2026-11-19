@@ -1,6 +1,12 @@
---- nvidia/nvidia_subr.c.orig	2026-11-18 03:47:39.101201000 +0000
-+++ nvidia/nvidia_subr.c	2026-11-18 03:49:20.209566000 +0000
-@@ -22,9 +22,27 @@
+--- nvidia/nvidia_subr.c.orig
++++ nvidia/nvidia_subr.c
+@@ -17,13 +17,32 @@
+ #include "nv-freebsd.h"
+ #include "nv-caps.h"
+ #include "nv-firmware.h"
++#include "nv-uvm-interface.h"	/* UVM top half, suspend/resume hooks (gb10) */
+ 
+ #include <sys/consio.h>
  #include <sys/fbio.h>
  #include <sys/linker.h>
  #include <sys/firmware.h>
@@ -19,16 +25,79 @@
 +#include <vm/vm_phys.h>		/* vm_phys_paddr_to_vm_page() */
 +#include "gb10_memattr.h"	/* gb10_bar_memattr(), gb10_range_class(),
 +				 * gb10_range_action() for device mmaps */
- 
++
 +/* arm64 BAR memory-attribute policy, defined in nvidia_os.c */
 +extern int os_arm64_altra_device_wc;
 +extern void os_arm64_bar_wc_init(void);
 +#endif
-+
+ 
  uma_zone_t nvidia_stack_t_zone;
  static nvidia_stack_t *__nvidia_init_sp = NULL;
+@@ -135,6 +154,18 @@
  
-@@ -736,6 +754,14 @@
+     nvidia_modeset_suspend(nv->gpu_id);
+ 
++    /*
++     * UVM first (uvm-spec 02 section 5): it may veto the sleep with
++     * NV_ERR_NOT_SUPPORTED while a VA space exists; RM's standby runs
++     * only once UVM has quiesced its GPUs.
++     */
++    status = nv_uvm_suspend();
++    if (status != NV_OK) {
++        nvidia_modeset_resume(nv->gpu_id);
++        NV_UMA_ZONE_FREE_STACK(sp);
++        return EBUSY;
++    }
++
+     status = rm_power_management(sp, nv, NV_PM_ACTION_STANDBY);
+ 
+     nvidia_pci_save_config_space(sp, dev);
+@@ -166,6 +197,8 @@
+ 
+     if (status == NV_OK)
+     {
++        /* RM's GPUs are running again: UVM resumes after RM (02 section 5) */
++        (void)nv_uvm_resume();
+         nvidia_modeset_resume(nv->gpu_id);
+     }
+ 
+@@ -266,16 +299,30 @@
+     if (sp == NULL)
+         return;
+ 
++    /*
++     * UVM's top half runs BEFORE RM's interrupt service (uvm-spec 02
++     * section 6 item 4): with a UVM callback table installed and this GPU
++     * registered, it takes the replayable-fault, non-replayable-fault and
++     * access-counter interrupts it owns and schedules its bottom halves.
++     * Its result is not needed here: this is an interrupt thread handler
++     * with no handled/not-handled verdict to report, and a GPU with UVM
++     * work still pending raises the interrupt again.
++     */
++    (void)nv_uvm_isr_top_half(nv);
++
+     rm_isr(sp, nv, &run_bottom_half);
+ 
+     if (run_bottom_half) {
+         /*
+-         * As UVM with faulting is currently not supported in this plateform, we can copy
+-         * MMU faults after grabbing RM lock. With UVM, this routine should be called
+-         * before calling rm_isr and bottom_half should be scheduled unconditionally
+-         * with low priority thread as bottom_half can wait for lock
++         * Without UVM, RM copies the non-replayable MMU faults into its
++         * shadow buffer here, after taking the RM lock.  Once UVM owns the
++         * fault buffers (02 section 6 item 5) the glue must not consume
++         * faults itself: the non-replayable ones reach UVM through the
++         * shadow buffer RM fills (GSP-RM does the copy on this GPU), and
++         * UVM drains it from its own bottom half.
+          */
+-        rm_gpu_copy_mmu_faults(sp, nv, &faultsCopied);
++        if (!nv_uvm_callbacks_installed())
++            rm_gpu_copy_mmu_faults(sp, nv, &faultsCopied);
+ 
+         /* We're not executing in an HW ISR context */
+         rm_isr_bh(sp, nv);
+@@ -736,6 +783,15 @@
              sc->nv_state = (void *)&nvidia_ctl_state;
  
              nvidia_sysctl_init();
@@ -40,10 +109,19 @@
 +             */
 +            os_arm64_bar_wc_init();
 +#endif
++            nv_uvm_glue_init();
              nvidia_linux_init();
  
              mtx_init(&snapshot_timer_mutex, "nvidia_profiler", NULL, MTX_DEF);
-@@ -1105,6 +1131,31 @@
+@@ -774,6 +830,7 @@
+ 
+             nvidia_sysctl_exit();
+             nvidia_linux_exit();
++            nv_uvm_glue_exit();
+ 
+             uma_zdestroy(nvidia_stack_t_zone);
+ 
+@@ -1105,6 +1162,31 @@
      smp_rendezvous(NULL, wbinvd_action_func, NULL, NULL);
      wbinvd_action_func(NULL);
  }
@@ -75,7 +153,7 @@
  #else
  static void flush_cpu_cache(void)
  {
-@@ -1118,6 +1169,7 @@
+@@ -1118,6 +1200,7 @@
      NvU32 caching
  )
  {
@@ -83,11 +161,10 @@
      switch (caching) {
          case NV_MEMORY_UNCACHED:
              return VM_MEMATTR_UNCACHEABLE;
-@@ -1128,7 +1180,29 @@
-             return VM_MEMATTR_WEAK_UNCACHEABLE;
+@@ -1129,6 +1212,28 @@
          case NV_MEMORY_WRITECOMBINED:
              return VM_MEMATTR_WRITE_COMBINING;
-+    }
+     }
 +#elif defined(__aarch64__)
 +    /*
 +     * arm64 has no VM_MEMATTR_WEAK_UNCACHEABLE, and its
@@ -108,17 +185,15 @@
 +        case NV_MEMORY_DEFAULT:
 +        case NV_MEMORY_CACHED:
 +            return VM_MEMATTR_WRITE_BACK;
-     }
++    }
 +#endif
  
      return VM_MEMATTR_UNCACHEABLE;
  }
-@@ -1530,7 +1604,59 @@
-     sx_xunlock(&nvffp->fops_sx);
- 
+@@ -1532,6 +1637,58 @@
      return status;
-+}
-+
+ }
+ 
 +#if defined(__aarch64__)
 +/*
 + * gb10_memarea_kind - classify the physical ranges of a device mmap for
@@ -168,16 +243,16 @@
 +    }
 +
 +    return (gb10_range_class(ram_pages, pages));
- }
++}
 +#endif /* __aarch64__ */
- 
++
  int nvidia_mmap_dev_single(
      nv_freebsd_file_private_t *nvffp,
-@@ -1583,10 +1709,86 @@
-     {
+     vm_ooffset_t *offset,
+@@ -1584,9 +1741,85 @@
          goto free_sglist;
      }
-+
+ 
 +#if defined(__aarch64__)
 +    /*
 +     * The mmap usually covers PCIe BAR pages (device registers or a
@@ -247,7 +322,7 @@
 +                status = EINVAL;
 +                goto free_sglist;
 +        }
- 
++
 +        VM_OBJECT_WLOCK(*object);
 +        vm_object_set_memattr(*object, attr);
 +        VM_OBJECT_WUNLOCK(*object);
@@ -260,7 +335,37 @@
  
      status = NV_OK;
  
-@@ -2414,6 +2615,12 @@
+@@ -2213,23 +2446,14 @@
+     if (snapshot_cb)
+         snapshot_cb(nvidia_ctl_state.profiler_context);
+     mtx_unlock(&snapshot_timer_mutex);
+-}
+-
+-void NV_API_CALL
+-nv_schedule_uvm_isr(nv_state_t *nv)
+-{
+ }
+ 
+-NV_STATUS NV_API_CALL
+-nv_schedule_uvm_drain_p2p(NvU8 *pUuid)
+-{
+-    return NV_ERR_NOT_SUPPORTED;
+-}
+-
+-void NV_API_CALL
+-nv_schedule_uvm_resume_p2p(NvU8 *pUuid)
+-{
+-}
++/*
++ * nv_schedule_uvm_isr(), nv_schedule_uvm_drain_p2p() and
++ * nv_schedule_uvm_resume_p2p(), the hooks RM calls into the OS layer for
++ * UVM, are defined in nv-uvm-interface.c (gb10): they dispatch to the
++ * callback table nvidia-uvm.ko installs.
++ */
+ 
+ NvBool NV_API_CALL nv_is_rm_firmware_active(
+     nv_state_t *nv
+@@ -2414,6 +2638,12 @@
              return;
          }
      }
@@ -273,7 +378,7 @@
      {
          const sc_softc_t *sc = sc_get_softc(0, SC_KERNEL_CONSOLE);
  
-@@ -2440,6 +2647,7 @@
+@@ -2440,6 +2670,7 @@
              }
          }
      }
