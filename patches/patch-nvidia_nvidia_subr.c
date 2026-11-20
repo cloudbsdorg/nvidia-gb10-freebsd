@@ -1,6 +1,6 @@
 --- nvidia/nvidia_subr.c.orig
 +++ nvidia/nvidia_subr.c
-@@ -17,13 +17,32 @@
+@@ -17,14 +17,33 @@
  #include "nv-freebsd.h"
  #include "nv-caps.h"
  #include "nv-firmware.h"
@@ -25,18 +25,20 @@
 +#include <vm/vm_phys.h>		/* vm_phys_paddr_to_vm_page() */
 +#include "gb10_memattr.h"	/* gb10_bar_memattr(), gb10_range_class(),
 +				 * gb10_range_action() for device mmaps */
-+
+ 
 +/* arm64 BAR memory-attribute policy, defined in nvidia_os.c */
 +extern int os_arm64_altra_device_wc;
 +extern void os_arm64_bar_wc_init(void);
 +#endif
- 
++
  uma_zone_t nvidia_stack_t_zone;
  static nvidia_stack_t *__nvidia_init_sp = NULL;
-@@ -135,6 +154,18 @@
+ 
+@@ -134,6 +153,18 @@
+     nv = sc->nv_state;
  
      nvidia_modeset_suspend(nv->gpu_id);
- 
++
 +    /*
 +     * UVM first (uvm-spec 02 section 5): it may veto the sleep with
 +     * NV_ERR_NOT_SUPPORTED while a VA space exists; RM's standby runs
@@ -48,10 +50,9 @@
 +        NV_UMA_ZONE_FREE_STACK(sp);
 +        return EBUSY;
 +    }
-+
+ 
      status = rm_power_management(sp, nv, NV_PM_ACTION_STANDBY);
  
-     nvidia_pci_save_config_space(sp, dev);
 @@ -166,6 +197,8 @@
  
      if (status == NV_OK)
@@ -61,10 +62,11 @@
          nvidia_modeset_resume(nv->gpu_id);
      }
  
-@@ -266,16 +299,30 @@
+@@ -265,17 +298,31 @@
+ 
      if (sp == NULL)
          return;
- 
++
 +    /*
 +     * UVM's top half runs BEFORE RM's interrupt service (uvm-spec 02
 +     * section 6 item 4): with a UVM callback table installed and this GPU
@@ -75,7 +77,7 @@
 +     * work still pending raises the interrupt again.
 +     */
 +    (void)nv_uvm_isr_top_half(nv);
-+
+ 
      rm_isr(sp, nv, &run_bottom_half);
  
      if (run_bottom_half) {
@@ -97,7 +99,58 @@
  
          /* We're not executing in an HW ISR context */
          rm_isr_bh(sp, nv);
-@@ -736,6 +783,15 @@
+@@ -458,6 +505,50 @@
+             break;
+         }
+ 
++        case NV_ESC_NUMA_INFO:
++        {
++            /*
++             * NV_ESC_NUMA_INFO (0xd7) is a Linux escape: Linux's driver
++             * answers it in its own ioctl layer (kernel-open/nvidia/nv.c,
++             * "case NV_ESC_NUMA_INFO") with the GPU's NUMA node, because
++             * Linux manages NUMA memory.  FreeBSD does not: every NUMA
++             * hook of this OS layer (os_numa_memblock_size(),
++             * os_numa_add_gpu_memory(), os_numa_remove_gpu_memory(),
++             * os_get_numa_node_memory_usage() in nvidia_os.c) returns
++             * NV_ERR_NOT_SUPPORTED, so there is no NUMA node to report
++             * and no NUMA memory to offline.
++             *
++             * Without this case the escape falls into the default:
++             * branch below: rm_ioctl() hands it to RmIoctl(), which does
++             * not know it either ("unknown NVRM ioctl command: 0xd7" in
++             * open-gpu-kernel-modules
++             * src/nvidia/arch/nvalloc/unix/src/escape.c), and the ioctl
++             * returns EINVAL.  That is what Linux's libcuda sees when it
++             * asks the driver for the NUMA info of the GPU.
++             *
++             * The answer is the one the RM gives for a device with no
++             * NUMA affinity (NV0000_CTRL_NO_NUMA_NODE == -1) and the one
++             * rm_get_gpu_numa_info() gives for a display device on a SoC
++             * (open-gpu-kernel-modules
++             * src/nvidia/arch/nvalloc/unix/src/osapi.c): no node, no
++             * NUMA memory, NUMA management disabled.
++             */
++            nv_ioctl_numa_info_t *api = args;
++
++            if (size != sizeof(nv_ioctl_numa_info_t)) {
++                status = EINVAL;
++                break;
++            }
++
++            memset(api, 0, size);
++            api->nid = -1;    /* NV0000_CTRL_NO_NUMA_NODE */
++            api->status = NV_IOCTL_NUMA_STATUS_DISABLED;
++            api->use_auto_online = 0;
++            api->offline_addresses.numEntries = 0;
++            status = 0;
++            break;
++        }
++
+         default:
+             status = ((rm_ioctl(sp, nv, &nvffp->nvfp, nr,
+                             args, size) == NV_OK) ? 0 : EINVAL);
+@@ -736,6 +827,15 @@
              sc->nv_state = (void *)&nvidia_ctl_state;
  
              nvidia_sysctl_init();
@@ -113,7 +166,7 @@
              nvidia_linux_init();
  
              mtx_init(&snapshot_timer_mutex, "nvidia_profiler", NULL, MTX_DEF);
-@@ -774,6 +830,7 @@
+@@ -774,6 +874,7 @@
  
              nvidia_sysctl_exit();
              nvidia_linux_exit();
@@ -121,10 +174,11 @@
  
              uma_zdestroy(nvidia_stack_t_zone);
  
-@@ -1105,6 +1162,31 @@
+@@ -1104,6 +1205,31 @@
+ {
      smp_rendezvous(NULL, wbinvd_action_func, NULL, NULL);
      wbinvd_action_func(NULL);
- }
++}
 +#elif defined(__aarch64__)
 +/*
 + * arm64 has no pmap_invalidate_cache(), and there is no safe
@@ -149,11 +203,10 @@
 +static void flush_cpu_cache(void)
 +{
 +    dsb(sy);
-+}
+ }
  #else
  static void flush_cpu_cache(void)
- {
-@@ -1118,6 +1200,7 @@
+@@ -1118,6 +1244,7 @@
      NvU32 caching
  )
  {
@@ -161,7 +214,7 @@
      switch (caching) {
          case NV_MEMORY_UNCACHED:
              return VM_MEMATTR_UNCACHEABLE;
-@@ -1129,6 +1212,28 @@
+@@ -1129,6 +1256,28 @@
          case NV_MEMORY_WRITECOMBINED:
              return VM_MEMATTR_WRITE_COMBINING;
      }
@@ -190,10 +243,12 @@
  
      return VM_MEMATTR_UNCACHEABLE;
  }
-@@ -1532,6 +1637,58 @@
-     return status;
- }
+@@ -1530,7 +1679,59 @@
+     sx_xunlock(&nvffp->fops_sx);
  
+     return status;
++}
++
 +#if defined(__aarch64__)
 +/*
 + * gb10_memarea_kind - classify the physical ranges of a device mmap for
@@ -243,13 +298,12 @@
 +    }
 +
 +    return (gb10_range_class(ram_pages, pages));
-+}
+ }
 +#endif /* __aarch64__ */
-+
+ 
  int nvidia_mmap_dev_single(
      nv_freebsd_file_private_t *nvffp,
-     vm_ooffset_t *offset,
-@@ -1584,9 +1741,85 @@
+@@ -1584,9 +1785,85 @@
          goto free_sglist;
      }
  
@@ -335,7 +389,7 @@
  
      status = NV_OK;
  
-@@ -2213,23 +2446,14 @@
+@@ -2213,23 +2490,14 @@
      if (snapshot_cb)
          snapshot_cb(nvidia_ctl_state.profiler_context);
      mtx_unlock(&snapshot_timer_mutex);
@@ -344,14 +398,14 @@
 -void NV_API_CALL
 -nv_schedule_uvm_isr(nv_state_t *nv)
 -{
- }
- 
+-}
+-
 -NV_STATUS NV_API_CALL
 -nv_schedule_uvm_drain_p2p(NvU8 *pUuid)
 -{
 -    return NV_ERR_NOT_SUPPORTED;
--}
--
+ }
+ 
 -void NV_API_CALL
 -nv_schedule_uvm_resume_p2p(NvU8 *pUuid)
 -{
@@ -365,7 +419,7 @@
  
  NvBool NV_API_CALL nv_is_rm_firmware_active(
      nv_state_t *nv
-@@ -2414,6 +2638,12 @@
+@@ -2414,6 +2682,12 @@
              return;
          }
      }
@@ -378,7 +432,7 @@
      {
          const sc_softc_t *sc = sc_get_softc(0, SC_KERNEL_CONSOLE);
  
-@@ -2440,6 +2670,7 @@
+@@ -2440,6 +2714,7 @@
              }
          }
      }
