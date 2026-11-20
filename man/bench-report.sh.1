@@ -1,0 +1,57 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 20, 2026
+.Dt BENCH-REPORT.SH 1
+.Os
+.Sh NAME
+.Nm bench-report.sh
+.Nd run the report llama-bench set on the RTX 5060 Ti with one backend
+.Sh SYNOPSIS
+.Nm
+.Cm cuda | vulkan
+.Ar OUTDIR
+.Sh DESCRIPTION
+Runs
+.Nm llama-bench
+for Llama 3.2 3B Q4_K_M (flash attention on), Llama 2 7B Q4_0 (flash attention off and on),
+Ornith 1.5 9B Q4_K_M and Qwen2.5 14B Q4_K_M (flash attention on), each with
+.Fl ngl No 99
+.Fl t No 8
+.Fl r No 3
+.Fl p No 512
+.Fl n No 128
+.Fl o No json .
+The
+.Cm cuda
+backend uses
+.Xr run-cuda-llama.sh 1 ;
+.Cm vulkan
+uses
+.Pa run-nv-vulkan.sh .
+.Pp
+.Ar OUTDIR
+is created and receives
+.Pa BACKEND-MODEL.json ,
+.Pa BACKEND-MODEL.err
+and
+.Pa run.log .
+The runs are sequential.
+The script refuses to start while
+.Pa uvm_stress.sh
+is running.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev GB10_WORK"
+.It Ev GB10_WORK
+Work root, default
+.Pa $HOME/work/gb10 .
+.It Ev MODELS
+Model directory, default
+.Pa $HOME/work/models .
+.It Ev ONLY
+Space-separated subset of
+.Cm 3b 7b ornith qwen .
+.El
+.Sh EXIT STATUS
+0 when every run succeeded; 1 when a run failed; 2 for a usage error or a running stress test.
+.Sh SEE ALSO
+.Xr run-cuda-llama.sh 1
