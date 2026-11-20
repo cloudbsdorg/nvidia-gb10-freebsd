@@ -31,8 +31,9 @@
 # (expected: a clean refusal), 5.3 regressions: CUDA smoke, Vulkan, the
 # modesetting X server, the Wayfire seat test.
 #
-# This script never loads or unloads a module, never touches a CRTC and never
-# reboots.  Overrides (rc.conf): prime_import_testboot_src (default
+# This script never loads or unloads a module and never touches a CRTC.  Its
+# only restart is the dead-man timer of deadman_arm(), armed at the start and
+# cancelled at the done row.  Overrides (rc.conf): prime_import_testboot_src (default
 # /dev/dri/card0, the amdgpu), _dst (/dev/dri/card1, nvidia-drm), _loops (50),
 # _wayfire_cmd (a command that runs the Wayfire seat test and exits 0 on
 # success; unset records a skip).  _logroot, _probe, _log, _linuxroot and _cudarun
@@ -48,6 +49,11 @@ stop_cmd=:
 : "${prime_import_testboot_src:=/dev/dri/card0}"
 : "${prime_import_testboot_dst:=/dev/dri/card1}"
 : "${prime_import_testboot_loops:=50}"
+: "${prime_import_testboot_probe_timeout:=120}"	# seconds for one probe run
+: "${prime_import_testboot_loop_timeout:=20}"	# seconds for one probe of the wire loop
+: "${prime_import_testboot_deadman:=45}"	# minutes until the dead-man timer fires; 0 disables.
+# Longer than the bounded worst case of the run: 120 s import + loops x 20 s
+# + 120 s reverse + 300 s CUDA + 120 s Vulkan + the Wayfire command = about 28 minutes
 
 : "${prime_import_testboot_logroot:=/home/mlapointe/work/gb10/logs}"
 : "${prime_import_testboot_probe:=/usr/local/bin/prime_import_probe}"
@@ -81,6 +87,39 @@ wired()
 	sysctl -n vm.stats.vm.v_wire_count 2>/dev/null || echo -1
 }
 
+# The dead-man timer: a hang (not a panic) would leave the test boot environment
+# stuck.  Armed at the start, cancelled at the done row, never otherwise.
+deadman_arm()
+{
+	case $prime_import_testboot_deadman in
+	''|*[!0-9]*)
+		row deadman fail "prime_import_testboot_deadman is '$prime_import_testboot_deadman', not a number of minutes: no dead-man timer is armed"
+		return 0 ;;
+	*[!0]*) ;;
+	*)
+		row deadman info "the dead-man timer is disabled (prime_import_testboot_deadman=0)"
+		return 0 ;;
+	esac
+	shutdown -r "+$prime_import_testboot_deadman" "prime_import_testboot dead-man: the machine restarts in $prime_import_testboot_deadman minutes unless the test run finishes" > /dev/null 2>&1 &
+	row deadman info "a dead-man timer is requested for $prime_import_testboot_deadman minutes from now unless the run finishes (to stop it by hand: pkill -f "prime_import_testboot dead-man")"
+	sync
+}
+
+deadman_cancel()
+{
+	case $prime_import_testboot_deadman in
+	''|*[!0-9]*) return 0 ;;
+	*[!0]*) ;;
+	*) return 0 ;;
+	esac
+	# only the timer armed above: its wall message is unique to this script
+	if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then
+		row deadman info "the run finished: the dead-man timer is cancelled"
+	else
+		row deadman info "the run finished: no dead-man timer was found to cancel (it may have been refused or has already fired)"
+	fi
+}
+
 prime_import_testboot_start()
 {
 	# root writes here: refuse a directory somebody else could have planted
@@ -88,6 +127,7 @@ prime_import_testboot_start()
 	cd "$OUT" || return 1	# relative names from here: a renamed directory cannot redirect them
 	: > "$OUT/results.jsonl"
 	(
+	deadman_arm
 	echo "== prime import testboot $STAMP $(sysctl -n kern.bootfile) BE $(bectl list -H 2>/dev/null | awk '$2 ~ /N/ {print $1}')"
 	kldstat > "$OUT/kldstat.txt" 2>&1
 	sha256 /boot/modules.nvtest/*.ko > "$OUT/module-sha256.txt" 2>&1
@@ -114,7 +154,7 @@ prime_import_testboot_start()
 	running import "the import probe is about to run: a panic from here leaves this row last"
 	if [ -x "$PROBE" ] && [ -c "$prime_import_testboot_src" ] && [ -c "$prime_import_testboot_dst" ]; then
 		w0=$(wired)
-		"$PROBE" --jsonl -s 64x64 -s 256x256 -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" > "$OUT/probe-import.jsonl" 2> "$OUT/probe-import.err"
+		timeout -k 5 "$prime_import_testboot_probe_timeout" "$PROBE" --jsonl -s 64x64 -s 256x256 -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" > "$OUT/probe-import.jsonl" 2> "$OUT/probe-import.err"
 		prc=$?
 		cat "$OUT/probe-import.jsonl"
 		n=$(wc -l < "$OUT/probe-import.jsonl" | tr -d ' ')
@@ -124,7 +164,11 @@ prime_import_testboot_start()
 		refused0=$(diff "$OUT/dmesg-before.txt" "$OUT/dmesg-mid.txt" | grep -c 'cannot be imported\|Could not wire\|does not match this nvidia-drm')
 		imported=0
 		if [ "$prc" -ne 0 ]; then
-			row import fail "prime_import_probe exited $prc: $(head -c 200 "$OUT/probe-import.err")"
+			if [ "$prc" -eq 124 ] || [ "$prc" -eq 137 ]; then
+				row import fail "prime_import_probe did not finish in $prime_import_testboot_probe_timeout seconds and was stopped (exit $prc; a probe stuck inside the kernel cannot be stopped and the dead-man timer is what ends the run): see probe-import.jsonl and dmesg-mid.txt"
+			else
+				row import fail "prime_import_probe exited $prc: $(head -c 200 "$OUT/probe-import.err")"
+			fi
 		elif [ "$n" -gt 0 ] && [ "$ok" -eq "$n" ] && [ "$fbok" -eq "$n" ] && [ "$refused0" -eq 0 ]; then
 			imported=1
 			row import pass "$ok of $n buffers imported on nvidia-drm and $fbok got a framebuffer; no refusal logged"
@@ -137,7 +181,10 @@ prime_import_testboot_start()
 		good=0
 		i=0
 		while [ "$i" -lt "$prime_import_testboot_loops" ]; do
-			"$PROBE" --jsonl -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" 2>/dev/null >> "$OUT/probe-loop.jsonl"; tail -1 "$OUT/probe-loop.jsonl" | grep -q '"addfb":0' && good=$((good + 1))
+			timeout -k 5 "$prime_import_testboot_loop_timeout" "$PROBE" --jsonl -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" 2>/dev/null > "$OUT/probe-loop-one.jsonl"
+			# this iteration's own output decides: a probe that timed out or failed is not good, whatever an earlier one printed
+			if [ $? -eq 0 ] && tail -1 "$OUT/probe-loop-one.jsonl" | grep -q '"addfb":0'; then good=$((good + 1)); fi
+			cat "$OUT/probe-loop-one.jsonl" >> "$OUT/probe-loop.jsonl"
 			i=$((i + 1))
 		done
 		sleep 2
@@ -163,10 +210,10 @@ prime_import_testboot_start()
 		fi
 		echo "== 5.2.5 the other direction (nvidia buffer to amdgpu)"
 		running reverse "the reverse probe is about to run"
-		"$PROBE" --jsonl -s 256x256 "$prime_import_testboot_dst" "$prime_import_testboot_src" > "$OUT/probe-reverse.jsonl" 2> "$OUT/probe-reverse.err"
+		timeout -k 5 "$prime_import_testboot_probe_timeout" "$PROBE" --jsonl -s 256x256 "$prime_import_testboot_dst" "$prime_import_testboot_src" > "$OUT/probe-reverse.jsonl" 2> "$OUT/probe-reverse.err"
 		rrc=$?
 		cat "$OUT/probe-reverse.jsonl"
-		row reverse info "exit $rrc; a clean errno is the expected answer (an NVIDIA video-memory buffer cannot be exported): $(head -c 300 "$OUT/probe-reverse.jsonl")"
+		row reverse info "exit $rrc$([ "$rrc" -eq 124 ] || [ "$rrc" -eq 137 ] && echo " (timed out after $prime_import_testboot_probe_timeout seconds)"); a clean errno is the expected answer (an NVIDIA video-memory buffer cannot be exported): $(head -c 300 "$OUT/probe-reverse.jsonl")"
 	else
 		row import skip "no prime_import_probe or no $prime_import_testboot_src / $prime_import_testboot_dst"
 	fi
@@ -225,6 +272,7 @@ prime_import_testboot_start()
 	fi
 	row dirty-busy-fallback info "hw.nvidia_unlock_dirty_busy_fallback is $(sysctl -n hw.nvidia_unlock_dirty_busy_fallback 2>/dev/null || echo unreadable): pages the RM unpinned while their busy lock stayed held, dirtied without the lock as the stock code did; a high count is a contention to look at, not a failure"
 	row regressions info "the cuda-smoke, vulkan, xorg and wayfire rows above ran (each is pass, fail, info or skip)"
+	deadman_cancel
 	row done info "every step ran to the end; a results.jsonl without this row is a failed run"
 	sync
 	echo "== done $(date -u +%FT%TZ)"

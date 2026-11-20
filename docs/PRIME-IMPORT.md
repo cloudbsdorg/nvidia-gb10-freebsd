@@ -500,10 +500,12 @@ teardown may hold locks the sleep check cannot see), and asks at the dirty
 site (`gb10_pi_dirty_action()`): no object means skip (no pager, nothing to write back); an object and
 all valid means `vm_page_dirty()`; **an object that is not all valid is the tripwire**. If, after the spin,
 the busy lock is still held by somebody else, the page is dirtied the way the stock code
-did, without the lock, and counted: a dirty bit is never dropped silently. The spin is per page and bounded at about a millisecond, so a
-long run of pages held busy by somebody else costs up to a millisecond each.
+did, without the lock, and counted: a dirty bit is never dropped silently. The spin has one budget for the whole teardown of a descriptor (`GB10_PI_DIRTY_SPIN_BUDGET`, 100
+delays of 10 microseconds, about a millisecond in all, however many pages), and only a page that has an
+object is waited for: a descriptor of many busy pages costs about a millisecond, not a millisecond a
+page, under the RM API lock. Tests pin the budget and check it at the cap and one past it.
 
-**The tripwires** are two read-only sysctls. The first must read 0 after a run (the boot kit has a
+**The tripwires** are two read-only sysctls. The first should read 0 after a run of the kit, which pins no files (the boot kit has a
 row for it, `dirty-refused`, which fails when it cannot be read after a passed import); the second
 is reported by the kit as information:
 
@@ -515,6 +517,12 @@ is reported by the kit as information:
   it.
 * `hw.nvidia_unlock_dirty_busy_fallback`: a page dirtied without its busy lock because the lock
   stayed held through the spin (the stock code's race: an invalidation between the question and the dirty).
+
+The step also covers the RM's own pinned user memory. For a partly valid page of a file (a truncate
+while it is pinned) the refusal means the GPU's writes to the valid part of that page are not
+marked dirty and can be lost; the stock code asserted or marked an invalid page dirty there. That
+is why a nonzero `hw.nvidia_unlock_dirty_refused` is unexpected for an imported buffer but not a
+driver defect in itself: look at what was pinned.
 
 Not chosen: leaving the page wired and the exporter's buffer referenced when the tripwire fires.
 It would leak one wired page and one exporter buffer per event, without bound if userland can
@@ -544,3 +552,25 @@ and `su` and checks the rows for a good probe, a failing probe and no probe (a s
 The row `wire-count-stable` says only that the wired page count did not grow; it cannot see a single
 leaked wiring of an already wired page, and the sysctl `hw.nvidia_unlock_dirty_refused` must read 0 (the row `dirty-refused`)
 after the run.
+
+### 7.7 Unloading nvidia-drm, and the coverage gate
+
+**Unload.** An export hands the RM a descriptor whose hold and release functions are in
+`nvidia-drm.ko`; the RM file descriptor that holds it can outlive the DRM file and be closed after
+the module is gone. `LKPI_DRIVER_MODULE` cannot refuse an unload, so a second module in
+`nvidia-drm-freebsd-lkpi.c` (`nvidia_drm_pi_guard`) returns `EBUSY` on `MOD_QUIESCE` and
+`MOD_UNLOAD` while `nv_drm_pi_live_holds()` is above zero (up when the RM takes its hold, down
+after the release has finished), and `nv_drm_remove()` keeps the device structures instead of freeing
+them while it is. `tests/prime_import_test.sh` (D6) checks all of it with a mutant for each part.
+
+**Coverage.** `tests/pageimport_test.sh` gates the lines of the core header at 100 percent with
+llvm-cov and tests the gate (a header with a line that never runs must fail it). Branch coverage is
+reported and not gated, on purpose: the argument guards test several pointers on one line, and a
+branch gate would need a test for each pointer. The risk a branch gate guards against is covered by
+the mutants instead (about fifty, one for each decision of the core, each of which must make the
+tests fail).
+
+**Kit safety.** The rc one-shot stops each probe after `prime_import_testboot_probe_timeout` seconds
+(120; 20 per probe of the wire loop) and records a hang as a fail, and arms a dead-man timer
+(`shutdown -r +45`, longer than the bounded worst case of the run, variable `prime_import_testboot_deadman`, 0 disables) at the start that it
+cancels at the done row, so a hang does not strand the boot environment.

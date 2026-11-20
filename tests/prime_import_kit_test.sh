@@ -264,7 +264,7 @@ fi
 # (e) forbidden commands anywhere in the kit
 common='kldunload|kldload|devctl|acpiconf|zzz|[^a-z_]reboot|shutdown|halt -|bectl[[:space:]]+destroy'
 scan() {	# scan <file>: forbidden commands, comments excluded
-	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#'
+	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vE '^[0-9]+:[[:space:]]+shutdown -r "\+\$prime_import_testboot_deadman" "prime_import_testboot dead-man: [^"]*" > /dev/null 2>&1 &$' | grep -vE '^[0-9]+:[[:space:]]+if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then$'
 }
 _hits=
 for f in prime_import_testboot make-be.sh prime_import_probe.c; do
@@ -330,8 +330,8 @@ fi
 # kldstat, dmesg, bectl, su and pgrep first in PATH.  The paths are rc.conf
 # variables, so nothing outside TMPD is touched.
 FAKE=$TMPD/fake; mkdir -p "$FAKE/bin"
-for t in kldstat dmesg bectl pgrep; do
-	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) exit 1;; esac\nexit 0\n' > "$FAKE/bin/$t"
+for t in kldstat dmesg bectl pgrep pkill shutdown; do
+	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) exit 1;; *shutdown|*pkill) echo "$0 $*" >> "%s/dead-man.log";; esac\nexit 0\n' "$FAKE" > "$FAKE/bin/$t"
 done
 printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kernel/kernel;; vm.stats.vm.v_wire_count) cat "%s/wired";; hw.nvidia_unlock_dirty_refused) cat "%s/refused" 2>/dev/null;; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/sysctl"
 printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
@@ -345,8 +345,8 @@ rc_run() {
 	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
 	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
 	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
-	    prime_import_testboot_loops=4 prime_import_testboot_linuxroot="$FAKE/none" \
-	    prime_import_testboot_cudarun="$FAKE/none" sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
+	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-45} prime_import_testboot_linuxroot="$FAKE/none" \
+	    prime_import_testboot_cudarun="$FAKE/none" timeout 90 sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
 	ls -d "$FAKE/logs-$_n"/prime-import-* 2>/dev/null | head -1
 }
 rowres() {	# rowres <results.jsonl> <row>: the results of the row, in order
@@ -421,6 +421,73 @@ sh "$KIT/summarize.sh" "$TMPD/empty.jsonl" > /dev/null 2>&1; [ $? -eq 1 ] && ok 
 sh "$KIT/summarize.sh" > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: no argument is a usage error" || bad "(f2) summarize.sh usage"
 sh "$KIT/summarize.sh" /nonexistent > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: an unreadable file is a usage error" || bad "(f2) summarize.sh unreadable"
 
+# the dead-man reboot: armed before the first probe, cancelled at the done row, off at 0
+d=$(rc_run good "$KIT/prime_import_testboot" "$FAKE/probe-good")
+if grep -q 'shutdown -r +45' "$FAKE/dead-man.log" 2>/dev/null; then
+	ok "(f2) the dead-man timer is armed for 45 minutes"
+else
+	bad "(f2) no dead-man reboot was armed: $(cat "$FAKE/dead-man.log" 2>/dev/null)"
+fi
+grep -q 'pkill -f prime_import_testboot dead-man' "$FAKE/dead-man.log" 2>/dev/null && ok "(f2) only this script's dead-man timer is cancelled (by its own message), at the end of a finished run" || bad "(f2) the dead-man reboot is not cancelled"
+case $(rowres "$d/results.jsonl" deadman) in "info info ") ok "(f2) the arm and the cancel are both recorded" ;; *) bad "(f2) deadman rows: '$(rowres "$d/results.jsonl" deadman)'" ;; esac
+[ "$(grep -c 'dead-man' "$KIT/prime_import_testboot")" -ge 2 ] && [ "$(grep -c '^[[:space:]]*shutdown ' "$KIT/prime_import_testboot")" -eq 1 ] && ok "(f2) the rc script has exactly one shutdown, the dead-man" || bad "(f2) the rc script has another shutdown"
+rm -f "$FAKE/dead-man.log"
+d=$(RC_DEADMAN=0 rc_run nodead "$KIT/prime_import_testboot" "$FAKE/probe-good")
+[ ! -s "$FAKE/dead-man.log" ] && ok "(f2) with the dead-man set to 0 nothing is armed" || bad "(f2) a dead-man was armed with the variable at 0"
+# the dead-man outlasts the bounded worst case of the run (the defaults, from the script itself)
+_dm=$(sed -n 's/^: "${prime_import_testboot_deadman:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
+_pt=$(sed -n 's/^: "${prime_import_testboot_probe_timeout:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
+_lt=$(sed -n 's/^: "${prime_import_testboot_loop_timeout:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
+_lp=$(sed -n 's/^: "${prime_import_testboot_loops:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
+_worst=$((_pt + _lp * _lt + _pt + 300 + 120))
+if [ -n "$_dm" ] && [ $((_dm * 60)) -gt "$_worst" ]; then
+	ok "(f2) the dead-man timer ($_dm minutes) outlasts the bounded worst case of the run ($((_worst / 60)) minutes, without the Wayfire command)"
+else
+	bad "(f2) the dead-man timer ('$_dm' minutes) does not outlast the worst case ($_worst s)"
+fi
+d=$(RC_DEADMAN=abc rc_run baddead "$KIT/prime_import_testboot" "$FAKE/probe-good")
+[ "$(rowres "$d/results.jsonl" deadman)" = "fail " ] && ok "(f2) a malformed dead-man value is a fail row, not a silent disable" || bad "(f2) malformed dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
+rm -f "$FAKE/dead-man.log"
+d=$(RC_DEADMAN=00 rc_run zerodead2 "$KIT/prime_import_testboot" "$FAKE/probe-good")
+[ ! -s "$FAKE/dead-man.log" ] && ok "(f2) a dead-man value of 00 disables the timer like 0, it does not restart the machine at once" || bad "(f2) a dead-man value of 00 armed a timer: $(cat "$FAKE/dead-man.log")"
+# the reverse probe (the sixth call of a run with 4 loops) that hangs is stopped and says so
+rm -f "$FAKE/count"
+printf '#!/bin/sh\nn=$(cat "%s/count" 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > "%s/count"\necho "{\\"import\\":0,\\"addfb\\":0}"\n[ $n -ge 6 ] && sleep 6\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/probe-revhang"
+chmod +x "$FAKE/probe-revhang"
+d=$(RC_PROBE_TIMEOUT=2 rc_run revhang "$KIT/prime_import_testboot" "$FAKE/probe-revhang")
+if grep '"row":"reverse"' "$d/results.jsonl" | grep -q 'timed out after 2 seconds'; then
+	ok "(f2) a reverse probe that hangs is stopped and the row says it timed out"
+else
+	bad "(f2) reverse hang: $(grep '"row":"reverse"' "$d/results.jsonl" | tail -1 | cut -c1-160)"
+fi
+rm -f "$FAKE/count"
+_f="$TMPD/ctl-rc-norevtimeout"
+sed 's/timeout -k 5 "$prime_import_testboot_probe_timeout" "$PROBE" --jsonl -s 256x256/"$PROBE" --jsonl -s 256x256/' "$KIT/prime_import_testboot" > "$_f"
+if cmp -s "$KIT/prime_import_testboot" "$_f"; then
+	bad "(f2) control no-reverse-timeout: the mutation changed nothing (stale test)"
+else
+	_d=$(RC_PROBE_TIMEOUT=2 rc_run mrevhang "$_f" "$FAKE/probe-revhang")
+	grep '"row":"reverse"' "$_d/results.jsonl" | grep -q 'timed out' && bad "(f2) control no-reverse-timeout: the mutant still reports a timeout" || ok "(f2) control: a reverse probe without its timeout is seen"
+fi
+rm -f "$FAKE/count"
+# a loop probe that hangs is not a good one, whatever the previous iteration printed
+printf '#!/bin/sh\necho "{\\"import\\":0,\\"addfb\\":0}"\n[ $# -eq 5 ] && sleep 6\nexit 0\n' > "$FAKE/probe-loophang"
+chmod +x "$FAKE/probe-loophang"
+d=$(RC_PROBE_TIMEOUT=30 RC_LOOP_TIMEOUT=2 rc_run loophang "$KIT/prime_import_testboot" "$FAKE/probe-loophang")
+if [ "$(rowres "$d/results.jsonl" wire-count-stable)" = "running fail " ] && grep -q 'only 0 of 4 loop probes' "$d/results.jsonl"; then
+	ok "(f2) loop probes that hang are not counted as good"
+else
+	bad "(f2) loop hang: wire-count-stable rows '$(rowres "$d/results.jsonl" wire-count-stable)'"
+fi
+# a hanging probe is stopped by its timeout and recorded as a fail
+printf '#!/bin/sh\nsleep 6\necho "{\\"import\\":0,\\"addfb\\":0}"\nexit 0\n' > "$FAKE/probe-hang"
+chmod +x "$FAKE/probe-hang"
+d=$(RC_PROBE_TIMEOUT=2 RC_LOOP_TIMEOUT=2 rc_run hang "$KIT/prime_import_testboot" "$FAKE/probe-hang")
+if [ -n "$d" ] && [ "$(rowres "$d/results.jsonl" import)" = "running fail " ] && grep -q 'did not finish in 2 seconds' "$d/results.jsonl"; then
+	ok "(f2) a probe that hangs is stopped by its timeout and recorded as a fail that says so"
+else
+	bad "(f2) hanging probe: import rows '$(rowres "$d/results.jsonl" import)'"
+fi
 # (f2) controls: each planted rc defect must be seen by the runs above
 mut_rc() {	# mut_rc <name> <sed> <probe> <import rows that must NOT appear (case pattern)>
 	_f="$TMPD/ctl-rc-$1"
@@ -435,6 +502,33 @@ mut_rc() {	# mut_rc <name> <sed> <probe> <import rows that must NOT appear (case
 }
 mut_rc no-probe-pass 's/row import skip "no prime_import_probe/row import pass "no prime_import_probe/' "$FAKE/no-such-probe" '*pass*'
 mut_rc probe-fail-pass 's/row import fail "prime_import_probe exited/row import pass "prime_import_probe exited/' "$FAKE/probe-bad" '*pass*'
+mut_hang() {	# mut_hang <name> <sed>: the hanging probe must still be stopped
+	_f="$TMPD/ctl-rc-$1"
+	sed -e "$2" "$KIT/prime_import_testboot" > "$_f"
+	if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control $1: the mutation changed nothing (stale test)"; return; fi
+	_d=$(RC_PROBE_TIMEOUT=2 RC_LOOP_TIMEOUT=2 rc_run "m$1" "$_f" "$FAKE/probe-hang")
+	case $(rowres "$_d/results.jsonl" import) in
+	*fail*) bad "(f2) control $1: the mutant still stops the hanging probe" ;;
+	*) ok "(f2) control: mutant $1 is seen (the hanging probe is not stopped)" ;;
+	esac
+}
+mut_hang no-import-timeout 's/timeout -k 5 "$prime_import_testboot_probe_timeout" "$PROBE" --jsonl -s 64x64/"$PROBE" --jsonl -s 64x64/'
+rm -f "$FAKE/dead-man.log"
+sed 's/^	deadman_arm$/	:/' "$KIT/prime_import_testboot" > "$TMPD/ctl-rc-nodead"
+if cmp -s "$KIT/prime_import_testboot" "$TMPD/ctl-rc-nodead"; then
+	bad "(f2) control no-deadman-arm: the mutation changed nothing (stale test)"
+else
+	rc_run mnodead "$TMPD/ctl-rc-nodead" "$FAKE/probe-good" > /dev/null
+	grep -q 'shutdown -r' "$FAKE/dead-man.log" 2>/dev/null && bad "(f2) control no-deadman-arm: the mutant still arms it" || ok "(f2) control: a rc without the dead-man arm is seen"
+fi
+_f="$TMPD/ctl-rc-oldloop"
+sed 's/if \[ \$? -eq 0 \] \&\& tail -1 "\$OUT\/probe-loop-one.jsonl"/if tail -1 "$OUT\/probe-loop-one.jsonl"/' "$KIT/prime_import_testboot" > "$_f"
+if cmp -s "$KIT/prime_import_testboot" "$_f"; then
+	bad "(f2) control loop-ignores-exit: the mutation changed nothing (stale test)"
+else
+	_d=$(RC_PROBE_TIMEOUT=30 RC_LOOP_TIMEOUT=2 rc_run moldloop "$_f" "$FAKE/probe-loophang")
+	[ "$(rowres "$_d/results.jsonl" wire-count-stable)" = "running pass " ] && ok "(f2) control: a loop that counts a timed-out probe as good is seen" || bad "(f2) control loop-ignores-exit: not seen ('$(rowres "$_d/results.jsonl" wire-count-stable)')"
+fi
 mut_rc no-running-row 's/^	running import .*$/	:/' "$FAKE/probe-good" 'pass '
 
 # (g) controls

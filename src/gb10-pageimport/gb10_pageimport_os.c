@@ -36,11 +36,13 @@
 #include "gb10_pageimport.h"
 
 /*
- * The tripwires of the dirty step of os_unlock_user_pages() (docs/PRIME-IMPORT.md,
- * "The release path"): a page of an RM user-page descriptor found with a VM
+ * The counters of the dirty step of os_unlock_user_pages() (section 7.6 of
+ * docs/PRIME-IMPORT.md): a page of an RM user-page descriptor found with a VM
  * object that is not all valid, and a page whose busy lock stayed held
- * through a short spin.  The analysis there says the first cannot be reached; the counters make a mistake in it visible.  Read-only; a
- * nonzero value is a driver defect, see docs/PRIME-IMPORT.md section 7.6.
+ * through the spin budget.  For an imported buffer the first is not
+ * expected (the exporter's mapping validates the pages it inserts); for the
+ * RM's own pinned user memory it can happen legitimately, for example when
+ * a file is truncated while its pages are pinned.  Read-only.
  */
 static unsigned long gb10_pi_dirty_refused;
 static unsigned long gb10_pi_dirty_busy_fallback;
@@ -48,10 +50,10 @@ static struct timeval gb10_pi_lasttime;
 static int gb10_pi_curpps;
 SYSCTL_ULONG(_hw, OID_AUTO, nvidia_unlock_dirty_refused, CTLFLAG_RD,
     &gb10_pi_dirty_refused, 0,
-    "Pages with a VM object that were not all valid when the RM unpinned them (not marked dirty); nonzero is a driver defect, see docs/PRIME-IMPORT.md 7.6");
+    "Pages with a VM object that were not all valid when the RM unpinned them (not marked dirty); unexpected for an imported buffer, legitimate for pinned user memory after a truncate, see docs/PRIME-IMPORT.md 7.6");
 SYSCTL_ULONG(_hw, OID_AUTO, nvidia_unlock_dirty_busy_fallback, CTLFLAG_RD,
     &gb10_pi_dirty_busy_fallback, 0,
-    "Pages the RM unpinned while their busy lock stayed held through a short spin (marked dirty without the lock, as the stock code did)");
+    "Pages the RM unpinned while their busy lock stayed held for about a millisecond of waiting (marked dirty without the lock, as the stock code did)");
 
 /* Asked with the page busied, by gb10_pi_wire(); the decision is the core's. */
 static int
@@ -254,27 +256,17 @@ gb10_pi_os_release(void *sgt)
 
 /*
  * The OS operations of the dirty step (gb10_pi_dirty_page()).  The wait for
- * a busy page spins for a short, fixed time and never sleeps: the RM's
- * teardown may run with locks held that THREAD_CAN_SLEEP() does not know
- * about.  Whoever holds a wired page busy (a pager, the exporter's fault)
- * holds it for microseconds; when it is still held after the spin the core
- * dirties the page without the lock, the way the stock code did, and the
- * result is counted in hw.nvidia_unlock_dirty_busy_fallback.
+ * a busy page is a spin, never a sleep: the RM's teardown may hold locks the
+ * sleep checks cannot see.  The core owns the bound (the per-teardown
+ * budget); whoever holds a wired page busy (a pager, the exporter's fault)
+ * holds it for microseconds, and when it is still held after the budget the
+ * core dirties the page without the lock, the way the stock code did, and
+ * the result is counted in hw.nvidia_unlock_dirty_busy_fallback.
  */
-#define	GB10_PI_BUSY_SPINS	100
-#define	GB10_PI_BUSY_SPIN_US	10
-
-static int
-nv_dirty_wait_busy(void *ctx, void *page)
+static void
+nv_dirty_delay(void *ctx, void *page)
 {
-	int tries;
-
-	for (tries = 0; tries < GB10_PI_BUSY_SPINS; tries++) {
-		if (vm_page_tryxbusy((vm_page_t)page) != 0)
-			return (0);
-		DELAY(GB10_PI_BUSY_SPIN_US);
-	}
-	return (-1);
+	DELAY(GB10_PI_DIRTY_SPIN_US);
 }
 
 static int
@@ -297,7 +289,7 @@ nv_dirty_dirty(void *ctx, void *page)
 
 static const struct gb10_pi_dirty_ops nv_dirty_ops = {
 	.try_busy   = nv_busy_try,
-	.wait_busy  = nv_dirty_wait_busy,
+	.delay      = nv_dirty_delay,
 	.unbusy     = nv_busy_release,
 	.has_object = nv_dirty_has_object,
 	.all_valid  = nv_dirty_all_valid,
@@ -307,29 +299,32 @@ static const struct gb10_pi_dirty_ops nv_dirty_ops = {
 /*
  * The dirty step of os_unlock_user_pages(), for every page of every writable
  * RM user-page descriptor.  The decision is the core's (gb10_pi_dirty_page()):
- * the page is busied (waiting for a pager that holds it) and the question
+ * the page is busied (spinning for a pager that holds it, out of the
+ * descriptor's one budget) and the question
  * asked at the dirty site, because vm_page_dirty() asserts that the page is
  * all valid (INVARIANTS; on any other kernel it would mark an invalid page
  * dirty) and a wired page can gain an object after it was wired (the
  * exporter's own mapping faults it in; the importer cannot map it, see
  * __nv_drm_gem_dma_buf_mmap()) and can be invalidated.  A page with an object
  * that is not all valid is not dirtied and is counted and logged, not made a
- * panic.  With the busy lock held by
- * somebody else after a short spin, the page is dirtied the stock way and counted.
+ * panic.  When the busy lock is still held by somebody else after the
+ * budget (a later page of the same descriptor gets no spin once it is spent),
+ * the page is dirtied the stock way and counted.
  */
 void NV_API_CALL
-gb10_pi_os_dirty(void *page)
+gb10_pi_os_dirty(void *page, int *spin_budget)
 {
-	switch (gb10_pi_dirty_page(page, &nv_dirty_ops, NULL)) {
+	switch (gb10_pi_dirty_page(page, &nv_dirty_ops, NULL, spin_budget)) {
 	case GB10_PI_DIRTY_REFUSE:
 		atomic_add_long(&gb10_pi_dirty_refused, 1);
 		if (ppsratecheck(&gb10_pi_lasttime, &gb10_pi_curpps, 1))
 			printf("nvidia: a page the RM unpinned has a VM object "
-			    "but is not all valid: not marked dirty.  This "
-			    "should not happen: report it with this line and "
-			    "the whole dmesg to the cloudbsdorg/nvidia-gb10-freebsd "
-			    "repository, Track #2228 (see section 7.6 of "
-			    "docs/PRIME-IMPORT.md in that repository)\n");
+			    "but is not all valid: not marked dirty.  Expected "
+			    "only for pinned user memory after a truncate; if "
+			    "an imported buffer was in use, report it with the "
+			    "whole dmesg to the cloudbsdorg/nvidia-gb10-freebsd "
+			    "repository, Track #2228 (section 7.6 of "
+			    "docs/PRIME-IMPORT.md there)\n");
 		break;
 	case GB10_PI_DIRTY_FALLBACK:
 		atomic_add_long(&gb10_pi_dirty_busy_fallback, 1);

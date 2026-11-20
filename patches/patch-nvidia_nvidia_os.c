@@ -291,11 +291,10 @@
      switch (mode) {
          case NV_MEMORY_CACHED:
              map_mode = PAT_WRITE_BACK;
-@@ -275,7 +483,73 @@
-             nv_printf(NV_DBG_ERRORS,
+@@ -276,6 +484,72 @@
                        "NVRM: unknown mode in os_map_kernel_space()\n");
              return NULL;
-+    }
+     }
 +#elif defined(__aarch64__)
 +    /*
 +     * The range is usually a PCIe BAR, but the closed core can also hand
@@ -358,7 +357,7 @@
 +                          "NVRM: unknown mode in os_map_kernel_space()\n");
 +                return NULL;
 +        }
-     }
++    }
 +#else
 +#error "nvidia_os.c: unsupported architecture"
 +#endif
@@ -386,7 +385,15 @@
  }
  
  void NV_API_CALL os_flush_cpu_write_combine_buffer(void)
-@@ -1016,12 +1303,20 @@
+@@ -1003,6 +1290,7 @@
+ {
+     NvBool write = FLD_TEST_DRF(_LOCK_USER_PAGES, _FLAGS, _WRITE, _YES, flags);
+     vm_page_t *user_pages = page_array;
++    int dirty_spin = GB10_PI_DIRTY_SPIN_BUDGET;
+     NvU32 i;
+ 
+     for (i = 0; i < page_count; i++) {
+@@ -1016,12 +1304,20 @@
  #endif
  
          if (write) {
@@ -399,7 +406,7 @@
 +             * whose busy lock stays held is dirtied without it, as before,
 +             * and counted.
 +             */
-+            gb10_pi_os_dirty(user_pages[i]);
++            gb10_pi_os_dirty(user_pages[i], &dirty_spin);
          }
          /*
           * In os_lock_user_pages either vm_fault_quick_hold_pages or us
