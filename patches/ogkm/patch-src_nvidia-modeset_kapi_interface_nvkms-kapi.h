@@ -1,6 +1,28 @@
 --- src/nvidia-modeset/kapi/interface/nvkms-kapi.h.orig
 +++ src/nvidia-modeset/kapi/interface/nvkms-kapi.h
-@@ -1606,6 +1606,41 @@
+/* CPD-OFF -- this patch and its twin edit two copies of the KAPI table header that must stay byte-identical (tests/kapi_table_test.sh); the duplication is the point */
+@@ -619,6 +619,20 @@
+     void (*remove)(NvU32 gpuId);
+     void (*probe)(const struct NvKmsKapiGpuInfo *gpu_info);
+ };
++
++/*
++ * CloudBSD (Track #2228): the layout of struct NvKmsKapiFunctionsTable.
++ * nvidia-drm.ko and nvidia-modeset.ko keep a copy of the table; the driver's
++ * own version check (NV_VERSION_STRING) does not notice a member appended to
++ * it, and a newer nvidia-modeset.ko would write one pointer past an older
++ * nvidia-drm.ko's table.  Both modules append this tag to the version string
++ * they compare, and nvidia-modeset.ko compares before it writes any member.
++ * Bump the number whenever a member is added or the table changes.  (The
++ * nvidia_modeset kld version (the number in the tag) and the
++ * matching MODULE_DEPEND in nvidia-drm make kldload refuse a
++ * mix before any code runs.)
++ */
++#define NVKMS_KAPI_CBSD_LAYOUT "+cbsd-kapi.2"
+ 
+ struct NvKmsKapiFunctionsTable {
+ 
+@@ -1606,6 +1620,41 @@
      (
          struct NvKmsKapiDevice *device
      );
@@ -42,3 +64,4 @@
  };
  
  /** @} */
+/* CPD-ON */

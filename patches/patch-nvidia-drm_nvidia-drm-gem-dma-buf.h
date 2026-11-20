@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.h.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.h
-@@ -28,10 +28,27 @@
+@@ -28,10 +28,34 @@
  #if defined(NV_DRM_AVAILABLE)
  
  #include "nvidia-drm-gem.h"
@@ -25,6 +25,13 @@
 +     * Linux sg_table it cannot read.
 +     */
 +    struct gb10_pi_desc pi_desc;
++
++    /*
++     * The exporter's dma-buf, held from the import until the GEM object is
++     * freed (after the RM handle), so that its page pool cannot reuse the
++     * pages while the RM maps them.
++     */
++    struct gb10_pi_life life;
  };
  
  extern const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops;

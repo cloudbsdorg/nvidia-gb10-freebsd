@@ -27,7 +27,18 @@
 #       Both modules ship together;
 #   (d) controls: the pristine copies lack the member; a planted layout
 #       mismatch (a member inserted before the others in one copy) makes
-#       (a) and (b) fail.
+#       (a) and (b) fail;
+#   (e) the pairing handshake, in both directions (docs/PRIME-IMPORT.md, the
+#       review of a00964c): the two modules refuse each other unless they are
+#       the same build.  Layer 1 is the kld version, MODULE_VERSION(
+#       nvidia_modeset, N) against MODULE_DEPEND(nvidia_drm, nvidia_modeset,
+#       N, N, N), which kldload checks before any code runs.  Layer 2 is the
+#       table's version string, which carries NVKMS_KAPI_CBSD_LAYOUT on both
+#       sides and which nvidia-modeset compares before it writes any member.
+#       The real source expressions are extracted and evaluated: new/new
+#       pairs, an old nvidia-modeset with a new nvidia-drm and a new
+#       nvidia-modeset with an old nvidia-drm are refused at both layers;
+#       planted mismatches in each module make the new/new check fail.
 #
 # Run: sh tests/kapi_table_test.sh      Exit 0 when every check passes.
 
@@ -141,6 +152,108 @@ if [ "$patched" -eq 1 ]; then
 	else
 		bad "nvKmsKapiGetFunctionsTableInternal() does not fill getSystemMemoryHandleFromPageArray"
 	fi
+fi
+
+# --- (e) the pairing handshake -----------------------------------------------
+DRM_C=nvidia-drm/nvidia-drm.c
+LKPI_C=nvidia-drm/nvidia-drm-freebsd-lkpi.c
+MS_C=nvidia-modeset/nvidia-modeset-freebsd.c
+for f in "$PRISTINE/$DRM_C" "$PRISTINE/$LKPI_C" "$PRISTINE/$MS_C"; do
+	[ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
+done
+mkdir -p "$TMPD/hs/new/nvidia-drm" "$TMPD/hs/new/nvidia-modeset" "$TMPD/hs/old/nvidia-drm" "$TMPD/hs/old/nvidia-modeset"
+for f in $DRM_C $LKPI_C $MS_C; do
+	cp "$PRISTINE/$f" "$TMPD/hs/new/$f"
+	cp "$PRISTINE/$f" "$TMPD/hs/old/$f"
+done
+for _p in patch-nvidia-drm_nvidia-drm.c patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c patch-nvidia-modeset_nvidia-modeset-freebsd.c; do
+	apply_one "$repo/patches/$_p" "$TMPD/hs/new" "$_p" || patched=0
+done
+cp "$TMPD/ogkm/$OGKM_C" "$TMPD/hs/new/ms-kapi.c"
+cp "$OGKMSRC/$OGKM_C" "$TMPD/hs/old/ms-kapi.c"
+
+# versions <tree>: "<MODULE_VERSION> <dep vmin> <dep vpref> <dep vmax>" (the
+# nvidia_modeset version, and what nvidia-drm depends on).
+mod_version() {
+	tr '\n' ' ' < "$1/$MS_C" | grep -Eo 'MODULE_VERSION\(nvidia_modeset,[[:space:]]*[0-9]+\)' | grep -Eo '[0-9]+' | tail -1
+}
+mod_dep() {
+	tr '\n' ' ' < "$1/$LKPI_C" | grep -Eo 'MODULE_DEPEND\(nvidia_drm,[[:space:]]*nvidia_modeset,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+\)' | grep -Eo '[0-9]+' | tr '\n' ' '
+}
+# kld_loads <modeset tree> <drm tree>: 0 when kldload would accept the pair.
+kld_loads() {
+	_v=$(mod_version "$1")
+	set -- $(mod_dep "$2")
+	[ -n "${_v:-}" ] && [ $# -eq 3 ] && [ "$_v" -ge "$1" ] && [ "$_v" -le "$3" ]
+}
+# dep_exact <tree>: nvidia-drm asks for exactly one nvidia-modeset version
+dep_exact() {
+	set -- $(mod_dep "$1")
+	[ $# -eq 3 ] && [ "$1" -eq "$2" ] && [ "$2" -eq "$3" ]
+}
+# the two string expressions the table handshake compares
+drm_expr() {
+	sed -n 's/^[[:space:]]*\.versionString[[:space:]]*=[[:space:]]*\(.*\),[[:space:]]*$/\1/p' "$1/$DRM_C"
+}
+ms_expr() {
+	# grep, not a greedy sed over the whole file as one line: that is quadratic
+	tr '\n' ' ' < "$1" | grep -Eo 'nvkms_strcmp\(funcsTable->versionString,[^)]*\)[[:space:]]*!=[[:space:]]*0' | head -1 | sed -e 's/^nvkms_strcmp(funcsTable->versionString,[[:space:]]*//' -e 's/)[[:space:]]*!=[[:space:]]*0$//'
+}
+# table_accepts <drm tree> <modeset kapi.c> <header>: does nvidia-modeset
+# accept the table nvidia-drm presents?  The two expressions are compiled
+# against the header and compared with strcmp, as nvkms_strcmp does.
+table_accepts() {
+	_d=$(drm_expr "$1")
+	_m=$(ms_expr "$2")
+	[ -n "$_d" ] && [ -n "$_m" ] || return 2
+	mkdir -p "$TMPD/hs/inc"
+	cp "$3" "$TMPD/hs/inc/nvkms-kapi.h"
+	cat > "$TMPD/hs/probe.c" <<PROBE
+#include <string.h>
+#include "nvkms-kapi.h"
+#define NV_VERSION_STRING "580.178.04"
+int main(void) { return strcmp($_d, $_m) == 0 ? 0 : 1; }
+PROBE
+	cc -std=gnu11 -w -I"$TMPD/hs/inc" -I"$PRISTINE/common/inc" -o "$TMPD/hs/probe" "$TMPD/hs/probe.c" 2> "$TMPD/hs/probe.err" || return 2
+	"$TMPD/hs/probe"
+}
+
+if [ "$patched" -eq 1 ]; then
+	NEWH=$TMPD/tree/$TREE_H
+	table_accepts "$TMPD/hs/new" "$TMPD/hs/new/ms-kapi.c" "$NEWH"; r=$?
+	[ "$r" -eq 0 ] && ok "table handshake: a new nvidia-modeset accepts a new nvidia-drm" || bad "table handshake: new/new refused (rc $r: $(head -2 "$TMPD/hs/probe.err" 2>/dev/null | tr '\n' ' '))"
+	table_accepts "$TMPD/hs/old" "$TMPD/hs/new/ms-kapi.c" "$NEWH"; r=$?
+	[ "$r" -eq 1 ] && ok "table handshake: a new nvidia-modeset refuses an old nvidia-drm, before it writes a member" || bad "table handshake: new modeset / old drm not refused (rc $r)"
+	table_accepts "$TMPD/hs/new" "$TMPD/hs/old/ms-kapi.c" "$NEWH"; r=$?
+	[ "$r" -eq 1 ] && ok "table handshake: an old nvidia-modeset refuses a new nvidia-drm" || bad "table handshake: old modeset / new drm not refused (rc $r)"
+	kld_loads "$TMPD/hs/new" "$TMPD/hs/new" && ok "kld versions: the new pair loads ($(mod_version "$TMPD/hs/new"), depends $(mod_dep "$TMPD/hs/new"))" || bad "kld versions: the new pair does not load"
+	kld_loads "$TMPD/hs/new" "$TMPD/hs/old" && bad "kld versions: a new nvidia-modeset loads under an old nvidia-drm" || ok "kld versions: a new nvidia-modeset is refused by an old nvidia-drm"
+	kld_loads "$TMPD/hs/old" "$TMPD/hs/new" && bad "kld versions: an old nvidia-modeset loads under a new nvidia-drm" || ok "kld versions: an old nvidia-modeset is refused by a new nvidia-drm"
+	_tagn=$(grep -o 'NVKMS_KAPI_CBSD_LAYOUT "+cbsd-kapi\.[0-9]*"' "$NEWH" | grep -o '[0-9]*"$' | tr -d '"')
+	[ -n "$_tagn" ] && [ "$_tagn" = "$(mod_version "$TMPD/hs/new")" ] && ok "the layout tag number ($_tagn) is the nvidia_modeset kld version" || bad "the layout tag number '$_tagn' and the nvidia_modeset kld version '$(mod_version "$TMPD/hs/new")' do not move together"
+	dep_exact "$TMPD/hs/new" && ok "kld versions: nvidia-drm asks for exactly one nvidia-modeset version" || bad "kld versions: nvidia-drm accepts a range of nvidia-modeset versions ($(mod_dep "$TMPD/hs/new"))"
+	tr '\n' ' ' < "$TMPD/hs/new/$DRM_C" | grep -Eq 'Version mismatch.*cbsd-kapi.*same build' \
+	    && ok "the version-mismatch message explains the layout suffix and the fix" \
+	    || bad "the version-mismatch message of nvidia-drm does not explain the +cbsd-kapi suffix and say to install the three modules from one build"
+
+	# planted mismatches: each must make the new/new pairing fail
+	planted() {
+		# planted <name> <file in hs/new> <sed> <kind: table|kld>
+		_t="$TMPD/hs/p-$1"
+		rm -rf "$_t"; cp -R "$TMPD/hs/new" "$_t"
+		sed -e "$3" "$TMPD/hs/new/$2" > "$_t/$2"
+		if cmp -s "$TMPD/hs/new/$2" "$_t/$2"; then bad "control $1: the planted change changed nothing (stale test)"; return; fi
+		case $4 in
+		table) table_accepts "$_t" "$_t/ms-kapi.c" "$NEWH"; _r=$? ;;
+		kld) if kld_loads "$_t" "$_t" && dep_exact "$_t"; then _r=0; else _r=1; fi ;;
+		esac
+		[ "$_r" -ne 0 ] && ok "control: planted mismatch $1 breaks the pairing" || bad "control: planted mismatch $1 passed"
+	}
+	planted drm-without-tag nvidia-drm/nvidia-drm.c 's/NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT,/NV_VERSION_STRING,/' table
+	planted modeset-without-tag ms-kapi.c 's/NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT) != 0/NV_VERSION_STRING) != 0/' table
+	planted modeset-version-1 nvidia-modeset/nvidia-modeset-freebsd.c 's/MODULE_VERSION(nvidia_modeset, 2)/MODULE_VERSION(nvidia_modeset, 1)/' kld
+	planted drm-depends-on-1 nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 2, 2, 2/nvidia_modeset, 1, 1, 1/' kld
+	planted drm-depends-on-range nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 2, 2, 2/nvidia_modeset, 1, 2, 2/' kld
 fi
 
 # --- controls ------------------------------------------------------------

@@ -29,15 +29,29 @@
 #       before drm_prime_gem_destroy(), and the retained page array after;
 #   D3  the export ioctl is served from the retained descriptor, not from
 #       the Linux sg_table the OS layer cannot read, and refuses a buffer
-#       that has none;
+#       that has none; whenever the pages were imported the export goes
+#       through the SGT path (a reference on the GEM object), never straight
+#       from the page-array handle (no reference on the exporter);
+#   D4  the exporter's dma-buf is held (gb10_pi_life_take) when the pages
+#       are imported and dropped last, after the RM handle, the attachment
+#       and the page array; the KAPI is called with size - 1, not size
+#       (the RM rounds the limit up: one page past the array);
+#   D5  the screening and the OS layer's re-check are the same function,
+#       gb10_pi_page_claimable (one place decides what may be imported);
 #  OS layer (patches/patch-nvidia_*)
-#   O1  nv_import_pages() allocates with os_alloc_mem(), wires through the
-#       core, and frees the array when the wiring fails; nv_unimport_pages()
-#       unwires and frees;
+#   O1  nv_import_pages() (in src/gb10-pageimport/gb10_pageimport_os.c, our
+#       BSD file, not in NVIDIA's proprietary nvidia_subr.c) allocates with
+#       os_alloc_mem(), checks the count with gb10_pi_array_ok(), wires
+#       through the core, and frees the array when the wiring fails;
+#       nv_unimport_pages() unwires and frees;
 #   O2  the unwire the OS layer does is the one the RM's teardown does
 #       (vm_page_unwire(..., PQ_ACTIVE), as os_unlock_user_pages()), the
-#       wire is vm_page_wire(), and a page counts as RAM only when
-#       vm_phys_paddr_to_vm_page() finds it and it is not fictitious;
+#       wire is vm_page_wire() with the page busied (vm_page_tryxbusy,
+#       vm_page_xunbusy) and re-checked by gb10_pi_page_claimable(); the
+#       dirty step of os_unlock_user_pages() is gb10_pi_os_dirty(), which
+#       busies the page and dirties it only as gb10_pi_dirty_action() says
+#       (vm_page_all_valid at the dirty site) and counts a refusal in a
+#       read-only sysctl; no NVIDIA file carries our logic;
 #   O3  nv_register_sgt() is not a stub that returns success: it registers
 #       through the core, sets the private data the RM asserts on, and
 #       nv_unregister_sgt() hands back the descriptor and the owner;
@@ -80,6 +94,7 @@ bad() { echo "FAIL: $1"; failed=$((failed + 1)); }
 DMABUF=nvidia-drm/nvidia-drm-gem-dma-buf.c
 DMABUFH=nvidia-drm/nvidia-drm-gem-dma-buf.h
 SUBR=nvidia/nvidia_subr.c
+OSF=nvidia/gb10_pageimport_os.c
 OSC=nvidia/nvidia_os.c
 MKF=nvidia/Makefile
 OSMEM=src/nvidia/arch/nvalloc/unix/src/osmemdesc.c
@@ -97,6 +112,7 @@ make_tree() {
 	for _f in $DMABUF $DMABUFH $SUBR $OSC $MKF; do cp "$PRISTINE/$_f" "$_d/$_f" || return 1; done
 	for _f in $OSMEM $KAPIC; do cp "$OGKMSRC/$_f" "$_d/ogkm/$_f" || return 1; done
 	[ "$2" -eq 1 ] || return 0
+	cp "$repo/src/gb10-pageimport/gb10_pageimport_os.c" "$_d/nvidia/gb10_pageimport_os.c" || return 1
 	for _p in patch-nvidia-drm_nvidia-drm-gem-dma-buf.c patch-nvidia-drm_nvidia-drm-gem-dma-buf.h \
 	    patch-nvidia_nvidia_subr.c patch-nvidia_nvidia_subr_prime.c patch-nvidia_nvidia_os.c patch-nvidia_Makefile; do
 		[ -f "$repo/patches/$_p" ] || { echo "missing patches/$_p"; return 1; }
@@ -149,49 +165,105 @@ check_tree() {
 	body "$_t/$DMABUF" __nv_drm_pi_page_at "$TMPD/dp.c" || { echo "D1: no __nv_drm_pi_page_at"; return; }
 	grep -q 'vm_phys_paddr_to_vm_page(' "$TMPD/dp.c" && grep -q 'PG_FICTITIOUS' "$TMPD/dp.c" || {
 		echo "D1: nvidia-drm does not check that a page is managed RAM"; return; }
+	tr '\n' ' ' < "$TMPD/ip.c" > "$TMPD/ipflat.c"
+	grep -Eq 'getSystemMemoryHandleFromPageArray\([^;]*[[:space:],]size[[:space:]]*-[[:space:]]*1[[:space:]]*,' "$TMPD/ipflat.c" || {
+		echo "D4: the KAPI limit is not size - 1 (the RM would read one page past the array)"; return; }
+	grep -q 'gb10_pi_life_take(' "$TMPD/ip.c" || { echo "D4: the exporter's dma-buf is not held when the pages are imported"; return; }
+	grep -q 'gb10_pi_page_claimable(' "$TMPD/dp.c" || { echo "D5: nvidia-drm does not use the shared page check"; return; }
 	# D2
 	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_free "$TMPD/fr.c" || { echo "D2: no free function"; return; }
 	before "$TMPD/fr.c" 'nvKms->freeMemory(' 'drm_prime_gem_destroy(' || { echo "D2: the GEM object is destroyed before the RM handle is freed"; return; }
 	before "$TMPD/fr.c" 'drm_prime_gem_destroy(' 'nv_drm_free(nv_dma_buf->pages)' || { echo "D2: the retained page array is not freed after the GEM object"; return; }
+	before "$TMPD/fr.c" 'nv_drm_free(nv_dma_buf->pages)' 'gb10_pi_life_drop(' || { echo "D4: the exporter's dma-buf is dropped before the pages are released"; return; }
+	before "$TMPD/fr.c" 'nvKms->freeMemory(' 'gb10_pi_life_drop(' || { echo "D4: the exporter's dma-buf is dropped before the RM handle is freed"; return; }
+	before "$TMPD/fr.c" 'gb10_pi_life_drop(' 'nv_drm_free(nv_dma_buf);' || { echo "D4: the exporter's dma-buf is not dropped as the last step"; return; }
 	# D3
 	body "$_t/$DMABUF" nv_drm_gem_export_dmabuf_memory_ioctl "$TMPD/ex.c" || { echo "D3: no export ioctl"; return; }
 	grep -Fq '&nv_dma_buf->pi_desc' "$TMPD/ex.c" || { echo "D3: the export is not served from the retained descriptor"; return; }
 	grep -Fq 'nv_dma_buf->sgt' "$TMPD/ex.c" && { echo "D3: the export hands the OS layer a Linux sg_table"; return; }
 	before "$TMPD/ex.c" 'nv_dma_buf->pages[[:space:]]*==[[:space:]]*NULL' 'getSystemMemoryHandleFromSgt(' || {
 		echo "D3: a buffer without a retained descriptor is not refused"; return; }
+	tr '\n' ' ' < "$TMPD/ex.c" > "$TMPD/exflat.c"
+	grep -Eq 'if \(!nv_dma_buf->base\.pMemory[[:space:]]*\|\|[[:space:]]*nv_dma_buf->pages[[:space:]]*!=[[:space:]]*NULL\)' "$TMPD/exflat.c" || {
+		echo "D3: a buffer whose pages were imported is exported straight from the page-array handle, which holds no reference on the exporter"; return; }
+	grep -Eq 'exportMemory\([^;]*pTmpMemory[[:space:]]*\?[[:space:]]*pTmpMemory[[:space:]]*:[[:space:]]*nv_dma_buf->base\.pMemory' "$TMPD/exflat.c" || {
+		echo "D3: the export prefers the page-array handle over the SGT one"; return; }
 	# O1
-	body "$_t/$SUBR" nv_import_pages "$TMPD/ni.c" || { echo "O1: no nv_import_pages"; return; }
+	body "$_t/$OSF" nv_import_pages "$TMPD/ni.c" || { echo "O1: no nv_import_pages in $OSF"; return; }
+	grep -q 'gb10_pi_array_ok(' "$TMPD/ni.c" || { echo "O1: nv_import_pages does not check the page count with gb10_pi_array_ok"; return; }
 	before "$TMPD/ni.c" 'os_alloc_mem(' 'gb10_pi_wire(' || { echo "O1: the array is not allocated with os_alloc_mem before the wiring"; return; }
 	before "$TMPD/ni.c" 'gb10_pi_wire(' 'os_free_mem(' || { echo "O1: a failed wiring does not free the array"; return; }
-	body "$_t/$SUBR" nv_unimport_pages "$TMPD/nu.c" || { echo "O1: no nv_unimport_pages"; return; }
+	grep -q 'nv_pi_status(' "$TMPD/ni.c" || { echo "O1: the wiring result is not mapped by the one status function"; return; }
+	body "$_t/$OSF" nv_pi_status "$TMPD/st.c" && grep -q 'GB10_PI_PAGE_BUSY' "$TMPD/st.c" && grep -q 'NV_ERR_BUSY_RETRY' "$TMPD/st.c" || { echo "O1: a page the exporter holds busy is not reported as a retry"; return; }
+	grep -q 'GB10_PI_PAGE_CHANGED' "$TMPD/st.c" && ! grep -A1 'GB10_PI_PAGE_CHANGED' "$TMPD/st.c" | grep -q 'BUSY_RETRY' || { echo "O1: a page that changed for good is reported as a retry"; return; }
+	body "$_t/$OSF" nv_unimport_pages "$TMPD/nu.c" || { echo "O1: no nv_unimport_pages"; return; }
 	before "$TMPD/nu.c" 'gb10_pi_unwire(' 'os_free_mem(' || { echo "O1: nv_unimport_pages does not unwire and free"; return; }
-	# O2
-	grep -Eq 'vm_page_unwire\(.*,[[:space:]]*PQ_ACTIVE\)' "$_t/$SUBR" || { echo "O2: the unwire is not vm_page_unwire(..., PQ_ACTIVE)"; return; }
+	# O2: the wire path, in the bodies of its own operations
+	grep -Eq 'vm_page_unwire\(.*,[[:space:]]*PQ_ACTIVE\)' "$_t/$OSF" || { echo "O2: the unwire is not vm_page_unwire(..., PQ_ACTIVE)"; return; }
 	grep -Eq 'vm_page_unwire\(.*,[[:space:]]*PQ_ACTIVE\)' "$_t/$OSC" || { echo "O2: the RM's own unwire changed; revisit the parity"; return; }
-	grep -Eq 'vm_page_wire\(' "$_t/$SUBR" || { echo "O2: the wire is not vm_page_wire()"; return; }
-	body "$_t/$SUBR" nv_pi_page_at "$TMPD/pa.c" || { echo "O2: no nv_pi_page_at"; return; }
-	grep -q 'vm_phys_paddr_to_vm_page(' "$TMPD/pa.c" && grep -q 'PG_FICTITIOUS' "$TMPD/pa.c" || {
-		echo "O2: a page is not checked to be managed RAM"; return; }
-	grep -q 'object[[:space:]]*!=[[:space:]]*NULL' "$TMPD/pa.c" || {
-		echo "O2: a page that belongs to a VM object is not refused in the OS layer"; return; }
-	grep -q 'object[[:space:]]*!=[[:space:]]*NULL' "$TMPD/dp.c" || {
+	body "$_t/$OSF" nv_pi_wire "$TMPD/w.c" && grep -q 'vm_page_wire(' "$TMPD/w.c" || { echo "O2: the wire is not vm_page_wire()"; return; }
+	body "$_t/$OSF" nv_busy_try "$TMPD/tb.c" && grep -q 'vm_page_tryxbusy(' "$TMPD/tb.c" || { echo "O2: the busy operation does not busy the page (nv_busy_try)"; return; }
+	body "$_t/$OSF" nv_busy_release "$TMPD/ub.c" && grep -q 'vm_page_xunbusy(' "$TMPD/ub.c" || { echo "O2: the busy operation does not unbusy the page (nv_busy_release)"; return; }
+	grep -Eq '\.try_busy[[:space:]]*=[[:space:]]*nv_busy_try' "$_t/$OSF" && grep -Eq '\.unbusy[[:space:]]*=[[:space:]]*nv_busy_release' "$_t/$OSF" || { echo "O2: the wire or dirty operations do not use the busy operations"; return; }
+	grep -c '\.try_busy[[:space:]]*=[[:space:]]*nv_busy_try' "$_t/$OSF" | grep -q '^2$' || { echo "O2: the wiring and the dirty step do not both busy through nv_busy_try"; return; }
+	body "$_t/$OSF" nv_pi_claimable "$TMPD/pa.c" || { echo "O2: no nv_pi_claimable"; return; }
+	grep -q 'gb10_pi_page_claimable(' "$TMPD/pa.c" && grep -q 'PG_FICTITIOUS' "$TMPD/pa.c" && grep -q 'object[[:space:]]*!=[[:space:]]*NULL' "$TMPD/pa.c" || {
+		echo "O2: the OS layer's re-check of a page is not the shared check with the fictitious and object tests"; return; }
+	grep -q 'object[[:space:]]*!=[[:space:]]*NULL\|gb10_pi_page_claimable' "$TMPD/dp.c" || {
 		echo "O2: a page that belongs to a VM object is not refused in nvidia-drm"; return; }
+	# the dirty step: in our file, decided by the core, every operation real
+	body "$_t/$OSC" os_unlock_user_pages "$TMPD/ou.c" || { echo "O2: no os_unlock_user_pages"; return; }
+	grep -q 'gb10_pi_os_dirty(' "$TMPD/ou.c" || { echo "O2: os_unlock_user_pages does not use the guarded dirty step (vm_page_dirty panics on a page that is not valid)"; return; }
+	grep -q 'vm_page_dirty(' "$TMPD/ou.c" && { echo "O2: os_unlock_user_pages still calls vm_page_dirty() itself"; return; }
+	body "$_t/$OSF" nv_dirty_wait_busy "$TMPD/d2.c" && grep -q 'vm_page_tryxbusy(' "$TMPD/d2.c" && grep -q 'DELAY(' "$TMPD/d2.c" || { echo "O2: the dirty step does not spin for a busy page"; return; }
+	grep -q 'vm_page_busy_acquire(\|pause(\|THREAD_CAN_SLEEP\|msleep(' "$TMPD/d2.c" && { echo "O2: the dirty step sleeps in the RM's teardown, which may hold locks the sleep check does not see"; return; }
+	body "$_t/$OSF" nv_dirty_all_valid "$TMPD/d4.c" && grep -q 'vm_page_all_valid(' "$TMPD/d4.c" || { echo "O2: the validity is not asked with vm_page_all_valid"; return; }
+	body "$_t/$OSF" nv_dirty_dirty "$TMPD/d5.c" && grep -q 'vm_page_dirty(' "$TMPD/d5.c" || { echo "O2: the dirty step does not dirty"; return; }
+	body "$_t/$OSF" gb10_pi_os_dirty "$TMPD/od.c" || { echo "O2: no gb10_pi_os_dirty"; return; }
+	grep -q 'gb10_pi_dirty_page(' "$TMPD/od.c" || { echo "O2: the dirty decision is not the core's (gb10_pi_dirty_page)"; return; }
+	grep -q 'atomic_add_long(&gb10_pi_dirty_refused' "$TMPD/od.c" && grep -q 'atomic_add_long(&gb10_pi_dirty_busy_fallback' "$TMPD/od.c" || { echo "O2: a refusal or a busy fallback is not counted"; return; }
+	grep -q 'SYSCTL_ULONG(_hw, OID_AUTO, nvidia_unlock_dirty_refused, CTLFLAG_RD' "$_t/$OSF" && grep -q 'SYSCTL_ULONG(_hw, OID_AUTO, nvidia_unlock_dirty_busy_fallback, CTLFLAG_RD' "$_t/$OSF" || { echo "O2: the counters are not read-only sysctls"; return; }
+	grep -Eq 'printf\([^;]*%p' "$TMPD/od.c" && { echo "O2: the tripwire prints a kernel pointer"; return; }
+	grep -q 'VM_PAGE_TO_PHYS' "$TMPD/od.c" && { echo "O2: the tripwire log line prints a physical address to an unprivileged reader of dmesg"; return; }
+	grep -q 'PRIME-IMPORT.md' "$TMPD/od.c" && grep -q 'Track #2228' "$TMPD/od.c" || { echo "O2: the tripwire log line does not say where to report it and what to read"; return; }
+	grep -q 'imported = 1' "$TMPD/ip.c" || { echo "D1: the descriptor is not marked imported once the RM has the pages (the second-wiring rule needs it)"; return; }
+	grep -q 'ppsratecheck(' "$TMPD/od.c" || { echo "O2: the tripwire log is not rate limited"; return; }
+	# NVIDIA's proprietary files carry no logic of ours, only calls into our file
+	# only the lines our patch adds count: the file itself is full of NVIDIA's vm_page_ calls
+	diff "$PRISTINE/$SUBR" "$_t/$SUBR" | grep '^>' | grep -v 'gb10_pi_os_' | grep -Eq 'vm_page_|nv_pi_|gb10_pi_(import|release|register|unregister|wire|unwire)\(' && { echo "SRC: logic of ours sits in NVIDIA's proprietary nvidia_subr.c"; return; }
+	head -20 "$repo/src/gb10-pageimport/gb10_pageimport_os.c" | grep -q 'SPDX-License-Identifier: BSD-3-Clause' || { echo "SRC: the OS file lacks its BSD SPDX line"; return; }
 	# O3
 	body "$_t/$SUBR" nv_register_sgt "$TMPD/rs.c" || { echo "O3: no nv_register_sgt"; return; }
-	grep -q 'gb10_pi_register(' "$TMPD/rs.c" || { echo "O3: nv_register_sgt does not register (a stub that lies)"; return; }
-	grep -Eq '\*priv_data[[:space:]]*=' "$TMPD/rs.c" || { echo "O3: nv_register_sgt sets no private data (the RM asserts on it)"; return; }
+	grep -q 'gb10_pi_os_register(' "$TMPD/rs.c" || { echo "O3: nv_register_sgt does not register (a stub that lies)"; return; }
+	grep -q 'NV_ERR_' "$TMPD/rs.c" && { echo "SRC: nv_register_sgt decides refusals itself instead of calling gb10_pi_os_register"; return; }
+	body "$_t/$OSF" gb10_pi_os_register "$TMPD/rg.c" || { echo "O3: no gb10_pi_os_register"; return; }
+	grep -q 'gb10_pi_register(' "$TMPD/rg.c" && grep -Eq '\*priv_data[[:space:]]*=[[:space:]]*import_sgt' "$TMPD/rg.c" || { echo "O3: the registration does not go through the core or sets no private data (the RM asserts on it)"; return; }
+	grep -q 'nv_pi_status(' "$TMPD/rg.c" || { echo "O3: the registration result is not mapped by the one status function"; return; }
+	grep -q 'printf(' "$TMPD/rg.c" "$TMPD/ni.c" && { echo "O3: an unprivileged caller can drive an unlimited log line from the wiring"; return; }
+	body "$_t/$OSF" nv_pi_rewire_ok "$TMPD/rw.c" && grep -q 'PG_FICTITIOUS' "$TMPD/rw.c" && grep -q 'vm_page_wired(' "$TMPD/rw.c" || { echo "O3: the second wiring of an imported buffer does not accept a wired page with an object (the exporter's mapping faults pages in)"; return; }
+	grep -q 'is_peer_mmio' "$TMPD/rg.c" || { echo "O3: the peer MMIO refusal is gone"; return; }
 	body "$_t/$SUBR" nv_unregister_sgt "$TMPD/us.c" || { echo "O3: no nv_unregister_sgt"; return; }
-	grep -q 'gb10_pi_unregister(' "$TMPD/us.c" && grep -Eq '\*import_sgt[[:space:]]*=' "$TMPD/us.c" \
-	    && grep -Eq '\*import_priv[[:space:]]*=' "$TMPD/us.c" || { echo "O3: nv_unregister_sgt does not unwire and hand back the descriptor and the owner"; return; }
+	grep -q 'gb10_pi_os_unregister(' "$TMPD/us.c" || { echo "O3: nv_unregister_sgt does not call gb10_pi_os_unregister"; return; }
+	body "$_t/$OSF" gb10_pi_os_unregister "$TMPD/ug.c" || { echo "O3: no gb10_pi_os_unregister"; return; }
+	grep -q 'gb10_pi_unregister(' "$TMPD/ug.c" && grep -Eq '\*import_sgt[[:space:]]*=' "$TMPD/ug.c" && grep -Eq '\*import_priv[[:space:]]*=' "$TMPD/ug.c" || { echo "O3: gb10_pi_os_unregister does not unwire and hand back the descriptor and the owner"; return; }
 	body "$_t/$SUBR" nv_dma_import_sgt "$TMPD/is.c" || { echo "O3: no nv_dma_import_sgt"; return; }
-	grep -q 'gb10_pi_import(' "$TMPD/is.c" || { echo "O3: nv_dma_import_sgt does not take the owner"; return; }
+	grep -q 'gb10_pi_os_import(' "$TMPD/is.c" || { echo "O3: nv_dma_import_sgt does not take the owner"; return; }
+	body "$_t/$OSF" gb10_pi_os_import "$TMPD/oi.c" && grep -q 'gb10_pi_import(' "$TMPD/oi.c" || { echo "O3: gb10_pi_os_import does not take the owner through the core"; return; }
 	body "$_t/$SUBR" nv_dma_release_sgt "$TMPD/rl.c" || { echo "O3: no nv_dma_release_sgt"; return; }
-	grep -q 'gb10_pi_release(' "$TMPD/rl.c" || { echo "O3: nv_dma_release_sgt does not drop the owner"; return; }
+	grep -q 'gb10_pi_os_release(' "$TMPD/rl.c" || { echo "O3: nv_dma_release_sgt does not drop the owner"; return; }
+	body "$_t/$OSF" gb10_pi_os_release "$TMPD/or.c" && grep -q 'gb10_pi_release(' "$TMPD/or.c" || { echo "O3: gb10_pi_os_release does not drop the owner through the core"; return; }
 	# O4
 	grep -Eq '(^|[[:space:]])nv_import_pages([[:space:]\\]|$)' "$_t/$MKF" && grep -Eq '(^|[[:space:]])nv_unimport_pages([[:space:]\\]|$)' "$_t/$MKF" || {
 		echo "O4: nvidia.ko does not export nv_import_pages and nv_unimport_pages"; return; }
-	grep -q '"gb10_pageimport.h"' "$_t/$SUBR" || { echo "O4: nvidia_subr.c does not include the core header"; return; }
+	grep -Eq '^SRCS\+=[[:space:]]*gb10_pageimport_os\.c' "$_t/$MKF" || { echo "O4: the nvidia/Makefile does not build gb10_pageimport_os.c"; return; }
+	for _f in $SUBR $OSC $OSF; do
+		grep -q '"gb10_pageimport.h"' "$_t/$_f" || { echo "O4: $_f does not include the core header"; return; }
+	done
 	grep -q 'gb10_pageimport.h' "$_t/$DMABUF" "$_t/$DMABUFH" || { echo "O4: nvidia-drm does not include the core header"; return; }
+	# the exporter reference is held across the failure points: the caller creates the GEM object whatever the import returns
+	body "$_t/$DMABUF" nv_drm_gem_prime_import_sg_table "$TMPD/imp2.c" || { echo "D4: no import function"; return; }
+	_mid=$(awk '/__nv_drm_gem_dma_buf_import_pages\(/ { on = 1 } /nv_drm_gem_object_init\(/ { on = 0 } on' "$TMPD/imp2.c")
+	case $_mid in *return*|*nv_drm_free\(nv_dma_buf\)*|*ERR_PTR*|*goto*) echo "D4: the GEM object is not created after every import result, so the exporter reference taken at import could leak"; return ;; esac
 }
 
 # O5, a property of the script and not of a source file.
@@ -254,12 +326,32 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant wire-before-check $DMABUF 's/gb10_pi_fill(/gb10_pi_fillX(/'
 	mutant no-rm-free $DMABUF 's/nvKms->freeMemory(/nvKms->freeMemoryX(/'
 	mutant export-from-sgt $DMABUF 's/&nv_dma_buf->pi_desc/nv_dma_buf->sgt/'
-	mutant unwire-queue $SUBR 's/PQ_ACTIVE/PQ_INACTIVE/'
-	mutant register-stub $SUBR 's/gb10_pi_register(/gb10_pi_registerX(/'
-	mutant no-release $SUBR 's/gb10_pi_release(/gb10_pi_releaseX(/'
-	mutant no-fictitious-check $SUBR 's/PG_FICTITIOUS/0/'
+	mutant unwire-queue $OSF 's/PQ_ACTIVE/PQ_INACTIVE/'
+	mutant register-stub $OSF 's/gb10_pi_register(/gb10_pi_registerX(/'
+	mutant no-release $SUBR 's/gb10_pi_os_release(/gb10_pi_os_releaseX(/'
+	mutant no-fictitious-check $OSF 's/PG_FICTITIOUS/0/'
 	mutant no-modeset-guard $DMABUF 's/getSystemMemoryHandleFromPageArray == NULL/getSystemMemoryHandleFromPageArray != NULL/'
-	mutant no-object-check $SUBR 's/p->object != NULL/0/'
+	mutant no-object-check $OSF 's/m->object != NULL))/0))/'
+	mutant kapi-limit-size $DMABUF 's/array, size - 1,/array, size,/'
+	mutant export-direct-handle $DMABUF 's/if (!nv_dma_buf->base.pMemory || nv_dma_buf->pages != NULL)/if (!nv_dma_buf->base.pMemory)/'
+	mutant export-prefers-page-array $DMABUF 's/pTmpMemory ?/nv_dma_buf->base.pMemory ?/'
+	mutant no-life-take $DMABUF 's/gb10_pi_life_take(/gb10_pi_life_takeX(/'
+	mutant life-dropped-first $DMABUF 's/gb10_pi_life_drop(&nv_dma_buf->life);/;/;s/nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/gb10_pi_life_drop(\&nv_dma_buf->life); nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/'
+	mutant dirty-in-nvidia-file $OSC 's/gb10_pi_os_dirty(user_pages\[i\]);/vm_page_dirty(user_pages[i]);/'
+	mutant busy-try-always-ok $OSF '/^nv_busy_try/,/^}/s/return (vm_page_tryxbusy((vm_page_t)page) != 0 ? 0 : -1);/return (0);/'
+	mutant busy-never-released $OSF '/^nv_busy_release/,/^}/s/vm_page_xunbusy((vm_page_t)page);/(void)page;/'
+	mutant dirty-never-waits $OSF '/^nv_dirty_wait_busy/,/^}/s/DELAY(GB10_PI_BUSY_SPIN_US);/pause("x", 1);/'
+	mutant dirty-prints-address $OSF 's/"but is not all valid: not marked dirty.  This "/"but is not all valid (VM_PAGE_TO_PHYS): not marked dirty.  This "/'
+	mutant dirty-not-core $OSF 's/gb10_pi_dirty_page(/gb10_pi_dirty_pageX(/'
+	mutant no-refuse-count $OSF 's/atomic_add_long(&gb10_pi_dirty_refused, 1);//'
+	mutant no-fallback-count $OSF 's/atomic_add_long(&gb10_pi_dirty_busy_fallback, 1);//'
+	mutant logic-in-nvidia-file $SUBR 's/return gb10_pi_os_register(import_sgt, page_count, phys_addr, priv_data,/if (is_peer_mmio) return NV_ERR_NOT_SUPPORTED; return gb10_pi_os_register(import_sgt, page_count, phys_addr, priv_data,/'
+	mutant busy-reported-as-oom $OSF '/^nv_pi_status/,/^}/s/return (NV_ERR_BUSY_RETRY);/return (NV_ERR_INSUFFICIENT_RESOURCES);/'
+	mutant changed-reported-as-retry $OSF '/^nv_pi_status/,/^}/s/return (NV_ERR_NOT_SUPPORTED);/return (NV_ERR_BUSY_RETRY);/'
+	mutant rewire-refuses-objects $OSF '/^nv_pi_rewire_ok/,/^}/s/ && vm_page_wired(m)/ \&\& m->object == NULL/'
+	mutant wiring-logs-unlimited $OSF '/^gb10_pi_os_register/,/^}/s/return (nv_pi_status(rc));/{ printf("x"); return (nv_pi_status(rc)); }/'
+	mutant no-srcs $MKF 's/gb10_pageimport_os.c/gb10_pageimport_osX.c/'
+	mutant drm-own-check $DMABUF 's/gb10_pi_page_claimable(/gb10_pi_page_claimableX(/'
 	mutant no-export $MKF 's/nv_unimport_pages/nv_unimport_pagesX/'
 fi
 

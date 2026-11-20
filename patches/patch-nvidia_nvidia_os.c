@@ -1,6 +1,11 @@
---- nvidia/nvidia_os.c.orig	2026-11-18 03:47:39.099320000 +0000
-+++ nvidia/nvidia_os.c	2026-11-18 03:48:37.282784000 +0000
-@@ -16,10 +16,157 @@
+--- nvidia/nvidia_os.c.orig
++++ nvidia/nvidia_os.c
+@@ -12,15 +12,163 @@
+ #include "nv.h"
+ #include "nv-freebsd.h"
+ #include "nv-retpoline.h"
++#include "gb10_pageimport.h"	/* gb10_pi_os_dirty() */
+ 
  #include <sys/linker.h>
  #include <sys/timex.h>
  #include <sys/stack.h>
@@ -17,7 +22,7 @@
  MALLOC_DEFINE(M_NVIDIA, "nvidia", "NVIDIA memory allocations");
  TASKQUEUE_DEFINE_THREAD(nvidia);
  NvBool os_is_unload_flush_ongoing = NV_FALSE;
-+
+ 
 +#if defined(__aarch64__)
 +/*
 + * arm64 PCIe BAR memory-attribute policy state, decided once at module
@@ -155,10 +160,11 @@
 +    }
 +}
 +#endif /* __aarch64__ */
- 
++
  NvU64 os_page_size     = PAGE_SIZE;
  NvU64 os_max_page_size = PAGE_SIZE;
-@@ -119,7 +266,21 @@
+ NvU64 os_page_mask     = ~PAGE_MASK;
+@@ -119,7 +267,21 @@
  NvU64 NV_API_CALL os_get_cpu_frequency(void)
  {
      /* round up by 4999 before division by 1000000 in osGetCpuFrequency() */
@@ -180,7 +186,7 @@
  }
  
  NvU32 NV_API_CALL os_get_current_process(void)
-@@ -205,8 +366,16 @@
+@@ -205,8 +367,16 @@
      NvU32 address
  )
  {
@@ -197,7 +203,7 @@
  }
  
  void NV_API_CALL os_io_write_byte(
-@@ -214,16 +383,31 @@
+@@ -214,16 +384,31 @@
      NvU8  value
  )
  {
@@ -229,7 +235,7 @@
  }
  
  void NV_API_CALL os_io_write_word(
-@@ -231,16 +415,31 @@
+@@ -231,16 +416,31 @@
      NvU16 value
  )
  {
@@ -261,7 +267,7 @@
  }
  
  void NV_API_CALL os_io_write_dword(
-@@ -248,8 +447,15 @@
+@@ -248,8 +448,15 @@
      NvU32 value
  )
  {
@@ -277,7 +283,7 @@
  }
  
  void* NV_API_CALL os_map_kernel_space(
-@@ -260,6 +466,7 @@
+@@ -260,6 +467,7 @@
  {
      int map_mode;
  
@@ -285,7 +291,7 @@
      switch (mode) {
          case NV_MEMORY_CACHED:
              map_mode = PAT_WRITE_BACK;
-@@ -275,7 +482,73 @@
+@@ -275,7 +483,73 @@
              nv_printf(NV_DBG_ERRORS,
                        "NVRM: unknown mode in os_map_kernel_space()\n");
              return NULL;
@@ -359,7 +365,7 @@
  
      return pmap_mapdev_attr(start, size, map_mode);
  }
-@@ -584,7 +857,20 @@
+@@ -584,7 +858,20 @@
  
  static void sfence_action_func(void *arg)
  {
@@ -380,3 +386,25 @@
  }
  
  void NV_API_CALL os_flush_cpu_write_combine_buffer(void)
+@@ -1016,12 +1303,20 @@
+ #endif
+ 
+         if (write) {
+-            vm_page_dirty(user_pages[i]);
++            /*
++             * The dirty step is ours (Track #2228): the page is busied
++             * (for a short spin) and dirtied only when it has an object and
++             * is all valid, which vm_page_dirty() asserts and which the
++             * pages of a buffer from another GPU driver never are; a page
++             * whose busy lock stays held is dirtied without it, as before,
++             * and counted.
++             */
++            gb10_pi_os_dirty(user_pages[i]);
+         }
+         /*
+          * In os_lock_user_pages either vm_fault_quick_hold_pages or us
+          * on older FreeBSD versions will have wired the page. So here
+          * we can unconditionally unwire the page since either way it is
+          * wired.
+          */
+         vm_page_unwire(user_pages[i], PQ_ACTIVE);

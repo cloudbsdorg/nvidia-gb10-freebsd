@@ -14,16 +14,25 @@
    #endif
    #include <compat/linux/linux_ioctl.h>
    #include <compat/linux/linux_util.h>
-@@ -1463,10 +1470,17 @@
+@@ -1456,17 +1463,25 @@
+                SI_SUB_DRIVERS,              /* subsystem */
+                SI_ORDER_ANY);               /* initialization order */
+ 
+-MODULE_VERSION(nvidia_modeset, 1);
++/* 2: the KAPI table has getSystemMemoryHandleFromPageArray (NVKMS_KAPI_CBSD_LAYOUT) */
++MODULE_VERSION(nvidia_modeset, 2);
+ 
+ MODULE_DEPEND(nvidia_modeset,               /* module name */
+               nvidia,                       /* prerequisite module */
                1, 1, 1);                     /* vmin, vpref, vmax */
  
  #if defined(NVKMS_SUPPORT_LINUX_COMPAT)
 +#if defined(NVCPU_AARCH64)
-+MODULE_DEPEND(nvidia_modeset,               /* module name */
+ MODULE_DEPEND(nvidia_modeset,               /* module name */
 +              linux64elf,                   /* arm64's 64-bit Linuxulator */
 +              1, 1, 1);                     /* vmin, vpref, vmax */
 +#else
- MODULE_DEPEND(nvidia_modeset,               /* module name */
++MODULE_DEPEND(nvidia_modeset,               /* module name */
                linux,                        /* prerequisite module */
                1, 1, 1);                     /* vmin, vpref, vmax */
 -#if defined(NVCPU_X86_64)

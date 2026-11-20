@@ -145,12 +145,13 @@ apply_patches() {
 
 # copy_repo_src - copy the repo's own source additions into TREE and record
 # each in the manifest temp file that finalize_marker folds into .prepared.
-# Today that is two files: the arm64 BAR memory-attribute policy header,
-# which goes to TREE/nvidia/ beside the sources that include it, and the
-# cross-GPU import core, which goes to TREE/common/inc/. A missing
+# Today that is three files: the arm64 BAR memory-attribute policy header,
+# which goes to TREE/nvidia/ beside the sources that include it, the
+# cross-GPU import core header, which goes to TREE/common/inc/, and its
+# FreeBSD side gb10_pageimport_os.c, which goes to TREE/nvidia/. A missing
 # file fails the run loudly (set -e): silently skipping it would only break
 # the build later in a less obvious way.
-# Time:  O(F) copy and sha256 runs for F added files (today F=2).
+# Time:  O(F) copy and sha256 runs for F added files (today F=3).
 # Space: O(F) manifest lines.
 copy_repo_src() {
 	mkdir -p "$TREE/nvidia"
@@ -165,6 +166,13 @@ copy_repo_src() {
 	    "$TREE/common/inc/gb10_pageimport.h"
 	printf '%s  %s\n' "src/gb10-pageimport/gb10_pageimport.h" \
 	    "$(sha256 -q "$REPO/src/gb10-pageimport/gb10_pageimport.h")" \
+	    >> "$TREE/.prepared.patches"
+	# Its FreeBSD side, our own BSD-licensed file (not NVIDIA's); the
+	# nvidia/Makefile patch adds it to SRCS.
+	cp "$REPO/src/gb10-pageimport/gb10_pageimport_os.c" \
+	    "$TREE/nvidia/gb10_pageimport_os.c"
+	printf '%s  %s\n' "src/gb10-pageimport/gb10_pageimport_os.c" \
+	    "$(sha256 -q "$REPO/src/gb10-pageimport/gb10_pageimport_os.c")" \
 	    >> "$TREE/.prepared.patches"
 }
 

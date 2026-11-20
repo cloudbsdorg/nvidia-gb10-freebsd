@@ -291,7 +291,8 @@ if sh -n "$KIT/prime_import_testboot" 2> "$TMPD/rcsyn.err"; then
 else
 	bad "(f) rc syntax: $(cat "$TMPD/rcsyn.err")"
 fi
-if grep -Eq '^LOGROOT=/home/mlapointe/work/gb10/logs$' "$KIT/prime_import_testboot" \
+if grep -Eq '^: "\$\{prime_import_testboot_logroot:=/home/mlapointe/work/gb10/logs\}"$' "$KIT/prime_import_testboot" \
+    && grep -Eq '^LOGROOT=\$prime_import_testboot_logroot$' "$KIT/prime_import_testboot" \
     && grep -Eq '^OUT=\$LOGROOT/prime-import-\$STAMP$' "$KIT/prime_import_testboot"; then
 	ok "(f) results land under ~/work/gb10/logs/prime-import-<stamp>"
 else
@@ -324,6 +325,117 @@ if grep -q 'mkdir -p "\$OUT"' "$KIT/prime_import_testboot"; then
 else
 	ok "(f) the rc script creates its output directory itself and fails if it exists"
 fi
+
+# (f2) the rc script's decisions, run for real against fakes: a fake probe, sysctl,
+# kldstat, dmesg, bectl, su and pgrep first in PATH.  The paths are rc.conf
+# variables, so nothing outside TMPD is touched.
+FAKE=$TMPD/fake; mkdir -p "$FAKE/bin"
+for t in kldstat dmesg bectl pgrep; do
+	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) exit 1;; esac\nexit 0\n' > "$FAKE/bin/$t"
+done
+printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kernel/kernel;; vm.stats.vm.v_wire_count) cat "%s/wired";; hw.nvidia_unlock_dirty_refused) cat "%s/refused" 2>/dev/null;; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/sysctl"
+printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
+chmod +x "$FAKE"/bin/*
+echo 1000 > "$FAKE/wired"
+echo 0 > "$FAKE/refused"
+# rc_run <name> <rc script> <probe>: run the one-shot, print its run directory
+rc_run() {
+	_n=$1; _rc=$2; _pr=$3
+	rm -rf "$FAKE/logs-$_n"; mkdir -p "$FAKE/logs-$_n"
+	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
+	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
+	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
+	    prime_import_testboot_loops=4 prime_import_testboot_linuxroot="$FAKE/none" \
+	    prime_import_testboot_cudarun="$FAKE/none" sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
+	ls -d "$FAKE/logs-$_n"/prime-import-* 2>/dev/null | head -1
+}
+rowres() {	# rowres <results.jsonl> <row>: the results of the row, in order
+	grep "\"row\":\"$2\"" "$1" | sed 's/.*"result":"\([a-z]*\)".*/\1/' | tr '\n' ' '
+}
+# a probe that records whether the "running" row was already on disk when it ran
+cat > "$FAKE/probe-good" <<PROBEEOF
+#!/bin/sh
+grep -q '"row":"import","result":"running"' "$FAKE/logs-good"/prime-import-*/results.jsonl && echo seen > "$FAKE/running-seen"
+echo '{"import":0,"addfb":0}'
+exit 0
+PROBEEOF
+printf '#!/bin/sh\nexit 1\n' > "$FAKE/probe-bad"
+chmod +x "$FAKE/probe-good" "$FAKE/probe-bad"
+
+d=$(rc_run good "$KIT/prime_import_testboot" "$FAKE/probe-good")
+if [ -n "$d" ] && [ -f "$d/results.jsonl" ]; then
+	r=$(rowres "$d/results.jsonl" import)
+	[ "$r" = "running pass " ] && ok "(f2) a good probe: import goes running, then pass" || bad "(f2) good probe: import rows are '$r'"
+	[ -f "$FAKE/running-seen" ] && ok "(f2) the running row is on disk before the probe starts (a panic leaves evidence)" || bad "(f2) the running row was not written before the probe"
+	[ "$(rowres "$d/results.jsonl" done)" = "info " ] && ok "(f2) a finished run ends with a done row" || bad "(f2) no done row"
+	[ "$(rowres "$d/results.jsonl" dirty-refused)" = "pass " ] && ok "(f2) the tripwire counter reads 0: dirty-refused passes" || bad "(f2) dirty-refused rows: $(rowres "$d/results.jsonl" dirty-refused)"
+	sh "$KIT/summarize.sh" "$d" > "$TMPD/sum-good.txt" 2>&1; rc=$?
+	[ "$rc" -eq 0 ] && ok "(f2) summarize.sh: a complete run passes" || bad "(f2) summarize.sh rc=$rc: $(grep -v "^pass\|^info\|^skip" "$TMPD/sum-good.txt" | tr "\n" " ")"
+else
+	bad "(f2) the rc script did not record a run: $(head -5 "$FAKE/rc-good.out" | tr '\n' ' ')"
+fi
+echo 2 > "$FAKE/refused"
+d=$(rc_run trip "$KIT/prime_import_testboot" "$FAKE/probe-good")
+if [ -n "$d" ] && [ -f "$d/results.jsonl" ]; then
+	[ "$(rowres "$d/results.jsonl" dirty-refused)" = "fail " ] && ok "(f2) a nonzero tripwire counter is a fail row" || bad "(f2) dirty-refused with the counter at 2: '$(rowres "$d/results.jsonl" dirty-refused)'"
+	sh "$KIT/summarize.sh" "$d" > /dev/null 2>&1; [ $? -eq 1 ] && ok "(f2) summarize.sh: a tripped counter fails the run" || bad "(f2) summarize.sh ignores the tripped counter"
+else
+	bad "(f2) no results for the tripwire run"
+fi
+rm -f "$FAKE/refused"
+d=$(rc_run blind "$KIT/prime_import_testboot" "$FAKE/probe-good")
+[ "$(rowres "$d/results.jsonl" dirty-refused)" = "fail " ] && ok "(f2) an unreadable tripwire after a passed import is a fail row, not a pass" || bad "(f2) unreadable tripwire rows: '$(rowres "$d/results.jsonl" dirty-refused)'"
+echo 0 > "$FAKE/refused"
+d=$(rc_run nop "$KIT/prime_import_testboot" "$FAKE/no-such-probe")
+if [ -n "$d" ] && [ -f "$d/results.jsonl" ]; then
+	sh "$KIT/summarize.sh" "$d" > /dev/null 2>&1; [ $? -eq 3 ] && ok "(f2) summarize.sh: a run that skipped the import is incomplete (exit 3), not a pass" || bad "(f2) summarize.sh passes a run that tested nothing"
+	r=$(rowres "$d/results.jsonl" import)
+	case $r in
+	*skip*) ok "(f2) no probe is recorded as skip" ;;
+	*) bad "(f2) no probe is recorded as '$r', not skip" ;;
+	esac
+	case $r in *pass*) bad "(f2) no probe is recorded as a pass" ;; *) ok "(f2) no probe is never a pass" ;; esac
+	[ -z "$(rowres "$d/results.jsonl" wire-count-stable | tr -d ' ')" ] && ok "(f2) no wire-count row is made up without a probe" || bad "(f2) a wire-count row exists without a probe"
+else
+	bad "(f2) no results for the no-probe run: $(head -5 "$FAKE/rc-nop.out" | tr '\n' ' ')"
+fi
+d=$(rc_run bad "$KIT/prime_import_testboot" "$FAKE/probe-bad")
+if [ -n "$d" ] && [ -f "$d/results.jsonl" ]; then
+	r=$(rowres "$d/results.jsonl" import)
+	[ "$r" = "running fail " ] && ok "(f2) a failing probe is recorded as fail" || bad "(f2) failing probe: import rows '$r'"
+	sh "$KIT/summarize.sh" "$d" > /dev/null 2>&1; rc=$?
+	[ "$rc" -eq 1 ] && ok "(f2) summarize.sh: a run with a fail is a failure" || bad "(f2) summarize.sh on a failed run: rc=$rc"
+else
+	bad "(f2) no results for the failing-probe run"
+fi
+# a run that died (panic): the last row is a running row and there is no done row
+printf '%s\n' '{"row":"stack","result":"pass","detail":"x"}' '{"row":"import","result":"running","detail":"x"}' > "$TMPD/died.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/died.jsonl" > "$TMPD/sum-died.txt" 2>&1; rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'stopped in step "import"' "$TMPD/sum-died.txt" && grep -q 'no final "done" row' "$TMPD/sum-died.txt"; then
+	ok "(f2) summarize.sh: a run that died in the import step fails and names the step"
+else
+	bad "(f2) summarize.sh on a died run: rc=$rc $(cat "$TMPD/sum-died.txt")"
+fi
+: > "$TMPD/empty.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/empty.jsonl" > /dev/null 2>&1; [ $? -eq 1 ] && ok "(f2) summarize.sh: an empty run fails" || bad "(f2) summarize.sh accepts an empty run"
+sh "$KIT/summarize.sh" > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: no argument is a usage error" || bad "(f2) summarize.sh usage"
+sh "$KIT/summarize.sh" /nonexistent > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: an unreadable file is a usage error" || bad "(f2) summarize.sh unreadable"
+
+# (f2) controls: each planted rc defect must be seen by the runs above
+mut_rc() {	# mut_rc <name> <sed> <probe> <import rows that must NOT appear (case pattern)>
+	_f="$TMPD/ctl-rc-$1"
+	sed -e "$2" "$KIT/prime_import_testboot" > "$_f"
+	if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control $1: the mutation changed nothing (stale test)"; return; fi
+	_d=$(rc_run "m$1" "$_f" "$3")
+	_r=$(rowres "$_d/results.jsonl" import)
+	case $_r in
+	$4) ok "(f2) control: mutant $1 is seen (import rows '$_r')" ;;
+	*) bad "(f2) control $1: the mutant records '$_r', as the good rc would" ;;
+	esac
+}
+mut_rc no-probe-pass 's/row import skip "no prime_import_probe/row import pass "no prime_import_probe/' "$FAKE/no-such-probe" '*pass*'
+mut_rc probe-fail-pass 's/row import fail "prime_import_probe exited/row import pass "prime_import_probe exited/' "$FAKE/probe-bad" '*pass*'
+mut_rc no-running-row 's/^	running import .*$/	:/' "$FAKE/probe-good" 'pass '
 
 # (g) controls
 mkdir -p "$TMPD/ctl"
