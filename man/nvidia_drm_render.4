@@ -117,6 +117,9 @@ For every other engine it must be 0.
 The driver creates the engine objects and returns them, with their
 subchannels, in
 .Va objs .
+A graphics channel gets the 3D, compute, copy, inline-to-memory and 2D
+objects (the copy object because graphics work writes copy methods into the
+graphics push); a copy channel gets one copy object.
 Needs
 .Dv DRM_IOCTL_NVR_VM_INIT
 first.

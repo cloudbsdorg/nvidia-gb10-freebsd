@@ -151,7 +151,7 @@ struct drm_nvr_getparam {
 /* ---- GETINFO ------------------------------------------------------------- */
 
 /* Engine selectors for CHANNEL_ALLOC and the class list. */
-#define	NVR_ENGINE_GR			1	/* graphics, compute, 2D, inline-to-memory */
+#define	NVR_ENGINE_GR			1	/* graphics, compute, copy, 2D, inline-to-memory */
 #define	NVR_ENGINE_CE			2	/* copy engine */
 #define	NVR_ENGINE_NVDEC		3	/* video decode */
 #define	NVR_ENGINE_NVENC		4	/* video encode */

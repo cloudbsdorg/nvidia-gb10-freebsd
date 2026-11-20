@@ -24,8 +24,7 @@
 #      with a wrong or too long minimum (256 -> 2560), a wrong kernel range, a
 #      dangling section reference, a renamed section 9, an offered used ioctl
 #      number or an unescaped pipe are each refused, for the stated reason.
-# Environment: GB10_WORK (default $HOME/work/gb10) holds the default scratch directory
-# $GB10_WORK/tmp; an existing TMPDIR is respected.
+# Environment: scratch goes to TMPDIR (default $REPO/tmp); no $HOME paths are used.
 # Exit: 0 pass, 1 fail (including a header the probe rejects), 2 a tool is missing.   Run: sh tests/render_uapi_docs_test.sh
 
 set -u
@@ -34,8 +33,7 @@ LC_ALL=C
 export PATH LC_ALL
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
-TMPDIR=${TMPDIR:-$WORK/tmp}; export TMPDIR
+TMPDIR=${TMPDIR:-$REPO/tmp}; export TMPDIR
 H_DIR=$REPO/src/nvidia-drm-render
 H=$H_DIR/nvidia-drm-render.h
 MAN=$REPO/man/nvidia_drm_render.4
@@ -141,6 +139,13 @@ check_docs() {
 	awk '/^\.It Dv DRM_IOCTL_NVR_CHANNEL_ALLOC/ {s=1; next} /^\.It Dv/ {s=0} s' "$_man" | grep -q '1-based' || { echo "man page: CHANNEL_ALLOC does not say engine_instance is 1-based"; _rc=1; }
 	awk '/^\.It Er ENODEV/ {s=1; next} /^\.It Er/ {s=0} /^\.Sh / {s=0} s' "$_man" | grep -q 'CHANNEL_FREE' || { echo "man page: ENODEV does not say to free the channel"; _rc=1; }
 	awk '/^\.It Er ENOSPC/ {s=1; next} /^\.It Er/ {s=0} /^\.Sh / {s=0} s' "$_man" | grep -q 'wait\|drain' || { echo "man page: ENOSPC gives no next step"; _rc=1; }
+	# review fixes B1, B2 and the N9 notes
+	tr '\n' ' ' <"$_doc" | tr -s ' ' | grep -q 'for `GR`, the 3D, compute, copy, inline-to-memory and 2D classes' || { echo "document: a GR channel must list the copy class"; _rc=1; }
+	grep -q 'copy' "$H_DIR/nvidia-drm-render.h" && sed -n '/define[[:space:]]*NVR_ENGINE_GR/p' "$H_DIR/nvidia-drm-render.h" | grep -q copy || { echo "header: NVR_ENGINE_GR comment must list copy"; _rc=1; }
+	awk '/^\.It Dv DRM_IOCTL_NVR_CHANNEL_ALLOC/ {s=1; next} /^\.It Dv/ {s=0} s' "$_man" | grep -q 'copy object' || { echo "man page: CHANNEL_ALLOC must list the copy object"; _rc=1; }
+	tr '\n' ' ' <"$_doc" | tr -s ' ' | grep -q 'UNMAP treats holes as no-ops' || { echo "document: UNMAP must treat holes as no-ops"; _rc=1; }
+	tr '\n' ' ' <"$_doc" | tr -s ' ' | grep -q 'MAP inside a sparse region replaces' || { echo "document: a MAP inside a sparse region must replace mappings"; _rc=1; }
+	grep -q '^## 11\. Notes for the Mesa backend' "$_doc" || { echo "document: the section of notes for N9 is missing"; _rc=1; }
 	grep -q 'EACCES' "$_doc" || { echo "document: the mmap authorisation rule (EACCES) is missing"; _rc=1; }
 	awk '/^\.It Er EBUSY/ {s=1; next} /^\.It Er/ {s=0} /^\.Sh / {s=0} s' "$_man" | grep -q 'VM_INIT' || { echo "man page: EBUSY does not mention VM_INIT"; _rc=1; }
 	awk '/^\.It Er ENOSPC/ {s=1; next} /^\.It Er/ {s=0} /^\.Sh / {s=0} s' "$_man" | grep -q 'open the device again' || { echo "man page: ENOSPC does not say to open the device again"; _rc=1; }

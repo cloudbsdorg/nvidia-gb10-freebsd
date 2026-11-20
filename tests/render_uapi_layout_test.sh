@@ -50,10 +50,14 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
-TMPDIR=${TMPDIR:-$WORK/tmp}
+# No $HOME defaults: inputs come from the environment or the repository.
+#   SYSDIR     a FreeBSD src/sys checkout (kernel compile)
+#   GB10_WORK  work root whose sources/ holds open-gpu-kernel-modules-580.178.04
+#   CI=1 or REQUIRE_INPUTS=yes make a missing input a FAIL (exit 1)
+WORK=${GB10_WORK:-}
+TMPDIR=${TMPDIR:-$REPO/tmp}
 export TMPDIR
-SYSDIR=${SYSDIR:-$HOME/src/csrc-90dcf68/sys}
+SYSDIR=${SYSDIR:-}
 HDR_DIR=$REPO/src/nvidia-drm-render
 PROBE=$TESTSDIR/render_uapi_layout.c
 
@@ -61,9 +65,9 @@ die2() { echo "render_uapi_layout_test: $*" >&2; exit 2; }
 [ -f "$HDR_DIR/nvidia-drm-render.h" ] || die2 "missing $HDR_DIR/nvidia-drm-render.h"
 [ -f "$PROBE" ] || die2 "missing $PROBE"
 HAVE_SYS=1
-if [ ! -f "$SYSDIR/sys/ioccom.h" ] || [ ! -d "$SYSDIR/arm64/include" ]; then
+if [ -z "$SYSDIR" ] || [ ! -f "$SYSDIR/sys/ioccom.h" ] || [ ! -d "$SYSDIR/arm64/include" ]; then
 	HAVE_SYS=0
-	echo "SKIPPED: kernel compile (check 3): SYSDIR $SYSDIR is not a FreeBSD src/sys tree; set SYSDIR=/path/to/src/sys"
+	echo "SKIPPED: kernel compile (check 3): SYSDIR $SYSDIR is not a FreeBSD src/sys tree; set SYSDIR=/path/to/src/sys (no default)"
 fi
 command -v cc >/dev/null 2>&1 || die2 "cc not found"
 mkdir -p "$TMPDIR" || die2 "cannot create $TMPDIR"
@@ -133,6 +137,10 @@ check_all() {
 	comm -13 "$_d/macros.base" "$_d/macros.hdr" | awk '{print $2}' | sed 's/(.*//' \
 	    | grep -v -E '^(_NVIDIA_DRM_RENDER_H_|NVR_|DRM_NVR_|DRM_IOCTL_NVR_)' >"$_d/stray.txt"
 	[ -s "$_d/stray.txt" ] && { echo "header defines names outside NVR_/DRM_NVR_/DRM_IOCTL_NVR_: $(tr '\n' ' ' <"$_d/stray.txt")" >>"$_out"; _rc=1; }
+	# 4c. ABI freeze: every NVR_/DRM_NVR_ define has an exact-value row V() in the probe
+	grep -E '^#define[[:space:]]+(NVR_|DRM_NVR_)[A-Z0-9_]+[[:space:]]' "$_inc/nvidia-drm-render.h" | awk '{print $2}' | grep -v '^NVR_IOW' | sort >"$_d/defs.txt"
+	sed -n 's/^V(\([A-Z0-9_]*\),.*/\1/p' "$PROBE" | sort >"$_d/vrows.txt"
+	cmp -s "$_d/defs.txt" "$_d/vrows.txt" || { echo "constant list differs from the V() value rows:" >>"$_out"; diff "$_d/defs.txt" "$_d/vrows.txt" >>"$_out" 2>&1; _rc=1; }
 	# 5. struct coverage
 	awk '/^struct[[:space:]]+[A-Za-z_0-9]+[[:space:]]*\{/ {sub(/^struct[[:space:]]+/, ""); sub(/[[:space:]]*\{.*/, ""); sub(/^drm_nvr_/, ""); print}' \
 	    "$_inc/nvidia-drm-render.h" | sort >"$_d/hdr.txt"
@@ -161,7 +169,10 @@ fi
 
 # ---- 6. NVIDIA's own table --------------------------------------------------
 SKIPS=0
-NVHS=$(ls "$WORK"/sources/open-gpu-kernel-modules-*/kernel-open/nvidia-drm/nvidia-drm-ioctl.h 2>/dev/null)
+# pinned to the driver version this contract was written against
+NVH_PIN=${NVIDIA_IOCTL_H:-${WORK:+$WORK/sources/open-gpu-kernel-modules-580.178.04/kernel-open/nvidia-drm/nvidia-drm-ioctl.h}}
+NVHS=
+[ -n "$NVH_PIN" ] && [ -f "$NVH_PIN" ] && NVHS=$NVH_PIN
 if [ -n "$NVHS" ]; then
 	_gend=$(cc -std=c11 -I"$HDR_DIR" "$PROBE" -o "$W/probe.g" 2>/dev/null && "$W/probe.g" | sed -n 's/^NV_GROWTH_END //p')
 	sed -n 's/^#define[[:space:]]*DRM_NVR_[A-Z0-9_]*[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' "$HDR_DIR/nvidia-drm-render.h" | sort -u >"$W/nvr.txt"
@@ -220,6 +231,9 @@ m_cmdbase()  { awk '/^#define[[:space:]]*NVR_COMMAND_BASE[[:space:]]/ {print "#d
 m_clash()    { awk '/^#define[[:space:]]*NVR_COMMAND_BASE[[:space:]]/ {print "#define\tDRM_IOWR(a, b)\t0"} {print}'; }
 m_newstruct(){ awk '/^\/\* ---- EXEC -/ {print "struct drm_nvr_unlisted {\n\tuint32_t a;\n\tuint32_t b;\n};\n"} {print}'; }
 m_pointer()  { sed 's|uint64_t op_ptr;	/\* in: user pointer to struct drm_nvr_vm_bind_op\[op_count\] \*/|void *op_ptr;|'; }
+m_synctl()   { sed 's|^\(#define[[:space:]]*NVR_SYNC_TIMELINE_SYNCOBJ[[:space:]]*\)0x1|\10x2|'; }
+m_last()     { sed 's|^\(#define[[:space:]]*DRM_NVR_LAST[[:space:]]*\)0x5f|\10x60|'; }
+m_newconst() { awk '{print} /^#define[[:space:]]*NVR_ENGINE_NVENC[[:space:]]/ {print "#define\tNVR_ENGINE_NEW\t\t\t5"}'; }
 m_digitptr() { awk '/^\/\* ---- EXEC -/ {print "struct drm_nvr_exec2 {\n\tvoid *p;\n};\n"} {print}'; }
 # a listed struct gets a pointer member, so only the member-type check (5b) can fire
 m_ptrlisted(){ awk '/^struct drm_nvr_sync \{/ {s=1} s && /uint64_t timeline_value;/ {print "\tlong timeline_value;"; s=0; next} {print}'; }
@@ -238,8 +252,15 @@ mutate pointer-in-a-listed-struct 'bad member' m_ptrlisted
 mutate change-ioctl-direction 'encoded direction' m_dir
 mutate unlisted-struct 'struct list differs' m_newstruct
 mutate pointer-member 'bad member' m_pointer
+mutate sync-timeline-value-changed 'value of NVR_SYNC_TIMELINE_SYNCOBJ' m_synctl
+mutate command-range-past-DRM_COMMAND_END 'DRM_NVR_LAST|value of DRM_NVR_LAST' m_last
+mutate new-constant-without-a-row 'constant list differs' m_newconst
 
 if [ "$FAILS" -eq 0 ]; then
+	if [ "$SKIPS" -gt 0 ] && { [ -n "${CI:-}" ] || [ "${REQUIRE_INPUTS:-}" = yes ]; }; then
+		echo "render_uapi_layout_test: FAIL: $SKIPS input(s) missing and CI or REQUIRE_INPUTS is set"
+		exit 1
+	fi
 	if [ "$SKIPS" -gt 0 ] && [ "${RENDER_UAPI_ALLOW_SKIP:-0}" != 1 ]; then
 		echo "render_uapi_layout_test: $SKIPS check(s) SKIPPED, so no PASS (exit 2); RENDER_UAPI_ALLOW_SKIP=1 accepts that"
 		exit 2

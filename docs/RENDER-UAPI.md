@@ -179,8 +179,9 @@ be 0 in version 1. `flags` MUST be 0.
 
 - **Requires VM_INIT**; before it `EINVAL`.
 - On success `channel` is the id and `objs[0..nr_obj-1]` lists the engine objects the kernel
-  created and bound to subchannels: for `GR`, the 3D, compute, inline-to-memory and 2D classes
-  of the device (as in the class list); for `CE`, one copy class; for video engines, the engine
+  created and bound to subchannels: for `GR`, the 3D, compute, copy, inline-to-memory and 2D classes
+  of the device (as in the class list; the copy class is the copy engine on the graphics
+  runlist, because NVK writes copy methods into the graphics push), 5 of the `NVR_CHANNEL_OBJ_MAX` 8 slots; for `CE`, one copy class; for video engines, the engine
   class. `subchan` is the subchannel number a push buffer addresses the object on. The caller
   does not allocate objects itself: there is no NVIF and no per-object ioctl.
 - An engine the GPU does not have is `EINVAL`. `MAX_CHANNELS` counts **live and draining**
@@ -343,7 +344,9 @@ instructions. So with `BAR_DEVICE_MEM`:
 - never use atomics on it (CPU atomics on GPU-visible memory belong in system-memory BOs);
 - reads are slow and are not combined; stage in system memory.
 
-Mesa's backend takes this flag as "use the aligned copy path". Without the flag the mapping is
+Mesa's backend takes this flag as "use the aligned copy path", and, because applications
+`memcpy` into mapped pointers, it MUST NOT expose host-visible device-local memory types when
+the flag is set (section 11). Without the flag the mapping is
 Normal non-cacheable and the usual rules for write-combining memory apply (a store barrier
 before the GPU may read it). In either case **EXEC itself issues a store barrier** (`dsb st` on arm64)
 before it publishes work, which covers the submitting thread's stores. A store done by another
@@ -416,8 +419,10 @@ kind**, because only that BO has compression backing; for any other BO it is `EI
 Overlap rules:
 
 - the span MUST be entirely free, **or** entirely inside one sparse region (it then replaces
-  the sparse backing for that span);
-- it overlaps an existing memory mapping: `EEXIST` (no implicit remap; unmap first);
+  the sparse backing and any mappings for that span);
+- outside a sparse region it overlaps an existing memory mapping: `EEXIST` (no implicit remap;
+  unmap first). A MAP inside a sparse region replaces any memory mappings in its span
+  atomically (a rebind of already bound pages succeeds);
 - it straddles the edge of a sparse region, or covers a region and free space: `EINVAL`.
 
 **MAP with `SPARSE`**: creates a sparse region over the span. `handle` and `bo_offset` MUST be 0.
@@ -425,7 +430,8 @@ Reads of a not-backed part return zero and writes to it are discarded; neither f
 MUST be entirely free (`EEXIST` if anything is mapped, `EINVAL` if it overlaps another region).
 
 **UNMAP** (`op = NVR_VM_BIND_OP_UNMAP`, no `SPARSE`): `handle`, `bo_offset` and `pte_kind` MUST be
-0. The span MUST be entirely covered by memory mappings (`ENOENT` if any part is a hole).
+0. UNMAP treats holes as no-ops: a span that is partly or wholly unmapped, or was never bound,
+succeeds and unmaps only what is mapped (unbinding is idempotent).
 **Partial unmap is allowed**: a mapping that is cut keeps its remaining pieces, which stay
 mapped at their addresses with their `bo_offset` adjusted (by subtraction and addition of
 values already known to be inside the old mapping, never by an unchecked sum); one UNMAP may cover several adjacent
@@ -434,7 +440,8 @@ the unmapped part reverts to sparse backing; outside it becomes unmapped. Becaus
 page tables to be split, it can fail with `ENOMEM`, and that is reported by the call (section 6.2.2).
 
 **UNMAP with `SPARSE`**: removes a sparse region. The span MUST be exactly one region
-(`addr` and `range` equal; `ENOENT` if there is none, `EINVAL` if different) and MUST contain no
+(`addr` and `range` equal; `ENOENT` if there is none, `EINVAL` if different; Mesa unmaps the
+whole VA first, so a sparse region normally has no mapping left) and MUST contain no
 memory mapping (`EBUSY`): unmap those first.
 
 #### 6.2.1 Atomicity and validation
@@ -676,6 +683,9 @@ package.
 Boundary cases every owning WP's user-space test must include (each one a hole a naive
 implementation leaves):
 
+- UNMAP of a range that was never bound, or has holes, succeeds; a MAP inside a sparse region over
+  an already bound page succeeds and replaces it; UNMAP of the whole VA of a sparse resource with
+  holes, then UNMAP|SPARSE of its region, both succeed (NVK's VA free);
 - VM_BIND MAP with `bo_offset = 2^64 - 4096`, `range = 8192` on a small BO: `EINVAL`;
 - VM_BIND with `addr + range` wrapping, or `op_count == 0`, or a sync bind with a non-zero
   `wait_ptr`: `EINVAL`;
@@ -745,3 +755,21 @@ implementation leaves):
 
 Every ioctl and every error code above has a user-space test in the owning WP; a behaviour
 this file leaves out is undefined and a defect in this file, to be fixed by a minor version.
+
+## 11. Notes for the Mesa backend (N9)
+
+Found by replaying NVK's real call sequences against this contract. None changes a layout.
+
+- **PTE kind.** NVK puts the kind in bits 0-7 of the bind op's `flags`, also on UNMAP. Use
+  `NVR_VM_BIND_PTE_KIND` with `pte_kind` on MAP only; send 0 in the bind op's `flags` kind bits and in `pte_kind` on UNMAP (anything else is `EINVAL`).
+- **Unbind.** NVK's `va_unbind` sends MAP with handle 0; send UNMAP instead (holes are no-ops,
+  section 6.2).
+- **VM_INIT** is a 32-byte read-write structure here (NVK's is 16 bytes, write only).
+- **Array sizes.** NVK's fixed arrays (256 syncs, 4096 bind ops) exceed the minimums of section
+  8; size them from GETPARAM `MAX_SYNCS` and `MAX_BIND_OPS`.
+- **VRAM_USED** is per file and can be 0; do not assert it is positive.
+- **BAR_DEVICE_MEM.** Do not offer host-visible device-local memory types: applications `memcpy`
+  into mapped pointers and Device-nGnRE memory faults on unaligned access.
+- **Open questions that are not decided here** (Mark's): the per-credential cap values (section
+  8), the major-version number plan (header comment, section 1.1) and the `VRAM_FREE` privacy
+  tunable (section 2.1) stay open.
