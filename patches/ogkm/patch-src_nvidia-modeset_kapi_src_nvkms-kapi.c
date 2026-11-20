@@ -24,11 +24,11 @@
 +    NV_OS_DESC_MEMORY_ALLOCATION_PARAMS memAllocParams = {0};
 +    struct NvKmsKapiMemory *memory = NULL;
 +    NvU32 hRmHandle;
-+
+ 
 +    if (pPagesTaken == NULL) {
 +        return NULL;
 +    }
- 
++
 +    *pPagesTaken = NV_FALSE;
 +
 +    if (pages == NvP64_NULL) {
@@ -87,7 +87,24 @@
  static NvBool RmGc6BlockerRefCntAction(const struct NvKmsKapiDevice *device,
                                         NvU32 action)
  {
-@@ -4111,6 +4190,8 @@
+@@ -4073,8 +4152,14 @@
+         return NV_FALSE;
+     }
+ 
+-    if (nvkms_strcmp(funcsTable->versionString, NV_VERSION_STRING) != 0) {
+-        funcsTable->versionString = NV_VERSION_STRING;
++    /*
++     * The version and the layout of the table (NVKMS_KAPI_CBSD_LAYOUT),
++     * compared before any member is written: a table of another layout is
++     * never filled.
++     */
++    if (nvkms_strcmp(funcsTable->versionString,
++                     NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT) != 0) {
++        funcsTable->versionString = NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT;
+         return NV_FALSE;
+     }
+ 
+@@ -4111,6 +4196,8 @@
      funcsTable->getSystemMemoryHandleFromSgt = GetSystemMemoryHandleFromSgt;
      funcsTable->getSystemMemoryHandleFromDmaBuf =
          GetSystemMemoryHandleFromDmaBuf;

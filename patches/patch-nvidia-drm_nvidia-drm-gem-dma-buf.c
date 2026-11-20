@@ -1,12 +1,17 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.c.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.c
-@@ -37,6 +37,57 @@
+@@ -37,6 +37,76 @@
  
  #include "linux/dma-buf.h"
  
 +#include <vm/vm_phys.h>
 +
-+/* The page `index` pages after `first`, or NULL when it is not a RAM page without a VM object. */
++/*
++ * The page `index` pages after `first`, or NULL when it is not a RAM page
++ * without a VM object.  That a first page is the page the entry names is
++ * checked by gb10_pi_fill().  The answer is only a first screening: the OS
++ * layer busies each page and asks again before it wires it.
++ */
 +static void *__nv_drm_pi_page_at(void *ctx, void *first,
 +                                 unsigned long long index)
 +{
@@ -19,14 +24,10 @@
 +
 +    p = vm_phys_paddr_to_vm_page(page_to_phys(m) +
 +                                 ((vm_paddr_t)index << PAGE_SHIFT));
-+    if (p == NULL || (p->flags & PG_FICTITIOUS) != 0) {
-+        return NULL;
-+    }
-+    if (index == 0 && p != m) {
-+        return NULL;
-+    }
-+    if (p->object != NULL) {
-+        /* Cannot be wired safely by the OS layer, see nv_pi_page_at(). */
++    /* The one decision, shared with nvidia.ko: gb10_pi_page_claimable(). */
++    if (!gb10_pi_page_claimable(p != NULL,
++                                p != NULL && (p->flags & PG_FICTITIOUS) != 0,
++                                p != NULL && p->object != NULL)) {
 +        return NULL;
 +    }
 +
@@ -55,20 +56,41 @@
 +    nv_drm_gem_object_unreference_unlocked(nv_gem);
 +}
 +
++/*
++ * The exporter's dma-buf, held for the whole life of the GEM object whenever
++ * its pages were imported (taken when the pages are imported,
++ * dropped as the last step of freeing the GEM object).  The
++ * RM maps the exporter's pages; nothing but a reference on the dma-buf
++ * stops the exporter's page pool from reusing them after the exporter
++ * closes its own handle and fd, exported again or not.
++ */
++static void __nv_drm_gem_dma_buf_life_hold(void *ctx)
++{
++    get_dma_buf((struct dma_buf *)ctx);
++}
++
++static void __nv_drm_gem_dma_buf_life_release(void *ctx)
++{
++    dma_buf_put((struct dma_buf *)ctx);
++}
++
  static inline
  void __nv_drm_gem_dma_buf_free(struct nv_drm_gem_object *nv_gem)
  {
-@@ -50,6 +101,9 @@
+@@ -50,6 +120,12 @@
  
      drm_prime_gem_destroy(&nv_gem->base, nv_dma_buf->sgt);
  
 +    /* After the RM handle and the attachment: nothing reads the pages now. */
 +    nv_drm_free(nv_dma_buf->pages);
 +
++    /* Last: only now may the exporter's pool reuse the pages. */
++    gb10_pi_life_drop(&nv_dma_buf->life);
++
      nv_drm_free(nv_dma_buf);
  }
  
-@@ -80,6 +134,16 @@
+@@ -80,6 +156,16 @@
       * through the same linuxkpi bits it seems (probably so it can be used
       * elsewhere), so dma_buf->file really is a native FreeBSD struct file...
       */
@@ -85,7 +107,7 @@
      if (!nv_gem->base.filp->f_op->mmap)
          return -EINVAL;
  
-@@ -124,6 +188,121 @@
+@@ -124,6 +210,149 @@
  #endif
  
      return ret;
@@ -106,6 +128,7 @@
 +static struct NvKmsKapiMemory *__nv_drm_gem_dma_buf_import_pages(
 +    struct nv_drm_device *nv_dev,
 +    struct nv_drm_gem_dma_buf *nv_dma_buf,
++    struct dma_buf *dma_buf,
 +    struct sg_table *sgt,
 +    NvU64 size)
 +{
@@ -167,6 +190,18 @@
 +    nv_dma_buf->pi_desc.hold = __nv_drm_gem_dma_buf_pi_hold;
 +    nv_dma_buf->pi_desc.release = __nv_drm_gem_dma_buf_pi_release;
 +
++    /*
++     * The exporter's buffer must outlive every use of its pages.  Taken
++     * here, before the failure points below, on purpose: the caller creates
++     * the GEM object whatever this function returns (a buffer without an
++     * NVKMS handle still keeps its pages), and the free of that object is
++     * the one place that drops the reference.
++     */
++    nv_dma_buf->life.ctx = dma_buf;
++    nv_dma_buf->life.hold = __nv_drm_gem_dma_buf_life_hold;
++    nv_dma_buf->life.release = __nv_drm_gem_dma_buf_life_release;
++    gb10_pi_life_take(&nv_dma_buf->life);
++
 +    if (nvKms->getSystemMemoryHandleFromPageArray == NULL) {
 +        /* An older nvidia-modeset.ko leaves the appended member empty. */
 +        NV_DRM_DEV_LOG_ERR(
@@ -176,16 +211,31 @@
 +        return NULL;
 +    }
 +
-+    if (nv_import_pages(pages, npages, &array) != 0) {
++    rc = nv_import_pages(pages, npages, &array);
++    if (rc != 0) {
 +        NV_DRM_DEV_LOG_ERR(
 +            nv_dev,
-+            "Could not wire the %llu pages of the dma-buf", npages);
++            "Could not wire the %llu pages of the dma-buf (status 0x%x): %s",
++            npages, (unsigned)rc,
++            rc == GB10_PI_STATUS_RETRY ?
++                "a page is held busy by the exporter's mapping right now; "
++                "the GEM object has no NVKMS handle, close it and import the "
++                "buffer again" :
++            rc == GB10_PI_STATUS_REFUSED ?
++                "a page is no longer importable (the exporter's mapping gave "
++                "it a VM object)" :
++                "out of resources or not system memory");
 +        return NULL;
 +    }
 +
 +    pMemory = nvKms->getSystemMemoryHandleFromPageArray(
 +                  nv_dev->pDevice, (NvP64)(NvUPtr)array, size - 1,
 +                  &pages_taken);
++
++    if (pMemory != NULL) {
++        /* wired for the RM: a later SGT export wires them again (second wiring) */
++        nv_dma_buf->pi_desc.imported = 1;
++    }
 +
 +    if (pMemory == NULL && !pages_taken) {
 +        /* The RM never took the array: unwire and free it here. */
@@ -207,7 +257,7 @@
  }
  
  const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops = {
-@@ -144,11 +323,24 @@
+@@ -144,11 +373,24 @@
  
      if ((nv_dma_buf =
              nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
@@ -235,7 +285,7 @@
  
      pMemory = NULL;
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-@@ -157,6 +349,35 @@
+@@ -157,6 +399,35 @@
                                                    dma_buf->size - 1);
      }
  
@@ -245,8 +295,8 @@
 +         * (nv_dma_import_dma_buf() returns NV_ERR_NOT_SUPPORTED): import
 +         * the buffer's pages instead, if it is system memory.
 +         */
-+        pMemory = __nv_drm_gem_dma_buf_import_pages(nv_dev, nv_dma_buf, sgt,
-+                                                    dma_buf->size);
++        pMemory = __nv_drm_gem_dma_buf_import_pages(nv_dev, nv_dma_buf, dma_buf,
++                                                    sgt, dma_buf->size);
 +    }
 +
 +    if (pMemory == NULL) {
@@ -271,10 +321,12 @@
      nv_drm_gem_object_init(nv_dev, &nv_dma_buf->base,
                             &__nv_gem_dma_buf_ops, dma_buf->size, pMemory);
  
-@@ -197,14 +418,27 @@
+@@ -196,17 +467,46 @@
+     }
  
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-         if (!nv_dma_buf->base.pMemory) {
+-        if (!nv_dma_buf->base.pMemory) {
++        if (!nv_dma_buf->base.pMemory || nv_dma_buf->pages != NULL) {
 +            if (nv_dma_buf->pages == NULL) {
 +                /* The import refused the buffer; nothing to export. */
 +                ret = -EINVAL;
@@ -291,10 +343,14 @@
 -             * on this GEM object to prevent the DMA-BUF from being unpinned
 -             * prematurely.
 +             * Get RM system memory handle from the pages kept at import
-+             * time.  The OS layer reads them from a struct gb10_pi_desc (it
-+             * cannot read the Linux sg_table), and the RM takes a reference
-+             * on this GEM object through it, to prevent the DMA-BUF from
-+             * being unpinned prematurely.
++             * time, also when the page-array import made a handle of its
++             * own: that handle holds no reference on anything, so an RM FD
++             * made from it could outlive this GEM object and the exporter's
++             * buffer.  This one goes through the OS layer's SGT path, which
++             * takes a reference on this GEM object for as long as the RM
++             * maps the pages (the RM FD releases it).  The OS layer reads
++             * the pages from a struct gb10_pi_desc (it cannot read the
++             * Linux sg_table).
               */
              pTmpMemory = nvKms->getSystemMemoryHandleFromSgt(
                               nv_dev->pDevice,
@@ -302,4 +358,29 @@
 +                             (NvP64)(NvUPtr)&nv_dma_buf->pi_desc,
                               (NvP64)(NvUPtr)&nv_dma_buf->base.base,
                               nv_dma_buf->base.base.size - 1);
++
++            if (!pTmpMemory) {
++                ret = -ENOMEM;
++                NV_DRM_DEV_LOG_ERR(
++                    nv_dev,
++                    "Failed to get memory to export from DMA-BUF GEM "
++                    "object: 0x%08x (the RM refused the pages: one may be "
++                    "held busy by the exporter's mapping, or has gained a VM "
++                    "object; see the earlier log lines)",
++                    p->handle);
++                goto done;
++            }
          }
+     }
+ 
+@@ -220,8 +520,8 @@
+     }
+ 
+     if (!nvKms->exportMemory(nv_dev->pDevice,
+-                             nv_dma_buf->base.pMemory ?
+-                                nv_dma_buf->base.pMemory : pTmpMemory,
++                             pTmpMemory ?
++                                pTmpMemory : nv_dma_buf->base.pMemory,
+                              p->nvkms_params_ptr,
+                              p->nvkms_params_size)) {
+         ret = -EINVAL;

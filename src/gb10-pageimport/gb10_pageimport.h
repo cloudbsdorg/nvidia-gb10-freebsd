@@ -18,10 +18,16 @@
  *      video memory, an empty or oversized buffer, entries that disagree
  *      with the size).  An entry may span several pages; each is expanded.
  *   2. wiring: gb10_pi_wire() wires every page or none of them, and
- *      gb10_pi_unwire() undoes exactly that.  The RM's own teardown of a
- *      page-array descriptor (os_unlock_user_pages) unwires one reference
- *      per page of the array it was given, so what is handed over must have
- *      been wired once per page here.
+ *      gb10_pi_unwire() undoes exactly that.  Each page is busied, checked
+ *      again (no VM object, not fictitious: a check made earlier, in another
+ *      module, can be stale by now), wired, then unbusied; one page that
+ *      fails refuses the whole array.  The RM's own teardown of a page-array
+ *      descriptor (os_unlock_user_pages) unwires one reference per page of
+ *      the array it was given, so what is handed over must have been wired
+ *      once per page here.  The same teardown dirties a page only when
+ *      gb10_pi_dirty_action() allows it, checked at the dirty site.
+ *      gb10_pi_life_take()/gb10_pi_life_drop() hold the exporter's object
+ *      (the dma-buf) for the whole life of the import.
  *   3. the SGT entry points of the OS layer, for a buffer that is already
  *      imported and is exported again: gb10_pi_import(),
  *      gb10_pi_register(), gb10_pi_unregister() and gb10_pi_release() are
@@ -61,6 +67,21 @@
 unsigned int nv_import_pages(void **pages, unsigned long long count, void **array);
 void nv_unimport_pages(void *array, unsigned long long count);
 
+/*
+ * The same, for nvidia_subr.c and nvidia_os.c, which call into
+ * gb10_pageimport_os.c (the FreeBSD side) rather than carry the code.
+ */
+#define	GB10_PI_STATUS_RETRY	3U	/* NV_ERR_BUSY_RETRY; gb10_pageimport_os.c asserts it */
+#define	GB10_PI_STATUS_REFUSED	0x56U	/* NV_ERR_NOT_SUPPORTED: a page changed for good */
+
+unsigned int gb10_pi_os_register(void *import_sgt, unsigned long long page_count,
+    unsigned long long *phys_addr, void **priv_data, int is_peer_mmio);
+void gb10_pi_os_unregister(void *priv_data, void **import_sgt,
+    void **import_priv);
+unsigned int gb10_pi_os_import(void *sgt);
+void gb10_pi_os_release(void *sgt);
+void gb10_pi_os_dirty(void *page);
+
 /* Not a kernel address (the top bits are clear), so it cannot be a pointer. */
 #define	GB10_PI_DESC_MAGIC	0x0000474231305049ULL	/* "IP01BG" */
 
@@ -74,7 +95,10 @@ enum gb10_pi_rc {
 	GB10_PI_OVERSIZE,		/* more than the KAPI's 32-bit limit */
 	GB10_PI_CAPACITY,		/* the output array is too small */
 	GB10_PI_WIRE_FAILED,		/* a page could not be wired */
-	GB10_PI_NOMEM			/* an allocation failed (the caller's) */
+	GB10_PI_NOMEM,			/* an allocation failed (the caller's) */
+	GB10_PI_PAGE_CHANGED,		/* a page got an object or went fictitious since the check: permanent for this import */
+	GB10_PI_PAGE_BUSY,		/* somebody else holds a page's busy lock right now: transient, retry */
+	GB10_PI_RC_END			/* not a result: one past the last, for loops */
 };
 
 /*
@@ -92,6 +116,19 @@ struct gb10_pi_ops {
 	int (*wire)(void *ctx, void *page);		/* 0 on success */
 	void (*unwire)(void *ctx, void *page);
 	unsigned long long (*phys)(void *ctx, void *page);
+	/* gb10_pi_wire() only: busy the page without waiting (0 on success) ... */
+	int (*try_busy)(void *ctx, void *page);
+	void (*unbusy)(void *ctx, void *page);
+	/* ... and, with the page busied, is it still one we may wire the first time? (the same decision in both modules: gb10_pi_page_claimable()) */
+	int (*claimable)(void *ctx, void *page);
+	/*
+	 * ... or wire again (the SGT export of a buffer already imported): the
+	 * page is wired by us, so it may have gained an object since (the
+	 * exporter's own mapping faults pages in, and validates them); it must
+	 * still be wired and not fictitious.  Busied, a wired page with an
+	 * object can be wired once more.
+	 */
+	int (*rewire_ok)(void *ctx, void *page);
 };
 
 /*
@@ -107,6 +144,13 @@ struct gb10_pi_desc {
 	void			*ctx;		/* the owner, given to hold/release */
 	void			(*hold)(void *ctx);
 	void			(*release)(void *ctx);
+	/*
+	 * Set once the pages were wired for the RM by the page-array import.
+	 * Only then may the SGT export wire them again under the second-wiring
+	 * rule (a page may have an object by now); a buffer that was never
+	 * wired by us is checked like a first wiring.
+	 */
+	int			imported;
 };
 
 static inline const char *
@@ -123,6 +167,8 @@ gb10_pi_str(int rc)
 	case GB10_PI_CAPACITY:		return "output array too small";
 	case GB10_PI_WIRE_FAILED:	return "a page could not be wired";
 	case GB10_PI_NOMEM:		return "out of memory";
+	case GB10_PI_PAGE_CHANGED:	return "a page changed while it was being imported (it got a VM object or became fictitious)";
+	case GB10_PI_PAGE_BUSY:		return "a page is busy (the exporter's mapping holds it); retry";
 	default:			return "unknown error";
 	}
 }
@@ -132,6 +178,111 @@ static inline int
 gb10_pi_is_nomem(int rc)
 {
 	return (rc == GB10_PI_NOMEM);
+}
+
+/*
+ * gb10_pi_array_ok - may `count` pages of `page_size` bytes be handed to the
+ * KAPI?  The limit is 4 GiB, exactly (GB10_PI_MAX_BYTES), and at least one page.
+ */
+static inline int
+gb10_pi_array_ok(unsigned long long count, unsigned long long page_size)
+{
+	if (page_size == 0 || count == 0)
+		return (0);
+	return (count <= GB10_PI_MAX_BYTES / page_size);
+}
+
+/*
+ * gb10_pi_page_claimable - the one place that decides whether a page may be
+ * imported: it must be managed RAM, not fictitious and have no VM object (a
+ * page that belongs to one can only be wired with the object locked, and
+ * can be renamed or freed under us; the pages of a GPU driver's buffers,
+ * which linuxkpi allocates without an object, are the ones we take).
+ * nvidia-drm.ko asks it when it converts the scatter list, nvidia.ko again
+ * with the page busied just before it wires it.
+ */
+static inline int
+gb10_pi_page_claimable(int is_managed_ram, int is_fictitious, int has_object)
+{
+	return (is_managed_ram && !is_fictitious && !has_object);
+}
+
+/*
+ * What the RM's teardown does with the dirty bit of one imported page
+ * (gb10_pi_dirty_action()).
+ */
+enum gb10_pi_dirty {
+	GB10_PI_DIRTY_SKIP = 0,		/* no VM object: no pager, nothing to write back */
+	GB10_PI_DIRTY_DO,		/* object and all valid: vm_page_dirty() is correct */
+	GB10_PI_DIRTY_REFUSE,		/* object but not all valid: refuse, and say so */
+	GB10_PI_DIRTY_FALLBACK		/* the busy lock could not be had and the page was dirtied without it, the way the stock code did; counted */
+};
+
+/*
+ * gb10_pi_dirty_action - decide the dirty step of os_unlock_user_pages().
+ * vm_page_dirty() asserts that the page is all valid (INVARIANTS; without
+ * the assertion it would silently mark an invalid page dirty).  A page with
+ * no object (the noobj pages of another GPU driver) has no pager and is
+ * skipped quietly.  A page that has an object but is not all valid is not
+ * dirtied either, and the OS layer logs the refusal rather than panic: it
+ * can only mean the exporter's own mapping faulted the page into an object
+ * and a truncate or a partial fill left it invalid, the exporter's data is
+ * not ours to mark.  The caller asks at the dirty site, with the page
+ * busied: a wired page can gain an object after the wiring, and can be
+ * invalidated, so an earlier check proves nothing.
+ */
+static inline int
+gb10_pi_dirty_action(int has_object, int all_valid)
+{
+	if (!has_object)
+		return (GB10_PI_DIRTY_SKIP);
+	return (all_valid ? GB10_PI_DIRTY_DO : GB10_PI_DIRTY_REFUSE);
+}
+
+/*
+ * The OS operations of the dirty step.  The step runs for every page of every
+ * writable RM user-page descriptor (the RM's own pinned user memory too, not
+ * only imported pages), so it must not lose a dirty bit the stock code would
+ * have set.
+ */
+struct gb10_pi_dirty_ops {
+	int (*try_busy)(void *ctx, void *page);		/* 0 on success, no wait */
+	int (*wait_busy)(void *ctx, void *page);	/* a bounded wait: 0 on success, -1 when the lock is still held; NULL for none */
+	void (*unbusy)(void *ctx, void *page);
+	int (*has_object)(void *ctx, void *page);
+	int (*all_valid)(void *ctx, void *page);
+	void (*dirty)(void *ctx, void *page);
+};
+
+/*
+ * gb10_pi_dirty_page - the dirty step for one page: busy it (a bounded
+ * wait, ops->wait_busy, which the FreeBSD side spins and never sleeps), ask
+ * gb10_pi_dirty_action() at the dirty site, dirty, unbusy.  When the busy
+ * lock stays held through the wait, the
+ * question is asked without it and an all-valid object page is dirtied the way
+ * the stock code did, and the result says so (GB10_PI_DIRTY_FALLBACK), so the
+ * caller can count it: a dirty bit is never dropped silently.
+ */
+static inline int
+gb10_pi_dirty_page(void *page, const struct gb10_pi_dirty_ops *o, void *ctx)
+{
+	int busied, act;
+
+	if (o == NULL || o->try_busy == NULL || o->unbusy == NULL ||
+	    o->has_object == NULL || o->all_valid == NULL || o->dirty == NULL)
+		return (GB10_PI_DIRTY_REFUSE);	/* never a silent skip: it is counted */
+	busied = (o->try_busy(ctx, page) == 0);
+	if (!busied && o->wait_busy != NULL)
+		busied = (o->wait_busy(ctx, page) == 0);
+	act = gb10_pi_dirty_action(o->has_object(ctx, page),
+	    o->all_valid(ctx, page));
+	if (act == GB10_PI_DIRTY_DO)
+		o->dirty(ctx, page);
+	if (busied)
+		o->unbusy(ctx, page);
+	else if (act == GB10_PI_DIRTY_DO)
+		act = GB10_PI_DIRTY_FALLBACK;
+	return (act);
 }
 
 /*
@@ -214,6 +365,9 @@ gb10_pi_fill(const struct gb10_pi_seg *segs, unsigned long long nsegs,
 			pg = ops->page_at(ctx, segs[i].first, j);
 			if (pg == NULL)
 				return (GB10_PI_NOT_RAM);
+			/* the page the entry names must be the first one found */
+			if (j == 0 && pg != segs[i].first)
+				return (GB10_PI_NOT_RAM);
 			pages[n++] = pg;
 		}
 	}
@@ -224,24 +378,55 @@ gb10_pi_fill(const struct gb10_pi_seg *segs, unsigned long long nsegs,
 /*
  * gb10_pi_wire - wire every page of the array, once each, or none: a page
  * that cannot be wired makes the pages wired before it be unwired again.
+ * Each page is busied without waiting, checked again with ops->claimable()
+ * and only then wired, so a page that gained a VM object since it was
+ * checked (a first-touch fault of the exporter's mapping) is never wired
+ * (vm_page_wire() asserts the object lock of such a page), and the busy lock
+ * keeps the fault from inserting it between the check and the wire.
  */
+static inline int
+gb10_pi_wire_mode(void **pages, unsigned long long n,
+    const struct gb10_pi_ops *ops, void *ctx, int rewire)
+{
+	unsigned long long i;
+	int rc;
+
+	if (pages == NULL || n == 0 || ops == NULL || ops->wire == NULL ||
+	    ops->unwire == NULL || ops->try_busy == NULL ||
+	    ops->unbusy == NULL || ops->claimable == NULL ||
+	    ops->rewire_ok == NULL)
+		return (GB10_PI_BAD_ARG);
+	for (i = 0; i < n; i++) {
+		if (ops->try_busy(ctx, pages[i]) != 0) {
+			rc = GB10_PI_PAGE_BUSY;
+			goto undo;
+		}
+		if (!(rewire ? ops->rewire_ok(ctx, pages[i]) :
+		    ops->claimable(ctx, pages[i]))) {
+			ops->unbusy(ctx, pages[i]);
+			rc = GB10_PI_PAGE_CHANGED;
+			goto undo;
+		}
+		if (ops->wire(ctx, pages[i]) != 0) {
+			ops->unbusy(ctx, pages[i]);
+			rc = GB10_PI_WIRE_FAILED;
+			goto undo;
+		}
+		ops->unbusy(ctx, pages[i]);
+	}
+	return (GB10_PI_OK);
+undo:
+	while (i-- > 0)
+		ops->unwire(ctx, pages[i]);
+	return (rc);
+}
+
+/* gb10_pi_wire - the first wiring of an imported array: pages without a VM object only. */
 static inline int
 gb10_pi_wire(void **pages, unsigned long long n, const struct gb10_pi_ops *ops,
     void *ctx)
 {
-	unsigned long long i;
-
-	if (pages == NULL || n == 0 || ops == NULL || ops->wire == NULL ||
-	    ops->unwire == NULL)
-		return (GB10_PI_BAD_ARG);
-	for (i = 0; i < n; i++) {
-		if (ops->wire(ctx, pages[i]) != 0) {
-			while (i-- > 0)
-				ops->unwire(ctx, pages[i]);
-			return (GB10_PI_WIRE_FAILED);
-		}
-	}
-	return (GB10_PI_OK);
+	return (gb10_pi_wire_mode(pages, n, ops, ctx, 0));
 }
 
 /* gb10_pi_unwire - drop the one wiring gb10_pi_wire() took on each page. */
@@ -323,7 +508,7 @@ gb10_pi_register(const struct gb10_pi_desc *d, unsigned long long page_count,
 		return (GB10_PI_BAD_ARG);
 	if (!gb10_pi_desc_valid(d, page_count))
 		return (GB10_PI_BAD_ARG);
-	rc = gb10_pi_wire(d->pages, d->count, ops, ctx);
+	rc = gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0);
 	if (rc != GB10_PI_OK)
 		return (rc);
 	for (i = 0; i < d->count; i++)
@@ -339,6 +524,39 @@ gb10_pi_unregister(const struct gb10_pi_desc *d, const struct gb10_pi_ops *ops,
 	if (d == NULL || d->magic != GB10_PI_DESC_MAGIC)
 		return;
 	gb10_pi_unwire(d->pages, d->count, ops, ctx);
+}
+
+/*
+ * The exporter's object, held for the whole life of an imported buffer.  An
+ * imported GEM handle owns pages another driver allocated; nothing but a
+ * reference on its dma-buf keeps that driver's page pool from reusing them
+ * once the exporter closes its own handle and fd, whether or not the
+ * buffer is ever exported again.  Taken once at import, dropped once after
+ * the RM handle was freed.
+ */
+struct gb10_pi_life {
+	void	(*hold)(void *ctx);
+	void	(*release)(void *ctx);
+	void	*ctx;
+	int	held;
+};
+
+static inline void
+gb10_pi_life_take(struct gb10_pi_life *l)
+{
+	if (l == NULL || l->held || l->hold == NULL || l->release == NULL)
+		return;
+	l->hold(l->ctx);
+	l->held = 1;
+}
+
+static inline void
+gb10_pi_life_drop(struct gb10_pi_life *l)
+{
+	if (l == NULL || !l->held)
+		return;
+	l->held = 0;
+	l->release(l->ctx);
 }
 
 #endif /* _GB10_PAGEIMPORT_H_ */

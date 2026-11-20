@@ -335,11 +335,12 @@ here; where the two disagree, this section is right.
 
 | Piece | File | Tests that go red without it |
 |---|---|---|
-| The pure core: conversion, wiring, the SGT logic | `src/gb10-pageimport/gb10_pageimport.h` (installed as `common/inc/gb10_pageimport.h`) | `tests/pageimport_test.sh` (conversion cases, wire balance, SGT cases, 16 mutants) |
+| The pure core: conversion, wiring, the SGT logic | `src/gb10-pageimport/gb10_pageimport.h` (installed as `common/inc/gb10_pageimport.h`) | `tests/pageimport_test.sh` (conversion cases, busy/re-check/wire, dirty rule, exporter lifetime, SGT cases, about 35 mutants, a line-coverage gate of 100 percent with llvm-cov) |
 | KAPI entry `getSystemMemoryHandleFromPageArray()`, last member of the table, in both header copies | `patches/ogkm/patch-src_nvidia-modeset_kapi_src_nvkms-kapi.c`, `patches/ogkm/patch-src_nvidia-modeset_kapi_interface_nvkms-kapi.h`, `patches/patch-common_inc_nvkms-kapi.h` | `tests/kapi_table_test.sh`, `tests/prime_import_test.sh` (K1) |
 | RM core: a kernel client may create a page-array descriptor | `patches/ogkm/patch-src_nvidia_arch_nvalloc_unix_src_osmemdesc.c` | `tests/prime_import_test.sh` (R1) |
 | nvidia-drm: scatter list to page array, import, export from the retained pages | `patches/patch-nvidia-drm_nvidia-drm-gem-dma-buf.c`, `.h` | `tests/prime_import_test.sh` (D1 to D3) |
-| nvidia.ko: `nv_import_pages()`, `nv_unimport_pages()`, real `nv_register_sgt()`, `nv_unregister_sgt()`, `nv_dma_import_sgt()`, `nv_dma_release_sgt()`; the two new symbols exported (prototypes in the shared core header) | `patches/patch-nvidia_nvidia_subr_prime.c` (applied after the older `patch-nvidia_nvidia_subr.c`), `patches/patch-nvidia_Makefile` | `tests/prime_import_test.sh` (O1 to O4); `tests/kmod_symbols_test.sh` (every symbol nvidia-drm.ko takes resolves) |
+| nvidia.ko, our own BSD-licensed file: `nv_import_pages()`, `nv_unimport_pages()`, the SGT register/unregister helpers, the guarded dirty step; the two import symbols exported (prototypes in the shared core header) | `src/gb10-pageimport/gb10_pageimport_os.c` (copied to `nvidia/` by `scripts/prepare-tree.sh`, added to `SRCS` by `patches/patch-nvidia_Makefile`); NVIDIA's proprietary `nvidia_subr.c` and `nvidia_os.c` only call into it (`patches/patch-nvidia_nvidia_subr_prime.c`, `patches/patch-nvidia_nvidia_os.c`) | `tests/prime_import_test.sh` (O1 to O4); `tests/kmod_symbols_test.sh` (every symbol nvidia-drm.ko takes resolves) |
+| The pairing handshake: kld version 2 of `nvidia_modeset` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 2, 2, 2)`, and the layout tag `NVKMS_KAPI_CBSD_LAYOUT` ("+cbsd-kapi.2") in the table's version string, in both header copies | `patches/patch-nvidia-modeset_nvidia-modeset-freebsd.c`, `patches/patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c`, `patches/patch-nvidia-drm_nvidia-drm.c`, both KAPI header patches, `patches/ogkm/...nvkms-kapi.c` | `tests/kapi_table_test.sh` (both directions, planted mismatches) |
 
 ### 7.2 Where the sketches were wrong or incomplete
 
@@ -363,10 +364,18 @@ here; where the two disagree, this section is right.
    the array with `os_alloc_mem()` (what the RM's `os_free_mem()` frees) and wires each page once
    with `vm_page_wire()`; the RM's teardown does `vm_page_unwire(page, PQ_ACTIVE)` per page,
    which `nv_pi_unwire()` repeats exactly. A wiring that fails halfway unwires what it wired.
-5. **The export ioctl does not use the Linux `sg_table`** (and is reached only for a buffer whose
-   page-array import produced no handle after the conversion succeeded: when the import has a
-   handle, the export uses it and the SGT functions do not run; the kit's probe does not call the
-   export ioctl, so those functions are covered by the userland model and the source checks only). The OS layer cannot read one. The GEM
+   The teardown also dirties the page when the descriptor is writable (the KAPI never marks it
+   read-only): in the stock `os_unlock_user_pages()` that is `vm_page_dirty()` on every page, which
+   asserts that the page is all valid on an INVARIANTS kernel, and marks an invalid page dirty on
+   any other. The noobj pages of a GPU driver are never valid (only a user-mmap fault validates
+   them), so the stock code panicked at the first close of an imported buffer. The dirty step is
+   now `gb10_pi_os_dirty()`, see 7.6.
+5. **The export ioctl does not use the Linux `sg_table`**, and it always goes through the SGT
+   path when the pages were imported, also when the page-array import made a handle: that handle
+   holds no reference on the GEM object or the exporter's dma-buf, so an RM file descriptor made
+   from it could outlive both. The kit's probe does not call the export ioctl, so the SGT
+   functions are covered by the userland model and the source checks only. The OS layer cannot
+   read an `sg_table`. The GEM
    object keeps the pages it converted (not wired: the dma-buf attachment owns them) in a
    `struct gb10_pi_desc`, and the export passes that descriptor through the KAPI's existing SGT
    entry in place of the `sg_table`. The OS layer's SGT functions recognise it by a magic number
@@ -382,14 +391,23 @@ here; where the two disagree, this section is right.
    compares `sizeof` and every `offsetof` of both header copies and fails on a planted mismatch.
 
 7. **Pages that belong to a VM object are refused.** `vm_page_wire()` needs the object locked
-   for such a page and the page can be renamed or freed under us, so both `page_at` functions
-   (nvidia-drm and nvidia.ko) accept only a non-fictitious RAM page with no object. linuxkpi
+   for such a page and the page can be renamed or freed under us, so one function,
+   `gb10_pi_page_claimable()` in the core, decides, and both modules call it: nvidia-drm
+   when it converts the scatter list (a first screening), nvidia.ko again with the page busied,
+   just before it wires it (`gb10_pi_wire()`: busy, check again, wire, unbusy; a page that fails
+   the second check, or whose busy lock somebody else holds, refuses the whole array and the
+   pages wired before it are unwired). The check made in nvidia-drm alone was a
+   check-then-wire race: a first-touch mmap fault of the exporter can insert the page into an
+   object between the two. nvidia.ko has no `page_at` function any more. linuxkpi
    allocates a GPU driver's pages with `vm_page_alloc_noobj()`, so the buffers this feature is
    for qualify; a buffer made of object pages (a shared-memory object) is refused with the same
    log line. "Managed RAM" in the older text means exactly this.
-8. **A mismatched `nvidia-modeset.ko`.** The appended table member stays NULL in an older module
-   and the version string cannot tell; the import checks it and refuses with a log line before
-   it wires anything.
+8. **A mismatched `nvidia-modeset.ko`** is refused twice over. kldload refuses it first
+   (`MODULE_VERSION(nvidia_modeset, 2)` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 2, 2, 2)`).
+   Then the table's version string carries `NVKMS_KAPI_CBSD_LAYOUT` on both sides, and
+   `nvKmsKapiGetFunctionsTableInternal()` compares it before it writes any member, so a new
+   nvidia-modeset never writes past an old nvidia-drm's table. Bump the tag and both versions
+   whenever a member is appended. The import still checks the member for NULL.
 9. **The RM rule the ownership report relies on** (kernel callers' allocation parameters are used
    in place) is pinned by `tests/prime_import_test.sh` (R2) against the pristine RM source, so a
    source bump that changes it goes red.
@@ -407,13 +425,16 @@ overflow cases are checked before any allocation or wiring (`tests/pageimport_te
 
 ### 7.4 Risks that remain
 
-* **Cache attributes.** The RM is asked for write-back memory (the page-array path accepts nothing
-  else). Pages another driver mapped write-combining on the CPU side are aliased with a cacheable
-  attribute here. arm64 allows it only with care; the 5.2 test is the first evidence.
-* **Mixing module generations.** A new `nvidia-modeset.ko` fills one pointer past the table of an
-  older `nvidia-drm.ko` (the version string cannot tell), and an older modeset module leaves the
-  member NULL (checked, refused with a log line). The modules ship and load together; a layout
-  tag in the handshake would close the first case and is not done.
+* **Cache attributes (latent).** The RM records the pages as cached
+  (`NV_MEMORY_CACHED`, snooped GPU access, the only mode the page-array path accepts) while the
+  exporter may have set write-combining or non-cacheable on them with `pmap_page_set_memattr()`,
+  which rewrites the direct-map alias with cache maintenance. This import creates no new CPU mapping, so
+  there is no live aliasing today. **Any future CPU mapping of imported pages (by NVKMS or the
+  RM) must take the exporter's attribute from the page (`md.pv_memattr`), not
+  `gb10_ram_memattr()`:** the policy would give a cacheable alias of a non-cacheable page, a
+  mismatched-attribute alias on arm64. Do not add such a mapping without that.
+* **Mixing module generations** is refused by kldload (nvidia_modeset version, and nvidia-drm's undefined
+  symbols against an older nvidia.ko without `nv_import_pages`) and by the table's layout tag (7.2, item 8).
 * **Wire counting on hardware.** `vm.stats.vm.v_wire_count` counts pages whose wire count is
   non-zero. A GPU driver's pages are already wired, so the kit's `wire-count-stable` row only
   shows the count did not grow; the exact wire and unwire balance is proven by the userland model
@@ -432,3 +453,94 @@ self-recording rc one-shot (results under `~/work/gb10/logs/prime-import-*`), an
 create, export, import and `ADDFB2` of section 5.2. It never sets a mode and never loads or
 unloads anything on a running system; the regressions of section 5.3 run from the rc script
 with every missing tool recorded as a skip with its reason, never as a pass.
+
+### 7.6 The release path, the exporter's lifetime and the tripwire
+
+**What keeps the exporter's buffer alive.** Every GEM object that imported pages holds a
+reference on the exporter's dma-buf from the import (`gb10_pi_life_take()`) to the very last step of
+the GEM object's free (`gb10_pi_life_drop()`), exported or not. The free order is fixed and
+checked in the source (`tests/prime_import_test.sh`, D4): the RM handle first (the RM's teardown dirties and unwires the pages), then the
+attachment (`drm_prime_gem_destroy()`), then the retained page array, then the dma-buf reference,
+which is the only thing that lets the exporter's page pool reuse the pages. An export (the RM file
+descriptor path) goes through the SGT functions and holds the GEM object for as long as the RM maps
+the pages. `tests/pageimport_test.sh` models an exporter whose pool reuses the pages once nobody
+holds the dma-buf: the exporter closes its handle and fd, and the pool has not reused them while
+the importer's handle exists, nor when the last page is unwired; they are released only by the
+final drop.
+
+**Can an imported page enter a VM object while it is imported?** Yes, and it is legitimate. The
+exporter's own user mapping of its buffer faults pages in through linuxkpi
+(`lkpi_vmf_insert_pfn_prot_locked()`, `sys/compat/linuxkpi/common/src/linux_page.c`): it takes the
+page with `PHYS_TO_VM_PAGE()`, busies it, and if it has no object inserts it into the mapping's
+object and calls `vm_page_valid()` before it unbusies. It never looks at the wire count, so a page
+we wired can gain an object at any time after the import; and a mapping that already faulted a
+page in before the import is why such a page is refused at the conversion. The importer cannot map
+the pages (`__nv_drm_gem_dma_buf_mmap()` refuses an imported buffer, which has no file). Preventing
+the exporter's mapping would mean holding the pages busy for the whole import, which makes the
+exporter's fault retry forever, or failing the exporter's mmap, which is not ours to do. So the
+design does not prevent it; it makes it harmless, in the three orders the test covers
+(`tests/pageimport_test.sh`): faulted in before the import (refused at the conversion, nothing
+wired), during it (between the check and the wire: the busy lock and the second check refuse the
+page and unwind), after the wiring (the page has an object and, because the fault path validates it
+in the same busy hold, is all valid: the release dirties it correctly).
+
+**The second wiring.** Exporting an imported buffer (the SGT path) wires its pages again. By then the
+exporter's mapping may have faulted a page in, so the second wiring accepts a page that has an object
+(it is wired by us and busied while it is wired once more; the descriptor is marked `imported` only once
+the RM has the pages, and a buffer that was never wired by us is exported under the first-wiring rule) and refuses one that went fictitious
+(permanent, `NV_ERR_NOT_SUPPORTED`); a page whose busy lock the exporter holds is a retry
+(`NV_ERR_BUSY_RETRY`), at the first wiring and the second. Only the first wiring requires a page without
+an object.
+
+**The release step (`gb10_pi_os_dirty()`).** The RM's teardown calls it for every page of a
+writable descriptor (the RM's own pinned user memory goes through it too, not only imported pages),
+then unwires the page. The core (`gb10_pi_dirty_page()`) busies the page, waiting for a pager or a
+laundry thread that holds it (about a millisecond, 100 spins of 10 microseconds, never sleeping: the
+teardown may hold locks the sleep check cannot see), and asks at the dirty
+site (`gb10_pi_dirty_action()`): no object means skip (no pager, nothing to write back); an object and
+all valid means `vm_page_dirty()`; **an object that is not all valid is the tripwire**. If, after the spin,
+the busy lock is still held by somebody else, the page is dirtied the way the stock code
+did, without the lock, and counted: a dirty bit is never dropped silently. The spin is per page and bounded at about a millisecond, so a
+long run of pages held busy by somebody else costs up to a millisecond each.
+
+**The tripwires** are two read-only sysctls. The first must read 0 after a run (the boot kit has a
+row for it, `dirty-refused`, which fails when it cannot be read after a passed import); the second
+is reported by the kit as information:
+
+* `hw.nvidia_unlock_dirty_refused`: a page with a VM object that was not all valid at the RM's unpin.
+  It is logged, rate limited, with where to report it and a pointer to this section (no kernel
+  pointer and no physical address: dmesg is readable by unprivileged users), not dirtied (`vm_page_dirty()` would assert on an INVARIANTS kernel and be wrong
+  on any other), and not made a panic. The page is still unwired by the RM's teardown and the
+  exporter's reference is still dropped last, so the pool cannot reuse the page while the RM maps
+  it.
+* `hw.nvidia_unlock_dirty_busy_fallback`: a page dirtied without its busy lock because the lock
+  stayed held through the spin (the stock code's race: an invalidation between the question and the dirty).
+
+Not chosen: leaving the page wired and the exporter's buffer referenced when the tripwire fires.
+It would leak one wired page and one exporter buffer per event, without bound if userland can
+repeat the event, and the RM's teardown hands over only the page array, so the count would be per
+page and not per buffer. Because the only code that puts a wired page into an object (the
+exporter's mapping fault, above) validates the page in the same busy hold, the refused state is
+not reachable from it, and the counter exists to show a mistake in this analysis.
+Preventing the entry itself would mean keeping every imported page busied for the whole
+import, which puts the exporter's thread to sleep in its page fault until the importer lets go
+(a deadlock when it is the same process that must release the import); it is not done.
+
+The core is tested at 100 percent line coverage, with the partly valid object page, the page
+invalidated after the wiring (a truncate), the page the exporter faulted in after the wiring, the page
+with no object, and a busy lock held by a pager for a short and for a long time, each
+with a mutant that fails without the rule. The tests also measure the counters: they stay 0 for a
+page refused at the conversion, a page refused at the wire, and a page the exporter faulted in after the
+wiring; they move only in the tripwire scenarios.
+
+The rc script writes a `running` row and syncs the disk before each step that can panic the machine
+(the import probe, the wire loop, the reverse probe, the regressions), and ends with a `done` row, so a
+panic leaves the row it died in as the last line. `tests/prime-import-testboot/summarize.sh
+<run directory | results.jsonl>` reads a run (usage in its header; exit 0 for a complete run
+without a failure whose import passed, 1 for a failure, 2 for a usage error, 3 for a complete run that
+skipped the import and so tested nothing): a missing `done` row or a trailing `running` row is a failure that names the step.
+`tests/prime_import_kit_test.sh` runs the rc script itself against a fake probe, `sysctl`, `kldstat`
+and `su` and checks the rows for a good probe, a failing probe and no probe (a skip, never a pass).
+The row `wire-count-stable` says only that the wired page count did not grow; it cannot see a single
+leaked wiring of an already wired page, and the sysctl `hw.nvidia_unlock_dirty_refused` must read 0 (the row `dirty-refused`)
+after the run.

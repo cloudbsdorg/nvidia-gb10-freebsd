@@ -89,6 +89,19 @@ describe the first failure.
 In detail: 0 when every step returned, whether with success or an errno;
 2 on a usage error;
 3 when a device cannot be opened.
+.Sh SYSCTL VARIABLES
+After a run, two read-only variables of
+.Xr nvidia 4
+describe the release path of imported buffers (see section 7.6 of
+docs/PRIME-IMPORT.md):
+.Bl -tag -width indent
+.It Va hw.nvidia_unlock_dirty_refused
+Pages with a VM object that were not all valid when the RM unpinned them, and so were not marked dirty.
+Must read 0; a nonzero value is a driver defect and the boot kit fails the run.
+.It Va hw.nvidia_unlock_dirty_busy_fallback
+Pages the RM unpinned while their busy lock stayed held through a short spin; they were marked dirty without it.
+Reported by the boot kit as information.
+.El
 .Sh EXAMPLES
 Import a buffer from the first card on the second one, for two sizes:
 .Bd -literal -offset indent
