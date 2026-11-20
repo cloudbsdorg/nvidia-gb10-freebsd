@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "prime-import-probe/1",
+  "title": "prime_import_probe result row",
+  "description": "One row per dumb-buffer size from prime_import_probe(8). Version 1; an additive change is a minor version, a breaking one a new major kept alongside.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "src", "dst", "width", "height", "bytes", "create", "map", "fill", "export", "import", "addfb", "stage", "errno", "error"],
+  "properties": {
+    "schema": { "const": "prime-import-probe/1" },
+    "src": { "type": "string", "description": "DRM node the buffer is created on" },
+    "dst": { "type": "string", "description": "DRM node the buffer is imported on" },
+    "width": { "type": "integer", "minimum": 1 },
+    "height": { "type": "integer", "minimum": 1 },
+    "bytes": { "type": "integer", "minimum": 0, "description": "size of the dumb buffer; 0 when it was not created" },
+    "create": { "type": "integer", "description": "0 on success, -1 on failure or not tried" },
+    "map": { "type": "integer" },
+    "fill": { "type": "integer" },
+    "export": { "type": "integer" },
+    "import": { "type": "integer" },
+    "addfb": { "type": "integer" },
+    "stage": { "enum": ["none", "create", "map", "export", "import", "addfb", "done"], "description": "the step the probe stopped in, done when every step ran" },
+    "errno": { "type": "integer", "minimum": 0, "description": "errno of the first failing step, 0 when none" },
+    "error": { "type": "string", "description": "strerror of errno, empty when none" }
+  }
+}

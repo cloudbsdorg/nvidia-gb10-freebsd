@@ -1,0 +1,344 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * gb10_pageimport.h - the pure core of the cross-GPU buffer import (PRIME)
+ * on FreeBSD (Track #2228, docs/PRIME-IMPORT.md).
+ *
+ * A buffer rendered on another GPU reaches nvidia-drm as a scatter list of
+ * pages.  The RM's page-array memory descriptor wants an array of vm_page
+ * pointers, one per page, wired for as long as the RM holds them.  This
+ * header holds the three pieces of logic between the two, with no kernel
+ * includes and no globals, so tests/pageimport_test.sh compiles it into a
+ * userland program with a fake VM and checks it:
+ *
+ *   1. conversion: gb10_pi_count() and gb10_pi_fill() turn scatter-list
+ *      entries into the page array, and refuse anything that is not a whole
+ *      number of managed RAM pages (partial pages, a buffer whose pages are
+ *      video memory, an empty or oversized buffer, entries that disagree
+ *      with the size).  An entry may span several pages; each is expanded.
+ *   2. wiring: gb10_pi_wire() wires every page or none of them, and
+ *      gb10_pi_unwire() undoes exactly that.  The RM's own teardown of a
+ *      page-array descriptor (os_unlock_user_pages) unwires one reference
+ *      per page of the array it was given, so what is handed over must have
+ *      been wired once per page here.
+ *   3. the SGT entry points of the OS layer, for a buffer that is already
+ *      imported and is exported again: gb10_pi_import(),
+ *      gb10_pi_register(), gb10_pi_unregister() and gb10_pi_release() are
+ *      the logic of nv_dma_import_sgt(), nv_register_sgt(),
+ *      nv_unregister_sgt() and nv_dma_release_sgt().  The "sg_table" the RM
+ *      passes through is a struct gb10_pi_desc.
+ *
+ * The kernel side supplies the ops table: page_at() (the page `index` pages
+ * after `first`, or NULL when it is not a managed RAM page: kernel side
+ * vm_phys_paddr_to_vm_page() and not fictitious), wire() (vm_page_wire()),
+ * unwire() (vm_page_unwire(m, PQ_ACTIVE), the call os_unlock_user_pages()
+ * makes) and phys() (VM_PAGE_TO_PHYS()).
+ *
+ * Types are unsigned long long and void pointers on purpose: this file must
+ * compile in nvidia.ko, in nvidia-drm.ko (linuxkpi) and in a userland test.
+ */
+
+#ifndef _GB10_PAGEIMPORT_H_
+#define	_GB10_PAGEIMPORT_H_
+
+#ifndef NULL
+#define	NULL	((void *)0)
+#endif
+
+/*
+ * The KAPI takes the size as "limit", an NvU32 equal to size - 1, so a
+ * buffer of more than 4 GiB cannot be described to it.
+ */
+#define	GB10_PI_MAX_BYTES	(1ULL << 32)
+
+/*
+ * The OS layer entry points nvidia-drm.ko takes from nvidia.ko (exported by
+ * EXPORT_SYMS).  Declared here once, with the types nvidia.ko defines them
+ * with (NV_STATUS is NvU32, NvU64 is unsigned long long), so that a change
+ * to either side fails to compile in nvidia.ko instead of at run time.
+ */
+unsigned int nv_import_pages(void **pages, unsigned long long count, void **array);
+void nv_unimport_pages(void *array, unsigned long long count);
+
+/* Not a kernel address (the top bits are clear), so it cannot be a pointer. */
+#define	GB10_PI_DESC_MAGIC	0x0000474231305049ULL	/* "IP01BG" */
+
+enum gb10_pi_rc {
+	GB10_PI_OK = 0,
+	GB10_PI_BAD_ARG,		/* a NULL or an impossible argument */
+	GB10_PI_EMPTY,			/* no entries or no bytes */
+	GB10_PI_NOT_WHOLE_PAGES,	/* an entry or the size is not whole pages */
+	GB10_PI_NOT_RAM,		/* a page is missing or not managed RAM */
+	GB10_PI_SIZE_MISMATCH,		/* the entries do not add up to the size */
+	GB10_PI_OVERSIZE,		/* more than the KAPI's 32-bit limit */
+	GB10_PI_CAPACITY,		/* the output array is too small */
+	GB10_PI_WIRE_FAILED,		/* a page could not be wired */
+	GB10_PI_NOMEM			/* an allocation failed (the caller's) */
+};
+
+/*
+ * One scatter-list entry: its first page, the offset into it, the length.
+ * (Not named "page": linuxkpi defines page as vm_page.)
+ */
+struct gb10_pi_seg {
+	void			*first;
+	unsigned long long	offset;
+	unsigned long long	length;
+};
+
+struct gb10_pi_ops {
+	void *(*page_at)(void *ctx, void *first, unsigned long long index);
+	int (*wire)(void *ctx, void *page);		/* 0 on success */
+	void (*unwire)(void *ctx, void *page);
+	unsigned long long (*phys)(void *ctx, void *page);
+};
+
+/*
+ * What the OS layer receives in place of a Linux struct sg_table: the
+ * pages of a buffer that nvidia-drm imported, and the owner that keeps the
+ * buffer alive while the RM holds it (hold/release take and drop a
+ * reference on the GEM object, as the Linux driver does).
+ */
+struct gb10_pi_desc {
+	unsigned long long	magic;		/* GB10_PI_DESC_MAGIC */
+	unsigned long long	count;		/* number of pages */
+	void			**pages;
+	void			*ctx;		/* the owner, given to hold/release */
+	void			(*hold)(void *ctx);
+	void			(*release)(void *ctx);
+};
+
+static inline const char *
+gb10_pi_str(int rc)
+{
+	switch (rc) {
+	case GB10_PI_OK:		return "ok";
+	case GB10_PI_BAD_ARG:		return "bad argument";
+	case GB10_PI_EMPTY:		return "empty buffer";
+	case GB10_PI_NOT_WHOLE_PAGES:	return "not a whole number of pages";
+	case GB10_PI_NOT_RAM:		return "a page is not system memory this driver can wire (video memory or a VM-object page)";
+	case GB10_PI_SIZE_MISMATCH:	return "scatter list does not match the buffer size";
+	case GB10_PI_OVERSIZE:		return "buffer larger than 4 GiB";
+	case GB10_PI_CAPACITY:		return "output array too small";
+	case GB10_PI_WIRE_FAILED:	return "a page could not be wired";
+	case GB10_PI_NOMEM:		return "out of memory";
+	default:			return "unknown error";
+	}
+}
+
+/* Only an allocation failure is ENOMEM; every refusal is EINVAL. */
+static inline int
+gb10_pi_is_nomem(int rc)
+{
+	return (rc == GB10_PI_NOMEM);
+}
+
+/*
+ * gb10_pi_count - check a scatter list and count its pages.
+ *
+ * Every entry must start at offset 0, be a non-zero whole number of pages
+ * long and have a page; the lengths must add up to `size`, which must be a
+ * non-zero whole number of pages of at most GB10_PI_MAX_BYTES.  No entry is
+ * added to the running total before it is known to fit, so the sum cannot
+ * wrap.  Whether the pages are RAM is gb10_pi_fill()'s question.
+ *
+ * Time O(nsegs), space O(1).
+ */
+static inline int
+gb10_pi_count(const struct gb10_pi_seg *segs, unsigned long long nsegs,
+    unsigned long long size, unsigned long long page_size,
+    unsigned long long *npages)
+{
+	unsigned long long i, sum;
+
+	if (segs == NULL || npages == NULL || page_size == 0 ||
+	    (page_size & (page_size - 1)) != 0)
+		return (GB10_PI_BAD_ARG);
+	if (nsegs == 0 || size == 0)
+		return (GB10_PI_EMPTY);
+	if (size > GB10_PI_MAX_BYTES)
+		return (GB10_PI_OVERSIZE);
+	if ((size & (page_size - 1)) != 0)
+		return (GB10_PI_NOT_WHOLE_PAGES);
+	sum = 0;
+	for (i = 0; i < nsegs; i++) {
+		if (segs[i].first == NULL)
+			return (GB10_PI_NOT_RAM);
+		if (segs[i].offset != 0)
+			return (GB10_PI_NOT_WHOLE_PAGES);
+		if (segs[i].length == 0 ||
+		    (segs[i].length & (page_size - 1)) != 0)
+			return (GB10_PI_NOT_WHOLE_PAGES);
+		if (segs[i].length > size - sum)
+			return (GB10_PI_SIZE_MISMATCH);
+		sum += segs[i].length;
+	}
+	if (sum != size)
+		return (GB10_PI_SIZE_MISMATCH);
+	*npages = size / page_size;
+	return (GB10_PI_OK);
+}
+
+/*
+ * gb10_pi_fill - expand a scatter list into `pages` (capacity `cap`
+ * entries) and return the number of pages in *npages.  Every page must be
+ * managed RAM (ops->page_at() returns NULL for one that is not).  Nothing
+ * is written when the list is refused by gb10_pi_count() or does not fit.
+ * No page is wired here.
+ *
+ * Time O(npages), space O(1).
+ */
+/* #lizard forgives -- the list, its size, the page size, the ops and the output array are one call's inputs */
+static inline int
+gb10_pi_fill(const struct gb10_pi_seg *segs, unsigned long long nsegs,
+    unsigned long long size, unsigned long long page_size,
+    const struct gb10_pi_ops *ops, void *ctx, void **pages,
+    unsigned long long cap, unsigned long long *npages)
+{
+	unsigned long long i, j, n, total;
+	void *pg;
+	int rc;
+
+	if (ops == NULL || ops->page_at == NULL || pages == NULL ||
+	    npages == NULL)
+		return (GB10_PI_BAD_ARG);
+	rc = gb10_pi_count(segs, nsegs, size, page_size, &total);
+	if (rc != GB10_PI_OK)
+		return (rc);
+	if (cap < total)
+		return (GB10_PI_CAPACITY);
+	n = 0;
+	for (i = 0; i < nsegs; i++) {
+		for (j = 0; j < segs[i].length / page_size; j++) {
+			pg = ops->page_at(ctx, segs[i].first, j);
+			if (pg == NULL)
+				return (GB10_PI_NOT_RAM);
+			pages[n++] = pg;
+		}
+	}
+	*npages = n;
+	return (GB10_PI_OK);
+}
+
+/*
+ * gb10_pi_wire - wire every page of the array, once each, or none: a page
+ * that cannot be wired makes the pages wired before it be unwired again.
+ */
+static inline int
+gb10_pi_wire(void **pages, unsigned long long n, const struct gb10_pi_ops *ops,
+    void *ctx)
+{
+	unsigned long long i;
+
+	if (pages == NULL || n == 0 || ops == NULL || ops->wire == NULL ||
+	    ops->unwire == NULL)
+		return (GB10_PI_BAD_ARG);
+	for (i = 0; i < n; i++) {
+		if (ops->wire(ctx, pages[i]) != 0) {
+			while (i-- > 0)
+				ops->unwire(ctx, pages[i]);
+			return (GB10_PI_WIRE_FAILED);
+		}
+	}
+	return (GB10_PI_OK);
+}
+
+/* gb10_pi_unwire - drop the one wiring gb10_pi_wire() took on each page. */
+static inline void
+gb10_pi_unwire(void **pages, unsigned long long n,
+    const struct gb10_pi_ops *ops, void *ctx)
+{
+	unsigned long long k;
+
+	if (pages == NULL || ops == NULL || ops->unwire == NULL)
+		return;
+	for (k = 0; k < n; k++)
+		ops->unwire(ctx, pages[k]);
+}
+
+/* gb10_pi_desc_ok - is `d` one of ours, with pages and an owner? */
+static inline int
+gb10_pi_desc_ok(const struct gb10_pi_desc *d)
+{
+	if (d == NULL)
+		return (0);
+	if (d->magic != GB10_PI_DESC_MAGIC)
+		return (0);
+	if (d->pages == NULL || d->count == 0)
+		return (0);
+	if (d->hold == NULL || d->release == NULL)
+		return (0);
+	return (1);
+}
+
+/* gb10_pi_desc_valid - is `d` a descriptor of exactly `page_count` pages? */
+static inline int
+gb10_pi_desc_valid(const struct gb10_pi_desc *d, unsigned long long page_count)
+{
+	if (!gb10_pi_desc_ok(d))
+		return (0);
+	if (d->count != page_count)
+		return (0);
+	return (1);
+}
+
+/*
+ * gb10_pi_import - nv_dma_import_sgt(): take the owner's reference.  The
+ * RM calls gb10_pi_release() exactly once afterwards, whatever happens to
+ * the registration, so a refused descriptor takes nothing.  The page count
+ * is the RM's to check, at the registration.
+ */
+static inline int
+gb10_pi_import(const struct gb10_pi_desc *d)
+{
+	if (!gb10_pi_desc_ok(d))
+		return (GB10_PI_BAD_ARG);
+	d->hold(d->ctx);
+	return (GB10_PI_OK);
+}
+
+/* gb10_pi_release - nv_dma_release_sgt(): drop the owner's reference. */
+static inline void
+gb10_pi_release(const struct gb10_pi_desc *d)
+{
+	if (d == NULL || d->magic != GB10_PI_DESC_MAGIC || d->release == NULL)
+		return;
+	d->release(d->ctx);
+}
+
+/*
+ * gb10_pi_register - nv_register_sgt(): wire the pages and fill the RM's
+ * physical-address array, one entry per page.  All or nothing: a refused
+ * descriptor or a failed wire leaves `phys_out` untouched and nothing wired.
+ */
+static inline int
+gb10_pi_register(const struct gb10_pi_desc *d, unsigned long long page_count,
+    unsigned long long *phys_out, const struct gb10_pi_ops *ops, void *ctx)
+{
+	unsigned long long i;
+	int rc;
+
+	if (phys_out == NULL || ops == NULL || ops->phys == NULL)
+		return (GB10_PI_BAD_ARG);
+	if (!gb10_pi_desc_valid(d, page_count))
+		return (GB10_PI_BAD_ARG);
+	rc = gb10_pi_wire(d->pages, d->count, ops, ctx);
+	if (rc != GB10_PI_OK)
+		return (rc);
+	for (i = 0; i < d->count; i++)
+		phys_out[i] = ops->phys(ctx, d->pages[i]);
+	return (GB10_PI_OK);
+}
+
+/* gb10_pi_unregister - nv_unregister_sgt(): undo gb10_pi_register(). */
+static inline void
+gb10_pi_unregister(const struct gb10_pi_desc *d, const struct gb10_pi_ops *ops,
+    void *ctx)
+{
+	if (d == NULL || d->magic != GB10_PI_DESC_MAGIC)
+		return;
+	gb10_pi_unwire(d->pages, d->count, ops, ctx);
+}
+
+#endif /* _GB10_PAGEIMPORT_H_ */
