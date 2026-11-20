@@ -11,7 +11,8 @@
 #   (a) build:           build-linux-cuda.sh builds shim.so and the four
 #                        programs into a scratch BUILDDIR
 #   (b) without the shim: test_shim_abstract run through the Linux ld.so
-#                        FAILS (the Linuxulator has no abstract sockets)
+#                        records the kernel's answer (fails on a Linuxulator
+#                        without abstract sockets, passes on one with them)
 #   (c) with the shim:   the same program PASSES under run-linux-cuda.sh
 #
 # Part 2 needs nothing but sh; run-linux-cuda.sh runs against a fake work
@@ -23,6 +24,7 @@
 #   (h) the SHIM_* environment is set, with a short SHIM_ABSTRACT_DIR
 #   (i) HOME and GB10_WORK unset: exit 2 and "HOME" said
 #   (j) both scripts parse (sh -n) and are executable
+#   (k) SHIM_ABSTRACT=off makes the shim stand aside: the same answer as (b)
 #
 # Run: sh tests/linux_cuda_test.sh
 
@@ -98,14 +100,19 @@ if [ -d "$LINUXROOT/rl9/usr/lib64" ] &&
 
 	R=$LINUXROOT/rl9
 	LDSO=$R/usr/lib/ld-linux-aarch64.so.1
-	# (b) without the shim the abstract bind fails.
-	rc=0
+	# (b) without the shim: the kernel's own answer.  A Linuxulator without
+	# abstract sockets fails the bind; one with them (cloudbsd-src
+	# agent/2101-linux-abstract-sockets) passes.  Either is recorded; (k)
+	# checks that SHIM_ABSTRACT=off gives the same answer.
+	brc=0
 	"$LDSO" --library-path "$R/usr/lib64:$R/usr/lib" "$RB/test_shim_abstract" \
-	    > "$TESTROOT/b.out" 2> "$TESTROOT/b.err" || rc=$?
-	if [ "$rc" -ne 0 ] && ! grep -q PASS "$TESTROOT/b.out"; then
-		ok "(b) without the shim: test_shim_abstract fails (rc=$rc)"
+	    > "$TESTROOT/b.out" 2> "$TESTROOT/b.err" || brc=$?
+	if [ "$brc" -eq 0 ] && grep -q '^PASS' "$TESTROOT/b.out"; then
+		ok "(b) without the shim: the kernel has abstract sockets (test passes)"
+	elif [ "$brc" -ne 0 ] && ! grep -q PASS "$TESTROOT/b.out"; then
+		ok "(b) without the shim: the kernel has no abstract sockets (rc=$brc)"
 	else
-		fail "(b) without the shim: rc=$rc out=$(cat "$TESTROOT/b.out")"
+		fail "(b) without the shim: inconsistent rc=$brc out=$(cat "$TESTROOT/b.out")"
 	fi
 
 	# (c) with the shim it passes.
@@ -118,8 +125,21 @@ if [ -d "$LINUXROOT/rl9/usr/lib64" ] &&
 	else
 		fail "(c) with the shim: rc=$rc out=$(cat "$TESTROOT/c.out") err=$(cat "$TESTROOT/c.err")"
 	fi
+
+	# (k) SHIM_ABSTRACT=off: the shim stands aside for abstract names, so the
+	# result is the kernel's, the same as (b).
+	krc=0
+	SHIM_ABSTRACT=off LINUXROOT=$LINUXROOT BUILDDIR=$RB GB10_WORK=$WORK \
+	    SHIM_ABSTRACT_DIR=$SADIR sh "$RUN" test_shim_abstract \
+	    > "$TESTROOT/k.out" 2> "$TESTROOT/k.err" || krc=$?
+	if { [ "$brc" -eq 0 ] && [ "$krc" -eq 0 ]; } ||
+	    { [ "$brc" -ne 0 ] && [ "$krc" -ne 0 ]; }; then
+		ok "(k) SHIM_ABSTRACT=off gives the kernel's answer (rc=$krc, as (b))"
+	else
+		fail "(k) SHIM_ABSTRACT=off: rc=$krc but without the shim rc=$brc"
+	fi
 else
-	skip "(a)(b)(c) no Linux sysroot at $LINUXROOT/rl9 (or no clang): build and shim tests"
+	skip "(a)(b)(c)(k) no Linux sysroot at $LINUXROOT/rl9 (or no clang): build and shim tests"
 fi
 
 # ---- Part 2: run-linux-cuda.sh against a stub loader ----

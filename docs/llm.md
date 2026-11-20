@@ -146,7 +146,7 @@ namespace; it hands the name bytes to unix(4) as a path and `bind` fails with EN
 abstract name to a file in `SHIM_ABSTRACT_DIR` and maps it back in `getsockname`,
 `getpeername`, `accept` and `recvmsg`. It also redirects `/proc/sys/vm/mmap_min_addr` and
 `/proc/self/task/*/comm`, which `linprocfs` lacks, and `SHIM_IOCTL_LOG=1` logs ioctl
-argument blocks. Keep `SHIM_ABSTRACT_DIR` short: `sun_path` holds 103 bytes on FreeBSD.
+argument blocks. Keep `SHIM_ABSTRACT_DIR` short: `sun_path` holds 103 bytes on FreeBSD. `SHIM_ABSTRACT=off` turns the emulation off and leaves abstract names to the kernel, for testing a Linuxulator that maps them itself (cloudbsd-src branch `agent/2101-linux-abstract-sockets`).
 
 The real fix is abstract-namespace sockets in the Linuxulator itself (cloudbsd-src, in
 progress). The shim goes away when that lands.

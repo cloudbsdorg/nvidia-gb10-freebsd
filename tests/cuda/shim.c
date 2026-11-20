@@ -79,6 +79,15 @@ int pthread_setname_np(pthread_t t, const char *n) { (void)t; (void)n; fprintf(s
 #define SHIM_SUN_PATH_MAX 108	/* Linux's sizeof(sun_path) */
 #define SHIM_MAX_PATH_LEN  103	/* longest path we can carry in sun_path */
 
+/* SHIM_ABSTRACT=off: do not emulate abstract sockets. */
+static int
+abstract_off(void)
+{
+	const char *e = getenv("SHIM_ABSTRACT");
+
+	return (e != NULL && strcmp(e, "off") == 0);
+}
+
 /* The name of the directory holding the mapped sockets. */
 static const char *
 abstract_dir(void)
@@ -206,6 +215,13 @@ abstract_name(const struct sockaddr *sa, socklen_t len,
 	if (sa == NULL || len < off + 1)
 		return (0);
 	if (sa->sa_family != AF_UNIX)
+		return (0);
+	/*
+	 * SHIM_ABSTRACT=off leaves abstract names to the kernel: the test for
+	 * a Linuxulator that maps them itself (Track #2101) keeps the /proc
+	 * redirects but must not have this emulation in front of it.
+	 */
+	if (abstract_off())
 		return (0);
 	un = (const struct sockaddr_un *)(const void *)sa;
 	if (un->sun_path[0] != '\0')
