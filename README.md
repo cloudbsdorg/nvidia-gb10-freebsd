@@ -350,11 +350,15 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
-| `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs |
-| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
+| `src/nvidia-drm-render/` | `nvidia-drm-render.h`, the render uAPI of nvidia-drm: layouts and ioctl numbers for the kernel work packages and the Mesa `nvdrm` backend; MIT |
+| `man/` | `nvidia_drm_render(4)`, the manual page of that interface |
+| `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
+| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 
 ## Licence
 
 Our scripts, patches and sources are BSD-3-Clause (see [`LICENSE`](LICENSE)). NVIDIA's code,
 fetched at build time, keeps NVIDIA's licences: MIT for open-gpu-kernel-modules, NVIDIA's own
-licence for the FreeBSD driver package and the firmware.
+licence for the FreeBSD driver package and the firmware. `src/nvidia-drm-render/nvidia-drm-render.h`
+is MIT, because its layouts follow Mesa's MIT nouveau uAPI header and it is meant to be included by
+NVIDIA's MIT nvidia-drm sources and by Mesa. Provenance: [`PROVENANCE.md`](PROVENANCE.md).
