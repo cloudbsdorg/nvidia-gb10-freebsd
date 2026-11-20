@@ -55,7 +55,7 @@ int main(int argc, char **argv)
 	CK(cuDeviceGetName(name, sizeof(name), dev)); printf("name: %s\n", name);
 	static const struct { int id; const char *n; } at[] = {
 	    {75, "cc_major"}, {76, "cc_minor"}, {16, "sm_count"}, {13, "clock_khz"}, {36, "mem_clock_khz"},
-	    {37, "bus_width"}, {1, "max_threads_block"}, {8, "smem_per_block"}, {39, "l2_bytes"}, {83, "managed_mem"}, {89, "concurrent_managed"} };
+	    {37, "bus_width"}, {1, "max_threads_block"}, {8, "smem_per_block"}, {38, "l2_bytes"}, {39, "max_threads_per_sm"}, {83, "managed_mem"}, {89, "concurrent_managed"} };
 	for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {
 		int v = -1; CUresult r = cuDeviceGetAttribute(&v, at[i].id, dev);
 		printf("attr %-20s = %d (rc=%d)\n", at[i].n, v, r);
