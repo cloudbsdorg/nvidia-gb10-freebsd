@@ -34,11 +34,10 @@
  uma_zone_t nvidia_stack_t_zone;
  static nvidia_stack_t *__nvidia_init_sp = NULL;
  
-@@ -134,6 +153,18 @@
-     nv = sc->nv_state;
+@@ -135,6 +154,18 @@
  
      nvidia_modeset_suspend(nv->gpu_id);
-+
+ 
 +    /*
 +     * UVM first (uvm-spec 02 section 5): it may veto the sleep with
 +     * NV_ERR_NOT_SUPPORTED while a VA space exists; RM's standby runs
@@ -50,9 +49,10 @@
 +        NV_UMA_ZONE_FREE_STACK(sp);
 +        return EBUSY;
 +    }
- 
++
      status = rm_power_management(sp, nv, NV_PM_ACTION_STANDBY);
  
+     nvidia_pci_save_config_space(sp, dev);
 @@ -166,6 +197,8 @@
  
      if (status == NV_OK)
@@ -99,10 +99,15 @@
  
          /* We're not executing in an HW ISR context */
          rm_isr_bh(sp, nv);
-@@ -458,6 +505,50 @@
-             break;
-         }
- 
+@@ -453,8 +500,52 @@
+                     status = EINVAL;
+                     break;
+                 }
++            }
++
++            break;
++        }
++
 +        case NV_ESC_NUMA_INFO:
 +        {
 +            /*
@@ -136,20 +141,17 @@
 +            if (size != sizeof(nv_ioctl_numa_info_t)) {
 +                status = EINVAL;
 +                break;
-+            }
-+
+             }
+ 
 +            memset(api, 0, size);
 +            api->nid = -1;    /* NV0000_CTRL_NO_NUMA_NODE */
 +            api->status = NV_IOCTL_NUMA_STATUS_DISABLED;
 +            api->use_auto_online = 0;
 +            api->offline_addresses.numEntries = 0;
 +            status = 0;
-+            break;
-+        }
-+
-         default:
-             status = ((rm_ioctl(sp, nv, &nvffp->nvfp, nr,
-                             args, size) == NV_OK) ? 0 : EINVAL);
+             break;
+         }
+ 
 @@ -736,6 +827,15 @@
              sc->nv_state = (void *)&nvidia_ctl_state;
  
@@ -174,11 +176,10 @@
  
              uma_zdestroy(nvidia_stack_t_zone);
  
-@@ -1104,6 +1205,31 @@
- {
+@@ -1105,6 +1206,31 @@
      smp_rendezvous(NULL, wbinvd_action_func, NULL, NULL);
      wbinvd_action_func(NULL);
-+}
+ }
 +#elif defined(__aarch64__)
 +/*
 + * arm64 has no pmap_invalidate_cache(), and there is no safe
@@ -203,9 +204,10 @@
 +static void flush_cpu_cache(void)
 +{
 +    dsb(sy);
- }
++}
  #else
  static void flush_cpu_cache(void)
+ {
 @@ -1118,6 +1244,7 @@
      NvU32 caching
  )
@@ -389,12 +391,38 @@
  
      status = NV_OK;
  
-@@ -2213,23 +2490,14 @@
-     if (snapshot_cb)
-         snapshot_cb(nvidia_ctl_state.profiler_context);
+@@ -1647,11 +1924,22 @@
+ )
+ {
+     struct nvidia_softc *sc = nv->os_state;
+-#if defined(NVCPU_X86_64)
+-    sc->dma_mask = (((uint64_t)1) << phys_addr_bits) - 1;
+-#else
+-    sc->dma_mask = 0xffffffffULL;
+-#endif
++    /*
++     * RM passes the width of the physical address the GPU can drive
++     * (osDmaSetAddressSize(), osinit.c; 47 bits or more on Blackwell).
++     * Honour it on every architecture: a fixed 32-bit mask on arm64
++     * made nv_set_dma_address_size() report a 4 GB window to nvidia-uvm
++     * (nv-uvm-interface.c dma_addressable_limit) and confined every RM
++     * system-memory allocation below 4 GB on a host whose RAM is far
++     * above it.  64 or more bits mean the whole space; zero or fewer
++     * than 32 bits keep the attach-time 32-bit default.
++     */
++    if (phys_addr_bits >= 64)
++        sc->dma_mask = ~(uint64_t)0;
++    else if (phys_addr_bits < 32)
++        sc->dma_mask = 0xffffffffULL;
++    else
++        sc->dma_mask = (((uint64_t)1) << phys_addr_bits) - 1;
+ }
+ 
+ nv_state_t* NV_API_CALL nv_get_adapter_state(
+@@ -2215,21 +2503,12 @@
      mtx_unlock(&snapshot_timer_mutex);
--}
--
+ }
+ 
 -void NV_API_CALL
 -nv_schedule_uvm_isr(nv_state_t *nv)
 -{
@@ -404,8 +432,8 @@
 -nv_schedule_uvm_drain_p2p(NvU8 *pUuid)
 -{
 -    return NV_ERR_NOT_SUPPORTED;
- }
- 
+-}
+-
 -void NV_API_CALL
 -nv_schedule_uvm_resume_p2p(NvU8 *pUuid)
 -{
@@ -419,7 +447,7 @@
  
  NvBool NV_API_CALL nv_is_rm_firmware_active(
      nv_state_t *nv
-@@ -2414,6 +2682,12 @@
+@@ -2414,6 +2693,12 @@
              return;
          }
      }
@@ -432,7 +460,7 @@
      {
          const sc_softc_t *sc = sc_get_softc(0, SC_KERNEL_CONSOLE);
  
-@@ -2440,6 +2714,7 @@
+@@ -2440,6 +2725,7 @@
              }
          }
      }
