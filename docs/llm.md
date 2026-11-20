@@ -115,5 +115,52 @@ llama.cpp `ubuntu-vulkan-arm64` build already runs that way from a private Ubunt
 started through that root's dynamic linker with `GGML_BACKEND_PATH` pointing at its
 `libggml-vulkan.so`. It finds no device without the ICD; with the ICD it stops at the same
 `SIGBUS` as `vulkaninfo`. The fix (3414fd7) waits for a test boot; after it, the plan is the
-same `llama-bench` run (pp512, tg128) for a comparison with the RX 7600. CUDA needs
-`nvidia-uvm`, which does not exist for FreeBSD yet (see the README's status table).
+same `llama-bench` run (pp512, tg128) for a comparison with the RX 7600. For CUDA see the
+next section.
+
+## CUDA (Linux libcuda through the Linuxulator)
+
+NVIDIA's Linux `libcuda.so.1` (580.178.04) runs under the Linuxulator against `nvidia.ko`
+and the clean-room `nvidia-uvm.ko` (uvm-bsd).
+
+What works today, checked on the RTX 5060 Ti:
+
+- `cuInit`, `cuDriverGetVersion`, device count, name, memory size and attributes
+- context creation, allocation, host-to-device and device-to-host copies
+  (`cuda_smoke`: a 64 MiB pattern round trip verifies)
+- a PTX kernel through the driver's JIT: `cuModuleLoadDataEx`, `cuLaunchKernel`
+  (`cuda_vecadd`: vectorAdd over 1 Mi elements, 0 mismatches)
+
+Managed memory is not covered yet: no test allocates it.
+
+Requirements:
+
+- `nvidia-uvm.ko` (uvm-bsd) loaded, so `/dev/nvidia-uvm` exists.
+- A Rocky 9 root in `$GB10_WORK/linuxroot/rl9` and NVIDIA's user libraries in
+  `$GB10_WORK/linuxroot/nv` (`LINUXROOT` names another place).
+
+The abstract-socket gap: `libcuda` binds an AF_UNIX socket in the Linux abstract namespace
+(a `sun_path` that starts with a NUL byte). The Linuxulator does not implement that
+namespace; it hands the name bytes to unix(4) as a path and `bind` fails with ENOENT, so
+`cuInit` returned error 304. `tests/cuda/shim.c` is an `LD_PRELOAD` shim that maps each
+abstract name to a file in `SHIM_ABSTRACT_DIR` and maps it back in `getsockname`,
+`getpeername`, `accept` and `recvmsg`. It also redirects `/proc/sys/vm/mmap_min_addr` and
+`/proc/self/task/*/comm`, which `linprocfs` lacks, and `SHIM_IOCTL_LOG=1` logs ioctl
+argument blocks. Keep `SHIM_ABSTRACT_DIR` short: `sun_path` holds 103 bytes on FreeBSD.
+
+The real fix is abstract-namespace sockets in the Linuxulator itself (cloudbsd-src, in
+progress). The shim goes away when that lands.
+
+Commands:
+
+```sh
+sh scripts/build-linux-cuda.sh                 # builds into $GB10_WORK/build/linux-cuda
+sh scripts/run-linux-cuda.sh cuinit            # cuInit and the device count
+sh scripts/run-linux-cuda.sh cuda_smoke        # context, 64 MiB alloc, copies, verify
+sh scripts/run-linux-cuda.sh cuda_vecadd       # deviceQuery-lite and a PTX vectorAdd
+sh tests/linux_cuda_test.sh                    # no GPU: build and the shim test
+```
+
+`run-linux-cuda.sh` starts the program through the Rocky `ld-linux-aarch64.so.1` with
+`--preload shim.so` and `--library-path` over `nv`, `rl9/usr/lib64` and `rl9/usr/lib`, and
+sets `SHIM_MMAP_MIN_ADDR`, `SHIM_COMM` and `SHIM_ABSTRACT_DIR` (default `~/.cache/sa`).

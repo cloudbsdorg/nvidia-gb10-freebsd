@@ -22,7 +22,7 @@ small source files of our own, and the tests.
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works: `vulkaninfo` lists the card; llama.cpp runs on it ([`docs/llm.md`](docs/llm.md)) |
-| CUDA | not yet: `nvidia.ko` exports the UVM interface (below) and the clean-room `nvidia-uvm.ko` (uvm-bsd) loads and passes its ioctl tests; `cuInit` still fails |
+| CUDA | not yet: `nvidia.ko` exports the UVM interface (below) and the clean-room `nvidia-uvm.ko` (uvm-bsd) loads and passes its ioctl tests; with the shim of [`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator) Linux `libcuda` runs cuInit, context, copies and a PTX kernel |
 
 Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with a GeForce RTX
 5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs.
@@ -93,6 +93,7 @@ sh scripts/build-rmcore.sh --core=nvidia-modeset   # NVIDIA's open modeset core,
 sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "build: OK" and its sha256
 DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
 sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
+sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
 ```
 
 `build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
@@ -382,6 +383,7 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs |
+| `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 
 ## Licence
