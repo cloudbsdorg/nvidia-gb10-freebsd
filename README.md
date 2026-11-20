@@ -11,37 +11,56 @@ for open-gpu-kernel-modules). This repository holds the build scripts, our patch
 code (`patches/`, unified diffs, so they carry the changed lines and their context), a few
 small source files of our own, and the tests.
 
-## What works
+## What works (status 2026-11-20)
 
 | | Status |
 |---|---|
-| `nvidia.ko` loads and attaches to the GPU | works |
-| GSP firmware module (`nvidia_gsp_ga10x_fw.ko`), GSP boots | works |
+| `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
-| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: 1920x1080 colour bars on `/dev/dri/card1` |
+| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on `/dev/dri/card1`; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | fix committed (3414fd7), waits for test boot 6 |
-| CUDA | does not work yet: needs `nvidia-uvm` (clean-room module in progress) |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below) |
+| CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below |
+| Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
+| Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
+| Accelerated native rendering (Mesa NVK over a render interface in `nvidia-drm`) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
 
 Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with a GeForce RTX
-5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs.
+5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs, amd64.
 
-The display and dumb-buffer results are from test boot 5 (2026-11-19): `nvidia-drm` at
-8f16409, a 1920x1080 colour-bar buffer on `/dev/dri/card1` read back with 0 bad samples.
+**CUDA prerequisites.** `libcuda` needs `/dev/nvidia-uvm`, which NVIDIA does not ship for
+FreeBSD. It comes from the clean-room module
+[uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (tested at commit 256297e). It also needs
+Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
+UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
-Vulkan reached the driver on 2026-11-19 and then died with `SIGBUS` on its first load from a
-GPU register page; the cause and fix are under [Memory attributes on arm64](#memory-attributes-on-arm64).
-The fixed `nvidia.ko` has not been booted yet.
+**Numbers.** Measured with llama.cpp b12531 (`llama-bench`, defaults otherwise), in tokens per
+second. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
+speed over 128 tokens.
 
-CUDA (NVIDIA's Linux `libcuda` under the Linuxulator) stops in `cuInit` for two reasons. The
-first is two `/proc` files that FreeBSD's `linprocfs` does not have yet:
-`/proc/sys/vm/mmap_min_addr` and `/proc/<pid>/task/<tid>/comm`. They are added in the
-FreeBSD kernel tree, not here. The second, and the real blocker, is that `libcuda` needs
-`/dev/nvidia-uvm` and its ioctl interface. NVIDIA's FreeBSD driver has no UVM module
-(`nvidia_subr.c`: "UVM with faulting is currently not supported in this platform"). The only
-implementation is NVIDIA's Linux `nvidia-uvm`, which this project does not use, so a
-clean-room module is being written.
+| Backend | Model | pp512 | tg128 |
+|---|---|---|---|
+| Vulkan | Llama-3.2-3B-Instruct Q4_K_M | 7047 | 159 |
+| CUDA | Llama-3.2-3B-Instruct Q4_K_M | 8728 | 166.2 |
+| CUDA | 7B Q4_0 | 3706 | 97.8 |
+
+CUDA also ran a 30-minute stress test (5992 CUDA processes, 220 of them killed with `kill -9`)
+with no failure.
+
+**Packages.** No package is published yet. The CloudBSD ports overlay accepts the 580 driver
+set on aarch64 (`x11/nvidia-kmod-580`, `graphics/nvidia-drm-612-kmod-580`,
+`x11/nvidia-driver-580`, `x11/linux-nvidia-libs-580`) and builds `graphics/nvidia-uvm-kmod`
+from uvm-bsd. The Jenkins builds come next.
+
+**Native desktop.** The goal is a native FreeBSD accelerated desktop on the NVIDIA card (Mesa NVK
+and Zink), with Linux binaries running on top of the same drivers. NVK already builds on FreeBSD
+arm64 and finds the GB206 through a test shim. It cannot drive the card until the render
+interface exists in the kernel.
+
+The earlier fixes (the arm64 BAR mapping and the `SIGBUS` on the first Vulkan register read)
+are under [Memory attributes on arm64](#memory-attributes-on-arm64). The CUDA start-up fix is
+in uvm-bsd's README, under "Status".
 
 Example, on that machine:
 
