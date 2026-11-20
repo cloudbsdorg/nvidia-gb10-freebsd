@@ -88,13 +88,23 @@ cat > "$TESTROOT/pi_test.c" <<'EOF'
 struct fake_page {
 	int wired;		/* wire count */
 	int ram;		/* managed RAM */
-	int wire_fail_after;	/* -1: never; else fail the wire call when count hits it */
+	int object;		/* belongs to a VM object (the noobj pages of a GPU driver: 0) */
+	int valid;		/* 0 none, 1 partly, 2 all valid (vm_page_all_valid()); a noobj page: 0 */
+	int fict;		/* PG_FICTITIOUS */
+	int busy;		/* exclusively busied by the importer */
+	int busy_other;		/* somebody else holds the busy lock */
+	int dirty;
 	unsigned long long pa;
 };
 
 static struct fake_page vm[NFAKE];
 static int wire_calls, unwire_calls, bad_unwire, fail_wire_at = -1;
 static int held;
+static int unwire_saw_refs, dmabuf_refs, pool_reused;
+/* the fake VM's KASSERTs: a wire of a page that is not busied by us or has an
+ * object, a dirty of a page that is not valid, a busy left behind */
+static int kassert_wire, kassert_dirty, alias_first, refused_dirty;
+static int busy_wait_ok, fallback_dirty, d_dirty_unbusied;
 
 static void
 vm_reset(void)
@@ -107,6 +117,9 @@ vm_reset(void)
 		vm[i].pa = 0x80000000ULL + (unsigned long long)i * PS;
 	}
 	wire_calls = unwire_calls = bad_unwire = held = 0;
+	kassert_wire = kassert_dirty = alias_first = refused_dirty = 0;
+	busy_wait_ok = 1;
+	fallback_dirty = d_dirty_unbusied = 0;
 	fail_wire_at = -1;
 }
 
@@ -118,9 +131,43 @@ f_page_at(void *ctx, void *first, unsigned long long index)
 
 	(void)ctx;
 	at = (unsigned long long)base + index;
-	if (base < 0 || at >= NFAKE || !vm[at].ram)
+	if (base < 0 || at >= NFAKE)
 		return NULL;
+	if (!gb10_pi_page_claimable(vm[at].ram, vm[at].fict, vm[at].object != 0))
+		return NULL;
+	if (alias_first && index == 0)	/* the physical lookup finds another page */
+		return &vm[at + 1];
 	return &vm[at];
+}
+
+static int
+f_try_busy(void *ctx, void *page)
+{
+	struct fake_page *p = page;
+
+	(void)ctx;
+	if (p->busy_other || p->busy)
+		return -1;
+	p->busy = 1;
+	return 0;
+}
+
+static void
+f_unbusy(void *ctx, void *page)
+{
+	(void)ctx;
+	((struct fake_page *)page)->busy = 0;
+	((struct fake_page *)page)->busy_other = 0;	/* an unbusy of a page we do not hold would drop somebody else's lock */
+}
+
+/* what the OS layer re-checks under the busy lock */
+static int
+f_claimable(void *ctx, void *page)
+{
+	struct fake_page *p = page;
+
+	(void)ctx;
+	return gb10_pi_page_claimable(p->ram, p->fict, p->object != 0);
 }
 
 static int
@@ -134,6 +181,8 @@ f_wire(void *ctx, void *page)
 		return -1;
 	}
 	wire_calls++;
+	if (!p->busy || (p->object && p->wired == 0))	/* vm_page_wire() asserts the object lock for a page with an object that is not busied by us or already wired */
+		kassert_wire++;
 	p->wired++;
 	return 0;
 }
@@ -145,6 +194,7 @@ f_unwire(void *ctx, void *page)
 
 	(void)ctx;
 	unwire_calls++;
+	unwire_saw_refs = dmabuf_refs;
 	if (p->wired <= 0)
 		bad_unwire++;
 	else
@@ -158,9 +208,106 @@ f_phys(void *ctx, void *page)
 	return ((struct fake_page *)page)->pa;
 }
 
+/* the second wiring of an imported buffer (the SGT export): wired by us, may have an object by now */
+static int
+f_rewire_ok(void *ctx, void *page)
+{
+	struct fake_page *p = page;
+
+	(void)ctx;
+	return p->ram && !p->fict && p->wired > 0;
+}
+
 static const struct gb10_pi_ops ops = {
 	.page_at = f_page_at, .wire = f_wire, .unwire = f_unwire, .phys = f_phys,
+	.try_busy = f_try_busy, .unbusy = f_unbusy, .claimable = f_claimable,
+	.rewire_ok = f_rewire_ok,
 };
+
+/*
+ * The model of the dirty step of os_unlock_user_pages(): the REAL core
+ * (gb10_pi_dirty_page) driven by fake VM operations.  A writable teardown
+ * busies the page, spins for a pager that holds it (the fake lets go
+ * within the wait or not at all), asks at the dirty site (object and all valid), dirties, unbusies,
+ * then unwires.  vm_page_dirty() asserts that the page is all valid
+ * (INVARIANTS) and a noobj page of another driver never is; a wired page
+ * can also be invalidated after the wiring (a truncate), so a check at wire
+ * time is not enough.
+ */
+static int d_try_busy(void *c, void *pg) { return f_try_busy(c, pg); }
+static int d_wait_busy(void *c, void *pg)
+{
+	struct fake_page *p = pg;
+
+	(void)c;
+	if (!busy_wait_ok)
+		return -1;
+	p->busy_other = 0;	/* the pager let go */
+	p->busy = 1;
+	return 0;
+}
+static void d_unbusy(void *c, void *pg) { f_unbusy(c, pg); }
+static int d_has_object(void *c, void *pg) { (void)c; return ((struct fake_page *)pg)->object != 0; }
+static int d_all_valid(void *c, void *pg) { (void)c; return ((struct fake_page *)pg)->valid == 2; }
+static void d_dirty(void *c, void *pg)
+{
+	struct fake_page *p = pg;
+
+	(void)c;
+	if (p->valid != 2)
+		kassert_dirty++;
+	if (!p->busy)
+		d_dirty_unbusied++;
+	p->dirty = 1;
+}
+static const struct gb10_pi_dirty_ops dirty_ops = {
+	.try_busy = d_try_busy, .wait_busy = d_wait_busy, .unbusy = d_unbusy,
+	.has_object = d_has_object, .all_valid = d_all_valid, .dirty = d_dirty,
+};
+
+static void
+f_rm_unlock_pages(void **pages, unsigned long long n, int write)
+{
+	unsigned long long i;
+	struct fake_page *p;
+
+	for (i = 0; i < n; i++) {
+		p = pages[i];
+		if (write) {
+			switch (gb10_pi_dirty_page(p, &dirty_ops, NULL)) {
+			case GB10_PI_DIRTY_REFUSE:
+				refused_dirty++;
+				break;
+			case GB10_PI_DIRTY_FALLBACK:
+				fallback_dirty++;
+				break;
+			default:
+				break;
+			}
+		}
+		f_unwire(NULL, p);
+	}
+}
+
+static int
+none_busy(void)
+{
+	int i;
+
+	for (i = 0; i < NFAKE; i++)
+		if (vm[i].busy)
+			return 0;
+	return 1;
+}
+
+/* a fake exporter whose buffer is freed with the last GEM reference. */
+static int gem_refs, src_freed;
+static void g_hold(void *ctx) { (void)ctx; gem_refs++; }
+static void g_release(void *ctx) { (void)ctx; if (--gem_refs == 0) src_freed = 1; }
+
+/* the exporter's dma-buf: when nobody holds it, its page pool may reuse the pages */
+static void x_hold(void *ctx) { (void)ctx; dmabuf_refs++; }
+static void x_release(void *ctx) { (void)ctx; if (--dmabuf_refs == 0) pool_reused = 1; }
 
 static void f_hold(void *ctx) { (void)ctx; held++; }
 static void f_release(void *ctx) { (void)ctx; held--; }
@@ -302,9 +449,263 @@ main(void)
 	rc = gb10_pi_wire(pages, n, &ops, NULL);
 	check("wire 6 pages: rc", rc, GB10_PI_OK);
 	check("wire 6 pages: every page wired once", vm[8].wired == 1 && vm[13].wired == 1 && vm[14].wired == 0, 1);
-	for (i = 0; (unsigned long long)i < n; i++)	/* the model of os_unlock_user_pages */
-		f_unwire(NULL, pages[i]);
+	f_rm_unlock_pages(pages, n, 1);	/* the RM's teardown: the descriptor is writable */
 	check("after the RM's teardown every page is unwired", all_unwired(), 1);
+	check("the teardown of noobj (never valid) pages dirties none: no panic", kassert_dirty == 0 && vm[8].dirty == 0, 1);
+	check("a wire of a plain noobj page is done under its busy lock", kassert_wire == 0 && none_busy(), 1);
+
+	/* the dirty guard is "has an object and is all valid", tested at the dirty site */
+	vm_reset();
+	s[0] = seg(8, 0, PS);
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	vm[8].object = 1;	/* the exporter's mapping faulted the page in after the import */
+	vm[8].valid = 2;
+	vm[8].wired = 1;
+	f_rm_unlock_pages(pages, n, 1);
+	check("a page with an object that is all valid is dirtied by a writable teardown", vm[8].dirty, 1);
+	vm_reset();
+	vm[8].object = 1;
+	vm[8].valid = 1;	/* partially valid object page: vm_page_dirty() would assert */
+	vm[8].wired = 1;
+	pages[0] = &vm[8];
+	f_rm_unlock_pages(pages, 1, 1);
+	check("a partially valid object page is not dirtied", vm[8].dirty == 0 && kassert_dirty == 0, 1);
+	check("... the refusal is reported, not silent", refused_dirty, 1);
+	vm_reset();
+	s[0] = seg(8, 0, 3 * PS);
+	gb10_pi_fill(s, 1, 3 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	vm[9].valid = 2;	/* valid when it was wired ... */
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[9].valid = 0;	/* ... invalidated later (vm_object_page_remove on a truncate) */
+	f_rm_unlock_pages(pages, n, 1);
+	check("a page invalidated after the wiring is not dirtied", kassert_dirty == 0 && vm[9].dirty == 0, 1);
+	check("... and it is still unwired", all_unwired(), 1);
+	vm_reset();
+	s[0] = seg(8, 0, PS);
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	vm[8].valid = 2;
+	gb10_pi_wire(pages, n, &ops, NULL);
+	f_rm_unlock_pages(pages, n, 0);
+	check("a read-only teardown dirties nothing", vm[8].dirty == 0 && kassert_dirty == 0, 1);
+	check("the dirty rule: no object, skipped", gb10_pi_dirty_action(0, 1), GB10_PI_DIRTY_SKIP);
+	check("the dirty rule: no object and not valid, skipped", gb10_pi_dirty_action(0, 0), GB10_PI_DIRTY_SKIP);
+	check("the dirty rule: object but not all valid, refused", gb10_pi_dirty_action(1, 0), GB10_PI_DIRTY_REFUSE);
+	check("the dirty rule: an all-valid object page is dirtied", gb10_pi_dirty_action(1, 1), GB10_PI_DIRTY_DO);
+
+	/* the busy lock held by a pager at the release: wait for it, never skip the dirty bit */
+	vm_reset();
+	s[0] = seg(8, 0, PS);
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[8].object = 1;
+	vm[8].valid = 2;
+	vm[8].busy_other = 1;		/* the laundry thread has it busied for a write */
+	f_rm_unlock_pages(pages, n, 1);
+	check("a pager holds the page at the release and lets go within the wait: dirtied after the wait", vm[8].dirty == 1 && d_dirty_unbusied == 0, 1);
+	check("... nothing is counted and nothing is left busied", fallback_dirty == 0 && refused_dirty == 0 && none_busy(), 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[8].object = 1;
+	vm[8].valid = 2;
+	vm[8].busy_other = 1;
+	busy_wait_ok = 0;			/* the pager holds the lock through the whole wait */
+	f_rm_unlock_pages(pages, n, 1);
+	check("a pager holds the page through the whole wait: dirtied the stock way", vm[8].dirty, 1);
+	check("... and counted, never silent", fallback_dirty, 1);
+	check("... nothing of the pager's busy lock is dropped", vm[8].busy_other, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[8].object = 1;
+	vm[8].valid = 1;		/* partly valid */
+	vm[8].busy_other = 1;
+	busy_wait_ok = 0;
+	f_rm_unlock_pages(pages, n, 1);
+	check("busy through the wait, not all valid: refused, not dirtied", vm[8].dirty == 0 && refused_dirty == 1 && fallback_dirty == 0 && kassert_dirty == 0, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[8].busy_other = 1;
+	busy_wait_ok = 0;
+	f_rm_unlock_pages(pages, n, 1);
+	check("busy through the wait, no object: skipped without a count", vm[8].dirty == 0 && refused_dirty == 0 && fallback_dirty == 0, 1);
+	check("the dirty step with missing operations is refused (and so counted), never skipped silently", gb10_pi_dirty_page(&vm[8], NULL, NULL), GB10_PI_DIRTY_REFUSE);
+
+	/* import, then the exporter's own mmap faults the wired page into an object, then close */
+	vm_reset();
+	s[0] = seg(8, 0, 2 * PS);
+	gb10_pi_fill(s, 1, 2 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	vm[8].object = 1;	/* the fault path inserts the page ... */
+	vm[8].valid = 2;	/* ... and validates it (a user-mmap fault does) */
+	vm[9].object = 1;	/* a second page inserted but never validated */
+	f_rm_unlock_pages(pages, n, 1);
+	check("a page the exporter faulted in (object, valid) is dirtied correctly", vm[8].dirty, 1);
+	check("... and it did not move the tripwire counters (only the invalid page counts)", refused_dirty + fallback_dirty, 1);
+	check("a page inserted but not valid is not dirtied", vm[9].dirty, 0);
+	check("... and the refusal is reported once", refused_dirty, 1);
+	check("... no assertion fires and both pages are unwired", kassert_dirty == 0 && all_unwired(), 1);
+
+	/*
+	 * The exporter's mapping, in the three orders: a page it faulted in BEFORE
+	 * the import is refused at the conversion; one it faults in DURING the
+	 * import (after the check, before the wire) is refused at the wire; one it
+	 * faults in AFTER the wiring (valid) is dirtied correctly at the release,
+	 * see below.
+	 */
+	vm_reset();
+	vm[10].object = 1;	/* mapped and touched before the import */
+	vm[10].valid = 2;
+	s[0] = seg(8, 0, 6 * PS);
+	check("a page the exporter faulted in before the import: the conversion refuses the buffer",
+	    gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n), GB10_PI_NOT_RAM);
+	check("... and nothing was wired", wire_calls, 0);
+	check("... the tripwire counters did not move (refused at the conversion)", refused_dirty + fallback_dirty, 0);
+
+	/* no check-then-wire race */
+	vm_reset();
+	s[0] = seg(8, 0, 6 * PS);
+	gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n);	/* all checked: no object */
+	vm[11].object = 1;			/* a first-touch fault inserts page 11 into an object now */
+	vm[11].valid = 1;
+	rc = gb10_pi_wire(pages, n, &ops, NULL);
+	check("a page that gained an object after the check: the wire is refused", rc, GB10_PI_PAGE_CHANGED);
+	check("... without a wire of that page (no VM_OBJECT assertion)", kassert_wire, 0);
+	check("... and the pages before it are unwired again", all_unwired(), 1);
+	check("... and nothing is left busied", none_busy(), 1);
+	check("... the tripwire counters did not move (refused at the wire)", refused_dirty + fallback_dirty, 0);
+	vm_reset();
+	gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	vm[10].busy_other = 1;			/* a fault holds the page busy: do not wait, refuse */
+	rc = gb10_pi_wire(pages, n, &ops, NULL);
+	check("a page busied by somebody else: the wire is refused as busy (retry)", rc, GB10_PI_PAGE_BUSY);
+	check("... pages before it are unwired again", all_unwired() && wire_calls == 2, 1);
+	check("... and the busy lock of a refused page is not ours to drop", none_busy() && vm[10].busy_other == 1, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	vm[9].fict = 1;				/* became fictitious: refused the same way */
+	check("a page that became fictitious is refused at the wire", gb10_pi_wire(pages, n, &ops, NULL), GB10_PI_PAGE_CHANGED);
+	vm_reset();
+	gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	check("a wire without the busy and recheck ops is refused", gb10_pi_wire(pages, n, &(struct gb10_pi_ops){ .wire = f_wire, .unwire = f_unwire }, NULL), GB10_PI_BAD_ARG);
+	check("... and wires nothing", wire_calls, 0);
+
+	/* the single import check both modules call */
+	check("claimable: plain managed RAM", gb10_pi_page_claimable(1, 0, 0), 1);
+	check("claimable: not managed RAM (video memory)", gb10_pi_page_claimable(0, 0, 0), 0);
+	check("claimable: fictitious", gb10_pi_page_claimable(1, 1, 0), 0);
+	check("claimable: has a VM object", gb10_pi_page_claimable(1, 0, 1), 0);
+
+	/*
+	 * The export of an imported buffer wires it again, after the exporter's
+	 * mapping may have faulted pages in: a wired page with an object is
+	 * fine the second time, a fictitious one or one held busy is not.
+	 */
+	vm_reset();
+	s[0] = seg(8, 0, 4 * PS);
+	gb10_pi_fill(s, 1, 4 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	memset(&d, 0, sizeof(d));
+	d.magic = GB10_PI_DESC_MAGIC; d.count = n; d.pages = pages; d.hold = x_hold; d.release = x_release;
+	d.imported = 1;			/* the page-array import wired them for the RM */
+	gb10_pi_wire(pages, n, &ops, NULL);	/* the first wiring, by the page-array import */
+	vm[9].object = 1;			/* the exporter's mapping faulted page 9 in, validated */
+	vm[9].valid = 2;
+	for (i = 0; i < NFAKE; i++)
+		phys[i] = 0xdeadbeefULL;
+	rc = gb10_pi_register(&d, 4, phys, &ops, NULL);
+	check("the export of a buffer a page of which the exporter faulted in: registers (not a retry, not a refusal)", rc, GB10_PI_OK);
+	check("... every page wired twice and no assertion fired", vm[8].wired == 2 && vm[9].wired == 2 && kassert_wire == 0, 1);
+	d.imported = 0;		/* a buffer that was never wired by us: the first-wiring rule applies, the object page is refused */
+	rc = gb10_pi_register(&d, 4, phys, &ops, NULL);
+	check("a buffer that was never imported is exported under the first-wiring rule: a page with an object is refused", rc, GB10_PI_PAGE_CHANGED);
+	d.imported = 1;
+	vm[10].fict = 1;
+	rc = gb10_pi_register(&d, 4, phys, &ops, NULL);
+	check("a page that went fictitious is refused for good (PAGE_CHANGED, not a retry)", rc, GB10_PI_PAGE_CHANGED);
+	vm[10].fict = 0;
+	vm[11].busy_other = 1;
+	rc = gb10_pi_register(&d, 4, phys, &ops, NULL);
+	check("a page the exporter holds busy: a retry (PAGE_BUSY)", rc, GB10_PI_PAGE_BUSY);
+
+	/* the first page of an entry must be the page the entry names */
+	vm_reset();
+	alias_first = 1;
+	s[0] = seg(8, 0, 2 * PS);
+	check("a physical lookup that finds another page for index 0 is refused",
+	    gb10_pi_fill(s, 1, 2 * PS, PS, &ops, NULL, pages, NFAKE, &n), GB10_PI_NOT_RAM);
+
+	/* the page-count cap of nv_import_pages(), at the exact boundary */
+	check("array cap: 1 page ok", gb10_pi_array_ok(1, PS), 1);
+	check("array cap: exactly 4 GiB of 4 KiB pages ok", gb10_pi_array_ok(1ULL << 20, PS), 1);
+	check("array cap: one page more is refused", gb10_pi_array_ok((1ULL << 20) + 1, PS), 0);
+	check("array cap: 0 pages refused", gb10_pi_array_ok(0, PS), 0);
+	check("array cap: 16 KiB pages, exactly 4 GiB ok", gb10_pi_array_ok(1ULL << 18, 16384), 1);
+	check("array cap: 16 KiB pages, one more refused", gb10_pi_array_ok((1ULL << 18) + 1, 16384), 0);
+	check("array cap: page size 0 refused", gb10_pi_array_ok(1, 0), 0);
+
+	/* the exporter buffer lives as long as the RM maps it (SGT export) */
+	vm_reset();
+	gem_refs = 1;			/* the GEM handle's reference */
+	src_freed = 0;
+	s[0] = seg(8, 0, 6 * PS);
+	gb10_pi_fill(s, 1, 6 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	memset(&d, 0, sizeof(d));
+	d.magic = GB10_PI_DESC_MAGIC;
+	d.count = n;
+	d.pages = pages;
+	d.hold = g_hold;
+	d.release = g_release;
+	gb10_pi_import(&d);
+	gb10_pi_register(&d, 6, phys, &ops, NULL);	/* the RM maps the export */
+	g_release(NULL);		/* the process closes the GEM handle ... */
+	check("handle and fd closed, source freed: the RM's reference keeps the buffer", src_freed, 0);
+	check("... the pages are still wired for the RM", vm[8].wired == 1 && vm[13].wired == 1, 1);
+	gb10_pi_unregister(&d, &ops, NULL);
+	gb10_pi_release(&d);		/* the RM FD closes */
+	check("the RM FD closed: the buffer is released exactly then", src_freed, 1);
+	check("... and the pages are unwired", all_unwired(), 1);
+
+	/*
+	 * The whole lifetime of the import: B imports A's buffer and never
+	 * re-exports it.  A closes its GEM handle and fd.  The exporter's pool
+	 * reuses the pages once nobody holds the dma-buf.  B's GPU must not
+	 * see a reused page while B's handle exists.
+	 */
+	vm_reset();
+	dmabuf_refs = 1;		/* A's own reference (its handle, its fd) */
+	pool_reused = 0;
+	{
+		struct gb10_pi_life life;
+
+		memset(&life, 0, sizeof(life));
+		life.hold = x_hold;
+		life.release = x_release;
+		s[0] = seg(8, 0, 4 * PS);
+		gb10_pi_fill(s, 1, 4 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+		gb10_pi_wire(pages, n, &ops, NULL);	/* the page-array import: the RM has them */
+		gb10_pi_life_take(&life);		/* taken at import, whatever happens to the handle later */
+		check("the import holds the exporter's dma-buf", dmabuf_refs, 2);
+		gb10_pi_life_take(&life);
+		check("a second take does not hold twice", dmabuf_refs, 2);
+		x_release(NULL);	/* A closes its handle and its fd, and frees the source */
+		check("A is gone: the exporter's pool has not reused the pages", pool_reused, 0);
+		/* B's handle is freed: the RM handle first (unlock), then the reference */
+		unwire_saw_refs = -1;
+		f_rm_unlock_pages(pages, n, 1);
+		check("the last page is unwired while the exporter's dma-buf is still held", unwire_saw_refs > 0, 1);
+		check("the RM handle is gone: pages unwired", all_unwired(), 1);
+		check("... the exporter has not reused them before B lets go", pool_reused, 0);
+		gb10_pi_life_drop(&life);
+		check("B's handle freed: now the exporter may reuse the pages", pool_reused, 1);
+		gb10_pi_life_drop(&life);
+		check("a second drop releases nothing more", dmabuf_refs, 0);
+		gb10_pi_life_drop(NULL);
+		gb10_pi_life_take(NULL);
+		memset(&life, 0, sizeof(life));
+		gb10_pi_life_take(&life);
+		check("a life without hold ops takes nothing and does not crash", life.held, 0);
+	}
 
 	vm_reset();
 	fail_wire_at = 3;
@@ -422,6 +823,38 @@ main(void)
 	check("import of NULL is refused", gb10_pi_import(NULL) != GB10_PI_OK, 1);
 	check("release of NULL does nothing", (gb10_pi_release(NULL), held), 0);
 
+	/* argument guards (coverage: every line of the header runs) */
+	{
+		int r, distinct = 1;
+
+		int q;
+
+		for (r = GB10_PI_OK; r < GB10_PI_RC_END; r++) {
+			if (strcmp(gb10_pi_str(r), "unknown error") == 0)
+				distinct = 0;
+			for (q = r + 1; q < GB10_PI_RC_END; q++)
+				if (strcmp(gb10_pi_str(r), gb10_pi_str(q)) == 0)
+					distinct = 0;
+		}
+		check("every result code has its own, different message", distinct, 1);
+	}
+	gb10_pi_unwire(NULL, 1, &ops, NULL);
+	gb10_pi_unregister(NULL, &ops, NULL);
+	check("register with no output array is refused", gb10_pi_register(&d, 6, NULL, &ops, NULL), GB10_PI_BAD_ARG);
+	check("register with no ops is refused", gb10_pi_register(&d, 6, phys, NULL, NULL), GB10_PI_BAD_ARG);
+	{
+		struct gb10_pi_life l;
+		int before = dmabuf_refs;
+
+		memset(&l, 0, sizeof(l));
+		l.hold = x_hold;
+		l.release = x_release;	/* ctx stays NULL */
+		gb10_pi_life_take(&l);
+		check("a life with a NULL ctx holds once", dmabuf_refs, before + 1);
+		gb10_pi_life_drop(&l);
+		check("... and balances on the drop", dmabuf_refs, before);
+	}
+
 	printf("failures: %d\n", failures);
 	return failures ? 1 : 0;
 }
@@ -487,7 +920,61 @@ mutate register-skips-magic    's/d->magic != GB10_PI_DESC_MAGIC)$/0)/'
 mutate import-skips-validation 's/if (!gb10_pi_desc_ok(d))$/if (0)/'
 mutate release-never-called    's/\td->release(d->ctx);/\t;/'
 mutate hold-never-called       's/\td->hold(d->ctx);/\t;/'
-mutate register-wires-nothing  's/rc = gb10_pi_wire(d->pages, d->count, ops, ctx);/rc = GB10_PI_OK;/'
+mutate register-wires-nothing  's/rc = gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0);/rc = GB10_PI_OK;/'
+mutate register-always-first-wire-rule 's/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0)/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, 0)/'
+mutate register-ignores-imported-flag 's/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0)/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, 1)/'
+mutate rewire-ignores-fictitious 's/if (!(rewire ? ops->rewire_ok(ctx, pages\[i\]) :/if (!(rewire ? 1 :/'
+mutate claimable-ignores-object 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !is_fictitious);/'
+mutate claimable-ignores-fictitious 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !has_object);/'
+mutate claimable-ignores-ram   's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (!is_fictitious \&\& !has_object);/'
+mutate dirty-no-wait           's/if (!busied \&\& o->wait_busy != NULL)/if (0)/'
+mutate dirty-fallback-uncounted 's/act = GB10_PI_DIRTY_FALLBACK;/;/'
+mutate dirty-never-unbusies    's/^\t\to->unbusy(ctx, page);$/\t\t;/'
+mutate dirty-needs-busy-to-dirty 's/^\tif (act == GB10_PI_DIRTY_DO)$/\tif (act == GB10_PI_DIRTY_DO \&\& busied)/'
+mutate wire-unbusies-foreign-busy 's/^\t\tif (ops->try_busy(ctx, pages\[i\]) != 0) {$/\t\tif (ops->try_busy(ctx, pages[i]) != 0) { ops->unbusy(ctx, pages[i]);/'
+mutate messages-duplicated     's/"out of memory"/"empty buffer"/'
+mutate life-ignores-held       's/if (l == NULL || l->held || l->hold == NULL/if (l == NULL || l->hold == NULL/'
+mutate wire-no-recheck         's/ops->claimable(ctx, pages\[i\])/1/'
+mutate wire-no-busy            's/if (ops->try_busy(ctx, pages\[i\]) != 0) {/if (0) {/'
+mutate busy-reported-as-changed 's/rc = GB10_PI_PAGE_BUSY;/rc = GB10_PI_PAGE_CHANGED;/'
+mutate wire-leaves-busy        's/^\t\tops->unbusy(ctx, pages\[i\]);$/\t\t;/'
+mutate wire-no-wire-fail-unbusy 's/if (ops->wire(ctx, pages\[i\]) != 0) {/if (0) {/'
+mutate dirty-always            's/return (all_valid ? GB10_PI_DIRTY_DO : GB10_PI_DIRTY_REFUSE);/return (GB10_PI_DIRTY_DO);/'
+mutate dirty-no-object-check   's/if (!has_object)/if (0)/'
+mutate dirty-refuse-is-skip     's/GB10_PI_DIRTY_DO : GB10_PI_DIRTY_REFUSE/GB10_PI_DIRTY_DO : GB10_PI_DIRTY_SKIP/'
+mutate array-cap-plus-one      's/count <= GB10_PI_MAX_BYTES \/ page_size/count <= GB10_PI_MAX_BYTES \/ page_size + 1/'
+mutate array-cap-minus-one     's/count <= GB10_PI_MAX_BYTES \/ page_size/count < GB10_PI_MAX_BYTES \/ page_size/'
+mutate array-accepts-zero      's/page_size == 0 || count == 0/page_size == 0/'
+mutate no-index0-check         's/if (j == 0 \&\& pg != segs\[i\].first)/if (0)/'
+mutate index0-check-every-page 's/if (j == 0 \&\& pg != segs\[i\].first)/if (pg != segs[i].first)/'
+mutate life-never-takes        's/^\tl->hold(l->ctx);$/\t;/'
+mutate life-never-drops        's/^\tl->release(l->ctx);$/\t;/'
+mutate life-drops-twice        's/^\tl->held = 0;$/\t;/'
+
+# --- coverage gate: every line of the pure core must run (testing standard, rule 4) ---
+# Branch coverage is reported, not gated: the argument guards chain several
+# conditions per line and the mutants above are the check for each one.
+if command -v llvm-cov > /dev/null 2>&1 && command -v llvm-profdata > /dev/null 2>&1; then
+	_c="$TESTROOT/cov"
+	mkdir -p "$_c"
+	cp "$HEADER" "$_c/gb10_pageimport.h"
+	if cc -std=c99 -O0 -fprofile-instr-generate -fcoverage-mapping -I"$_c" -o "$_c/prog" "$TESTROOT/pi_test.c" 2> "$_c/cc.err" \
+	    && LLVM_PROFILE_FILE="$_c/p.profraw" "$_c/prog" > /dev/null 2>&1 \
+	    && llvm-profdata merge -o "$_c/p.profdata" "$_c/p.profraw" 2>> "$_c/cc.err" \
+	    && llvm-cov report "$_c/prog" -instr-profile="$_c/p.profdata" "$_c/gb10_pageimport.h" > "$_c/report" 2>> "$_c/cc.err"; then
+		_missed=$(awk '$1 ~ /gb10_pageimport\.h$/ { print $9 }' "$_c/report")
+		if [ "$_missed" = 0 ]; then
+			ok "coverage gate: every line of gb10_pageimport.h runs ($(awk '$1 ~ /gb10_pageimport\.h$/ { print $10 " lines, " $13 " branches" }' "$_c/report"))"
+		else
+			fail "coverage gate: ${_missed:-?} lines of gb10_pageimport.h never run"
+			llvm-cov show "$_c/prog" -instr-profile="$_c/p.profdata" "$_c/gb10_pageimport.h" 2>/dev/null | grep -E '^ +[0-9]+\| +0\|' | head -10
+		fi
+	else
+		fail "coverage gate: the instrumented build or run failed: $(head -3 "$_c/cc.err" | tr '\n' ' ')"
+	fi
+else
+	fail "coverage gate: llvm-cov and llvm-profdata are required"
+fi
 
 echo "pageimport_test: passed $PASSED, failed $FAILED"
 [ "$FAILED" -eq 0 ] && echo "PASS"

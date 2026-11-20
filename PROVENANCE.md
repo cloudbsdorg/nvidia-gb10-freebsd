@@ -62,3 +62,16 @@ clean-room dirty-notes.
 Patches to NVIDIA's files keep NVIDIA's notices (the patch is a diff; the file keeps its header).
 New files of ours carry the repository header (`Copyright (c) 2026 REVYTECH, Inc.`,
 `SPDX-License-Identifier: BSD-3-Clause`).
+
+## Licence of the files
+
+The new FreeBSD-side code of the import (`nv_import_pages()` and its siblings, the busy/wire/unwire
+ops and the guarded dirty step) is BSD-3-Clause in our own file `src/gb10-pageimport/gb10_pageimport_os.c`.
+NVIDIA's `nvidia_subr.c` and `nvidia_os.c` carry NVIDIA's proprietary notice, not MIT. For this feature
+the patches to them add an include and one-line calls into our file (`nvidia_os.c` also carries our earlier
+arm64 memory-attribute patches, which predate this work and use `gb10_memattr.h`). `tests/prime_import_test.sh` fails when
+logic of ours appears in the lines the patch adds to `nvidia_subr.c`.
+The files of the open-gpu-kernel-modules and nvidia-drm that the patches touch are MIT (SPDX or MIT text
+checked). Sources read for this round: FreeBSD's `sys/compat/linuxkpi/common/src/linux_page.c` and
+`sys/vm` (BSD) for the fault path. No Linux kernel source was read, and no GPL header text: the
+`get_dma_buf()` and `dma_buf_put()` calls are the public API names.
