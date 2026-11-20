@@ -93,6 +93,8 @@ bad() { echo "FAIL: $1"; failed=$((failed + 1)); }
 
 DMABUF=nvidia-drm/nvidia-drm-gem-dma-buf.c
 DMABUFH=nvidia-drm/nvidia-drm-gem-dma-buf.h
+LKPI=nvidia-drm/nvidia-drm-freebsd-lkpi.c
+DRV=nvidia-drm/nvidia-drm-drv.c
 SUBR=nvidia/nvidia_subr.c
 OSF=nvidia/gb10_pageimport_os.c
 OSC=nvidia/nvidia_os.c
@@ -109,11 +111,12 @@ done
 make_tree() {
 	_d=$1
 	mkdir -p "$_d/nvidia-drm" "$_d/nvidia" "$_d/ogkm/$(dirname "$OSMEM")" "$_d/ogkm/$(dirname "$KAPIC")"
-	for _f in $DMABUF $DMABUFH $SUBR $OSC $MKF; do cp "$PRISTINE/$_f" "$_d/$_f" || return 1; done
+	for _f in $DMABUF $DMABUFH $LKPI $DRV $SUBR $OSC $MKF; do cp "$PRISTINE/$_f" "$_d/$_f" || return 1; done
 	for _f in $OSMEM $KAPIC; do cp "$OGKMSRC/$_f" "$_d/ogkm/$_f" || return 1; done
 	[ "$2" -eq 1 ] || return 0
 	cp "$repo/src/gb10-pageimport/gb10_pageimport_os.c" "$_d/nvidia/gb10_pageimport_os.c" || return 1
 	for _p in patch-nvidia-drm_nvidia-drm-gem-dma-buf.c patch-nvidia-drm_nvidia-drm-gem-dma-buf.h \
+	    patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c patch-nvidia-drm_nvidia-drm-drv.c patch-nvidia-drm_nvidia-drm-drv_prime.c \
 	    patch-nvidia_nvidia_subr.c patch-nvidia_nvidia_subr_prime.c patch-nvidia_nvidia_os.c patch-nvidia_Makefile; do
 		[ -f "$repo/patches/$_p" ] || { echo "missing patches/$_p"; return 1; }
 		patch -d "$_d" -p0 -E -s -i "$repo/patches/$_p" || { echo "patches/$_p does not apply"; return 1; }
@@ -215,8 +218,10 @@ check_tree() {
 	body "$_t/$OSC" os_unlock_user_pages "$TMPD/ou.c" || { echo "O2: no os_unlock_user_pages"; return; }
 	grep -q 'gb10_pi_os_dirty(' "$TMPD/ou.c" || { echo "O2: os_unlock_user_pages does not use the guarded dirty step (vm_page_dirty panics on a page that is not valid)"; return; }
 	grep -q 'vm_page_dirty(' "$TMPD/ou.c" && { echo "O2: os_unlock_user_pages still calls vm_page_dirty() itself"; return; }
-	body "$_t/$OSF" nv_dirty_wait_busy "$TMPD/d2.c" && grep -q 'vm_page_tryxbusy(' "$TMPD/d2.c" && grep -q 'DELAY(' "$TMPD/d2.c" || { echo "O2: the dirty step does not spin for a busy page"; return; }
+	body "$_t/$OSF" nv_dirty_delay "$TMPD/d2.c" && grep -q 'DELAY(GB10_PI_DIRTY_SPIN_US)' "$TMPD/d2.c" || { echo "O2: the dirty step does not spin for a busy page with DELAY(GB10_PI_DIRTY_SPIN_US)"; return; }
 	grep -q 'vm_page_busy_acquire(\|pause(\|THREAD_CAN_SLEEP\|msleep(' "$TMPD/d2.c" && { echo "O2: the dirty step sleeps in the RM's teardown, which may hold locks the sleep check does not see"; return; }
+	grep -Eq '\.delay[[:space:]]*=[[:space:]]*nv_dirty_delay' "$_t/$OSF" || { echo "O2: the dirty operations do not use nv_dirty_delay"; return; }
+	grep -Eq 'int[[:space:]]+dirty_spin[[:space:]]*=[[:space:]]*GB10_PI_DIRTY_SPIN_BUDGET;' "$TMPD/ou.c" && grep -q 'gb10_pi_os_dirty(user_pages\[i\],[[:space:]]*&dirty_spin)' "$TMPD/ou.c" || { echo "O2: the spin budget is not one per os_unlock_user_pages call, shared by all its pages"; return; }
 	body "$_t/$OSF" nv_dirty_all_valid "$TMPD/d4.c" && grep -q 'vm_page_all_valid(' "$TMPD/d4.c" || { echo "O2: the validity is not asked with vm_page_all_valid"; return; }
 	body "$_t/$OSF" nv_dirty_dirty "$TMPD/d5.c" && grep -q 'vm_page_dirty(' "$TMPD/d5.c" || { echo "O2: the dirty step does not dirty"; return; }
 	body "$_t/$OSF" gb10_pi_os_dirty "$TMPD/od.c" || { echo "O2: no gb10_pi_os_dirty"; return; }
@@ -264,6 +269,25 @@ check_tree() {
 	body "$_t/$DMABUF" nv_drm_gem_prime_import_sg_table "$TMPD/imp2.c" || { echo "D4: no import function"; return; }
 	_mid=$(awk '/__nv_drm_gem_dma_buf_import_pages\(/ { on = 1 } /nv_drm_gem_object_init\(/ { on = 0 } on' "$TMPD/imp2.c")
 	case $_mid in *return*|*nv_drm_free\(nv_dma_buf\)*|*ERR_PTR*|*goto*) echo "D4: the GEM object is not created after every import result, so the exporter reference taken at import could leak"; return ;; esac
+	# the exporter reference is dropped in exactly one place, the free of the GEM object (comments stripped)
+	strip_comments "$_t/$DMABUF" "$TMPD/dmabuf-nocomment.c"
+	[ "$(grep -c 'gb10_pi_life_drop(' "$TMPD/dmabuf-nocomment.c")" -eq 1 ] || { echo "D4: gb10_pi_life_drop( does not appear exactly once in nvidia-drm-gem-dma-buf.c"; return; }
+	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_free "$TMPD/fr2.c" && grep -q 'gb10_pi_life_drop(' "$TMPD/fr2.c" || { echo "D4: the one gb10_pi_life_drop( is not in the free of the GEM object"; return; }
+	# D6: an RM file descriptor that holds an export calls back into this module: no unload, no free of the device while it does
+	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_hold "$TMPD/h6.c" && grep -q 'atomic_inc(&__nv_drm_pi_live_holds)' "$TMPD/h6.c" || { echo "D6: the hold the RM takes on an export is not counted"; return; }
+	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_release "$TMPD/r6.c" && grep -q 'atomic_dec(&__nv_drm_pi_live_holds)' "$TMPD/r6.c" || { echo "D6: the release of an export is not counted down"; return; }
+	before "$TMPD/r6.c" 'nv_drm_gem_object_unreference_unlocked(' 'atomic_dec(' || { echo "D6: the count goes down before the release has finished using this module"; return; }
+	grep -q 'nv_drm_pi_live_holds' "$_t/$DMABUFH" || { echo "D6: nv_drm_pi_live_holds is not declared for the other files of nvidia-drm"; return; }
+	tr '\n' ' ' < "$_t/$LKPI" > "$TMPD/lkpi-flat.c"
+	grep -Eq 'DECLARE_MODULE\(nvidia_drm_pi_guard,' "$TMPD/lkpi-flat.c" || { echo "D6: there is no second module that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
+	body "$_t/$LKPI" nv_drm_pi_guard_handler "$TMPD/g6.c" || { echo "D6: no guard handler"; return; }
+	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*case MOD_UNLOAD:[[:space:]]*if \(nv_drm_pi_live_holds\(\) > 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;' || { echo "D6: the guard does not refuse MOD_QUIESCE and MOD_UNLOAD with EBUSY while an export is held"; return; }
+	grep -q 'printf("nvidia_drm: unload refused' "$TMPD/g6.c" || { echo "D6: a refused unload is silent"; return; }
+	body "$_t/$DRV" nv_drm_remove "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove"; return; }
+	grep -Fq 'if (nv_dev && nv_drm_pi_live_holds() > 0) {' "$TMPD/rm6.c" || { echo "D6: nv_drm_remove does not test the live holds before it frees the device"; return; }
+	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/rm6.c" > "$TMPD/rm6b.c"
+	grep -Eq '^[[:space:]]+return;' "$TMPD/rm6b.c" || { echo "D6: nv_drm_remove falls through to the free when an export is still open"; return; }
+	before "$TMPD/rm6.c" 'if (nv_dev && nv_drm_pi_live_holds() > 0) {' 'nv_drm_dev_destroy(' || { echo "D6: nv_drm_remove frees the device without asking whether an export still holds it"; return; }
 }
 
 # O5, a property of the script and not of a source file.
@@ -337,11 +361,22 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant export-prefers-page-array $DMABUF 's/pTmpMemory ?/nv_dma_buf->base.pMemory ?/'
 	mutant no-life-take $DMABUF 's/gb10_pi_life_take(/gb10_pi_life_takeX(/'
 	mutant life-dropped-first $DMABUF 's/gb10_pi_life_drop(&nv_dma_buf->life);/;/;s/nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/gb10_pi_life_drop(\&nv_dma_buf->life); nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/'
-	mutant dirty-in-nvidia-file $OSC 's/gb10_pi_os_dirty(user_pages\[i\]);/vm_page_dirty(user_pages[i]);/'
+	mutant unload-no-decrement $DMABUF 's/atomic_dec(&__nv_drm_pi_live_holds);/;/'
+	mutant unload-no-increment $DMABUF 's/atomic_inc(&__nv_drm_pi_live_holds);/;/'
+	mutant unload-decrement-first $DMABUF '/^static void __nv_drm_gem_dma_buf_pi_release/,/^}/{s/    nv_drm_gem_object_unreference_unlocked(nv_gem);/    atomic_dec(\&__nv_drm_pi_live_holds); nv_drm_gem_object_unreference_unlocked(nv_gem);/;s/    atomic_dec(&__nv_drm_pi_live_holds);$/    ;/;}'
+	mutant unload-guard-always-ok $LKPI 's/return EBUSY;/return 0;/'
+	mutant unload-guard-silent $LKPI 's/printf("nvidia_drm: unload refused/(void)("nvidia_drm: unload refused/'
+	mutant unload-guard-load-only $LKPI 's/    case MOD_QUIESCE:/    case MOD_LOAD + 1000:/'
+	mutant unload-no-guard-module $LKPI 's/DECLARE_MODULE(nvidia_drm_pi_guard,/DECLARE_MODULE(nvidia_drm_pi_guardX,/'
+	mutant remove-falls-through $DRV '/nv_drm_pi_live_holds() > 0) {/,/^    }/s/^        return;/        ;/'
+	mutant remove-ignores-holds $DRV 's/if (nv_dev \&\& nv_drm_pi_live_holds() > 0) {/if (0) {/'
+	mutant life-dropped-twice $DMABUF 's/    nv_drm_free(nv_dma_buf->pages);/    gb10_pi_life_drop(\&nv_dma_buf->life); nv_drm_free(nv_dma_buf->pages);/'
+	mutant spin-budget-per-page $OSC 's/gb10_pi_os_dirty(user_pages\[i\], \&dirty_spin)/gb10_pi_os_dirty(user_pages[i], NULL)/'
+	mutant dirty-in-nvidia-file $OSC 's/gb10_pi_os_dirty(user_pages\[i\], &dirty_spin);/vm_page_dirty(user_pages[i]);/'
 	mutant busy-try-always-ok $OSF '/^nv_busy_try/,/^}/s/return (vm_page_tryxbusy((vm_page_t)page) != 0 ? 0 : -1);/return (0);/'
 	mutant busy-never-released $OSF '/^nv_busy_release/,/^}/s/vm_page_xunbusy((vm_page_t)page);/(void)page;/'
-	mutant dirty-never-waits $OSF '/^nv_dirty_wait_busy/,/^}/s/DELAY(GB10_PI_BUSY_SPIN_US);/pause("x", 1);/'
-	mutant dirty-prints-address $OSF 's/"but is not all valid: not marked dirty.  This "/"but is not all valid (VM_PAGE_TO_PHYS): not marked dirty.  This "/'
+	mutant dirty-never-waits $OSF '/^nv_dirty_delay/,/^}/s/DELAY(GB10_PI_DIRTY_SPIN_US);/pause("x", 1);/'
+	mutant dirty-prints-address $OSF 's/not marked dirty.  Expected "/not marked dirty (VM_PAGE_TO_PHYS).  Expected "/'
 	mutant dirty-not-core $OSF 's/gb10_pi_dirty_page(/gb10_pi_dirty_pageX(/'
 	mutant no-refuse-count $OSF 's/atomic_add_long(&gb10_pi_dirty_refused, 1);//'
 	mutant no-fallback-count $OSF 's/atomic_add_long(&gb10_pi_dirty_busy_fallback, 1);//'

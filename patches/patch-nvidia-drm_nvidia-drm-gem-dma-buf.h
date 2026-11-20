@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.h.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.h
-@@ -28,10 +28,34 @@
+@@ -28,12 +28,39 @@
  #if defined(NV_DRM_AVAILABLE)
  
  #include "nvidia-drm-gem.h"
@@ -34,4 +34,9 @@
 +    struct gb10_pi_life life;
  };
  
++/* The RM holds on exported imported buffers; nonzero forbids unloading nvidia-drm. */
++int nv_drm_pi_live_holds(void);
++
  extern const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops;
+ 
+ static inline struct nv_drm_gem_dma_buf *to_nv_dma_buf(

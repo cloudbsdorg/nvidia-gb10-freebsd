@@ -289,9 +289,21 @@ disagrees with the size) is refused with `EINVAL` and a line in the log saying w
 object is created without an NVKMS handle, so it cannot become a framebuffer (the guard of #2228
 answers `ADDFB2` with `EINVAL`). Otherwise `nvidia.ko` wires the pages (`nv_import_pages()`) and
 the new KAPI entry `getSystemMemoryHandleFromPageArray()` gives them to the RM as a write-back
-page-array descriptor; the RM's own teardown unwires and frees them. The export ioctl uses the handle when there is one; for a buffer whose handle could not be made
-it retries the same pages through the SGT entry points (`nv_register_sgt()` and friends), which
-used to be stubs that returned success and filled nothing.
+page-array descriptor; the RM's own teardown unwires and frees them. The export ioctl always goes through the SGT entry points (`nv_register_sgt()` and friends, which
+used to be stubs that returned success and filled nothing) when the pages were imported, never
+straight from the page-array handle: that holds no reference, and the SGT path holds the GEM
+object for as long as the RM file descriptor maps the pages. The exporter's dma-buf is held for
+the whole life of the imported GEM object.
+
+A buffer the exporter has already CPU-mapped and touched when it is imported (a page the exporter
+faulted in has a VM object) is refused with a log line. One it maps later is fine: the page gets
+an object after the wiring and is dirtied correctly at the release.
+
+Two read-only sysctls report the release path: `hw.nvidia_unlock_dirty_refused` (pages with a VM
+object that were not all valid when the RM unpinned them; unexpected for an imported buffer) and
+`hw.nvidia_unlock_dirty_busy_fallback` (pages dirtied without their busy lock after a short spin);
+see section 7.6 of `docs/PRIME-IMPORT.md`. `kldunload nvidia_drm` is refused (`EBUSY`) while an RM
+file descriptor still holds an exported imported buffer.
 
 What does not work yet: a buffer in the other GPU's video memory (needs a copy), the dma-buf file
 descriptor interface the NVIDIA userspace driver uses (Track #2307), and scanning an imported

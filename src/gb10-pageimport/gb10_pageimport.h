@@ -80,7 +80,7 @@ void gb10_pi_os_unregister(void *priv_data, void **import_sgt,
     void **import_priv);
 unsigned int gb10_pi_os_import(void *sgt);
 void gb10_pi_os_release(void *sgt);
-void gb10_pi_os_dirty(void *page);
+void gb10_pi_os_dirty(void *page, int *spin_budget);
 
 /* Not a kernel address (the top bits are clear), so it cannot be a pointer. */
 #define	GB10_PI_DESC_MAGIC	0x0000474231305049ULL	/* "IP01BG" */
@@ -240,6 +240,16 @@ gb10_pi_dirty_action(int has_object, int all_valid)
 }
 
 /*
+ * The spin of the dirty step: GB10_PI_DIRTY_SPIN_BUDGET delays of
+ * GB10_PI_DIRTY_SPIN_US microseconds in all, for the whole teardown of one
+ * descriptor (the caller owns the budget and passes it for every page), so
+ * that a descriptor of many busy pages costs about a millisecond and not a
+ * millisecond per page, under the RM API lock.
+ */
+#define	GB10_PI_DIRTY_SPIN_BUDGET	100
+#define	GB10_PI_DIRTY_SPIN_US		10
+
+/*
  * The OS operations of the dirty step.  The step runs for every page of every
  * writable RM user-page descriptor (the RM's own pinned user memory too, not
  * only imported pages), so it must not lose a dirty bit the stock code would
@@ -247,7 +257,7 @@ gb10_pi_dirty_action(int has_object, int all_valid)
  */
 struct gb10_pi_dirty_ops {
 	int (*try_busy)(void *ctx, void *page);		/* 0 on success, no wait */
-	int (*wait_busy)(void *ctx, void *page);	/* a bounded wait: 0 on success, -1 when the lock is still held; NULL for none */
+	void (*delay)(void *ctx, void *page);		/* one short busy-wait (never a sleep); NULL for none */
 	void (*unbusy)(void *ctx, void *page);
 	int (*has_object)(void *ctx, void *page);
 	int (*all_valid)(void *ctx, void *page);
@@ -255,25 +265,33 @@ struct gb10_pi_dirty_ops {
 };
 
 /*
- * gb10_pi_dirty_page - the dirty step for one page: busy it (a bounded
- * wait, ops->wait_busy, which the FreeBSD side spins and never sleeps), ask
- * gb10_pi_dirty_action() at the dirty site, dirty, unbusy.  When the busy
- * lock stays held through the wait, the
+ * gb10_pi_dirty_page - the dirty step for one page: busy it, ask
+ * gb10_pi_dirty_action() at the dirty site, dirty, unbusy.  When the busy lock
+ * is held by somebody else and the page has an object, spin (ops->delay) while
+ * *budget lasts, one unit per delay; a page without an object is never
+ * waited for (the step skips it anyway).  When the lock stays held, the
  * question is asked without it and an all-valid object page is dirtied the way
  * the stock code did, and the result says so (GB10_PI_DIRTY_FALLBACK), so the
  * caller can count it: a dirty bit is never dropped silently.
  */
 static inline int
-gb10_pi_dirty_page(void *page, const struct gb10_pi_dirty_ops *o, void *ctx)
+gb10_pi_dirty_page(void *page, const struct gb10_pi_dirty_ops *o, void *ctx,
+    int *budget)
 {
-	int busied, act;
+	int busied, act, obj;
 
 	if (o == NULL || o->try_busy == NULL || o->unbusy == NULL ||
 	    o->has_object == NULL || o->all_valid == NULL || o->dirty == NULL)
 		return (GB10_PI_DIRTY_REFUSE);	/* never a silent skip: it is counted */
 	busied = (o->try_busy(ctx, page) == 0);
-	if (!busied && o->wait_busy != NULL)
-		busied = (o->wait_busy(ctx, page) == 0);
+	/* only to decide whether waiting is worth it; the dirty decision below asks again, at the dirty site */
+	obj = o->has_object(ctx, page);
+	while (!busied && obj && budget != NULL && *budget > 0 &&
+	    o->delay != NULL) {
+		(*budget)--;
+		o->delay(ctx, page);
+		busied = (o->try_busy(ctx, page) == 0);
+	}
 	act = gb10_pi_dirty_action(o->has_object(ctx, page),
 	    o->all_valid(ctx, page));
 	if (act == GB10_PI_DIRTY_DO)

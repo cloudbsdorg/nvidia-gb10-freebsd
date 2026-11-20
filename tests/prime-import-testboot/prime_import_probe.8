@@ -90,16 +90,20 @@ In detail: 0 when every step returned, whether with success or an errno;
 2 on a usage error;
 3 when a device cannot be opened.
 .Sh SYSCTL VARIABLES
-After a run, two read-only variables of
-.Xr nvidia 4
-describe the release path of imported buffers (see section 7.6 of
+After a run, two read-only variables of the NVIDIA kernel module describe
+the release path of imported buffers (section 7.6 of
 docs/PRIME-IMPORT.md):
 .Bl -tag -width indent
 .It Va hw.nvidia_unlock_dirty_refused
-Pages with a VM object that were not all valid when the RM unpinned them, and so were not marked dirty.
-Must read 0; a nonzero value is a driver defect and the boot kit fails the run.
+Pages with a VM object that were not all valid when the RM unpinned them,
+and so were not marked dirty.
+Not expected for an imported buffer; the boot kit fails the run when it
+is nonzero.
+The RM's own pinned user memory can raise it legitimately, for example
+when a file is truncated while its pages are pinned.
 .It Va hw.nvidia_unlock_dirty_busy_fallback
-Pages the RM unpinned while their busy lock stayed held through a short spin; they were marked dirty without it.
+Pages the RM unpinned while their busy lock stayed held for about a
+millisecond of waiting; they were marked dirty without the lock.
 Reported by the boot kit as information.
 .El
 .Sh EXAMPLES

@@ -104,7 +104,7 @@ static int unwire_saw_refs, dmabuf_refs, pool_reused;
 /* the fake VM's KASSERTs: a wire of a page that is not busied by us or has an
  * object, a dirty of a page that is not valid, a busy left behind */
 static int kassert_wire, kassert_dirty, alias_first, refused_dirty;
-static int busy_wait_ok, fallback_dirty, d_dirty_unbusied;
+static int fallback_dirty, d_dirty_unbusied, delay_calls, pager_lets_go_at, unlock_budget;
 
 static void
 vm_reset(void)
@@ -118,7 +118,9 @@ vm_reset(void)
 	}
 	wire_calls = unwire_calls = bad_unwire = held = 0;
 	kassert_wire = kassert_dirty = alias_first = refused_dirty = 0;
-	busy_wait_ok = 1;
+	delay_calls = 0;
+	pager_lets_go_at = 3;	/* by default a pager holds a page for 3 delays, then lets go */
+	unlock_budget = GB10_PI_DIRTY_SPIN_BUDGET;
 	fallback_dirty = d_dirty_unbusied = 0;
 	fail_wire_at = -1;
 }
@@ -167,7 +169,8 @@ f_claimable(void *ctx, void *page)
 	struct fake_page *p = page;
 
 	(void)ctx;
-	return gb10_pi_page_claimable(p->ram, p->fict, p->object != 0);
+	/* the re-check is only meaningful with the page busied (a check made before the busy proves nothing) */
+	return p->busy == 1 && gb10_pi_page_claimable(p->ram, p->fict, p->object != 0);
 }
 
 static int
@@ -215,7 +218,7 @@ f_rewire_ok(void *ctx, void *page)
 	struct fake_page *p = page;
 
 	(void)ctx;
-	return p->ram && !p->fict && p->wired > 0;
+	return p->busy == 1 && p->ram && !p->fict && p->wired > 0;
 }
 
 static const struct gb10_pi_ops ops = {
@@ -235,16 +238,15 @@ static const struct gb10_pi_ops ops = {
  * time is not enough.
  */
 static int d_try_busy(void *c, void *pg) { return f_try_busy(c, pg); }
-static int d_wait_busy(void *c, void *pg)
+static void d_delay(void *c, void *pg)
 {
-	struct fake_page *p = pg;
+	int i;
 
-	(void)c;
-	if (!busy_wait_ok)
-		return -1;
-	p->busy_other = 0;	/* the pager let go */
-	p->busy = 1;
-	return 0;
+	(void)c; (void)pg;
+	delay_calls++;
+	if (pager_lets_go_at >= 0 && delay_calls == pager_lets_go_at)
+		for (i = 0; i < NFAKE; i++)
+			vm[i].busy_other = 0;	/* the pager let go */
 }
 static void d_unbusy(void *c, void *pg) { f_unbusy(c, pg); }
 static int d_has_object(void *c, void *pg) { (void)c; return ((struct fake_page *)pg)->object != 0; }
@@ -261,7 +263,7 @@ static void d_dirty(void *c, void *pg)
 	p->dirty = 1;
 }
 static const struct gb10_pi_dirty_ops dirty_ops = {
-	.try_busy = d_try_busy, .wait_busy = d_wait_busy, .unbusy = d_unbusy,
+	.try_busy = d_try_busy, .delay = d_delay, .unbusy = d_unbusy,
 	.has_object = d_has_object, .all_valid = d_all_valid, .dirty = d_dirty,
 };
 
@@ -270,11 +272,12 @@ f_rm_unlock_pages(void **pages, unsigned long long n, int write)
 {
 	unsigned long long i;
 	struct fake_page *p;
+	int budget = unlock_budget;	/* one budget for the whole teardown */
 
 	for (i = 0; i < n; i++) {
 		p = pages[i];
 		if (write) {
-			switch (gb10_pi_dirty_page(p, &dirty_ops, NULL)) {
+			switch (gb10_pi_dirty_page(p, &dirty_ops, NULL, &budget)) {
 			case GB10_PI_DIRTY_REFUSE:
 				refused_dirty++;
 				break;
@@ -509,7 +512,7 @@ main(void)
 	vm[8].object = 1;
 	vm[8].valid = 2;
 	vm[8].busy_other = 1;
-	busy_wait_ok = 0;			/* the pager holds the lock through the whole wait */
+	pager_lets_go_at = -1;			/* the pager holds the lock through the whole budget */
 	f_rm_unlock_pages(pages, n, 1);
 	check("a pager holds the page through the whole wait: dirtied the stock way", vm[8].dirty, 1);
 	check("... and counted, never silent", fallback_dirty, 1);
@@ -520,17 +523,77 @@ main(void)
 	vm[8].object = 1;
 	vm[8].valid = 1;		/* partly valid */
 	vm[8].busy_other = 1;
-	busy_wait_ok = 0;
+	pager_lets_go_at = -1;
 	f_rm_unlock_pages(pages, n, 1);
 	check("busy through the wait, not all valid: refused, not dirtied", vm[8].dirty == 0 && refused_dirty == 1 && fallback_dirty == 0 && kassert_dirty == 0, 1);
 	vm_reset();
 	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
 	gb10_pi_wire(pages, n, &ops, NULL);
 	vm[8].busy_other = 1;
-	busy_wait_ok = 0;
+	pager_lets_go_at = -1;
 	f_rm_unlock_pages(pages, n, 1);
 	check("busy through the wait, no object: skipped without a count", vm[8].dirty == 0 && refused_dirty == 0 && fallback_dirty == 0, 1);
-	check("the dirty step with missing operations is refused (and so counted), never skipped silently", gb10_pi_dirty_page(&vm[8], NULL, NULL), GB10_PI_DIRTY_REFUSE);
+	check("the dirty step with missing operations is refused (and so counted), never skipped silently", gb10_pi_dirty_page(&vm[8], NULL, NULL, NULL), GB10_PI_DIRTY_REFUSE);
+
+	/* the spin: one budget per teardown, pinned, at the cap and one past it, never for a page without an object */
+	check("the spin budget is 100 delays", GB10_PI_DIRTY_SPIN_BUDGET, 100);
+	check("a delay is 10 microseconds", GB10_PI_DIRTY_SPIN_US, 10);
+	vm_reset();
+	s[0] = seg(8, 0, 5 * PS);
+	gb10_pi_fill(s, 1, 5 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	for (i = 8; i < 13; i++) { vm[i].object = 1; vm[i].valid = 2; vm[i].busy_other = 1; }
+	unlock_budget = 3;
+	pager_lets_go_at = -1;		/* never */
+	f_rm_unlock_pages(pages, n, 1);
+	check("five busy pages, budget 3: the teardown spins exactly 3 times in all", delay_calls, 3);
+	check("... every page is still dirtied (the stock way) and counted", fallback_dirty == 5 && vm[8].dirty && vm[12].dirty, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, 5 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	for (i = 8; i < 13; i++) { vm[i].object = 1; vm[i].valid = 2; vm[i].busy_other = 1; }
+	unlock_budget = 3;
+	pager_lets_go_at = 3;		/* the pager lets go at the last delay of the budget: the cap */
+	f_rm_unlock_pages(pages, n, 1);
+	check("the pager lets go at delay 3 of a budget of 3: dirtied with the lock, nothing counted", fallback_dirty == 0 && vm[8].dirty == 1 && d_dirty_unbusied == 0, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, 5 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	for (i = 8; i < 13; i++) { vm[i].object = 1; vm[i].valid = 2; vm[i].busy_other = 1; }
+	unlock_budget = 3;
+	pager_lets_go_at = 4;		/* one past the cap: the budget is gone first */
+	f_rm_unlock_pages(pages, n, 1);
+	check("the pager lets go at delay 4 of a budget of 3: all five pages fall back (the budget is spent on the first)", fallback_dirty, 5);
+	check("... and the budget is not exceeded", delay_calls, 3);
+	vm_reset();
+	gb10_pi_fill(s, 1, 5 * PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, n, &ops, NULL);
+	for (i = 8; i < 13; i++) vm[i].busy_other = 1;	/* busy, but no object */
+	pager_lets_go_at = -1;
+	f_rm_unlock_pages(pages, n, 1);
+	check("busy pages without an object are never waited for", delay_calls == 0 && fallback_dirty == 0 && refused_dirty == 0, 1);
+	vm_reset();
+	gb10_pi_fill(s, 1, PS, PS, &ops, NULL, pages, NFAKE, &n);
+	gb10_pi_wire(pages, 1, &ops, NULL);
+	vm[8].object = 1; vm[8].valid = 2; vm[8].busy_other = 1;
+	{
+		struct gb10_pi_dirty_ops nodelay = dirty_ops;
+		int b = GB10_PI_DIRTY_SPIN_BUDGET;
+
+		nodelay.delay = NULL;
+		check("no delay operation: a busy object page falls back at once", gb10_pi_dirty_page(&vm[8], &nodelay, NULL, &b), GB10_PI_DIRTY_FALLBACK);
+		check("... without spending the budget", b, GB10_PI_DIRTY_SPIN_BUDGET);
+		check("no budget at all: the same, no spin", gb10_pi_dirty_page(&vm[8], &dirty_ops, NULL, NULL), GB10_PI_DIRTY_FALLBACK);
+	}
+
+	/* a zero-length entry among good ones is refused wherever it sits */
+	vm_reset();
+	s[0] = seg(3, 0, PS);
+	s[1] = seg(4, 0, 0);
+	check("a zero-length entry after a good one: refused", gb10_pi_count(s, 2, PS, PS, &n), GB10_PI_NOT_WHOLE_PAGES);
+	s[0] = seg(4, 0, 0);
+	s[1] = seg(3, 0, PS);
+	check("a zero-length entry before a good one: refused", gb10_pi_count(s, 2, PS, PS, &n), GB10_PI_NOT_WHOLE_PAGES);
 
 	/* import, then the exporter's own mmap faults the wired page into an object, then close */
 	vm_reset();
@@ -927,7 +990,10 @@ mutate rewire-ignores-fictitious 's/if (!(rewire ? ops->rewire_ok(ctx, pages\[i\
 mutate claimable-ignores-object 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !is_fictitious);/'
 mutate claimable-ignores-fictitious 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !has_object);/'
 mutate claimable-ignores-ram   's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (!is_fictitious \&\& !has_object);/'
-mutate dirty-no-wait           's/if (!busied \&\& o->wait_busy != NULL)/if (0)/'
+mutate dirty-budget-cap-plus-one 's/\*budget > 0 \&\&/*budget >= 0 \&\&/'
+mutate dirty-budget-cap-minus-one 's/\*budget > 0 \&\&/*budget > 1 \&\&/'
+mutate dirty-spins-without-object 's/obj = o->has_object(ctx, page);/obj = 1;/'
+mutate recheck-before-busy 's/if (ops->try_busy(ctx, pages\[i\]) != 0) {/if (!(rewire ? ops->rewire_ok(ctx, pages[i]) : ops->claimable(ctx, pages[i]))) { rc = GB10_PI_PAGE_CHANGED; goto undo; } if (ops->try_busy(ctx, pages[i]) != 0) {/'
 mutate dirty-fallback-uncounted 's/act = GB10_PI_DIRTY_FALLBACK;/;/'
 mutate dirty-never-unbusies    's/^\t\to->unbusy(ctx, page);$/\t\t;/'
 mutate dirty-needs-busy-to-dirty 's/^\tif (act == GB10_PI_DIRTY_DO)$/\tif (act == GB10_PI_DIRTY_DO \&\& busied)/'
@@ -952,25 +1018,52 @@ mutate life-never-drops        's/^\tl->release(l->ctx);$/\t;/'
 mutate life-drops-twice        's/^\tl->held = 0;$/\t;/'
 
 # --- coverage gate: every line of the pure core must run (testing standard, rule 4) ---
-# Branch coverage is reported, not gated: the argument guards chain several
-# conditions per line and the mutants above are the check for each one.
+# Branch coverage is reported and not gated, on purpose (docs/PRIME-IMPORT.md
+# 7.7): the argument guards test several pointers on one line, and the
+# mutants above (one per decision of the core) cover what a branch gate
+# would.  Lines are gated at 100 percent, and the gate has a self-test: a
+# header with a line that never runs must fail it.
+# cov_missed <header dir> <program source>: print the number of lines of
+# gb10_pageimport.h that never ran, or "error".
+cov_missed() {
+	_cd=$1
+	rm -f "$_cd/p.profraw" "$_cd/p.profdata" "$_cd/report"
+	if cc -std=c99 -O0 -fprofile-instr-generate -fcoverage-mapping -I"$_cd" -o "$_cd/prog" "$TESTROOT/pi_test.c" 2> "$_cd/cc.err" \
+	    && LLVM_PROFILE_FILE="$_cd/p.profraw" "$_cd/prog" > /dev/null 2>&1 \
+	    && llvm-profdata merge -o "$_cd/p.profdata" "$_cd/p.profraw" 2>> "$_cd/cc.err" \
+	    && llvm-cov report "$_cd/prog" -instr-profile="$_cd/p.profdata" "$_cd/gb10_pageimport.h" > "$_cd/report" 2>> "$_cd/cc.err"; then
+		awk '$1 ~ /gb10_pageimport\.h$/ { print $9 }' "$_cd/report"
+	else
+		echo error
+	fi
+}
 if command -v llvm-cov > /dev/null 2>&1 && command -v llvm-profdata > /dev/null 2>&1; then
 	_c="$TESTROOT/cov"
 	mkdir -p "$_c"
 	cp "$HEADER" "$_c/gb10_pageimport.h"
-	if cc -std=c99 -O0 -fprofile-instr-generate -fcoverage-mapping -I"$_c" -o "$_c/prog" "$TESTROOT/pi_test.c" 2> "$_c/cc.err" \
-	    && LLVM_PROFILE_FILE="$_c/p.profraw" "$_c/prog" > /dev/null 2>&1 \
-	    && llvm-profdata merge -o "$_c/p.profdata" "$_c/p.profraw" 2>> "$_c/cc.err" \
-	    && llvm-cov report "$_c/prog" -instr-profile="$_c/p.profdata" "$_c/gb10_pageimport.h" > "$_c/report" 2>> "$_c/cc.err"; then
-		_missed=$(awk '$1 ~ /gb10_pageimport\.h$/ { print $9 }' "$_c/report")
-		if [ "$_missed" = 0 ]; then
-			ok "coverage gate: every line of gb10_pageimport.h runs ($(awk '$1 ~ /gb10_pageimport\.h$/ { print $10 " lines, " $13 " branches" }' "$_c/report"))"
-		else
-			fail "coverage gate: ${_missed:-?} lines of gb10_pageimport.h never run"
-			llvm-cov show "$_c/prog" -instr-profile="$_c/p.profdata" "$_c/gb10_pageimport.h" 2>/dev/null | grep -E '^ +[0-9]+\| +0\|' | head -10
-		fi
+	_missed=$(cov_missed "$_c")
+	if [ "$_missed" = 0 ]; then
+		ok "coverage gate: every line of gb10_pageimport.h runs ($(awk '$1 ~ /gb10_pageimport\.h$/ { print $10 " lines, " $13 " branches" }' "$_c/report"))"
 	else
-		fail "coverage gate: the instrumented build or run failed: $(head -3 "$_c/cc.err" | tr '\n' ' ')"
+		case $_missed in
+		error) fail "coverage gate: the instrumented build or run failed: $(head -2 "$_c/cc.err" | tr '\n' ' ')" ;;
+		*) fail "coverage gate: ${_missed:-?} lines of gb10_pageimport.h never run" ;;
+		esac
+		llvm-cov show "$_c/prog" -instr-profile="$_c/p.profdata" "$_c/gb10_pageimport.h" 2>/dev/null | grep -E '^ +[0-9]+\| +0\|' | head -10
+	fi
+	# self-test: a header with a function nothing calls must be caught
+	_d="$TESTROOT/cov-plant"
+	mkdir -p "$_d"
+	sed -e 's|^#endif /\* _GB10_PAGEIMPORT_H_ \*/|static inline int gb10_pi_planted_dead(int x)\n{\n\tif (x)\n\t\treturn (1);\n\treturn (0);\n}\n\n#endif /* _GB10_PAGEIMPORT_H_ */|' "$HEADER" > "$_d/gb10_pageimport.h"
+	if cmp -s "$HEADER" "$_d/gb10_pageimport.h"; then
+		fail "coverage gate self-test: the planted header equals the original (stale test)"
+	else
+		_pm=$(cov_missed "$_d")
+		case $_pm in
+		error) fail "coverage gate self-test: the planted header did not build or run: $(head -2 "$_d/cc.err" | tr '\n' ' ')" ;;
+		''|0) fail "coverage gate self-test: a header with a line that never runs passed the gate ($_pm)" ;;
+		*) ok "coverage gate self-test: a planted line that never runs is caught ($_pm lines)" ;;
+		esac
 	fi
 else
 	fail "coverage gate: llvm-cov and llvm-profdata are required"
