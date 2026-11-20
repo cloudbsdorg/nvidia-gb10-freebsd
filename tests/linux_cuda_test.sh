@@ -44,8 +44,13 @@ SKIPPED=0
 mkdir -p "$REPO/tmp"
 TESTROOT=$(mktemp -d "$REPO/tmp/linux-cuda-test.XXXXXXXX") || exit 1
 # The shim keeps abstract sockets in a file whose path must fit sun_path
-# (103 bytes), so the abstract directory is short, outside the repository.
-SADIR=$(mktemp -d "${HOME:-/tmp}/.cache-sa.XXXXXX") || exit 1
+# (103 bytes), so the abstract directory is short, outside the repository:
+# under $HOME, never /tmp.  With no HOME there is nowhere short and private.
+if [ -z "${HOME:-}" ]; then
+	echo "linux_cuda_test: HOME is unset; refusing to fall back to /tmp" >&2
+	exit 2
+fi
+SADIR=$(mktemp -d "$HOME/.cache-sa.XXXXXX") || exit 1
 
 # cleanup - remove exactly this run's scratch files on every exit path.
 # Time:  O(files created by this test).
