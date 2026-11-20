@@ -48,7 +48,10 @@
 # src/ additions are copied in and recorded the same way: currently
 # src/gb10-memattr/gb10_memattr.h (the arm64 PCIe BAR memory-attribute
 # policy header) to TREE/nvidia/gb10_memattr.h, so the patched nvidia_os.c
-# and nvidia_subr.c can #include "gb10_memattr.h" with no Makefile change.
+# and nvidia_subr.c can #include "gb10_memattr.h" with no Makefile change,
+# and src/gb10-pageimport/gb10_pageimport.h (the cross-GPU import core) to
+# TREE/common/inc/gb10_pageimport.h, which nvidia.ko and nvidia-drm.ko both
+# find through -I../common/inc.
 # Nothing is written outside TREE and /tmp is never used.
 
 set -eu
@@ -142,17 +145,26 @@ apply_patches() {
 
 # copy_repo_src - copy the repo's own source additions into TREE and record
 # each in the manifest temp file that finalize_marker folds into .prepared.
-# Today that is one file, the arm64 BAR memory-attribute policy header,
-# which goes to TREE/nvidia/ beside the sources that include it. A missing
+# Today that is two files: the arm64 BAR memory-attribute policy header,
+# which goes to TREE/nvidia/ beside the sources that include it, and the
+# cross-GPU import core, which goes to TREE/common/inc/. A missing
 # file fails the run loudly (set -e): silently skipping it would only break
 # the build later in a less obvious way.
-# Time:  O(F) copy and sha256 runs for F added files (today F=1).
+# Time:  O(F) copy and sha256 runs for F added files (today F=2).
 # Space: O(F) manifest lines.
 copy_repo_src() {
 	mkdir -p "$TREE/nvidia"
 	cp "$REPO/src/gb10-memattr/gb10_memattr.h" "$TREE/nvidia/gb10_memattr.h"
 	printf '%s  %s\n' "src/gb10-memattr/gb10_memattr.h" \
 	    "$(sha256 -q "$REPO/src/gb10-memattr/gb10_memattr.h")" \
+	    >> "$TREE/.prepared.patches"
+	# The cross-GPU import core (docs/PRIME-IMPORT.md): both nvidia.ko and
+	# nvidia-drm.ko include it, and both are built with -I../common/inc.
+	mkdir -p "$TREE/common/inc"
+	cp "$REPO/src/gb10-pageimport/gb10_pageimport.h" \
+	    "$TREE/common/inc/gb10_pageimport.h"
+	printf '%s  %s\n' "src/gb10-pageimport/gb10_pageimport.h" \
+	    "$(sha256 -q "$REPO/src/gb10-pageimport/gb10_pageimport.h")" \
 	    >> "$TREE/.prepared.patches"
 }
 

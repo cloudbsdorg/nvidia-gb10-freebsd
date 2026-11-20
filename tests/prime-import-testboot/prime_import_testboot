@@ -1,0 +1,198 @@
+#!/bin/sh
+#
+# PROVIDE: prime_import_testboot
+# REQUIRE: LOGIN kld linux
+# KEYWORD: nojail
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# One-shot test-boot recorder for the cross-GPU buffer import (Track #2228,
+# docs/PRIME-IMPORT.md, section 5).  Installed into a test boot environment
+# by make-be.sh; it runs once, after the nvidia stack and amdgpu are loaded by
+# kld_list, and records everything under
+# /home/mlapointe/work/gb10/logs/prime-import-<UTC stamp>/:
+#
+#   results.jsonl   one object per row: {"row","result","detail"};
+#                   result is pass, fail, info or skip (a skip names why:
+#                   a missing tool is never a pass)
+#   probe-*.jsonl   the raw output of prime_import_probe
+#   dmesg*.txt, kldstat.txt, wired-*.txt, ...
+#
+# Rows: 5.1 guard (no panic), 5.2 import (amdgpu to nvidia-drm), wire-count-stable
+# (the wired page count after 50 probes did not grow), 5.2.5 reverse direction
+# (expected: a clean refusal), 5.3 regressions: CUDA smoke, Vulkan, the
+# modesetting X server, the Wayfire seat test.
+#
+# This script never loads or unloads a module, never touches a CRTC and never
+# reboots.  Overrides (rc.conf): prime_import_testboot_src (default
+# /dev/dri/card0, the amdgpu), _dst (/dev/dri/card1, nvidia-drm), _loops (50),
+# _wayfire_cmd (a command that runs the Wayfire seat test and exits 0 on
+# success; unset records a skip).
+
+. /etc/rc.subr
+
+name=prime_import_testboot
+rcvar=prime_import_testboot_enable
+start_cmd=prime_import_testboot_start
+stop_cmd=:
+
+: "${prime_import_testboot_src:=/dev/dri/card0}"
+: "${prime_import_testboot_dst:=/dev/dri/card1}"
+: "${prime_import_testboot_loops:=50}"
+
+LOGROOT=/home/mlapointe/work/gb10/logs
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT=$LOGROOT/prime-import-$STAMP
+LOG=/var/log/prime-import-testboot.log
+PROBE=/usr/local/bin/prime_import_probe
+LINUXROOT=/home/mlapointe/work/gb10/linuxroot
+CUDARUN=/home/mlapointe/work/gb10/nvidia-gb10-freebsd-uvm0/scripts/run-linux-cuda.sh
+U="env HOME=/home/mlapointe USER=mlapointe PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin"
+
+row()	# row <name> <pass|fail|info|skip> <detail>
+{
+	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
+	    "$(printf '%s' "$3" | tr -c '[:print:]' ' ' | tr '"\\' "''")" >> "$OUT/results.jsonl"
+	echo "== row $1: $2: $3"
+}
+
+wired()
+{
+	sysctl -n vm.stats.vm.v_wire_count 2>/dev/null || echo -1
+}
+
+prime_import_testboot_start()
+{
+	# root writes here: refuse a directory somebody else could have planted
+	mkdir -m 0755 "$OUT" || { echo "cannot create $OUT"; return 1; }
+	cd "$OUT" || return 1	# relative names from here: a renamed directory cannot redirect them
+	: > "$OUT/results.jsonl"
+	(
+	echo "== prime import testboot $STAMP $(sysctl -n kern.bootfile) BE $(bectl list -H 2>/dev/null | awk '$2 ~ /N/ {print $1}')"
+	kldstat > "$OUT/kldstat.txt" 2>&1
+	sha256 /boot/modules.nvtest/*.ko > "$OUT/module-sha256.txt" 2>&1
+	ls -l /dev/dri > "$OUT/dri.txt" 2>&1
+	dmesg > "$OUT/dmesg-before.txt" 2>&1
+
+	echo "== 5.0 stack"
+	if kldstat | grep -q 'nvidia-drm' && kldstat | grep -q 'amdgpu'; then
+		row stack pass "nvidia-drm and amdgpu are loaded"
+	else
+		row stack fail "nvidia-drm or amdgpu is not loaded: see kldstat.txt"
+	fi
+
+	echo "== 5.1 the panic is gone"
+	# We got here: the boot did not panic.  The same Wayland login that
+	# panicked drives ADDFB2 with an imported handle, which the probe below
+	# does as well; the check after it is that the machine still answers.
+	bad=$(grep -ciE 'panic|Fatal trap|IsVidmem|vm_fault failed' "$OUT/dmesg-before.txt")
+	[ "$bad" -eq 0 ] && row guard-boot pass "no panic or fatal trap in the boot log" \
+	    || row guard-boot fail "$bad suspicious lines in dmesg-before.txt"
+
+	echo "== 5.2 render on $prime_import_testboot_src, import on $prime_import_testboot_dst"
+	if [ -x "$PROBE" ] && [ -c "$prime_import_testboot_src" ] && [ -c "$prime_import_testboot_dst" ]; then
+		w0=$(wired)
+		"$PROBE" --jsonl -s 64x64 -s 256x256 -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" > "$OUT/probe-import.jsonl" 2> "$OUT/probe-import.err"
+		prc=$?
+		cat "$OUT/probe-import.jsonl"
+		n=$(wc -l < "$OUT/probe-import.jsonl" | tr -d ' ')
+		ok=$(grep -c '"import":0' "$OUT/probe-import.jsonl")
+		fbok=$(grep -c '"addfb":0' "$OUT/probe-import.jsonl")
+		dmesg > "$OUT/dmesg-mid.txt" 2>&1
+		refused0=$(diff "$OUT/dmesg-before.txt" "$OUT/dmesg-mid.txt" | grep -c 'cannot be imported\|Could not wire\|does not match this nvidia-drm')
+		imported=0
+		if [ "$prc" -ne 0 ]; then
+			row import fail "prime_import_probe exited $prc: $(head -c 200 "$OUT/probe-import.err")"
+		elif [ "$n" -gt 0 ] && [ "$ok" -eq "$n" ] && [ "$fbok" -eq "$n" ] && [ "$refused0" -eq 0 ]; then
+			imported=1
+			row import pass "$ok of $n buffers imported on nvidia-drm and $fbok got a framebuffer; no refusal logged"
+		else
+			row import fail "import ok $ok, addfb ok $fbok of $n, $refused0 refusal lines in the log: see probe-import.jsonl and dmesg-mid.txt for the stage and the reason"
+		fi
+		echo "== wire balance: $prime_import_testboot_loops probes"
+		w1=$(wired)
+		good=0
+		i=0
+		while [ "$i" -lt "$prime_import_testboot_loops" ]; do
+			"$PROBE" --jsonl -s 1920x1080 "$prime_import_testboot_src" "$prime_import_testboot_dst" 2>/dev/null >> "$OUT/probe-loop.jsonl"; tail -1 "$OUT/probe-loop.jsonl" | grep -q '"addfb":0' && good=$((good + 1))
+			i=$((i + 1))
+		done
+		sleep 2
+		w2=$(wired)
+		echo "wired pages: before=$w0 after-first=$w1 after-loop=$w2 good-probes=$good" > "$OUT/wired-pages.txt"
+		d=$((w2 - w1))
+		[ "$d" -lt 0 ] && d=$((-d))
+		# 1080p is 2025 pages; the bound is below one leaked page per probe
+		# NOTE: v_wire_count counts pages whose wire count is non-zero. The pages of
+		# a GPU's buffers are already wired by their allocator, so a leaked extra
+		# wiring is NOT visible here; the exact balance is proven by
+		# tests/pageimport_test.sh.  This row only shows the count did not grow.
+		if [ "$imported" -ne 1 ]; then
+			row wire-count-stable skip "no successful import to measure"
+		elif [ "$good" -ne "$prime_import_testboot_loops" ]; then
+			row wire-count-stable fail "only $good of $prime_import_testboot_loops loop probes imported: see probe-loop.jsonl"
+		elif [ "$w1" -lt 0 ] || [ "$w2" -lt 0 ]; then
+			row wire-count-stable skip "vm.stats.vm.v_wire_count is not readable"
+		elif [ "$d" -lt $((prime_import_testboot_loops * 3 / 4)) ]; then
+			row wire-count-stable pass "the wired page count moved by $d over $good 1080p imports (it did not grow; a leaked page would be 2025 per probe)"
+		else
+			row wire-count-stable fail "the wired page count moved by $d over $good imports: see wired-pages.txt"
+		fi
+		echo "== 5.2.5 the other direction (nvidia buffer to amdgpu)"
+		"$PROBE" --jsonl -s 256x256 "$prime_import_testboot_dst" "$prime_import_testboot_src" > "$OUT/probe-reverse.jsonl" 2> "$OUT/probe-reverse.err"
+		rrc=$?
+		cat "$OUT/probe-reverse.jsonl"
+		row reverse info "exit $rrc; a clean errno is the expected answer (an NVIDIA video-memory buffer cannot be exported): $(head -c 300 "$OUT/probe-reverse.jsonl")"
+	else
+		row import skip "no prime_import_probe or no $prime_import_testboot_src / $prime_import_testboot_dst"
+	fi
+	dmesg > "$OUT/dmesg-after.txt" 2>&1
+	refused=$(diff "$OUT/dmesg-before.txt" "$OUT/dmesg-after.txt" | grep -c 'cannot be imported')
+	row import-log info "$refused 'cannot be imported' lines were logged during the probes"
+	bad=$(diff "$OUT/dmesg-before.txt" "$OUT/dmesg-after.txt" | grep -ciE 'panic|Fatal trap|IsVidmem|Xid|lock order reversal|vm_fault failed')
+	[ "$bad" -eq 0 ] && row guard-probe pass "no panic, trap, Xid or lock order reversal during the probes" \
+	    || row guard-probe fail "$bad suspicious kernel lines during the probes: see dmesg-after.txt"
+
+	echo "== 5.3 regressions"
+	if [ -f "$CUDARUN" ] && [ -f /boot/modules.nvtest/nvidia-uvm.ko ]; then
+		kldstat | grep -q nvidia_uvm || echo "(nvidia-uvm is loaded by kld_list in this BE or the row fails)"
+		su -m mlapointe -c "$U timeout 300 sh $CUDARUN cuda_smoke" > "$OUT/cuda-smoke.txt" 2>&1
+		rc=$?
+		[ "$rc" -eq 0 ] && row cuda-smoke pass "cuda_smoke exited 0" || row cuda-smoke fail "cuda_smoke exited $rc: $(tail -2 "$OUT/cuda-smoke.txt")"
+	else
+		row cuda-smoke skip "no run-linux-cuda.sh or no nvidia-uvm.ko in this BE"
+	fi
+	if [ -x "$LINUXROOT/rl9/usr/bin/vulkaninfo" ]; then
+		su -m mlapointe -c "$U env LD_LIBRARY_PATH=$LINUXROOT/rl9/usr/lib64:$LINUXROOT/nv timeout 120 $LINUXROOT/rl9/usr/bin/vulkaninfo --summary" > "$OUT/vulkaninfo.txt" 2>&1
+		grep -q 'NVIDIA GeForce RTX 5060 Ti' "$OUT/vulkaninfo.txt" \
+		    && row vulkan pass "vulkaninfo lists the RTX 5060 Ti" \
+		    || row vulkan fail "vulkaninfo does not list the RTX 5060 Ti: see vulkaninfo.txt"
+	else
+		row vulkan skip "no vulkaninfo in $LINUXROOT/rl9"
+	fi
+	if pgrep -x Xorg > /dev/null 2>&1; then
+		xrandr_out=$(env DISPLAY=:0 xrandr --listmonitors 2>&1 | head -5)
+		echo "$xrandr_out" > "$OUT/xrandr.txt"
+		pgrep -lf Xorg > "$OUT/xorg-ps.txt" 2>&1
+		fstat /dev/dri/card1 > "$OUT/fstat-card1.txt" 2>&1
+		row xorg info "Xorg is running; monitors: $xrandr_out (Mark checks the picture on HDMI: not decidable from here)"
+	else
+		row xorg skip "no Xorg process: the modesetting X check needs sddm and the 20-cloudbsd-nvidia.conf of this BE"
+	fi
+	if [ -n "${prime_import_testboot_wayfire_cmd:-}" ]; then
+		sh -c "$prime_import_testboot_wayfire_cmd" > "$OUT/wayfire.txt" 2>&1
+		rc=$?
+		[ "$rc" -eq 0 ] && row wayfire pass "the Wayfire seat test exited 0" || row wayfire fail "the Wayfire seat test exited $rc: see wayfire.txt"
+	else
+		row wayfire skip "prime_import_testboot_wayfire_cmd is not set"
+	fi
+	dmesg > "$OUT/dmesg-final.txt" 2>&1
+	echo "== done $(date -u +%FT%TZ)"
+	) > "$LOG" 2>&1
+	cp "$LOG" "$OUT/" 2>/dev/null
+	chown -R mlapointe "$OUT" 2>/dev/null
+}
+
+load_rc_config $name
+run_rc_command "$1"

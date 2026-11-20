@@ -1,0 +1,1 @@
+- 2026-11-20 nvidia-prime-import: the RM refuses OS_PAGE_ARRAY descriptors to kernel clients (osmemdesc.c), and v_wire_count counts pages with a non-zero wire count, so it cannot show a leaked extra wiring of already-wired GPU pages. Check both before designing a kernel-side import or a boot-time wire check.
