@@ -1,14 +1,13 @@
 --- nvidia-drm/nvidia-drm-gem-nvkms-memory.c.orig
 +++ nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-@@ -34,6 +34,138 @@
- #include <linux/io.h>
+@@ -35,7 +35,139 @@
  #if defined(NV_BSD)
  #include <vm/vm_pageout.h>
-+#endif
+ #endif
 +#if !defined(NV_LINUX)
 +#include <vm/vm_phys.h>
 +#endif
-+
+ 
 +#if !defined(NV_LINUX)
 +/*
 + * FreeBSD: a user mapping of video memory needs vm_pages.
@@ -136,9 +135,11 @@
 +
 +    vm_phys_fictitious_unreg_range(start, end);
 +}
- #endif
- 
++#endif
++
  static void __nv_drm_gem_nvkms_memory_free(struct nv_drm_gem_object *nv_gem)
+ {
+     struct nv_drm_device *nv_dev = nv_gem->nv_dev;
 @@ -47,6 +179,10 @@
              iounmap(nv_nvkms_memory->pWriteCombinedIORemapAddress);
          }
@@ -218,7 +219,27 @@
          pfn = page_to_pfn(nv_nvkms_memory->pages[page_offset]);
      }
  
-@@ -170,8 +339,20 @@
+@@ -157,6 +326,19 @@
+         goto done;
+     }
+ 
++    if (pMemory == NULL) {
++        /*
++         * No NVKMS memory handle.  The KAPI's isVidmem() dereferences the
++         * handle it is given (nvkms-kapi.c: IsVidmem() returns
++         * memory->isVidmem), so a NULL handle is a kernel panic there and
++         * not an error return.
++         */
++        NV_DRM_DEV_LOG_ERR(nv_dev,
++            "GEM object has no NVKMS memory handle; cannot map it");
++        ret = -EINVAL;
++        goto done;
++    }
++
+     if (!nvKms->isVidmem(pMemory)) {
+         goto done;
+     }
+@@ -170,8 +352,20 @@
              "Failed to map NvKmsKapiMemory 0x%p",
              pMemory);
          ret = -ENOMEM;
@@ -239,7 +260,23 @@
  
      nv_nvkms_memory->pWriteCombinedIORemapAddress = ioremap_wc(
              (uintptr_t)nv_nvkms_memory->pPhysicalAddress,
-@@ -297,6 +478,9 @@
+@@ -293,10 +487,25 @@
+         return -EINVAL;
+     }
+ 
++    if (pMemory == NULL) {
++        /*
++         * The KAPI's isVidmem() dereferences the handle it is given
++         * (nvkms-kapi.c: IsVidmem() returns memory->isVidmem), so a NULL
++         * handle is a kernel panic there and not an error return.
++         */
++        NV_DRM_DEV_LOG_ERR(
++            nv_dev,
++            "Cannot create a GEM object without an NVKMS memory handle");
++        return -EINVAL;
++    }
++
+     mutex_init(&nv_nvkms_memory->map_lock);
      nv_nvkms_memory->pPhysicalAddress = NULL;
      nv_nvkms_memory->pWriteCombinedIORemapAddress = NULL;
      nv_nvkms_memory->physically_mapped = false;
