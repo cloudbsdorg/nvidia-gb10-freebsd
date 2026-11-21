@@ -434,3 +434,18 @@ fetched at build time, keeps NVIDIA's licences: MIT for open-gpu-kernel-modules,
 licence for the FreeBSD driver package and the firmware. `src/nvidia-drm-render/nvidia-drm-render.h`
 is MIT, because its layouts follow Mesa's MIT nouveau uAPI header and it is meant to be included by
 NVIDIA's MIT nvidia-drm sources and by Mesa. Provenance: [`PROVENANCE.md`](PROVENANCE.md).
+
+## libnvrm and nvrm-info
+
+`lib/libnvrm/` is the shared user-space layer for native NVIDIA access: C, BSD-2-Clause, no
+LinuxKPI and no Linux layer. `nvrm_enumerate()` opens `/dev/nvidiactl`, checks that the kernel
+module is the RM version the library was built for (580.178.04), lists and attaches the probed
+GPUs and describes each one (PCI identity, UUID, architecture, SM version, GPC/TPC/SM counts,
+class list, VRAM, BAR1, page sizes, capability flags). Every value is available or carries a
+reason; the layers are abstract device, class, family (a generation table keyed by class ids)
+and board decorators (none yet). Backends are providers: `rm` and `fake`
+(`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
+capability mode. `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
+`lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
+the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
+the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.

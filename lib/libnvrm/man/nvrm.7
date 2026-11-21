@@ -1,0 +1,95 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 21, 2026
+.Dt NVRM 7
+.Os
+.Sh NAME
+.Nm nvrm
+.Nd model of the libnvrm device description
+.Sh DESCRIPTION
+.Xr nvrm 3
+describes a GPU in layers.
+Every device starts as an abstract device; each layer fills or overrides only
+what it knows, and the rest stays unavailable with a reason.
+Consumers use the abstract and class members only.
+.Bl -tag -width "board decorators"
+.It abstract device
+Identity: PCI location and identifiers, subsystem identifiers, RM GPU id, UUID.
+.It class
+What any compute or graphics GPU reports: architecture, implementation, chip
+id, SM version, GPC, TPC and SM counts, the class list, memory sizes, page
+sizes and the capability flags.
+.It family
+Values only a generation table knows, selected by the pair of GPFIFO and
+compute classes the GPU lists: family name, the channel, compute, 3D and copy
+classes and the page size candidates.
+A GPU the table does not know is still described; the family values are then
+unavailable with the reason
+.Li no_family_entry .
+The library core names no chip.
+.It board decorators
+Entries keyed by PCI subsystem identifiers that only add or override options.
+A decorator never decides whether a GPU is supported.
+None exists yet: none is added without a real board that needs it.
+.El
+.Ss Availability
+Every value is available, or carries a reason identifier and a source:
+.Li rm ,
+.Li os ,
+.Li derived ,
+.Li family
+or
+.Li board .
+An unavailable value is never reported as a number.
+VRAM size 0 on a unified-memory part is available, with the value 0.
+.Ss Capabilities
+A fixed, indexed set of flags; the index is stable and new flags are only
+appended.
+Each is available (yes or no) or carries a reason.
+.Bl -tag -width "0 coherent_gpu_memory" -compact
+.It 0 Li dmabuf_export
+the RM can export memory as a dma-buf (GPU info index DMABUF_CAPABILITY).
+.It 1 Li ats
+address translation services (GPU_ATS_CAPABILITY).
+.It 2 Li self_hosted
+the GPU is self-hosted (GPU_SELF_HOSTED_CAPABILITY).
+.It 3 Li display_enabled
+the GPU has an enabled display engine (DISPLAY_ENABLED).
+.It 4 Li soc
+the GPU is part of a system on a chip (the SOC bit of the GPU id flags).
+.It 5 Li coherent_gpu_memory
+GPU memory is CPU coherent (COHERENT_GPU_MEMORY_MODE is not NONE).
+.It 6 Li os_device_wc_active
+the OS layer maps device memory write-combined on this host: the sysctl
+.Va hw.nvidia.altra_device_wc_active ,
+the Ampere Altra memory attribute decision.
+.El
+.Ss Backends
+.Bl -tag -width "fake"
+.It rm
+The NVIDIA kernel module, through the RM escape ioctls.
+The RM version of the module must equal the version
+.Xr nvrm 3
+was built for; otherwise it refuses to run and says which version it found.
+.It fake
+Synthetic data for tests and for machines without a GPU.
+.El
+.Ss Capsicum
+The descriptors are limited to ioctl, mmap and event rights and to the RM
+escapes allocate, control and free.
+After enumeration the process may call
+.Xr cap_enter 2
+and keep calling
+.Fn nvrm_device_refresh .
+OS-layer values (sysctl, card list) are read before and kept.
+.Ss JSON
+Schema
+.Li nvrm-info/1 ;
+documents name it in the
+.Li schema
+member.
+Additive changes raise the minor number; a breaking change is a new major
+schema installed beside the old one.
+.Sh SEE ALSO
+.Xr nvrm 3 ,
+.Xr nvrm-info 8

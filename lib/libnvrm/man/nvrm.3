@@ -1,0 +1,195 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 21, 2026
+.Dt NVRM 3
+.Os
+.Sh NAME
+.Nm nvrm_enumerate ,
+.Nm nvrm_close ,
+.Nm nvrm_device_count ,
+.Nm nvrm_device_get ,
+.Nm nvrm_device_info_get ,
+.Nm nvrm_device_refresh ,
+.Nm nvrm_json_document ,
+.Nm nvrm_json_schema ,
+.Nm nvrm_info_nfields ,
+.Nm nvrm_info_field
+.Nd NVIDIA Resource Manager device discovery
+.Sh LIBRARY
+libnvrm
+.Sh SYNOPSIS
+.In nvrm/nvrm.h
+.Ft int
+.Fn nvrm_enumerate "nvrm_ctx **ctxp" "const nvrm_enum_opts *opts" "char *err" "size_t errlen"
+.Ft void
+.Fn nvrm_close "nvrm_ctx *ctx"
+.Ft unsigned
+.Fn nvrm_device_count "const nvrm_ctx *ctx"
+.Ft nvrm_device *
+.Fn nvrm_device_get "const nvrm_ctx *ctx" "unsigned index"
+.Ft const nvrm_device_info *
+.Fn nvrm_device_info_get "const nvrm_device *dev"
+.Ft int
+.Fn nvrm_device_refresh "nvrm_device *dev"
+.Ft int
+.Fn nvrm_json_document "const nvrm_ctx *ctx" "FILE *fp"
+.Ft int
+.Fn nvrm_json_schema "FILE *fp"
+.Ft unsigned
+.Fn nvrm_info_nfields void
+.Ft const nvrm_field *
+.Fn nvrm_info_field "unsigned index"
+.Sh DESCRIPTION
+The
+.Nm libnvrm
+library lists the NVIDIA GPUs in the machine and describes each one, through
+the Resource Manager (RM) of the NVIDIA kernel module.
+It uses only the RM escape ioctls on
+.Pa /dev/nvidiactl ;
+it needs no Linux compatibility layer.
+See
+.Xr nvrm 7
+for the model.
+.Pp
+.Fn nvrm_enumerate
+selects a backend, opens the control device, checks that the kernel module is
+the RM version the library was built for, lists the probed GPUs, attaches them,
+queries each one and limits the descriptors for
+.Xr capsicum 4 .
+.Fa opts
+may be
+.Dv NULL ;
+.Va opts->backend
+names a backend
+.Pq Dq rm No or Dq fake .
+The backend is chosen in this order:
+.Bl -enum -offset indent -compact
+.It
+.Va opts->backend ,
+if given;
+.It
+else the environment variable
+.Ev NVRM_BACKEND ,
+which is ignored in a set-user-ID or set-group-ID process;
+.It
+else the backend with the highest score that is usable on the machine.
+The fake backend is never chosen this way.
+.El
+On failure
+.Fa *ctxp
+is
+.Dv NULL
+and
+.Fa err ,
+if not
+.Dv NULL ,
+holds one line saying why.
+.Pp
+.Fn nvrm_close
+releases everything, including the RM objects.
+.Pp
+.Fn nvrm_device_get
+returns the device at
+.Fa index ,
+or
+.Dv NULL .
+.Fn nvrm_device_info_get
+returns its description, a
+.Vt nvrm_device_info .
+Every member is an
+.Vt nvrm_u64 ,
+.Vt nvrm_str
+or
+.Vt nvrm_list :
+a value, a reason code and a source.
+A value is valid only when
+.Fn NVRM_HAVE
+is true; otherwise
+.Va reason
+says why it is not
+.Pq see Fn nvrm_reason_id
+and no number is made up.
+.Pp
+.Fn nvrm_device_refresh
+queries the GPU again through the descriptors that are already open.
+It works in capability mode.
+It returns
+.Dv NVRM_E_IO
+when a system call to the driver failed (the affected values then carry the
+reason
+.Li os_call_failed ) ,
+and 0 otherwise; a value the RM itself refuses is not an error of the call.
+.Pp
+.Fn nvrm_info_nfields
+and
+.Fn nvrm_info_field
+describe the members of
+.Vt nvrm_device_info
+(group, name, kind, whether it reads in hex); the JSON output, the schema and
+the text view of
+.Xr nvrm-info 8
+all walk this one table.
+.Pp
+.Fn nvrm_json_document
+writes the whole description as one JSON line, schema
+.Li nvrm-info/1 .
+The related
+.Fn nvrm_json_header ,
+.Fn nvrm_json_device ,
+.Fn nvrm_json_end
+and
+.Fn nvrm_json_error
+write the records of the line stream.
+.Fn nvrm_json_schema
+writes the JSON Schema of all of them; it is generated from the same table as
+the output.
+Each returns 0, or \-1 if writing failed.
+.Sh RETURN VALUES
+.Fn nvrm_enumerate
+returns 0 or one of
+.Dv NVRM_E_NOBACKEND ,
+.Dv NVRM_E_OPEN ,
+.Dv NVRM_E_VERSION ,
+.Dv NVRM_E_IO ,
+.Dv NVRM_E_NOMEM ,
+.Dv NVRM_E_INVAL ,
+.Dv NVRM_E_NODEV ,
+.Dv NVRM_E_CAPSICUM .
+.Fn nvrm_strerror
+and
+.Fn nvrm_error_id
+turn the code into text and a stable machine identifier.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
+.It Ev NVRM_BACKEND
+.Dq rm
+or
+.Dq fake .
+.It Ev NVRM_FAKE_PROFILE
+Comma list of fake GPUs:
+.Dq discrete ,
+.Dq unified ,
+.Dq unknown ,
+.Dq sparse .
+.It Ev NVRM_FAKE_FAIL
+Make a step of the fake backend fail:
+.Dq open ,
+.Dq version ,
+.Dq list ,
+.Dq nogpu ,
+.Dq gpu_open ,
+.Dq limit .
+.El
+.Sh FILES
+.Bl -tag -width ".Pa /dev/nvidiactl"
+.It Pa /dev/nvidiactl
+RM control device.
+.It Pa share/nvrm/schema/nvrm-info-1.schema.json
+JSON Schema of the JSON output.
+.El
+.Sh SEE ALSO
+.Xr capsicum 4 ,
+.Xr nvrm 7 ,
+.Xr nvrm-info 8
+.Sh HISTORY
+The library first appeared with the native NVIDIA graphics and compute stack.

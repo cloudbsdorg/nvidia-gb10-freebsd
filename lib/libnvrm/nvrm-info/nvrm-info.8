@@ -1,0 +1,80 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 21, 2026
+.Dt NVRM-INFO 8
+.Os
+.Sh NAME
+.Nm nvrm-info
+.Nd describe the NVIDIA GPUs through the Resource Manager
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json | Fl -jsonl | Fl -schema
+.Op Fl -backend Ar name
+.Nm
+.Fl -help
+.Sh DESCRIPTION
+The
+.Nm
+utility lists every NVIDIA GPU with the values
+.Xr nvrm 3
+reports.
+After it has opened its descriptors it enters capability mode and queries the
+GPUs again through them; if capability mode is not available it fails.
+The text output lists every value of the library, as the JSON does.
+It needs no Linux compatibility layer.
+.Bl -tag -width ".Fl -backend Ar name"
+.It Fl -json
+Print one JSON document on one line, schema
+.Li nvrm-info/1 .
+.It Fl -jsonl
+Print JSON Lines: a header record, one record per GPU, an end record.
+Output is flushed per line; a closed pipe ends the program quietly.
+.It Fl -schema
+Print the JSON Schema that every JSON mode validates against.
+.It Fl -backend Ar name
+.Dq rm
+or
+.Dq fake ;
+the default is
+.Ev NVRM_BACKEND ,
+else the kernel driver.
+.It Fl -help
+Print usage.
+.El
+.Pp
+In the JSON modes a failure prints one error record on standard output.
+Values that cannot be read are
+.Li "available": false
+with a reason, never a made-up number.
+.Sh ENVIRONMENT
+.Ev NVRM_BACKEND ,
+.Ev NVRM_FAKE_PROFILE
+and
+.Ev NVRM_FAKE_FAIL ;
+see
+.Xr nvrm 3 .
+.Sh EXIT STATUS
+.Ex -std
+Status 2 means a usage error, including two output modes or
+.Fl -schema
+with
+.Fl -backend .
+.Sh EXAMPLES
+Print the header record and the first GPU as JSON Lines:
+.Bd -literal -offset indent
+nvrm-info --jsonl | head -2
+.Ed
+.Pp
+Print the schema the JSON output validates against:
+.Bd -literal -offset indent
+nvrm-info --schema
+.Ed
+.Pp
+Run on a machine without a GPU, against synthetic data:
+.Bd -literal -offset indent
+NVRM_BACKEND=fake nvrm-info --json
+.Ed
+.Sh SEE ALSO
+.Xr nvrm 3 ,
+.Xr capsicum 4 ,
+.Xr nvrm 7
