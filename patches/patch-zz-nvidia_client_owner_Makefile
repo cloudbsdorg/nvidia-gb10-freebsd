@@ -1,0 +1,15 @@
+--- nvidia/Makefile.orig
++++ nvidia/Makefile
+@@ -36,6 +36,12 @@
+ 		nv_kthread_q_stop
+ .endif
+ 
++# The client hold/release pair nvidia-uvm.ko calls (Track #2373); amd64 modules
++# export every global symbol.
++.if ${MACHINE_CPUARCH} == "aarch64"
++EXPORT_SYMS+=	nvUvmInterfaceClientHold nvUvmInterfaceClientRelease
++.endif
++
+ include ../common/optional-cflags.mk
+ 
+ OBJS+=		${RMOBJ}

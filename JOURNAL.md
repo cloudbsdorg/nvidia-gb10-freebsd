@@ -13,3 +13,32 @@ Next: write header.
 2026-11-20T19:40:00Z Gate round 6 findings addressed (CHANNEL_FREE wording, ENOSPC row, CPU_PREP precedence and clear rule, GEM_NEW EINVAL rules in the man page, digit-safe seds, README env vars). Deliberately not changed, listed for the kernel WPs and Mark: rename NVR_SYNC_TYPE_MASK / split param-minimum names (cosmetic); DRM_COMMAND_END check for LAST; a major-version number plan; brace-on-next-line struct style (the header is ours and fixed); one helper for man page prose checks. Commit follows this entry; nothing else is pending except the Track comment and Honcho lesson. Resume: if this branch head is pushed, only the Track comment and Honcho remain.
 2026-11-20T20:00:00Z Gate round 7: dropped the sticky per-BO CPU_PREP error (a faulted job is reported by CPU_PREP waits, the job's signal fences and the lost channel), fixed "three ways" and the dangling map_handle sentence. Left open for the kernel WPs (decisions, not defects): union members in the pointer check, sync-bind retry progress, blocked EXEC racing CHANNEL_FREE, per-credential caps versus the per-file minimums, ENOSPC remedies, major-version number plan, and whether per-BO access info for implicit sync belongs in EXEC (N11).
 2026-11-20T21:00:00Z Merge-review fixes (9475983): B1 GR channel gets the copy class, B2 UNMAP holes are no-ops and a sparse-region MAP replaces mappings, B3 no $HOME defaults, NVIDIA header pinned to 580.178.04, a missing input fails under CI or REQUIRE_INPUTS, B4 exact-value V() row for every NVR_ constant plus a coverage diff, Q9 DRM_NVR_LAST < DRM_COMMAND_END, N9 notes (section 11). Q3, Q5, Q7 stay open for Mark. New nit-level gate findings are not iterated: mutations for the new docs checks, wording of the CI failure message and SYSDIR skip text, NVIDIA_IOCTL_H documentation, scratch dir inside the tree, internal labels in the section 11 heading.
+
+## 2026-11-21T04:13:44Z (#2373 sec)
+- Plan: nv side adds the RM client ownership table (src/gb10-client-owner/nv_client_owner.h, patch-zz-* hooks) and exports nvUvmInterfaceClientOwnedByFile; branch is from agent/2088-build-host WITHOUT the uvm glue (that lives on agent/uvm-phase0): the new patches are separate zz files and apply over either.
+- Built nvidia.ko on the prepared tree (LLD stamp ok, export present, scratch ~/work/gb10/tmp/sec-2373/w). tests/client_owner_test.sh green with 5 plants + 4 hook plants red.
+- Next: gate round 1, commit, push, then uvm side. Resume: git status; commit with the Stewardship block.
+
+## 2026-11-21T04:24:15Z
+- Round 1 (receipt 2365788e): TOCTOU (DEFECT), cdevpriv type confusion (DEFECT), hook plants tautological (DEFECT), CI input (DEFECT), comments/labels/README (NIT). All fixed: table lock across client ops, ClientHold/Release, VCHR+nvidiactl checks, real plants. Rebuilt nvidia.ko OK. Next: round 2 with answers, commit, push. Resume: git status.
+
+## 2026-11-21T04:35:57Z
+- Round 2 (receipt c5ee21db): redesigned to per-client holds + file reference, ownerless eviction, NV01_ROOT_CLIENT class, single decoder, test exit status. Rebuilt nvidia.ko OK (LLD). Final receipt run next, then commit and push. Resume: git status; commit.
+
+## 2026-11-21T04:47:25Z
+- Round 3 findings (receipt c7d5d40a) fixed: Release owner check, revoked entries, begin_free + PCATCH, single decoders, real mutants. nvidia.ko rebuilt OK. Gate round 4 next. Note: exceeds the 2-round budget because the findings were genuine DEFECTs (security).
+
+## 2026-11-21T04:57:20Z
+- Round 4 findings (receipt 7dcc43ba): freeing count, owner-only counting, held-entry revoke at close, release matched on the held file, sx_xlocked guard, README. Rebuilt OK. Gate again, then commit. Resume: git status.
+
+## 2026-11-21T05:05:41Z
+- Round 5 (receipt ef8df6a3): escape numbers pinned, release diagnostic and context rule, xfer unwrap pins. Final gate then commit and push.
+
+## 2026-11-21T05:10:51Z
+- Round 6 (receipt aa8d461e): end_free owner-matched, test inputs no HOME default, README stuck-free text. Final gate, commit, push. Findings after this are recorded, not iterated (budget).
+
+## 2026-11-21T05:17:47Z
+- Round 7 (receipt 9ce936bd): collision never hands over a client, unrecorded-client diagnostic, honest layout skip. Final gate, then commit and push; further findings recorded only.
+
+## 2026-11-21T05:22:28Z
+- Round 8 (receipt 46ce47a3): doc and diagnostic wording only. Commit after this receipt.

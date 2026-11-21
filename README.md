@@ -374,6 +374,57 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 
+## RM client ownership for nvidia-uvm
+
+**What and why.** The RM resolves a client handle with kernel privilege and never asks who
+is calling, and handles are predictable (`0xC1D00000` is the first client of a boot). So
+`nvidia.ko` records which open `/dev/nvidiactl` file each client was allocated on
+(`src/gb10-client-owner/nv_client_owner.h`, hooked into `nvidia_handle_ioctl` and
+`nvidia_close_ctl` by `patches/patch-zz-nvidia_client_owner_subr.c`) and exports two
+functions for `nvidia-uvm.ko` (the clean-room UVM driver, nvidia-uvm-freebsd):
+
+- `NV_STATUS nvUvmInterfaceClientHold(struct file *fp, NvHandle hClient)`: `NV_OK` only for a
+  devfs character device `nvidiactl` file of this module that owns the client, otherwise
+  `NV_ERR_INSUFFICIENT_PERMISSIONS`. On `NV_OK` the client is held: a free of it waits, and
+  the file cannot close (the hold keeps its own file reference).
+- `void nvUvmInterfaceClientRelease(struct file *fp, NvHandle hClient)`: call it exactly once
+  per `NV_OK`, never after a refusal. Holds are per client and nest, so an RM call made under
+  a hold delays only a free of that one client, not other users.
+
+**Guarantees.** Root-client allocations and frees run under the table lock
+together with their table change (other RM calls take no lock), and a free first waits for
+the holds on that client. A client freed through any
+file leaves the table, a closing file forgets its clients, and only a control file can own
+one. `MODULE_VERSION` stays 1: an `nvidia.ko` without the exports makes `nvidia-uvm.ko` fail
+to load, which is the safe answer. If `kldload nvidia-uvm` fails (it prints "an error occurred
+while loading module") and `dmesg` shows `symbol nvUvmInterfaceClientHold undefined` (or
+`...ClientRelease`), the loaded `nvidia.ko` was built without the
+`patch-zz-nvidia_client_owner_*` patches: rebuild it from a tree made by
+`scripts/prepare-tree.sh` and reload both modules.
+
+**A stuck free.** A free of a client waits for the holds on it, in an interruptible sleep with
+wait channel `nvcobusy`, and every other ioctl on the same file waits behind it. `nvidia-uvm.ko`
+takes a hold for one request and releases it when the request ends, so the wait is normally
+short. A process that stays in `nvcobusy` means a hold was leaked, which is a bug in
+nvidia-uvm-freebsd: a leaked hold lasts until reboot (killing the waiting process only ends
+that one wait, and the client is never freed). A fatal signal, or a caught signal without
+`SA_RESTART`, ends the wait (`EINTR`, nothing freed); a restartable signal waits again.
+`ps -axo pid,wchan,comm | grep nvcobusy` finds the process. A console line
+`nvUvmInterfaceClientRelease: no hold on client ... (nvidia-uvm bug)` is the opposite fault, a
+release without a matching hold; quote it in the report if you see it (a debug kernel panics
+with "client release without a matching hold" instead). A console line
+`RM client 0x... was not recorded for nvidia-uvm` means the table and the RM disagreed about a
+handle: nvidia-uvm refuses requests on that client until it is freed and allocated again. Only a free by the
+client's owner stops new holds while it waits, so a stranger cannot starve the owner by freeing
+its predictable handle. `nvUvmInterfaceClientHold` must be called from a sleepable context with
+no RM lock held, never from an RM callback; the same goes for `nvUvmInterfaceClientRelease`.
+
+**Tests.** `tests/client_owner_test.sh` reads `GB10_WORK` (a directory with `sources/` holding the
+pinned open-gpu-kernel-modules 580.178.04 checkout and the NVIDIA FreeBSD tarball) and `TMPDIR`;
+without them the layout and prepare-tree checks are skipped (a failure under `CI` or
+`REQUIRE_INPUTS`). It runs the table logic (layouts compared with the real `nvos.h`), checks the
+patch hooks, and runs deliberately broken copies of the header and the patch that it must reject.
+
 ## Licence
 
 Our scripts, patches and sources are BSD-3-Clause (see [`LICENSE`](LICENSE)). NVIDIA's code,

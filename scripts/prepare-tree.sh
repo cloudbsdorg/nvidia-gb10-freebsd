@@ -48,7 +48,9 @@
 # src/ additions are copied in and recorded the same way: currently
 # src/gb10-memattr/gb10_memattr.h (the arm64 PCIe BAR memory-attribute
 # policy header) to TREE/nvidia/gb10_memattr.h, so the patched nvidia_os.c
-# and nvidia_subr.c can #include "gb10_memattr.h" with no Makefile change.
+# and nvidia_subr.c can #include "gb10_memattr.h" with no Makefile change;
+# src/gb10-client-owner/nv_client_owner.h (the RM client ownership table
+# for nvidia-uvm.ko, Track #2373) likewise.
 # Nothing is written outside TREE and /tmp is never used.
 
 set -eu
@@ -153,6 +155,11 @@ copy_repo_src() {
 	cp "$REPO/src/gb10-memattr/gb10_memattr.h" "$TREE/nvidia/gb10_memattr.h"
 	printf '%s  %s\n' "src/gb10-memattr/gb10_memattr.h" \
 	    "$(sha256 -q "$REPO/src/gb10-memattr/gb10_memattr.h")" \
+	    >> "$TREE/.prepared.patches"
+	# the client ownership table nvidia_subr.c includes (Track #2373)
+	cp "$REPO/src/gb10-client-owner/nv_client_owner.h" "$TREE/nvidia/nv_client_owner.h"
+	printf '%s  %s\n' "src/gb10-client-owner/nv_client_owner.h" \
+	    "$(sha256 -q "$REPO/src/gb10-client-owner/nv_client_owner.h")" \
 	    >> "$TREE/.prepared.patches"
 }
 
