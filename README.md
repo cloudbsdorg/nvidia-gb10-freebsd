@@ -11,37 +11,56 @@ for open-gpu-kernel-modules). This repository holds the build scripts, our patch
 code (`patches/`, unified diffs, so they carry the changed lines and their context), a few
 small source files of our own, and the tests.
 
-## What works
+## What works (status 2026-11-20)
 
 | | Status |
 |---|---|
-| `nvidia.ko` loads and attaches to the GPU | works |
-| GSP firmware module (`nvidia_gsp_ga10x_fw.ko`), GSP boots | works |
+| `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
-| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: 1920x1080 colour bars on `/dev/dri/card1` |
+| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on `/dev/dri/card1`; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works: `vulkaninfo` lists the card; llama.cpp runs on it ([`docs/llm.md`](docs/llm.md)) |
 | CUDA | not yet: `nvidia.ko` exports the UVM interface (below) and the clean-room `nvidia-uvm.ko` (uvm-bsd) loads and passes its ioctl tests; with the shim of [`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator) Linux `libcuda` runs cuInit, context, copies and a PTX kernel |
+| Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
+| Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
+| Accelerated native rendering (Mesa NVK over a render interface in `nvidia-drm`) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
 
 Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with a GeForce RTX
-5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs.
+5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs, amd64.
 
-The display and dumb-buffer results are from test boot 5 (2026-11-19): `nvidia-drm` at
-8f16409, a 1920x1080 colour-bar buffer on `/dev/dri/card1` read back with 0 bad samples.
+**CUDA prerequisites.** `libcuda` needs `/dev/nvidia-uvm`, which NVIDIA does not ship for
+FreeBSD. It comes from the clean-room module
+[uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (tested at commit 256297e; the version 2 `nvidia.ko` below needs a newer one, see Versions). It also needs
+Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
+UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
-Vulkan reached the driver on 2026-11-19 and then died with `SIGBUS` on its first load from a
-GPU register page; the cause and fix are under [Memory attributes on arm64](#memory-attributes-on-arm64).
-The fixed `nvidia.ko` has not been booted yet.
+**Numbers.** Measured with llama.cpp b12531 (`llama-bench`, defaults otherwise), in tokens per
+second. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
+speed over 128 tokens.
 
-CUDA (NVIDIA's Linux `libcuda` under the Linuxulator) stops in `cuInit` for two reasons. The
-first is two `/proc` files that FreeBSD's `linprocfs` does not have yet:
-`/proc/sys/vm/mmap_min_addr` and `/proc/<pid>/task/<tid>/comm`. They are added in the
-FreeBSD kernel tree, not here. The second, and the real blocker, is that `libcuda` needs
-`/dev/nvidia-uvm` and its ioctl interface. NVIDIA's FreeBSD driver has no UVM module
-(`nvidia_subr.c`: "UVM with faulting is currently not supported in this platform"). The only
-implementation is NVIDIA's Linux `nvidia-uvm`, which this project does not use, so a
-clean-room module is being written.
+| Backend | Model | pp512 | tg128 |
+|---|---|---|---|
+| Vulkan | Llama-3.2-3B-Instruct Q4_K_M | 7047 | 159 |
+| CUDA | Llama-3.2-3B-Instruct Q4_K_M | 8728 | 166.2 |
+| CUDA | 7B Q4_0 | 3706 | 97.8 |
+
+CUDA also ran a 30-minute stress test (5992 CUDA processes, 220 of them killed with `kill -9`)
+with no failure.
+
+**Packages.** No package is published yet. The CloudBSD ports overlay accepts the 580 driver
+set on aarch64 (`x11/nvidia-kmod-580`, `graphics/nvidia-drm-612-kmod-580`,
+`x11/nvidia-driver-580`, `x11/linux-nvidia-libs-580`) and builds `graphics/nvidia-uvm-kmod`
+from uvm-bsd. The Jenkins builds come next.
+
+**Native desktop.** The goal is a native FreeBSD accelerated desktop on the NVIDIA card (Mesa NVK
+and Zink), with Linux binaries running on top of the same drivers. NVK already builds on FreeBSD
+arm64 and finds the GB206 through a test shim. It cannot drive the card until the render
+interface exists in the kernel.
+
+The earlier fixes (the arm64 BAR mapping and the `SIGBUS` on the first Vulkan register read)
+are under [Memory attributes on arm64](#memory-attributes-on-arm64). The CUDA start-up fix is
+in uvm-bsd's README, under "Status".
 
 Example, on that machine:
 
@@ -303,7 +322,7 @@ ship (`nv_uvm_types.h`, `nv_uvm_user_types.h`, `nvgputypes.h`) are copied into t
 `ogkm:<path>`. `tests/uvm_glue_test.sh` checks the exports, the structure layouts against the
 UVM specification, the interrupt order and the manifest.
 
-The module itself lives in its own repository (`nvidia-uvm-freebsd`), written clean-room
+The module itself lives in its own repository (uvm-bsd), written clean-room
 from a specification; this repository holds only the `nvidia.ko` side.
 
 ## nvidia-smi
@@ -382,12 +401,79 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
-| `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs |
+| `src/nvidia-drm-render/` | `nvidia-drm-render.h`, the render uAPI of nvidia-drm: layouts and ioctl numbers for the kernel work packages and the Mesa `nvdrm` backend; MIT |
+| `man/` | `nvidia_drm_render(4)`, the manual page of that interface |
+| `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
-| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
+| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
+
+## RM client ownership for nvidia-uvm
+
+**What and why.** The RM resolves a client handle with kernel privilege and never asks who
+is calling, and handles are predictable (`0xC1D00000` is the first client of a boot). So
+`nvidia.ko` records which open `/dev/nvidiactl` file each client was allocated on
+(`src/gb10-client-owner/nv_client_owner.h`, hooked into `nvidia_handle_ioctl` and
+`nvidia_close_ctl` by `patches/patch-zz-nvidia_client_owner_subr.c`) and exports two
+functions for `nvidia-uvm.ko` (the clean-room UVM driver, uvm-bsd):
+
+- `NV_STATUS nvUvmInterfaceClientHold(struct file *fp, NvHandle hClient)`: `NV_OK` only for a
+  devfs character device `nvidiactl` file of this module that owns the client, otherwise
+  `NV_ERR_INSUFFICIENT_PERMISSIONS`. On `NV_OK` the client is held: a free of it waits, and
+  the file cannot close (the hold keeps its own file reference).
+- `void nvUvmInterfaceClientRelease(struct file *fp, NvHandle hClient)`: call it exactly once
+  per `NV_OK`, never after a refusal. Holds are per client and nest, so an RM call made under
+  a hold delays only a free of that one client, not other users.
+
+**Guarantees.** The table lock is a leaf lock: it is never held across an RM call (the RM can run
+a file's close destructor, which takes it, from inside an RM call), so the table is updated after
+the RM call returns and may lag it; every lag fails closed (an unrecorded new client is refused, a
+reused handle leaves both parties unowned, the owner's own free keeps new holds out). A free of a
+client first waits for the holds on it, before the ioctl takes any other lock. A client freed
+through any file leaves the table, a closing file forgets its clients, and only a control file can
+own one.
+
+**Versions.** `nvidia.ko` is module version 2. `nvidia-modeset.ko`, `nvidia-drm.ko` and
+`nvidia-uvm.ko` depend on exactly that. `nvidia-uvm.ko` has to come from the uvm-bsd branch
+`agent/2373-uvm-client-ownership` or later (its `MODULE_DEPEND` is in that repository; the
+"CUDA prerequisites" commit above predates it). So updating `nvidia.ko` alone does not fix the
+cross-user hole or keep the display: the four modules go together.
+
+- Symptom: `kldload` fails ("an error occurred while loading module"), and `dmesg` shows a
+  version mismatch or `symbol nvUvmInterfaceClientHold undefined` (or `...ClientRelease`).
+- Cause: the modules are from different builds, or `nvidia.ko` was built without the
+  `patch-zz-nvidia_client_owner_*` patches. An older `nvidia-uvm.ko` (version 1 dependency)
+  refuses the new `nvidia.ko`, and the new one refuses an old `nvidia.ko`.
+- Fix: rebuild `nvidia`, `nvidia-modeset`, `nvidia-drm` and `nvidia-uvm` from one tree made by
+  `scripts/prepare-tree.sh` and reload them together.
+
+**A stuck free.** A free of a client waits for the holds on it, in an interruptible sleep with
+wait channel `nvcobusy`, and every other ioctl on the same file waits behind it. `nvidia-uvm.ko`
+takes a hold for one request and releases it when the request ends, so the wait is normally
+short. A process that stays in `nvcobusy` means a hold was leaked, which is a bug in
+uvm-bsd: a leaked hold lasts until reboot (killing the waiting process only ends
+that one wait, and the client is never freed). A fatal signal, or a caught signal without
+`SA_RESTART`, ends the wait (`EINTR`, nothing freed); a restartable signal waits again.
+`ps -axo pid,wchan,comm | grep nvcobusy` finds the process. A console line
+`nvUvmInterfaceClientRelease: no hold on client ... (nvidia-uvm bug)` is the opposite fault, a
+release without a matching hold; quote it in the report if you see it (a debug kernel panics
+with "client release without a matching hold" instead). A console line
+`RM client 0x... was not recorded for nvidia-uvm` means the table and the RM disagreed about a
+handle: nvidia-uvm refuses requests on that client until it is freed and allocated again. Only a free by the
+client's owner stops new holds while it waits, so a stranger cannot starve the owner by freeing
+its predictable handle. `nvUvmInterfaceClientHold` must be called from a sleepable context with
+no RM lock held, never from an RM callback; the same goes for `nvUvmInterfaceClientRelease`.
+
+**Tests.** `tests/client_owner_glue_test.sh` compiles the real glue (`src/gb10-client-owner/nvco_glue.h`)
+against fakes of the kernel and runs it, with mutants that must fail. `tests/client_owner_test.sh` reads `GB10_WORK` (a directory with `sources/` holding the
+pinned open-gpu-kernel-modules 580.178.04 checkout and the NVIDIA FreeBSD tarball) and `TMPDIR`;
+without them the layout and prepare-tree checks are skipped (a failure under `CI` or
+`REQUIRE_INPUTS`). It runs the table logic (layouts compared with the real `nvos.h`), checks the
+patch hooks, and runs deliberately broken copies of the header and the patch that it must reject.
 
 ## Licence
 
 Our scripts, patches and sources are BSD-3-Clause (see [`LICENSE`](LICENSE)). NVIDIA's code,
 fetched at build time, keeps NVIDIA's licences: MIT for open-gpu-kernel-modules, NVIDIA's own
-licence for the FreeBSD driver package and the firmware.
+licence for the FreeBSD driver package and the firmware. `src/nvidia-drm-render/nvidia-drm-render.h`
+is MIT, because its layouts follow Mesa's MIT nouveau uAPI header and it is meant to be included by
+NVIDIA's MIT nvidia-drm sources and by Mesa. Provenance: [`PROVENANCE.md`](PROVENANCE.md).

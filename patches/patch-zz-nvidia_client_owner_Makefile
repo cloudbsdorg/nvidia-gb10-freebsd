@@ -1,0 +1,19 @@
+--- nvidia/Makefile.orig
++++ nvidia/Makefile
+@@ -73,10 +73,16 @@
+ 		nvUvmInterfaceInitAccessCntrInfo nvUvmInterfaceDestroyAccessCntrInfo \
+ 		nvUvmInterfaceEnableAccessCntr nvUvmInterfaceDisableAccessCntr \
+ 		nvUvmInterfaceReportFatalError
+ .endif
+ 
++# The client hold/release pair nvidia-uvm.ko calls (Track #2373); amd64 modules
++# export every global symbol.
++.if ${MACHINE_CPUARCH} == "aarch64"
++EXPORT_SYMS+=	nvUvmInterfaceClientHold nvUvmInterfaceClientRelease
++.endif
++
+ include ../common/optional-cflags.mk
+ 
+ OBJS+=		${RMOBJ}
+ NO_OBJ=		true
+ 

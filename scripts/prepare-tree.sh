@@ -49,6 +49,8 @@
 # below): the arm64 PCIe BAR memory-attribute policy header to
 # TREE/nvidia/gb10_memattr.h, the UVM interface glue (src/gb10-uvm) and the
 # three MIT interface headers it needs from the open RM core checkout.
+# src/gb10-client-owner/nv_client_owner.h and nvco_glue.h (the RM client
+# ownership table and its kernel glue for nvidia-uvm.ko, Track #2373) likewise.
 # Nothing is written outside TREE and /tmp is never used.
 
 set -eu
@@ -159,7 +161,8 @@ copy_repo_src() {
 	_ogkm=$WORK/sources/open-gpu-kernel-modules-580.178.04
 	mkdir -p "$TREE/nvidia"
 	for _f in src/gb10-memattr/gb10_memattr.h \
-	    src/gb10-uvm/nv-uvm-interface.h src/gb10-uvm/nv-uvm-interface.c; do
+	    src/gb10-uvm/nv-uvm-interface.h src/gb10-uvm/nv-uvm-interface.c \
+	    src/gb10-client-owner/nv_client_owner.h src/gb10-client-owner/nvco_glue.h; do
 		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
 		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
 		    >> "$TREE/.prepared.patches"
