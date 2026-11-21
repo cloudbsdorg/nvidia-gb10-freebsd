@@ -11,8 +11,9 @@
 # Skips and infos are listed, never counted as a pass.  Exit codes: 0 a complete
 # run without a failure whose import row passed; 1 a failure (a fail row, a step
 # that never finished, no done row, no rows); 2 a usage error or an unreadable
-# file; 3 the run finished without a failure but the import row was not a pass
-# (it was skipped): nothing was tested.
+# file; 3 the run finished without a failure but the import row or the
+# wire-count-stable row was not a pass (skipped): the import or its wiring was
+# not tested.
 
 set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
@@ -54,7 +55,8 @@ END {
 	}
 	if (!("done" in seen) || last["done"] != "info") { print "FAIL: no final \"done\" row: the run did not finish"; bad++ }
 	if (bad) { print "summary: FAIL"; exit 1 }
-	if (last["import"] != "pass") { print "summary: INCOMPLETE: the run finished but the import row is \"" last["import"] "\", not pass: nothing was tested"; exit 3 }
+	if (last["import"] != "pass") { print "summary: INCOMPLETE: the run finished but the import row is \"" (("import" in seen) ? last["import"] : "missing") "\", not pass: nothing was tested"; exit 3 }
+	if (last["wire-count-stable"] != "pass") { print "summary: INCOMPLETE: the run finished but the wire-count-stable row is \"" (("wire-count-stable" in seen) ? last["wire-count-stable"] : "missing") "\", not pass: the wiring was not measured"; exit 3 }
 	print "summary: PASS (skips and infos are listed above and are not passes)"
 	exit 0
 }' "$f"

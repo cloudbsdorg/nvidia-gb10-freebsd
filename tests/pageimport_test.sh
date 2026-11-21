@@ -305,14 +305,26 @@ none_busy(void)
 
 /* a fake exporter whose buffer is freed with the last GEM reference. */
 static int gem_refs, src_freed;
-static void g_hold(void *ctx) { (void)ctx; gem_refs++; }
+static int g_hold(void *ctx) { (void)ctx; gem_refs++; return 0; }
 static void g_release(void *ctx) { (void)ctx; if (--gem_refs == 0) src_freed = 1; }
+
+/*
+ * The unload gate, driven as nvidia-drm does: the owner's hold goes through
+ * the gate (under the module's lock, which a single-threaded model needs no
+ * more than the order of the calls), the owner's release is the module's
+ * and sees the count still up, and the core counts down after it returned.
+ */
+static struct gb10_pi_gate G;
+static int owner_refs, live_seen_in_release;
+static int gate_hold(void *ctx) { (void)ctx; if (gb10_pi_gate_hold(&G) != 0) return -1; owner_refs++; return 0; }
+static void gate_release(void *ctx) { (void)ctx; live_seen_in_release = gb10_pi_gate_live(&G); owner_refs--; }
 
 /* the exporter's dma-buf: when nobody holds it, its page pool may reuse the pages */
 static void x_hold(void *ctx) { (void)ctx; dmabuf_refs++; }
+static int xd_hold(void *ctx) { (void)ctx; dmabuf_refs++; return 0; }
 static void x_release(void *ctx) { (void)ctx; if (--dmabuf_refs == 0) pool_reused = 1; }
 
-static void f_hold(void *ctx) { (void)ctx; held++; }
+static int f_hold(void *ctx) { (void)ctx; held++; return 0; }
 static void f_release(void *ctx) { (void)ctx; held--; }
 
 static int failures;
@@ -533,6 +545,12 @@ main(void)
 	pager_lets_go_at = -1;
 	f_rm_unlock_pages(pages, n, 1);
 	check("busy through the wait, no object: skipped without a count", vm[8].dirty == 0 && refused_dirty == 0 && fallback_dirty == 0, 1);
+	{
+		int b = GB10_PI_DIRTY_SPIN_BUDGET;
+
+		check("... the result is SKIP", gb10_pi_dirty_page(&vm[8], &dirty_ops, NULL, &b), GB10_PI_DIRTY_SKIP);
+		check("... the foreign busy lock is still the foreigner's (not taken, not dropped)", vm[8].busy_other == 1 && vm[8].busy == 0, 1);
+	}
 	check("the dirty step with missing operations is refused (and so counted), never skipped silently", gb10_pi_dirty_page(&vm[8], NULL, NULL, NULL), GB10_PI_DIRTY_REFUSE);
 
 	/* the spin: one budget per teardown, pinned, at the cap and one past it, never for a page without an object */
@@ -584,6 +602,58 @@ main(void)
 		check("no delay operation: a busy object page falls back at once", gb10_pi_dirty_page(&vm[8], &nodelay, NULL, &b), GB10_PI_DIRTY_FALLBACK);
 		check("... without spending the budget", b, GB10_PI_DIRTY_SPIN_BUDGET);
 		check("no budget at all: the same, no spin", gb10_pi_dirty_page(&vm[8], &dirty_ops, NULL, NULL), GB10_PI_DIRTY_FALLBACK);
+	}
+
+	/* the unload gate: two holds, one release, the quiesce is still refused; a closed gate gives no hold */
+	{
+		struct gb10_pi_desc d1, d2;
+
+		memset(&G, 0, sizeof(G));
+		owner_refs = 0;
+		live_seen_in_release = 0;
+		memset(&d1, 0, sizeof(d1));
+		d1.magic = GB10_PI_DESC_MAGIC; d1.count = 1; d1.pages = pages; d1.hold = gate_hold; d1.release = gate_release; d1.gate = &G;
+		d2 = d1;
+		check("a first export: the hold is taken", gb10_pi_import(&d1), GB10_PI_OK);
+		check("a second export: the hold is taken", gb10_pi_import(&d2), GB10_PI_OK);
+		check("two holds are live", gb10_pi_gate_live(&G), 2);
+		gb10_pi_release(&d1);
+		check("one release: one hold is still live", gb10_pi_gate_live(&G), 1);
+		check("... and the release saw the count still up (it is counted down after the module's release returned)", live_seen_in_release, 2);
+		check("the unload is refused while a hold is live", gb10_pi_gate_quiesce(&G), -1);
+		check("... a refused quiesce does not close the gate", G.closing, 0);
+		check("... so a new export is still given", gb10_pi_import(&d1), GB10_PI_OK);
+		gb10_pi_release(&d1);
+		gb10_pi_release(&d2);
+		check("every hold released: none is live", gb10_pi_gate_live(&G), 0);
+		check("... and the owner has no reference left", owner_refs, 0);
+		check("the unload is agreed once none is live", gb10_pi_gate_quiesce(&G), 0);
+		check("... and it closes the gate", G.closing, 1);
+		check("a closed gate refuses a new export", gb10_pi_import(&d1), GB10_PI_CLOSING);
+		check("... without taking a reference on the owner", owner_refs, 0);
+		check("... and without counting a hold", gb10_pi_gate_live(&G), 0);
+		check("the closing result has a message", gb10_pi_str(GB10_PI_CLOSING) != NULL && strcmp(gb10_pi_str(GB10_PI_CLOSING), "unknown error") != 0, 1);
+		/* one GEM object exported twice: two holds on one descriptor, two releases, a third does nothing */
+		memset(&G, 0, sizeof(G));
+		d1.gate = &G;
+		d1.held = 0;
+		gb10_pi_import(&d1);
+		gb10_pi_import(&d1);
+		check("two exports of one object: two holds are live", gb10_pi_gate_live(&G), 2);
+		gb10_pi_release(&d1);
+		check("the first release leaves one hold (the descriptor counts holds, not a flag)", gb10_pi_gate_live(&G), 1);
+		gb10_pi_release(&d1);
+		gb10_pi_release(&d1);
+		check("the third release does nothing: no underflow", gb10_pi_gate_live(&G), 0);
+		owner_refs = 0;
+		check("a release without a hold (an import that was refused) does nothing: no underflow", (gb10_pi_release(&d1), gb10_pi_gate_live(&G)), 0);
+		check("... and the owner is not released either", owner_refs, 0);
+		memset(&G, 0, sizeof(G));
+		d1.gate = NULL;
+		gb10_pi_import(&d1);		/* G is not d1's gate any more: its count must not move */
+		G.holds = 5;
+		gb10_pi_release(&d1);
+		check("a descriptor without a gate is released without counting anything", G.holds, 5);
 	}
 
 	/* a zero-length entry among good ones is refused wherever it sits */
@@ -669,7 +739,7 @@ main(void)
 	s[0] = seg(8, 0, 4 * PS);
 	gb10_pi_fill(s, 1, 4 * PS, PS, &ops, NULL, pages, NFAKE, &n);
 	memset(&d, 0, sizeof(d));
-	d.magic = GB10_PI_DESC_MAGIC; d.count = n; d.pages = pages; d.hold = x_hold; d.release = x_release;
+	d.magic = GB10_PI_DESC_MAGIC; d.count = n; d.pages = pages; d.hold = xd_hold; d.release = x_release;
 	d.imported = 1;			/* the page-array import wired them for the RM */
 	gb10_pi_wire(pages, n, &ops, NULL);	/* the first wiring, by the page-array import */
 	vm[9].object = 1;			/* the exporter's mapping faulted page 9 in, validated */
@@ -982,7 +1052,10 @@ mutate register-skips-count    's/d->count != page_count/0/'
 mutate register-skips-magic    's/d->magic != GB10_PI_DESC_MAGIC)$/0)/'
 mutate import-skips-validation 's/if (!gb10_pi_desc_ok(d))$/if (0)/'
 mutate release-never-called    's/\td->release(d->ctx);/\t;/'
-mutate hold-never-called       's/\td->hold(d->ctx);/\t;/'
+mutate release-without-hold-counts 's/		if (h <= 0)/		if (0)/'
+mutate held-is-a-flag          's/__atomic_add_fetch(&d->held, 1, __ATOMIC_SEQ_CST);/d->held = 1;/'
+mutate import-does-not-mark-held 's/^	__atomic_add_fetch(&d->held, 1, __ATOMIC_SEQ_CST);$/	;/'
+mutate hold-never-called       's/if (d->hold(d->ctx) != 0)/if (0)/'
 mutate register-wires-nothing  's/rc = gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0);/rc = GB10_PI_OK;/'
 mutate register-always-first-wire-rule 's/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0)/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, 0)/'
 mutate register-ignores-imported-flag 's/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, d->imported != 0)/gb10_pi_wire_mode(d->pages, d->count, ops, ctx, 1)/'
@@ -990,6 +1063,7 @@ mutate rewire-ignores-fictitious 's/if (!(rewire ? ops->rewire_ok(ctx, pages\[i\
 mutate claimable-ignores-object 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !is_fictitious);/'
 mutate claimable-ignores-fictitious 's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (is_managed_ram \&\& !has_object);/'
 mutate claimable-ignores-ram   's/return (is_managed_ram \&\& !is_fictitious \&\& !has_object);/return (!is_fictitious \&\& !has_object);/'
+mutate dirty-unbusies-foreign-lock 's/^\tif (busied)$/\tif (busied || !obj)/'
 mutate dirty-budget-cap-plus-one 's/\*budget > 0 \&\&/*budget >= 0 \&\&/'
 mutate dirty-budget-cap-minus-one 's/\*budget > 0 \&\&/*budget > 1 \&\&/'
 mutate dirty-spins-without-object 's/obj = o->has_object(ctx, page);/obj = 1;/'
@@ -1000,6 +1074,13 @@ mutate dirty-needs-busy-to-dirty 's/^\tif (act == GB10_PI_DIRTY_DO)$/\tif (act =
 mutate wire-unbusies-foreign-busy 's/^\t\tif (ops->try_busy(ctx, pages\[i\]) != 0) {$/\t\tif (ops->try_busy(ctx, pages[i]) != 0) { ops->unbusy(ctx, pages[i]);/'
 mutate messages-duplicated     's/"out of memory"/"empty buffer"/'
 mutate life-ignores-held       's/if (l == NULL || l->held || l->hold == NULL/if (l == NULL || l->hold == NULL/'
+mutate gate-drop-sets-one      's/__atomic_sub_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);/__atomic_store_n(\&g->holds, 1, __ATOMIC_SEQ_CST);/'
+mutate gate-quiesce-ignores-holds 's/if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0)/if (0)/'
+mutate gate-quiesce-never-closes 's/__atomic_store_n(&g->closing, 1, __ATOMIC_SEQ_CST);/;/'
+mutate gate-hold-ignores-closing 's/if (__atomic_load_n(&g->closing, __ATOMIC_SEQ_CST))/if (0)/'
+mutate gate-hold-not-counted   's/__atomic_add_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);/;/'
+mutate gate-counts-down-before-release 's/^\td->release(d->ctx);$/\tif (g != NULL) gb10_pi_gate_drop(g); d->release(d->ctx); g = NULL;/'
+mutate gate-refused-hold-imports 's/if (d->hold(d->ctx) != 0)/if (d->hold(d->ctx) != 0 \&\& 0)/'
 mutate wire-no-recheck         's/ops->claimable(ctx, pages\[i\])/1/'
 mutate wire-no-busy            's/if (ops->try_busy(ctx, pages\[i\]) != 0) {/if (0) {/'
 mutate busy-reported-as-changed 's/rc = GB10_PI_PAGE_BUSY;/rc = GB10_PI_PAGE_CHANGED;/'

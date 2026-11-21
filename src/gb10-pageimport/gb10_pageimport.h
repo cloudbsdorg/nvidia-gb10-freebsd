@@ -83,7 +83,7 @@ void gb10_pi_os_release(void *sgt);
 void gb10_pi_os_dirty(void *page, int *spin_budget);
 
 /* Not a kernel address (the top bits are clear), so it cannot be a pointer. */
-#define	GB10_PI_DESC_MAGIC	0x0000474231305049ULL	/* "IP01BG" */
+#define	GB10_PI_DESC_MAGIC	0x0000474232305049ULL	/* "IP02BG": the layout and the hold signature of version 2 */
 
 enum gb10_pi_rc {
 	GB10_PI_OK = 0,
@@ -98,6 +98,7 @@ enum gb10_pi_rc {
 	GB10_PI_NOMEM,			/* an allocation failed (the caller's) */
 	GB10_PI_PAGE_CHANGED,		/* a page got an object or went fictitious since the check: permanent for this import */
 	GB10_PI_PAGE_BUSY,		/* somebody else holds a page's busy lock right now: transient, retry */
+	GB10_PI_CLOSING,		/* the module is being unloaded: no new hold */
 	GB10_PI_RC_END			/* not a result: one past the last, for loops */
 };
 
@@ -132,6 +133,56 @@ struct gb10_pi_ops {
 };
 
 /*
+ * The unload gate of a module whose functions the RM calls back into (the
+ * hold and release of an export live in nvidia-drm.ko, the RM file descriptor
+ * that holds the export can outlive everything else).  `holds` counts the
+ * exports the RM holds; `closing` is set by the first quiesce that finds
+ * none, and from then on no new hold is given.  The caller serialises
+ * gb10_pi_gate_hold() and gb10_pi_gate_quiesce() with one lock (the check
+ * of `closing` and the increment, and the check of `holds` and the setting
+ * of `closing`, must not interleave); the drop is a plain atomic decrement,
+ * done by gb10_pi_release() in the text of nvidia.ko after the module's
+ * own release function has returned, so that no instruction of the module
+ * runs after the count reaches zero.
+ */
+struct gb10_pi_gate {
+	int	holds;
+	int	closing;
+};
+
+/* take a hold: 0, or -1 when the gate is closing (nothing is counted) */
+static inline int
+gb10_pi_gate_hold(struct gb10_pi_gate *g)
+{
+	if (__atomic_load_n(&g->closing, __ATOMIC_SEQ_CST))
+		return (-1);
+	__atomic_add_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);
+	return (0);
+}
+
+/* the unload asks: -1 (busy) while any hold is live, else close the gate and 0 */
+static inline int
+gb10_pi_gate_quiesce(struct gb10_pi_gate *g)
+{
+	if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0)
+		return (-1);
+	__atomic_store_n(&g->closing, 1, __ATOMIC_SEQ_CST);
+	return (0);
+}
+
+static inline int
+gb10_pi_gate_live(const struct gb10_pi_gate *g)
+{
+	return (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST));
+}
+
+static inline void
+gb10_pi_gate_drop(struct gb10_pi_gate *g)
+{
+	__atomic_sub_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);
+}
+
+/*
  * What the OS layer receives in place of a Linux struct sg_table: the
  * pages of a buffer that nvidia-drm imported, and the owner that keeps the
  * buffer alive while the RM holds it (hold/release take and drop a
@@ -142,8 +193,10 @@ struct gb10_pi_desc {
 	unsigned long long	count;		/* number of pages */
 	void			**pages;
 	void			*ctx;		/* the owner, given to hold/release */
-	void			(*hold)(void *ctx);
+	int			(*hold)(void *ctx);	/* 0, or non-zero to refuse (the module is closing) */
 	void			(*release)(void *ctx);
+	struct gb10_pi_gate	*gate;		/* counted by gb10_pi_release(); may be NULL */
+	int			held;		/* holds taken by successful gb10_pi_import() calls minus releases (one GEM object can be exported twice): a release with none held does nothing */
 	/*
 	 * Set once the pages were wired for the RM by the page-array import.
 	 * Only then may the SGT export wire them again under the second-wiring
@@ -169,6 +222,7 @@ gb10_pi_str(int rc)
 	case GB10_PI_NOMEM:		return "out of memory";
 	case GB10_PI_PAGE_CHANGED:	return "a page changed while it was being imported (it got a VM object or became fictitious)";
 	case GB10_PI_PAGE_BUSY:		return "a page is busy (the exporter's mapping holds it); retry";
+	case GB10_PI_CLOSING:		return "this display driver refuses new exports until the next boot, because an unload was started (reboot, or do not unload it)";
 	default:			return "unknown error";
 	}
 }
@@ -493,21 +547,36 @@ gb10_pi_desc_valid(const struct gb10_pi_desc *d, unsigned long long page_count)
  * is the RM's to check, at the registration.
  */
 static inline int
-gb10_pi_import(const struct gb10_pi_desc *d)
+gb10_pi_import(struct gb10_pi_desc *d)
 {
 	if (!gb10_pi_desc_ok(d))
 		return (GB10_PI_BAD_ARG);
-	d->hold(d->ctx);
+	if (d->hold(d->ctx) != 0)
+		return (GB10_PI_CLOSING);
+	__atomic_add_fetch(&d->held, 1, __ATOMIC_SEQ_CST);
 	return (GB10_PI_OK);
 }
 
 /* gb10_pi_release - nv_dma_release_sgt(): drop the owner's reference. */
 static inline void
-gb10_pi_release(const struct gb10_pi_desc *d)
+gb10_pi_release(struct gb10_pi_desc *d)
 {
+	struct gb10_pi_gate *g;
+	int h;
+
 	if (d == NULL || d->magic != GB10_PI_DESC_MAGIC || d->release == NULL)
 		return;
+	/* one release per hold, also when two exports of one object release at once */
+	h = __atomic_load_n(&d->held, __ATOMIC_SEQ_CST);
+	do {
+		if (h <= 0)
+			return;
+	} while (!__atomic_compare_exchange_n(&d->held, &h, h - 1, 0,
+	    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+	g = d->gate;		/* d may be freed by the release */
 	d->release(d->ctx);
+	if (g != NULL)
+		gb10_pi_gate_drop(g);
 }
 
 /*

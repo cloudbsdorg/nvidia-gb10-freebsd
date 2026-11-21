@@ -221,7 +221,7 @@ check_tree() {
 	body "$_t/$OSF" nv_dirty_delay "$TMPD/d2.c" && grep -q 'DELAY(GB10_PI_DIRTY_SPIN_US)' "$TMPD/d2.c" || { echo "O2: the dirty step does not spin for a busy page with DELAY(GB10_PI_DIRTY_SPIN_US)"; return; }
 	grep -q 'vm_page_busy_acquire(\|pause(\|THREAD_CAN_SLEEP\|msleep(' "$TMPD/d2.c" && { echo "O2: the dirty step sleeps in the RM's teardown, which may hold locks the sleep check does not see"; return; }
 	grep -Eq '\.delay[[:space:]]*=[[:space:]]*nv_dirty_delay' "$_t/$OSF" || { echo "O2: the dirty operations do not use nv_dirty_delay"; return; }
-	grep -Eq 'int[[:space:]]+dirty_spin[[:space:]]*=[[:space:]]*GB10_PI_DIRTY_SPIN_BUDGET;' "$TMPD/ou.c" && grep -q 'gb10_pi_os_dirty(user_pages\[i\],[[:space:]]*&dirty_spin)' "$TMPD/ou.c" || { echo "O2: the spin budget is not one per os_unlock_user_pages call, shared by all its pages"; return; }
+	grep -Eq '^[[:space:]]+int[[:space:]]+dirty_spin[[:space:]]*=[[:space:]]*GB10_PI_DIRTY_SPIN_BUDGET;' "$TMPD/ou.c" && grep -q 'gb10_pi_os_dirty(user_pages\[i\],[[:space:]]*&dirty_spin)' "$TMPD/ou.c" || { echo "O2: the spin budget is not one per os_unlock_user_pages call, shared by all its pages"; return; }
 	body "$_t/$OSF" nv_dirty_all_valid "$TMPD/d4.c" && grep -q 'vm_page_all_valid(' "$TMPD/d4.c" || { echo "O2: the validity is not asked with vm_page_all_valid"; return; }
 	body "$_t/$OSF" nv_dirty_dirty "$TMPD/d5.c" && grep -q 'vm_page_dirty(' "$TMPD/d5.c" || { echo "O2: the dirty step does not dirty"; return; }
 	body "$_t/$OSF" gb10_pi_os_dirty "$TMPD/od.c" || { echo "O2: no gb10_pi_os_dirty"; return; }
@@ -273,21 +273,28 @@ check_tree() {
 	strip_comments "$_t/$DMABUF" "$TMPD/dmabuf-nocomment.c"
 	[ "$(grep -c 'gb10_pi_life_drop(' "$TMPD/dmabuf-nocomment.c")" -eq 1 ] || { echo "D4: gb10_pi_life_drop( does not appear exactly once in nvidia-drm-gem-dma-buf.c"; return; }
 	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_free "$TMPD/fr2.c" && grep -q 'gb10_pi_life_drop(' "$TMPD/fr2.c" || { echo "D4: the one gb10_pi_life_drop( is not in the free of the GEM object"; return; }
-	# D6: an RM file descriptor that holds an export calls back into this module: no unload, no free of the device while it does
-	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_hold "$TMPD/h6.c" && grep -q 'atomic_inc(&__nv_drm_pi_live_holds)' "$TMPD/h6.c" || { echo "D6: the hold the RM takes on an export is not counted"; return; }
-	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_release "$TMPD/r6.c" && grep -q 'atomic_dec(&__nv_drm_pi_live_holds)' "$TMPD/r6.c" || { echo "D6: the release of an export is not counted down"; return; }
-	before "$TMPD/r6.c" 'nv_drm_gem_object_unreference_unlocked(' 'atomic_dec(' || { echo "D6: the count goes down before the release has finished using this module"; return; }
-	grep -q 'nv_drm_pi_live_holds' "$_t/$DMABUFH" || { echo "D6: nv_drm_pi_live_holds is not declared for the other files of nvidia-drm"; return; }
+	# D6: an RM file descriptor that holds an export calls back into this module: a gate refuses the unload while one is held
+	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_hold "$TMPD/h6.c" && grep -q 'spin_lock(&__nv_drm_pi_gate_lock)' "$TMPD/h6.c" && grep -q 'gb10_pi_gate_hold(&__nv_drm_pi_gate)' "$TMPD/h6.c" || { echo "D6: the hold the RM takes on an export does not go through the closing gate under its lock"; return; }
+	before "$TMPD/h6.c" 'gb10_pi_gate_hold(' 'drm_gem_object_get(' || { echo "D6: the GEM reference is taken before the gate agreed"; return; }
+	body "$_t/$DMABUF" __nv_drm_gem_dma_buf_pi_release "$TMPD/r6.c" && grep -q 'nv_drm_gem_object_unreference_unlocked(' "$TMPD/r6.c" || { echo "D6: no release"; return; }
+	grep -q 'gate_drop\|atomic_\|holds' "$TMPD/r6.c" && { echo "D6: this module counts the hold down itself: the core does it in nvidia.ko after the release has returned"; return; }
+	grep -Eq 'pi_desc\.gate[[:space:]]*=[[:space:]]*&__nv_drm_pi_gate;' "$_t/$DMABUF" || { echo "D6: the descriptor does not carry the gate, so the release is never counted down"; return; }
+	body "$_t/$DMABUF" nv_drm_pi_quiesce "$TMPD/q6.c" && grep -q 'spin_lock(' "$TMPD/q6.c" && grep -q 'gb10_pi_gate_quiesce(&__nv_drm_pi_gate)' "$TMPD/q6.c" && grep -q 'EBUSY' "$TMPD/q6.c" || { echo "D6: the quiesce is not the gate's, under the lock, answering EBUSY"; return; }
+	grep -q 'nv_drm_pi_live_holds' "$_t/$DMABUFH" && grep -q 'nv_drm_pi_quiesce' "$_t/$DMABUFH" || { echo "D6: the gate functions are not declared for the other files of nvidia-drm"; return; }
 	tr '\n' ' ' < "$_t/$LKPI" > "$TMPD/lkpi-flat.c"
-	grep -Eq 'DECLARE_MODULE\(nvidia_drm_pi_guard,' "$TMPD/lkpi-flat.c" || { echo "D6: there is no second module that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
+	grep -Eq 'DECLARE_MODULE\(nvidia_drm_pi_guard,[^;]*SI_ORDER_FIRST\)' "$TMPD/lkpi-flat.c" || { echo "D6: there is no second module, ordered first, that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
 	body "$_t/$LKPI" nv_drm_pi_guard_handler "$TMPD/g6.c" || { echo "D6: no guard handler"; return; }
-	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*case MOD_UNLOAD:[[:space:]]*if \(nv_drm_pi_live_holds\(\) > 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;' || { echo "D6: the guard does not refuse MOD_QUIESCE and MOD_UNLOAD with EBUSY while an export is held"; return; }
+	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
 	grep -q 'printf("nvidia_drm: unload refused' "$TMPD/g6.c" || { echo "D6: a refused unload is silent"; return; }
-	body "$_t/$DRV" nv_drm_remove "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove"; return; }
-	grep -Fq 'if (nv_dev && nv_drm_pi_live_holds() > 0) {' "$TMPD/rm6.c" || { echo "D6: nv_drm_remove does not test the live holds before it frees the device"; return; }
+	# the real teardown path on FreeBSD: nv_bsd_drm_exit -> nv_drm_exit -> nv_drm_remove_devices
+	body "$_t/$DRV" nv_drm_remove_devices "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove_devices"; return; }
 	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/rm6.c" > "$TMPD/rm6b.c"
-	grep -Eq '^[[:space:]]+return;' "$TMPD/rm6b.c" || { echo "D6: nv_drm_remove falls through to the free when an export is still open"; return; }
-	before "$TMPD/rm6.c" 'if (nv_dev && nv_drm_pi_live_holds() > 0) {' 'nv_drm_dev_destroy(' || { echo "D6: nv_drm_remove frees the device without asking whether an export still holds it"; return; }
+	grep -Eq '^[[:space:]]+return;' "$TMPD/rm6b.c" || { echo "D6: nv_drm_remove_devices destroys the devices while an export is still open"; return; }
+	before "$TMPD/rm6.c" 'nv_drm_pi_live_holds() > 0' 'nv_drm_pop_device()' || { echo "D6: nv_drm_remove_devices pops devices before it asks about the exports"; return; }
+	body "$_t/$LKPI" nv_bsd_drm_exit "$TMPD/ex6.c" || { echo "D6: no nv_bsd_drm_exit"; return; }
+	before "$TMPD/ex6.c" 'nv_drm_exit()' 'nv_drm_pi_live_holds() > 0' || { echo "D6: nv_bsd_drm_exit does not ask about the exports after the common teardown"; return; }
+	before "$TMPD/ex6.c" 'nv_drm_pi_live_holds() > 0' 'linux_pci_detach_device(' || { echo "D6: nv_bsd_drm_exit frees the pdevs the attachment uses without asking about the exports"; return; }
+	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/ex6.c" | grep -Eq '^[[:space:]]+return;' || { echo "D6: nv_bsd_drm_exit frees the pdevs even with an export open"; return; }
 }
 
 # O5, a property of the script and not of a source file.
@@ -361,16 +368,23 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant export-prefers-page-array $DMABUF 's/pTmpMemory ?/nv_dma_buf->base.pMemory ?/'
 	mutant no-life-take $DMABUF 's/gb10_pi_life_take(/gb10_pi_life_takeX(/'
 	mutant life-dropped-first $DMABUF 's/gb10_pi_life_drop(&nv_dma_buf->life);/;/;s/nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/gb10_pi_life_drop(\&nv_dma_buf->life); nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/'
-	mutant unload-no-decrement $DMABUF 's/atomic_dec(&__nv_drm_pi_live_holds);/;/'
-	mutant unload-no-increment $DMABUF 's/atomic_inc(&__nv_drm_pi_live_holds);/;/'
-	mutant unload-decrement-first $DMABUF '/^static void __nv_drm_gem_dma_buf_pi_release/,/^}/{s/    nv_drm_gem_object_unreference_unlocked(nv_gem);/    atomic_dec(\&__nv_drm_pi_live_holds); nv_drm_gem_object_unreference_unlocked(nv_gem);/;s/    atomic_dec(&__nv_drm_pi_live_holds);$/    ;/;}'
-	mutant unload-guard-always-ok $LKPI 's/return EBUSY;/return 0;/'
+	mutant unload-no-gate-in-hold $DMABUF 's/rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);/rc = 0;/'
+	mutant unload-hold-without-lock $DMABUF '/^static int __nv_drm_gem_dma_buf_pi_hold/,/^}/s/spin_lock(&__nv_drm_pi_gate_lock);//'
+	mutant unload-unload-does-not-close $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/if (nv_drm_pi_quiesce() != 0) {/if (nv_drm_pi_live_holds() > 0) {/'
+	mutant unload-module-counts-down $DMABUF '/^static void __nv_drm_gem_dma_buf_pi_release/,/^}/s/nv_drm_gem_object_unreference_unlocked(nv_gem);/nv_drm_gem_object_unreference_unlocked(nv_gem); gb10_pi_gate_drop(\&__nv_drm_pi_gate);/'
+	mutant unload-no-gate-on-desc $DMABUF 's/nv_dma_buf->pi_desc.gate = &__nv_drm_pi_gate;//'
+	mutant unload-quiesce-ignores-gate $DMABUF 's/rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/rc = 0;/'
+	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce() != 0) {/if (0) {/'
+	mutant unload-only-on-unload $LKPI 's/    case MOD_QUIESCE:/    case MOD_QUIESCE + 1000:/'
+	mutant unload-unload-ok $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/return EBUSY;/return 0;/'
 	mutant unload-guard-silent $LKPI 's/printf("nvidia_drm: unload refused/(void)("nvidia_drm: unload refused/'
-	mutant unload-guard-load-only $LKPI 's/    case MOD_QUIESCE:/    case MOD_LOAD + 1000:/'
 	mutant unload-no-guard-module $LKPI 's/DECLARE_MODULE(nvidia_drm_pi_guard,/DECLARE_MODULE(nvidia_drm_pi_guardX,/'
-	mutant remove-falls-through $DRV '/nv_drm_pi_live_holds() > 0) {/,/^    }/s/^        return;/        ;/'
-	mutant remove-ignores-holds $DRV 's/if (nv_dev \&\& nv_drm_pi_live_holds() > 0) {/if (0) {/'
+	mutant unload-guard-not-first $LKPI 's/SI_ORDER_FIRST);/SI_ORDER_ANY);/'
+	mutant remove-devices-ignores-holds $DRV '/^void nv_drm_remove_devices/,/^}/s/if (nv_drm_pi_live_holds() > 0) {/if (0) {/'
+	mutant remove-devices-falls-through $DRV '/nv_drm_pi_live_holds() > 0) {/,/^    }/s/^        return;/        ;/'
+	mutant exit-frees-pdevs $LKPI '/^static void nv_bsd_drm_exit/,/^}/s/if (nv_drm_pi_live_holds() > 0) {/if (0) {/'
 	mutant life-dropped-twice $DMABUF 's/    nv_drm_free(nv_dma_buf->pages);/    gb10_pi_life_drop(\&nv_dma_buf->life); nv_drm_free(nv_dma_buf->pages);/'
+	mutant spin-budget-static $OSC 's/    int dirty_spin = GB10_PI_DIRTY_SPIN_BUDGET;/    static int dirty_spin = GB10_PI_DIRTY_SPIN_BUDGET;/'
 	mutant spin-budget-per-page $OSC 's/gb10_pi_os_dirty(user_pages\[i\], \&dirty_spin)/gb10_pi_os_dirty(user_pages[i], NULL)/'
 	mutant dirty-in-nvidia-file $OSC 's/gb10_pi_os_dirty(user_pages\[i\], &dirty_spin);/vm_page_dirty(user_pages[i]);/'
 	mutant busy-try-always-ok $OSF '/^nv_busy_try/,/^}/s/return (vm_page_tryxbusy((vm_page_t)page) != 0 ? 0 : -1);/return (0);/'

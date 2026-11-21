@@ -553,24 +553,62 @@ The row `wire-count-stable` says only that the wired page count did not grow; it
 leaked wiring of an already wired page, and the sysctl `hw.nvidia_unlock_dirty_refused` must read 0 (the row `dirty-refused`)
 after the run.
 
-### 7.7 Unloading nvidia-drm, and the coverage gate
+### 7.7 Unloading nvidia-drm, the coverage gate, and the kit
 
 **Unload.** An export hands the RM a descriptor whose hold and release functions are in
 `nvidia-drm.ko`; the RM file descriptor that holds it can outlive the DRM file and be closed after
 the module is gone. `LKPI_DRIVER_MODULE` cannot refuse an unload, so a second module in
-`nvidia-drm-freebsd-lkpi.c` (`nvidia_drm_pi_guard`) returns `EBUSY` on `MOD_QUIESCE` and
-`MOD_UNLOAD` while `nv_drm_pi_live_holds()` is above zero (up when the RM takes its hold, down
-after the release has finished), and `nv_drm_remove()` keeps the device structures instead of freeing
-them while it is. `tests/prime_import_test.sh` (D6) checks all of it with a mutant for each part.
+`nvidia-drm-freebsd-lkpi.c`, `nvidia_drm_pi_guard`, is the gate, and it is ordered first
+(`SI_ORDER_FIRST`) so that its quiesce runs before the driver's own teardown:
+
+* `MOD_QUIESCE` returns `EBUSY` while any export is held (and says so in the log). When none is,
+  it **closes the gate**: from then on a new export is refused (`nv_dma_import_sgt()` fails and the
+  RM does not call the release after a failed import), and the unload can proceed. The kernel has
+  no call that undoes a quiesce, so after a quiesce that was followed by an aborted unload (another
+  module of the file refused), exports of imported buffers stay refused until the next boot.
+* `MOD_UNLOAD` takes the same gate (EBUSY while an export is held, else it closes the gate), so an
+  unload that skipped the quiesce still closes it when none is held.
+* `kldunload -f` ignores a refused quiesce (`linker_file_unload()` in `sys/kern/kern_linker.c`), but not a
+  module's refused unload: the loop that unloads the modules of the file returns the module's error
+  whatever the flags. The guard is the first module of the file (`SI_ORDER_FIRST`, registered first and
+  so unloaded first), so its `EBUSY` stops even a forced unload before the driver's own teardown has
+  run. A forced unload with no export held proceeds, the gate closed.
+* As a second line of defence, `nv_drm_exit()` (through `nv_drm_remove_devices()`) does not destroy the
+  devices and `nv_bsd_drm_exit()` does not free the pdevs while an export is held (the dma-buf
+  attachment uses `&pdev->dev`); they are not reached by an unload the guard agreed to. On FreeBSD the
+  teardown path is `nv_bsd_drm_exit` -> `nv_drm_exit` -> `nv_drm_remove_devices`; the KAPI `.remove`
+  callback that calls `nv_drm_remove()` is registered only by the Linux build of nvidia-modeset.
+* The count is taken in the hold, under a spin lock together with the closing test, and counted down by
+  the core in `nvidia.ko` after the module's own release function has returned (`gb10_pi_release()`),
+  so no instruction of `nvidia-drm.ko` runs after the count reaches zero. The descriptor counts the
+  holds taken on it (one object can be exported twice) and a release without a hold does nothing.
+  The behaviour is modelled in `tests/pageimport_test.sh` (two holds, one release, the quiesce still
+  refused; a quiesce that closes the gate; a refused hold takes nothing; two exports of one object) and
+  the wiring is checked in `tests/prime_import_test.sh` (D6).
 
 **Coverage.** `tests/pageimport_test.sh` gates the lines of the core header at 100 percent with
 llvm-cov and tests the gate (a header with a line that never runs must fail it). Branch coverage is
 reported and not gated, on purpose: the argument guards test several pointers on one line, and a
 branch gate would need a test for each pointer. The risk a branch gate guards against is covered by
-the mutants instead (about fifty, one for each decision of the core, each of which must make the
+the mutants instead (about sixty, one for each decision of the core, each of which must make the
 tests fail).
 
-**Kit safety.** The rc one-shot stops each probe after `prime_import_testboot_probe_timeout` seconds
-(120; 20 per probe of the wire loop) and records a hang as a fail, and arms a dead-man timer
-(`shutdown -r +45`, longer than the bounded worst case of the run, variable `prime_import_testboot_deadman`, 0 disables) at the start that it
-cancels at the done row, so a hang does not strand the boot environment.
+**Kit.** The rc one-shot stops each probe after `prime_import_testboot_probe_timeout` seconds
+(120; 20 per probe of the wire loop; CUDA 300, Vulkan 120; each with `-k 5`) and records a hang as a
+fail, for the reverse probe too. It requests a dead-man restart at the start
+(`prime_import_testboot_deadman`, default 60 minutes, longer than the bounded worst case of about
+32 minutes; 0 disables), checks that the request is really pending (a fail row otherwise), and
+cancels it at the done row. A probe stuck inside the kernel cannot be killed by a signal; the
+dead-man restart is what ends that run. `make-be.sh` turns off every other `*_testboot_enable` in the
+clone of the base boot environment (`/etc/rc.conf`, `/etc/rc.conf.local` and every file under
+`/etc/rc.conf.d`) and removes an `nvidia-uvm.ko` the base left in
+`/boot/modules.nvtest` unless `-u` gives one. The kit runs from rc, before sddm and any user session,
+so the `xorg` and `wayfire` rows are skips in this boot and `prime_import_testboot_wayfire_cmd` stays
+unset; a second-stage Wayfire step after login is a follow-up.
+
+What to expect on the day: the machine boots into the test boot environment and the kit runs while
+the boot is held, for about 30 minutes (a hang ends in the dead-man restart after 60). After the done
+row it stays in the test boot environment until the next reboot. A missing run directory under
+`~/work/gb10/logs/prime-import-<stamp>` means the boot died before the rc script. Read a run with
+`tests/prime-import-testboot/summarize.sh <run directory>`: 0 passed, 1 failed, 3 finished but the
+import or the wire measurement was skipped.

@@ -183,6 +183,8 @@ fi
 cat > "$TMPD/fake-bectl" <<'FEOF'
 #!/bin/sh
 echo "bectl $*" >> "$FAKE_BECTL_LOG"
+# bectl mount <be> <dir>: the base BE's files, when the test provides some
+if [ "$1" = mount ] && [ -n "${FAKE_BASE_DIR:-}" ]; then cp -R "$FAKE_BASE_DIR/." "$3/"; fi
 exit 0
 FEOF
 chmod +x "$TMPD/fake-bectl"
@@ -198,9 +200,64 @@ run_be() {
 	shift
 	rm -rf "${TMPD:?}/mnt"
 	: > "$TMPD/bectl.log"
-	FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
+	FAKE_BASE_DIR="${FAKE_BASE_DIR:-}" FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
 	    sh "$_s" "$@" 2>&1
 }
+# the clone of a base BE that has other kits armed and an old nvidia-uvm.ko
+mkdir -p "$TMPD/base/etc/rc.conf.d" "$TMPD/base/boot/modules.nvtest"
+printf 'hostname="x"\nother_testboot_enable="YES"\nprime_import_testboot_enable="NO"\n' > "$TMPD/base/etc/rc.conf"
+printf 'foo_testboot_enable="YES"\nfoo_testboot_other="keep"\n' > "$TMPD/base/etc/rc.conf.d/foo_testboot"
+mkdir -p "$TMPD/base/etc/rc.conf.d/sub"
+printf 'bar_testboot_enable="YES"\n' > "$TMPD/base/etc/rc.conf.d/sub/bar"
+printf 'local_testboot_enable="YES"\n' > "$TMPD/base/etc/rc.conf.local"
+printf 'quiet_testboot_enable="NO"\n' > "$TMPD/base/etc/rc.conf.d/quiet"
+printf 'out_testboot_enable="YES"\n' > "$TMPD/outside-kit"
+ln -s "$TMPD/outside-kit" "$TMPD/base/etc/rc.conf.d/link"
+printf 'old' > "$TMPD/base/boot/modules.nvtest/nvidia-uvm.ko"
+printf 'oldd' > "$TMPD/base/boot/modules.nvtest/nvidia-uvm.ko.debug"
+printf 'k' > "$TMPD/base/boot/modules.nvtest/other.ko"
+out=$(FAKE_BASE_DIR="$TMPD/base" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 8 -m "$TMPD/mods")
+case $out in
+*"turned off the other test-boot kits in "*"/etc/rc.conf.d/foo_testboot"*) ok "(d) the message names a file it really changed" ;;
+*) bad "(d) no message for a file it changed" ;;
+esac
+case $out in
+*"kits in "*"/etc/rc.conf.d/quiet"*) bad "(d) the message claims it turned off a kit that was already off" ;;
+*) ok "(d) a file whose kit was already off is not reported as changed" ;;
+esac
+M="$TMPD/mnt"
+if [ "$(cat "$TMPD/outside-kit")" = 'out_testboot_enable="YES"' ]; then
+	ok "(d) a symbolic link in the clone is not written through (the file it points to is untouched)"
+else
+	bad "(d) make-be.sh wrote through a symbolic link: $(cat "$TMPD/outside-kit")"
+fi
+if grep -q '^other_testboot_enable="NO"' "$M/etc/rc.conf" && grep -q '^foo_testboot_enable="NO"' "$M/etc/rc.conf.d/foo_testboot" \
+    && grep -q 'foo_testboot_other="keep"' "$M/etc/rc.conf.d/foo_testboot" && grep -q '^hostname="x"' "$M/etc/rc.conf" \
+    && grep -q '^bar_testboot_enable="NO"' "$M/etc/rc.conf.d/sub/bar" && grep -q '^local_testboot_enable="NO"' "$M/etc/rc.conf.local" \
+    && grep -q 'prime_import_testboot_enable="YES"' "$M/etc/rc.conf.d/prime_import_testboot"; then
+	ok "(d) the clone turns off every other test-boot kit, keeps the other settings, and enables only this kit"
+else
+	bad "(d) the clone still has another kit armed: $(cat "$M/etc/rc.conf" "$M"/etc/rc.conf.d/* 2>&1 | tr '\n' ' ')"
+fi
+if [ ! -e "$M/boot/modules.nvtest/nvidia-uvm.ko" ] && [ ! -e "$M/boot/modules.nvtest/nvidia-uvm.ko.debug" ] && [ -f "$M/boot/modules.nvtest/other.ko" ]; then
+	ok "(d) without -u an nvidia-uvm.ko left by the base BE is removed (and nothing else)"
+else
+	bad "(d) the base BE's nvidia-uvm.ko survives the clone"
+fi
+out=$(FAKE_BASE_DIR="$TMPD/base" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 9 -m "$TMPD/mods" -u "$TMPD/uvm.ko")
+[ "$(cat "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" 2>/dev/null)" = u ] && ok "(d) with -u the given nvidia-uvm.ko is the one in the clone" || bad "(d) -u did not give the clone its nvidia-uvm.ko"
+mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
+_f="$TMPD/ctl2/make-be.sh"
+sed 's/^	for _f in "\$MNT\/etc\/rc.conf" .*; do$/	for _f in; do/' "$KIT/make-be.sh" > "$_f"
+if cmp -s "$KIT/make-be.sh" "$_f"; then bad "(d) control keep-other-kits: the mutation changed nothing (stale test)"; else
+	FAKE_BASE_DIR="$TMPD/base" run_be "$_f" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
+	grep -q '^other_testboot_enable="YES"' "$TMPD/mnt/etc/rc.conf" && ok "(d) control: a make-be.sh that leaves the other kits armed is seen" || bad "(d) control keep-other-kits: not seen"
+fi
+sed 's/^	run rm -f "\$MNT"\/boot\/modules.nvtest\/nvidia-uvm.ko .*/	:/' "$KIT/make-be.sh" > "$_f"
+if cmp -s "$KIT/make-be.sh" "$_f"; then bad "(d) control keep-uvm: the mutation changed nothing (stale test)"; else
+	FAKE_BASE_DIR="$TMPD/base" run_be "$_f" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
+	[ -e "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" ] && ok "(d) control: a make-be.sh that keeps the base's nvidia-uvm.ko is seen" || bad "(d) control keep-uvm: not seen"
+fi
 sh "$KIT/make-be.sh" > "$TMPD/nob.out" 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "(d) make-be.sh without -b exits 2" || bad "(d) make-be.sh without -b rc=$rc"
 out=$(sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
@@ -264,7 +321,7 @@ fi
 # (e) forbidden commands anywhere in the kit
 common='kldunload|kldload|devctl|acpiconf|zzz|[^a-z_]reboot|shutdown|halt -|bectl[[:space:]]+destroy'
 scan() {	# scan <file>: forbidden commands, comments excluded
-	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vE '^[0-9]+:[[:space:]]+shutdown -r "\+\$prime_import_testboot_deadman" "prime_import_testboot dead-man: [^"]*" > /dev/null 2>&1 &$' | grep -vE '^[0-9]+:[[:space:]]+if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then$'
+	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vE '^[0-9]+:[[:space:]]+shutdown -r "\+\$prime_import_testboot_deadman" "prime_import_testboot dead-man: [^"]*" > /dev/null 2>&1 &$' | grep -vE '^[0-9]+::[[:space:]]"\$\{prime_import_testboot_lockfile:=/var/run/noshutdown\}"$' | grep -vE '^[0-9]+:[[:space:]]+if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then$'
 }
 _hits=
 for f in prime_import_testboot make-be.sh prime_import_probe.c; do
@@ -330,8 +387,8 @@ fi
 # kldstat, dmesg, bectl, su and pgrep first in PATH.  The paths are rc.conf
 # variables, so nothing outside TMPD is touched.
 FAKE=$TMPD/fake; mkdir -p "$FAKE/bin"
-for t in kldstat dmesg bectl pgrep pkill shutdown; do
-	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) exit 1;; *shutdown|*pkill) echo "$0 $*" >> "%s/dead-man.log";; esac\nexit 0\n' "$FAKE" > "$FAKE/bin/$t"
+for t in kldstat dmesg bectl pgrep pkill shutdown sync; do
+	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) [ -e "%s/pgrep-miss" ] && exit 1; grep -q "shutdown -r" "%s/dead-man.log" 2>/dev/null && exit 0; exit 1;; *shutdown) echo "$0 $*" >> "%s/dead-man.log";; *pkill) echo "$0 $*" >> "%s/dead-man.log"; [ -e "%s/pkill-fail" ] && exit 1;; *sync) echo s >> "%s/sync.log";; esac\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/$t"
 done
 printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kernel/kernel;; vm.stats.vm.v_wire_count) cat "%s/wired";; hw.nvidia_unlock_dirty_refused) cat "%s/refused" 2>/dev/null;; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/sysctl"
 printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
@@ -345,7 +402,7 @@ rc_run() {
 	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
 	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
 	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
-	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-45} prime_import_testboot_linuxroot="$FAKE/none" \
+	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-60} prime_import_testboot_lockfile="$FAKE/noshutdown" prime_import_testboot_linuxroot="$FAKE/none" \
 	    prime_import_testboot_cudarun="$FAKE/none" timeout 90 sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
 	ls -d "$FAKE/logs-$_n"/prime-import-* 2>/dev/null | head -1
 }
@@ -356,6 +413,7 @@ rowres() {	# rowres <results.jsonl> <row>: the results of the row, in order
 cat > "$FAKE/probe-good" <<PROBEEOF
 #!/bin/sh
 grep -q '"row":"import","result":"running"' "$FAKE/logs-good"/prime-import-*/results.jsonl && echo seen > "$FAKE/running-seen"
+[ -e "$FAKE/sync-at-probe" ] || wc -l < "$FAKE/sync.log" | tr -d ' ' > "$FAKE/sync-at-probe"
 echo '{"import":0,"addfb":0}'
 exit 0
 PROBEEOF
@@ -416,6 +474,8 @@ if [ "$rc" -eq 1 ] && grep -q 'stopped in step "import"' "$TMPD/sum-died.txt" &&
 else
 	bad "(f2) summarize.sh on a died run: rc=$rc $(cat "$TMPD/sum-died.txt")"
 fi
+printf '%s\n' '{"row":"import","result":"pass","detail":"x"}' '{"row":"wire-count-stable","result":"skip","detail":"x"}' '{"row":"done","result":"info","detail":"x"}' > "$TMPD/nowire.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/nowire.jsonl" > /dev/null 2>&1; [ $? -eq 3 ] && ok "(f2) summarize.sh: a run whose wire row was not a pass is incomplete (exit 3)" || bad "(f2) summarize.sh passes a run that did not measure the wiring"
 : > "$TMPD/empty.jsonl"
 sh "$KIT/summarize.sh" "$TMPD/empty.jsonl" > /dev/null 2>&1; [ $? -eq 1 ] && ok "(f2) summarize.sh: an empty run fails" || bad "(f2) summarize.sh accepts an empty run"
 sh "$KIT/summarize.sh" > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: no argument is a usage error" || bad "(f2) summarize.sh usage"
@@ -423,8 +483,8 @@ sh "$KIT/summarize.sh" /nonexistent > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) s
 
 # the dead-man reboot: armed before the first probe, cancelled at the done row, off at 0
 d=$(rc_run good "$KIT/prime_import_testboot" "$FAKE/probe-good")
-if grep -q 'shutdown -r +45' "$FAKE/dead-man.log" 2>/dev/null; then
-	ok "(f2) the dead-man timer is armed for 45 minutes"
+if grep -q 'shutdown -r +60' "$FAKE/dead-man.log" 2>/dev/null; then
+	ok "(f2) the dead-man timer is armed for 60 minutes"
 else
 	bad "(f2) no dead-man reboot was armed: $(cat "$FAKE/dead-man.log" 2>/dev/null)"
 fi
@@ -434,12 +494,46 @@ case $(rowres "$d/results.jsonl" deadman) in "info info ") ok "(f2) the arm and 
 rm -f "$FAKE/dead-man.log"
 d=$(RC_DEADMAN=0 rc_run nodead "$KIT/prime_import_testboot" "$FAKE/probe-good")
 [ ! -s "$FAKE/dead-man.log" ] && ok "(f2) with the dead-man set to 0 nothing is armed" || bad "(f2) a dead-man was armed with the variable at 0"
+# the dead-man must really be pending: a timer that was requested but is not there is a fail row
+touch "$FAKE/pgrep-miss"
+d=$(rc_run nopend "$KIT/prime_import_testboot" "$FAKE/probe-good")
+rm -f "$FAKE/pgrep-miss"
+[ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that is not pending is a fail row" || bad "(f2) not-pending dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
+touch "$FAKE/noshutdown"
+d=$(rc_run noshut "$KIT/prime_import_testboot" "$FAKE/probe-good")
+rm -f "$FAKE/noshutdown"
+[ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that shutdown refuses (noshutdown) is a fail row" || bad "(f2) noshutdown dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
+touch "$FAKE/pkill-fail"
+d=$(rc_run nocancel "$KIT/prime_import_testboot" "$FAKE/probe-good")
+rm -f "$FAKE/pkill-fail"
+grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | grep -q 'no dead-man timer was found to cancel' && ok "(f2) a cancel that finds no timer says so, it does not claim success" || bad "(f2) cancel without a timer: '$(grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | cut -c1-120)'"
+# the sync after a running row is real: the sync count at the first probe falls by one without it
+rm -f "$FAKE/sync.log" "$FAKE/sync-at-probe"; : > "$FAKE/sync.log"
+d=$(rc_run syncgood "$KIT/prime_import_testboot" "$FAKE/probe-good")
+_sg=$(cat "$FAKE/sync-at-probe" 2>/dev/null)
+rm -f "$FAKE/sync.log" "$FAKE/sync-at-probe"; : > "$FAKE/sync.log"
+sed '/^running()/,/^}/s/^\tsync$/\t:/' "$KIT/prime_import_testboot" > "$TMPD/ctl-rc-nosync"
+if cmp -s "$KIT/prime_import_testboot" "$TMPD/ctl-rc-nosync"; then
+	bad "(f2) control running-without-sync: the mutation changed nothing (stale test)"
+else
+	d=$(rc_run syncbad "$TMPD/ctl-rc-nosync" "$FAKE/probe-good")
+	_sb=$(cat "$FAKE/sync-at-probe" 2>/dev/null)
+	if [ -n "$_sg" ] && [ -n "$_sb" ] && [ "$_sb" -lt "$_sg" ]; then
+		ok "(f2) control: a running() without its sync is seen (syncs at the first probe: $_sg, without: $_sb)"
+	else
+		bad "(f2) control running-without-sync: not seen ($_sg vs $_sb)"
+	fi
+fi
+rm -f "$FAKE/sync-at-probe"
 # the dead-man outlasts the bounded worst case of the run (the defaults, from the script itself)
 _dm=$(sed -n 's/^: "${prime_import_testboot_deadman:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
 _pt=$(sed -n 's/^: "${prime_import_testboot_probe_timeout:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
 _lt=$(sed -n 's/^: "${prime_import_testboot_loop_timeout:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
 _lp=$(sed -n 's/^: "${prime_import_testboot_loops:=\([0-9]*\)}".*/\1/p' "$KIT/prime_import_testboot")
-_worst=$((_pt + _lp * _lt + _pt + 300 + 120))
+_cu=$(sed -n 's/.*timeout -k 5 \([0-9]*\) sh \$CUDARUN.*/\1/p' "$KIT/prime_import_testboot")
+_vk=$(sed -n 's/.*timeout -k 5 \([0-9]*\) \$LINUXROOT.*vulkaninfo.*/\1/p' "$KIT/prime_import_testboot")
+_worst=$(( (_pt + 5) + _lp * (_lt + 5) + (_pt + 5) + (_cu + 5) + (_vk + 5) ))
+[ -n "$_cu" ] && [ -n "$_vk" ] || bad "(f2) the CUDA and Vulkan timeouts have no -k, or cannot be read from the script"
 if [ -n "$_dm" ] && [ $((_dm * 60)) -gt "$_worst" ]; then
 	ok "(f2) the dead-man timer ($_dm minutes) outlasts the bounded worst case of the run ($((_worst / 60)) minutes, without the Wayfire command)"
 else
@@ -455,8 +549,8 @@ rm -f "$FAKE/count"
 printf '#!/bin/sh\nn=$(cat "%s/count" 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > "%s/count"\necho "{\\"import\\":0,\\"addfb\\":0}"\n[ $n -ge 6 ] && sleep 6\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/probe-revhang"
 chmod +x "$FAKE/probe-revhang"
 d=$(RC_PROBE_TIMEOUT=2 rc_run revhang "$KIT/prime_import_testboot" "$FAKE/probe-revhang")
-if grep '"row":"reverse"' "$d/results.jsonl" | grep -q 'timed out after 2 seconds'; then
-	ok "(f2) a reverse probe that hangs is stopped and the row says it timed out"
+if [ "$(rowres "$d/results.jsonl" reverse)" = "running fail " ] && grep '"row":"reverse"' "$d/results.jsonl" | grep -q 'did not finish in 2 seconds'; then
+	ok "(f2) a reverse probe that hangs is stopped and the row is a fail that says so"
 else
 	bad "(f2) reverse hang: $(grep '"row":"reverse"' "$d/results.jsonl" | tail -1 | cut -c1-160)"
 fi
@@ -467,7 +561,7 @@ if cmp -s "$KIT/prime_import_testboot" "$_f"; then
 	bad "(f2) control no-reverse-timeout: the mutation changed nothing (stale test)"
 else
 	_d=$(RC_PROBE_TIMEOUT=2 rc_run mrevhang "$_f" "$FAKE/probe-revhang")
-	grep '"row":"reverse"' "$_d/results.jsonl" | grep -q 'timed out' && bad "(f2) control no-reverse-timeout: the mutant still reports a timeout" || ok "(f2) control: a reverse probe without its timeout is seen"
+	[ "$(rowres "$_d/results.jsonl" reverse)" = "running fail " ] && bad "(f2) control no-reverse-timeout: the mutant still reports the hang" || ok "(f2) control: a reverse probe without its timeout is seen"
 fi
 rm -f "$FAKE/count"
 # a loop probe that hangs is not a good one, whatever the previous iteration printed

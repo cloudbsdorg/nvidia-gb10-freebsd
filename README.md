@@ -302,8 +302,10 @@ an object after the wiring and is dirtied correctly at the release.
 Two read-only sysctls report the release path: `hw.nvidia_unlock_dirty_refused` (pages with a VM
 object that were not all valid when the RM unpinned them; unexpected for an imported buffer) and
 `hw.nvidia_unlock_dirty_busy_fallback` (pages dirtied without their busy lock after a short spin);
-see section 7.6 of `docs/PRIME-IMPORT.md`. `kldunload nvidia_drm` is refused (`EBUSY`) while an RM
-file descriptor still holds an exported imported buffer.
+see section 7.6 of `docs/PRIME-IMPORT.md`. `kldunload nvidia_drm` is refused (`EBUSY`, with the reason in the log) while an RM file descriptor
+still holds an exported imported buffer, also for `kldunload -f`, and once the driver has agreed to an unload (a quiesce with no
+export open) new exports are refused until the next boot, even if the unload is then abandoned
+(docs/PRIME-IMPORT.md 7.7).
 
 What does not work yet: a buffer in the other GPU's video memory (needs a copy), the dma-buf file
 descriptor interface the NVIDIA userspace driver uses (Track #2307), and scanning an imported

@@ -1,6 +1,33 @@
 --- nvidia-drm/nvidia-drm-freebsd-lkpi.c.orig
 +++ nvidia-drm/nvidia-drm-freebsd-lkpi.c
-@@ -237,5 +237,41 @@
+@@ -213,10 +213,26 @@
+     return 0;
+ }
+ 
++/* the gate of the exports of imported buffers, in nvidia-drm-gem-dma-buf.c */
++extern int nv_drm_pi_live_holds(void);
++extern int nv_drm_pi_quiesce(void);
++
+ static void nv_bsd_drm_exit(void)
+ {
+     nv_drm_exit();
+ 
++    if (nv_drm_pi_live_holds() > 0) {
++        /*
++         * Not reached by an unload the guard module agreed to: its
++         * MOD_QUIESCE and MOD_UNLOAD answer EBUSY while an export is held,
++         * for kldunload -f as well.  Kept as a second line of defence:
++         * nv_drm_exit() has left the devices alone (see
++         * nv_drm_remove_devices()), and the pdevs they use (the dma-buf
++         * attachment keeps &pdev->dev) stay too.
++         */
++        return;
++    }
++
+     // After doing the common DRM teardown, free any linuxkpi devices we
+     // allocated during init
+     for (int i = 0; i < NV_MAX_DEVICES; i++) {
+@@ -237,5 +253,63 @@
  MODULE_DEPEND(nvidia_drm, drmn, 2, 2, 2);
  MODULE_DEPEND(nvidia_drm, dmabuf, 1, 1, 1);
  MODULE_DEPEND(nvidia_drm, nvidia, 1, 1, 1);
@@ -10,13 +37,17 @@
 +
 +/*
 + * LKPI_DRIVER_MODULE cannot refuse an unload.  An RM file descriptor that
-+ * holds an exported imported buffer (nv_drm_pi_live_holds() above zero) calls
-+ * back into this module and its device structures when it closes: a second
-+ * module in this file refuses MOD_QUIESCE and MOD_UNLOAD while any is held,
-+ * and kldunload quiesces every module of the file before it unloads any.
++ * holds an exported imported buffer calls back into this module and its
++ * device structures when it closes, so a second module in this file is the
++ * gate: MOD_QUIESCE is refused with EBUSY while any hold is live and, when
++ * none is, closes the gate (no new hold is given afterwards, the export
++ * fails cleanly).  A closed gate stays closed until the next boot: the
++ * kernel has no call that undoes a quiesce, so after a quiesce that was
++ * followed by an aborted unload, exports of imported buffers are refused.
++ * MOD_UNLOAD is refused while a hold is live as well, for a forced unload
++ * (kldunload -f skips a refused quiesce).  The guard is ordered first so its
++ * quiesce runs before the driver's own teardown.
 + */
-+extern int nv_drm_pi_live_holds(void);
-+
 +static int
 +nv_drm_pi_guard_handler(module_t mod, int what, void *arg)
 +{
@@ -24,11 +55,29 @@
 +    case MOD_LOAD:
 +        return 0;
 +    case MOD_QUIESCE:
-+    case MOD_UNLOAD:
-+        if (nv_drm_pi_live_holds() > 0) {
++        if (nv_drm_pi_quiesce() != 0) {
 +            printf("nvidia_drm: unload refused: %d RM export(s) of imported "
 +                   "buffers are still open; close the processes that hold "
 +                   "them (fstat /dev/nvidiactl) and try again\n",
++                   nv_drm_pi_live_holds());
++            return EBUSY;
++        }
++        return 0;
++    case MOD_UNLOAD:
++        /*
++         * The same gate as the quiesce, so that an unload that skipped the
++         * quiesce (kldunload -f ignores a refused quiesce) still closes it
++         * when no export is held, and a hold cannot arrive between this
++         * check and the teardown.  An EBUSY from here stops even a forced
++         * unload (linker_file_unload() returns a module's unload error
++         * whatever the flags), and this module is the first of the file, so
++         * it answers before the driver's own teardown has run: see
++         * docs/PRIME-IMPORT.md 7.7.
++         */
++        if (nv_drm_pi_quiesce() != 0) {
++            printf("nvidia_drm: unload refused, also for kldunload -f: %d RM "
++                   "export(s) of imported buffers are still open; close the "
++                   "processes that hold them (fstat /dev/nvidiactl)\n",
 +                   nv_drm_pi_live_holds());
 +            return EBUSY;
 +        }
@@ -41,5 +90,5 @@
 +static moduledata_t nv_drm_pi_guard_mod = {
 +    "nvidia_drm_pi_guard", nv_drm_pi_guard_handler, NULL
 +};
-+DECLARE_MODULE(nvidia_drm_pi_guard, nv_drm_pi_guard_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
++DECLARE_MODULE(nvidia_drm_pi_guard, nv_drm_pi_guard_mod, SI_SUB_DRIVERS, SI_ORDER_FIRST);
  #endif /* NV_DRM_AVAILABLE */

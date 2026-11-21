@@ -103,7 +103,34 @@ run "$BECTL" create -e "$BASE" "$BE"
 run mkdir -p "$MNT"
 run "$BECTL" mount "$BE" "$MNT"
 
+# The clone inherits the base BE's rc.conf and module directory, and this boot
+# must run the kit alone.  Any other *_testboot_enable in it is turned off
+# (a second kit would load other modules, run other probes and reboot on its
+# own), and an nvidia-uvm.ko the base left behind is removed unless -u gives
+# one: the kit tests the three modules it was built with, nothing else.
+if [ "$DRY" -eq 1 ]; then
+	echo "+ turn off every other *_testboot_enable in $MNT/etc/rc.conf, $MNT/etc/rc.conf.local and every regular file under $MNT/etc/rc.conf.d"
+else
+	for _f in "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" $(find "$MNT/etc/rc.conf.d" -type f 2>/dev/null); do
+		[ -f "$_f" ] || continue
+		if [ -L "$_f" ]; then echo "make-be.sh: $_f is a symbolic link; it is not rewritten (it could point outside the clone)" >&2; continue; fi
+		grep -Eq '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=' "$_f" || continue
+		sed -E -e '/^[[:space:]]*prime_import_testboot_enable=/b' \
+		    -e 's/^([[:space:]]*[A-Za-z0-9_]+_testboot_enable)=.*/\1="NO"/' "$_f" > "$_f.prime-new" \
+		    || { rm -f "$_f.prime-new"; echo "make-be.sh: cannot rewrite $_f; the BE is left mounted at $MNT: fix the file by hand or remove the boot environment $BE and start again" >&2; exit 1; }
+		if cmp -s "$_f" "$_f.prime-new"; then
+			rm -f "$_f.prime-new"
+		else
+			cat "$_f.prime-new" > "$_f" && rm -f "$_f.prime-new" \
+			    || { echo "make-be.sh: cannot write $_f; the BE is left mounted at $MNT: fix the file by hand or remove the boot environment $BE and start again" >&2; exit 1; }
+			echo "turned off the other test-boot kits in $_f"
+		fi
+	done
+fi
 run mkdir -p "$MNT/boot/modules.nvtest"
+if [ -z "$UVMKO" ]; then
+	run rm -f "$MNT"/boot/modules.nvtest/nvidia-uvm.ko "$MNT"/boot/modules.nvtest/nvidia-uvm.ko.*
+fi
 for m in $modules; do
 	b=$(basename "$m")
 	run cp "$MODDIR/$m" "$MNT/boot/modules.nvtest/$b"

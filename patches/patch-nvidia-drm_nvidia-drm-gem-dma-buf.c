@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.c.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.c
-@@ -37,6 +37,101 @@
+@@ -37,6 +37,118 @@
  
  #include "linux/dma-buf.h"
  
@@ -46,24 +46,49 @@
 + * The holds the RM has on imported buffers (one per export, taken by
 + * nv_dma_import_sgt(), dropped by nv_dma_release_sgt()).  The RM calls back
 + * into this module's text and, through the GEM object, into its device
-+ * structures, from an RM file descriptor that can outlive the DRM file: the
-+ * module must not unload and the device must not be freed while it is
-+ * above zero (the guard module in nvidia-drm-freebsd-lkpi.c and
-+ * nv_drm_remove() read it).
++ * structures, from an RM file descriptor that can outlive the DRM file.  The
++ * gate counts them: the guard module in nvidia-drm-freebsd-lkpi.c closes it
++ * at MOD_QUIESCE (refused while a hold is live; once closed no new hold is
++ * given, the export fails cleanly), and the teardown of the devices does not
++ * run while a hold is live.  The decrement is done by the core in nvidia.ko
++ * after __nv_drm_gem_dma_buf_pi_release() has returned, so no instruction
++ * of this module runs after the count reaches zero.
 + */
-+static atomic_t __nv_drm_pi_live_holds = ATOMIC_INIT(0);
++static struct gb10_pi_gate __nv_drm_pi_gate;
++/* a spin lock: the sections are a few instructions, and the RM may call the hold from a context that must not sleep */
++static DEFINE_SPINLOCK(__nv_drm_pi_gate_lock);
 +
 +int nv_drm_pi_live_holds(void)
 +{
-+    return atomic_read(&__nv_drm_pi_live_holds);
++    return gb10_pi_gate_live(&__nv_drm_pi_gate);
 +}
 +
-+static void __nv_drm_gem_dma_buf_pi_hold(void *ctx)
++/* MOD_QUIESCE and MOD_UNLOAD: EBUSY while an export is held, else close the gate. */
++int nv_drm_pi_quiesce(void)
++{
++    int rc;
++
++    spin_lock(&__nv_drm_pi_gate_lock);
++    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);
++    spin_unlock(&__nv_drm_pi_gate_lock);
++
++    return rc != 0 ? EBUSY : 0;
++}
++
++static int __nv_drm_gem_dma_buf_pi_hold(void *ctx)
 +{
 +    struct nv_drm_gem_object *nv_gem = ctx;
++    int rc;
 +
-+    atomic_inc(&__nv_drm_pi_live_holds);
++    spin_lock(&__nv_drm_pi_gate_lock);
++    rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);
++    spin_unlock(&__nv_drm_pi_gate_lock);
++    if (rc != 0) {
++        return rc;
++    }
++
 +    drm_gem_object_get(&nv_gem->base);
++    return 0;
 +}
 +
 +static void __nv_drm_gem_dma_buf_pi_release(void *ctx)
@@ -71,14 +96,6 @@
 +    struct nv_drm_gem_object *nv_gem = ctx;
 +
 +    nv_drm_gem_object_unreference_unlocked(nv_gem);
-+    /*
-+     * Last, so the count stays above zero while this function still uses
-+     * this module.  The few instructions between this decrement and the
-+     * return are not covered: an unload that passes its quiesce check in
-+     * that window is not stopped.  Accepted: the check and the unload come
-+     * from root, and the RM file descriptor that released has just closed.
-+     */
-+    atomic_dec(&__nv_drm_pi_live_holds);
 +}
 +
 +/*
@@ -102,7 +119,7 @@
  static inline
  void __nv_drm_gem_dma_buf_free(struct nv_drm_gem_object *nv_gem)
  {
-@@ -50,6 +145,12 @@
+@@ -50,6 +162,12 @@
  
      drm_prime_gem_destroy(&nv_gem->base, nv_dma_buf->sgt);
  
@@ -115,7 +132,7 @@
      nv_drm_free(nv_dma_buf);
  }
  
-@@ -80,6 +181,16 @@
+@@ -80,6 +198,16 @@
       * through the same linuxkpi bits it seems (probably so it can be used
       * elsewhere), so dma_buf->file really is a native FreeBSD struct file...
       */
@@ -132,7 +149,7 @@
      if (!nv_gem->base.filp->f_op->mmap)
          return -EINVAL;
  
-@@ -126,6 +237,149 @@
+@@ -126,6 +254,150 @@
      return ret;
  }
  
@@ -212,6 +229,7 @@
 +    nv_dma_buf->pi_desc.ctx = &nv_dma_buf->base;
 +    nv_dma_buf->pi_desc.hold = __nv_drm_gem_dma_buf_pi_hold;
 +    nv_dma_buf->pi_desc.release = __nv_drm_gem_dma_buf_pi_release;
++    nv_dma_buf->pi_desc.gate = &__nv_drm_pi_gate;
 +
 +    /*
 +     * The exporter's buffer must outlive every use of its pages.  Taken
@@ -282,7 +300,7 @@
  const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops = {
      .free = __nv_drm_gem_dma_buf_free,
      .create_mmap_offset = __nv_drm_gem_dma_buf_create_mmap_offset,
-@@ -144,11 +398,24 @@
+@@ -144,11 +416,24 @@
  
      if ((nv_dma_buf =
              nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
@@ -310,7 +328,7 @@
  
      pMemory = NULL;
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-@@ -157,6 +424,35 @@
+@@ -157,6 +442,35 @@
                                                    dma_buf->size - 1);
      }
  
@@ -346,7 +364,7 @@
      nv_drm_gem_object_init(nv_dev, &nv_dma_buf->base,
                             &__nv_gem_dma_buf_ops, dma_buf->size, pMemory);
  
-@@ -196,17 +492,46 @@
+@@ -196,17 +510,46 @@
      }
  
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
@@ -398,7 +416,7 @@
          }
      }
  
-@@ -220,8 +545,8 @@
+@@ -220,8 +563,8 @@
      }
  
      if (!nvKms->exportMemory(nv_dev->pDevice,
