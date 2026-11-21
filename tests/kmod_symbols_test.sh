@@ -9,9 +9,9 @@
 #       `ld -Bshareable`, the same type as the system's own kmods;
 #   (b) every undefined symbol (nm -u) is defined in the running kernel
 #       ($(sysctl -n kern.bootfile)) or in a module nvidia.ko depends on
-#       per patches/patch-nvidia_nvidia_pci.c: linux64.ko (which registers
-#       the linux64elf module) and linux_common.ko (which linux64.ko
-#       needs), both looked up in the running kernel's own directory; mem
+#       (only mem since Track #2363; the Linuxulator modules are no longer
+#       dependencies of the core), looked up in the running kernel's own
+#       directory; mem
 #       is a dependency but its interface symbols live in the kernel.
 #       Only GLOBAL defined symbols count as resolvers: the kernel linker
 #       never resolves a module's undefined symbols against STB_LOCAL
@@ -32,7 +32,8 @@
 #       __set_modmetadata_set_sym__m_depend_on_<dep> and a static struct
 #       _m_depend_on_<dep> (/usr/src/sys/sys/module.h:120-127), so
 #       "nm nvidia.ko | grep _depend_on_" yields the dependency list.
-#       Asserted: the set is EXACTLY {linux64elf, mem} - a membership
+#       Asserted: the set is EXACTLY {mem} (Track #2363: the Linux bridge is
+#       the separate nvidia_linux.ko) - a membership
 #       check ("mem present, linux64elf present, io absent") would let a
 #       regression like MODULE_DEPEND(nvidia, linux) through, and no such
 #       module exists on arm64, so kldload would fail; io(4) is x86-only
@@ -54,7 +55,8 @@
 #   (f) the nvidia-modeset.ko module, when it has been built (or always,
 #       with --modeset):
 #       (f1) its declared dependency set is exactly
-#            {linux64elf, linux_common, nvidia} plus the kernel itself
+#            {nvidia} plus the kernel itself (Track #2363: the Linux bridge is
+#            nvidia_modeset_linux.ko)
 #            (MODULE_DEPEND(nvidia_modeset, kernel) may or may not be
 #            there - the kernel is not a module and has no .ko file), and
 #            nothing else: an extra dependency (a regression putting back
@@ -353,11 +355,11 @@ echo "deps: $(tr '\n' ' ' < "$TMPD/deps")"
 # Exact set, not membership: an extra dependency (a regression putting
 # back MODULE_DEPEND(nvidia, linux) - no such module on arm64) or a
 # missing one must both fail here, before kldload could.
-printf 'linux64elf\nlinux_common\nmem\n' > "$TMPD/deps-want"
+printf 'mem\n' > "$TMPD/deps-want"
 if cmp -s "$TMPD/deps" "$TMPD/deps-want"; then
-	echo "deps ok: exactly linux64elf linux_common mem"
+	echo "deps ok: exactly mem (no Linuxulator, Track #2363)"
 else
-	fail "dependency set is not exactly {linux64elf, linux_common, mem}: got [$(tr '\n' ' ' < "$TMPD/deps")]"
+	fail "dependency set is not exactly {mem}: got [$(tr '\n' ' ' < "$TMPD/deps")]"
 fi
 
 # Symbols from the kernel and from each DECLARED dependency's file. On this
@@ -445,18 +447,18 @@ grep '_nvidia_modeset_depend_on_' "$TMPD/ms-nm-all" | awk '{print $NF}' \
 [ -s "$TMPD/ms-deps" ] || fail "no MODULE_DEPEND symbols found in nvidia-modeset.ko"
 while IFS= read -r _ms_dep; do
 	case $_ms_dep in
-	kernel|linux64elf|linux_common|nvidia) ;;
+	kernel|nvidia) ;;
 	*)
-		fail "nvidia-modeset.ko declares an unexpected dependency: $_ms_dep (allowed: kernel, linux64elf, linux_common, nvidia)"
+		fail "nvidia-modeset.ko declares an unexpected dependency: $_ms_dep (allowed: kernel, nvidia; the Linux bridge is nvidia_modeset_linux.ko, Track #2363)"
 		;;
 	esac
 done < "$TMPD/ms-deps"
-for _ms_dep in linux64elf linux_common nvidia; do
+for _ms_dep in nvidia; do
 	grep -qx "$_ms_dep" "$TMPD/ms-deps" ||
 		fail "nvidia-modeset.ko does not declare the dependency $_ms_dep"
 done
 echo "modeset deps: $(tr '\n' ' ' < "$TMPD/ms-deps")"
-echo "deps ok: exactly linux64elf linux_common nvidia (plus the kernel itself)"
+echo "deps ok: exactly nvidia (plus the kernel itself)"
 
 # (f2) every undefined symbol resolves in the kernel or in the file of one
 # of the declared dependencies, and only against their EXPORTED symbols.
@@ -466,11 +468,6 @@ nm -u "$MSKO" > "$TMPD/ms-nm-undef" || fail "nm -u failed on $MSKO"
 awk '{print $NF}' < "$TMPD/ms-nm-undef" | sort -u > "$TMPD/ms-undef"
 : > "$TMPD/ms-defined-others"
 append_defined_syms "$KERNEL" "$TMPD/ms-defined-others"
-[ -f "$KDIR/linux64.ko" ] || fail "no $KDIR/linux64.ko for the linux64elf dependency"
-[ -f "$KDIR/linux_common.ko" ] ||
-	fail "no $KDIR/linux_common.ko for the linux_common dependency"
-append_defined_syms "$KDIR/linux64.ko" "$TMPD/ms-defined-others"
-append_defined_syms "$KDIR/linux_common.ko" "$TMPD/ms-defined-others"
 sort -u "$TMPD/ms-defined-others" -o "$TMPD/ms-defined-others"
 cat "$TMPD/ms-defined-others" > "$TMPD/ms-defined"
 append_defined_syms "$KO" "$TMPD/ms-defined"

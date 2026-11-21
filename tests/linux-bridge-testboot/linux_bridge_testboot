@@ -1,0 +1,202 @@
+#!/bin/sh
+#
+# PROVIDE: linux_bridge_testboot
+# REQUIRE: LOGIN kld
+# KEYWORD: nojail
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# One-shot test-boot recorder for Track #2363 (the Linux ioctl bridges are
+# optional modules). Installed into a test boot environment by make-be.sh;
+# it runs once, after kld_list has loaded nvidia (and nvidia_modeset) with NO
+# Linux layer (the BE sets linux_enable=NO), and records everything under
+# ${linux_bridge_testboot_logroot}/linux-bridge-<UTC stamp>.<random>/:
+#
+#   results.jsonl   one object per row: {"row","result","detail"}; result is
+#                   pass, fail, info or skip. A skip names why: a missing tool
+#                   is never a pass.
+#   kldstat-*.txt, dmesg-*.txt, nvrm/ (the nvrm-info proof), cuda-smoke.txt
+#
+# A "running" row is written and the disk synced before each step that can
+# panic the machine, and a final "done" row ends the run: a missing "done" or
+# a trailing "running" is a failure (summarize.sh).
+#
+# Phase A (no Linux layer): the modules are loaded, no linux* kmod is loaded,
+#   /dev/nvidiactl and /dev/nvidia0 exist, nvrm-info (libnvrm, Track #2378)
+#   runs its whole proof against the real driver.
+# Phase B (the Linux layer on top): linux64 is loaded (service linux
+#   onestart), then nvidia_linux and nvidia_modeset_linux load; the Linux CUDA
+#   smoke runs (needs nvidia-uvm.ko in the BE; skipped otherwise).
+# Phase C (unload order): kldunload nvidia and nvidia-modeset must be REFUSED
+#   (Device busy) while their providers are loaded, and the module must still
+#   be loaded afterwards; then the providers unload in reverse order, then the
+#   core can unload; the rows record each result. The
+#   kldunload of the core is only tried after the providers are gone and
+#   nothing holds the device; it is skipped when the nvidia-drm module is
+#   loaded (it depends on the core).
+#
+# This script never reboots: the dead-man timer of deadman_arm() is armed at
+# the start and cancelled at the done row, and lets the BE fall back if a step
+# hangs. Overrides (rc.conf): linux_bridge_testboot_logroot (a root-owned
+# directory, default /var/log/linux_bridge_testboot; the run directory under it
+# is made with mktemp), _nvrm_info, _nvrm_proof, _cudarun and _user (both
+# unset by default: row B4 is then a skip), _deadman (minutes, 0 disables).
+
+. /etc/rc.subr
+
+name=linux_bridge_testboot
+rcvar=linux_bridge_testboot_enable
+start_cmd=linux_bridge_testboot_start
+stop_cmd=:
+
+: "${linux_bridge_testboot_logroot:=/var/log/linux_bridge_testboot}"
+: "${linux_bridge_testboot_nvrm_info:=/usr/local/bin/nvrm-info}"
+: "${linux_bridge_testboot_nvrm_proof:=/usr/local/libexec/boot_nvrm_info.sh}"
+: "${linux_bridge_testboot_cudarun:=}"	# a Linux CUDA runner (run-linux-cuda.sh); unset: row B4 is a skip
+: "${linux_bridge_testboot_user:=}"	# the user that runs the CUDA runner; unset: row B4 is a skip
+: "${linux_bridge_testboot_deadman:=45}"
+: "${linux_bridge_testboot_owner:=0}"	# the uid that must own the log root (the tests use their own)
+: "${linux_bridge_testboot_version:=/usr/local/etc/linux_bridge_testboot.version}"
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT=
+
+row()	# row <name> <pass|fail|info|skip|running|done> <detail>
+{
+	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
+	    "$(printf '%s' "$3" | tr -d '"\\' | tr '\n' ' ')" >> "$OUT/results.jsonl"
+	sync
+}
+running() { row "$1" running "$2"; }
+
+loaded() { kldstat -q -m "$1" 2>/dev/null; }
+
+linux_kmods()	# the Linuxulator modules in kldstat, one per line
+{
+	kldstat | awk 'NR > 1 { print $5 }' | grep -E '^(linux|linux64|linux_common)(\.ko)?$' || true
+}
+
+deadman_arm()
+{
+	[ "$linux_bridge_testboot_deadman" -gt 0 ] 2>/dev/null || return 0
+	( sleep $((linux_bridge_testboot_deadman * 60)); \
+	    row deadman fail "the run did not finish in ${linux_bridge_testboot_deadman} minutes"; \
+	    [ -e /var/run/noshutdown ] || shutdown -r now "linux_bridge_testboot dead-man" ) > /dev/null 2>&1 &
+	DEADMAN_PID=$!
+}
+deadman_cancel() { [ -n "${DEADMAN_PID:-}" ] && kill "$DEADMAN_PID" > /dev/null 2>&1; return 0; }
+
+linux_bridge_testboot_start()
+{
+	# This runs as root while user sessions may already exist: the log root must
+	# be a root-owned real directory, and the run directory is made fresh by
+	# mktemp(1), never followed through a name a user could have planted.
+	_lr=$linux_bridge_testboot_logroot
+	mkdir -p "$_lr" || return 1
+	if [ -L "$_lr" ] || [ "$(stat -f %u "$_lr")" != "$linux_bridge_testboot_owner" ] || [ $(( 0$(stat -f %Lp "$_lr") & 022 )) -ne 0 ]; then
+		echo "linux_bridge_testboot: refusing log root $_lr: a symbolic link, or not owned by root, or writable by others" >&2
+		return 1
+	fi
+	OUT=$(mktemp -d "$_lr/linux-bridge-$STAMP.XXXXXX") || return 1
+	: > "$OUT/results.jsonl"
+	row start info "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(hostname) kit $(cat "$linux_bridge_testboot_version" 2>/dev/null || echo unknown)"
+	deadman_arm
+	kldstat -v > "$OUT/kldstat-start.txt" 2>&1
+	dmesg > "$OUT/dmesg-start.txt" 2>&1
+
+	echo "== phase A: no Linux layer"
+	loaded nvidia && row A1-nvidia pass "nvidia is loaded" || row A1-nvidia fail "nvidia is not loaded"
+	loaded nvidia_modeset && row A1-modeset pass "nvidia_modeset is loaded" || row A1-modeset info "nvidia_modeset is not loaded (not in kld_list)"
+	_l=$(linux_kmods | tr '\n' ' ')
+	[ -z "$_l" ] && row A2-no-linux pass "no linux, linux64 or linux_common kmod is loaded" \
+	    || row A2-no-linux fail "Linuxulator modules are loaded: $_l"
+	if loaded linux64elf || loaded linux; then row A2-no-linux-module fail "a Linuxulator module is registered"; else row A2-no-linux-module pass "no linux64elf or linux module is registered"; fi
+	[ -c /dev/nvidiactl ] && row A3-nvidiactl pass "/dev/nvidiactl exists" || row A3-nvidiactl fail "no /dev/nvidiactl"
+	[ -c /dev/nvidia0 ] && row A3-nvidia0 pass "/dev/nvidia0 exists" || row A3-nvidia0 fail "no /dev/nvidia0"
+	if [ -x "$linux_bridge_testboot_nvrm_info" ] && [ -f "$linux_bridge_testboot_nvrm_proof" ]; then
+		running A4-nvrm-info "nvrm-info proof against the real driver, no Linux layer"
+		timeout -k 5 300 sh "$linux_bridge_testboot_nvrm_proof" "$OUT/nvrm" "$linux_bridge_testboot_nvrm_info" > "$OUT/nvrm-proof.txt" 2>&1
+		_rc=$?
+		[ "$_rc" -eq 0 ] && row A4-nvrm-info pass "boot_nvrm_info.sh exited 0 with no Linux layer" \
+		    || row A4-nvrm-info fail "boot_nvrm_info.sh exited $_rc: $(tail -2 "$OUT/nvrm-proof.txt")"
+	else
+		row A4-nvrm-info skip "no nvrm-info or no boot_nvrm_info.sh in this BE (libnvrm not staged)"
+	fi
+	[ -z "$(linux_kmods)" ] && row A5-still-no-linux pass "still no Linux layer after the native checks" \
+	    || row A5-still-no-linux fail "a Linux module appeared during phase A"
+
+	echo "== phase B: the Linux layer on top"
+	running B1-load "linux64 and the providers load now"
+	service linux onestart > "$OUT/linux-start.txt" 2>&1
+	loaded linux64elf && row B1-linux64 pass "linux64elf is loaded" || row B1-linux64 fail "linux64elf did not load: $(tail -1 "$OUT/linux-start.txt")"
+	kldload nvidia_linux > "$OUT/kldload-nvidia_linux.txt" 2>&1 && row B2-nvidia_linux pass "nvidia_linux loaded" \
+	    || row B2-nvidia_linux fail "kldload nvidia_linux: $(tail -1 "$OUT/kldload-nvidia_linux.txt")"
+	if loaded nvidia_modeset; then
+		kldload nvidia_modeset_linux > "$OUT/kldload-nvidia_modeset_linux.txt" 2>&1 && row B2-modeset_linux pass "nvidia_modeset_linux loaded" \
+		    || row B2-modeset_linux fail "kldload nvidia_modeset_linux: $(tail -1 "$OUT/kldload-nvidia_modeset_linux.txt")"
+	else
+		row B2-modeset_linux skip "nvidia_modeset is not loaded"
+	fi
+	kldstat -v > "$OUT/kldstat-linux.txt" 2>&1
+	if [ -f /boot/modules.nvtest/nvidia-uvm.ko ] && ! loaded nvidia_uvm; then
+		kldload /boot/modules.nvtest/nvidia-uvm.ko > "$OUT/kldload-uvm.txt" 2>&1 || row B3-uvm fail "kldload nvidia-uvm: $(tail -1 "$OUT/kldload-uvm.txt")"
+	fi
+	if [ -n "$linux_bridge_testboot_user" ] && [ -f "$linux_bridge_testboot_cudarun" ] && loaded nvidia_uvm; then
+		running B4-cuda "Linux CUDA smoke through nvidia_linux"
+		_home=$(pw usershow -n "$linux_bridge_testboot_user" | cut -d: -f9)
+		su -m "$linux_bridge_testboot_user" -c "env HOME=$_home USER=$linux_bridge_testboot_user PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin timeout -k 5 300 sh $linux_bridge_testboot_cudarun cuda_smoke" > "$OUT/cuda-smoke.txt" 2>&1
+		_rc=$?
+		[ "$_rc" -eq 0 ] && row B4-cuda pass "Linux cuda_smoke exited 0 through nvidia_linux" \
+		    || row B4-cuda fail "cuda_smoke exited $_rc: $(tail -2 "$OUT/cuda-smoke.txt")"
+	else
+		row B4-cuda skip "no user, no run-linux-cuda.sh or no nvidia-uvm.ko loaded in this BE"
+	fi
+	dmesg > "$OUT/dmesg-linux.txt" 2>&1
+	_bad=$(diff "$OUT/dmesg-start.txt" "$OUT/dmesg-linux.txt" | grep -ciE 'panic|Fatal trap|Xid|lock order reversal') || true
+	[ "${_bad:-0}" -eq 0 ] && row B5-dmesg pass "no panic, trap, Xid or LOR in phase B" || row B5-dmesg fail "$_bad suspicious kernel lines: see dmesg-linux.txt"
+
+	echo "== phase C: unload order"
+	# kldunload takes a FILE name (nvidia-modeset, nvidia-uvm), kldstat -m a
+	# module name (nvidia_modeset). The veto (kern_kldunload: refs > 1 is EBUSY)
+	# is asserted on all three: a non-zero status, the reason, and the state.
+	running C1-veto "kldunload of a native module is tried while its provider is loaded"
+	veto() {	# veto <row> <file name> <module name>
+		kldunload "$2" > "$OUT/veto-$2.txt" 2>&1
+		_rc=$?
+		if [ "$_rc" -ne 0 ] && grep -q 'Device busy' "$OUT/veto-$2.txt" && loaded "$3"; then
+			row "$1" pass "kldunload $2 refused with Device busy and $3 is still loaded"
+		else
+			row "$1" fail "kldunload $2: rc $_rc, output [$(tail -1 "$OUT/veto-$2.txt")], $3 loaded: $(loaded "$3" && echo yes || echo no)"
+		fi
+	}
+	loaded nvidia_linux && veto C1-veto-nvidia nvidia nvidia
+	loaded nvidia_modeset_linux && veto C1-veto-modeset nvidia-modeset nvidia_modeset
+	if loaded nvidia_uvm; then
+		kldunload nvidia-uvm > "$OUT/unload-uvm.txt" 2>&1 && row C2-uvm pass "nvidia-uvm unloaded" || row C2-uvm info "nvidia-uvm did not unload: $(tail -1 "$OUT/unload-uvm.txt")"
+	fi
+	running C3-unload "providers unload in reverse order"
+	loaded nvidia_modeset_linux && { kldunload nvidia_modeset_linux > "$OUT/unload-ms.txt" 2>&1 && row C3-modeset_linux pass "nvidia_modeset_linux unloaded" || row C3-modeset_linux fail "kldunload nvidia_modeset_linux: $(tail -1 "$OUT/unload-ms.txt")"; }
+	loaded nvidia_linux && { kldunload nvidia_linux > "$OUT/unload-nl.txt" 2>&1 && row C3-nvidia_linux pass "nvidia_linux unloaded" || row C3-nvidia_linux fail "kldunload nvidia_linux: $(tail -1 "$OUT/unload-nl.txt")"; }
+	loaded nvidia && row C3-core-stays pass "nvidia is still loaded after its provider left" || row C3-core-stays fail "nvidia left with its provider"
+	if loaded nvidia_drm; then
+		row C4-core skip "nvidia_drm is loaded; the core stays"
+	else
+		running C4-core "kldunload of the native modules in reverse order"
+		loaded nvidia_modeset && { kldunload nvidia-modeset > "$OUT/unload-ms2.txt" 2>&1 && row C4-modeset pass "nvidia-modeset unloaded after its provider" || row C4-modeset fail "kldunload nvidia-modeset: $(tail -1 "$OUT/unload-ms2.txt")"; }
+		kldunload nvidia > "$OUT/unload-nvidia.txt" 2>&1 && row C4-nvidia pass "nvidia unloaded after its provider" \
+		    || row C4-nvidia fail "kldunload nvidia: $(tail -1 "$OUT/unload-nvidia.txt")"
+	fi
+	kldstat -v > "$OUT/kldstat-end.txt" 2>&1
+	dmesg > "$OUT/dmesg-end.txt" 2>&1
+	deadman_cancel
+	row done info "finished $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	echo "linux_bridge_testboot: results in $OUT"
+	return 0
+}
+
+# the tests source this file to reach linux_bridge_testboot_start
+[ -n "${LINUX_BRIDGE_TESTBOOT_SOURCE_ONLY:-}" ] && return 0 2>/dev/null
+
+load_rc_config $name
+run_rc_command "$1"

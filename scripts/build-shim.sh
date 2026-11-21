@@ -5,9 +5,10 @@
 # build-shim.sh - measure the arm64 compile state of NVIDIA's FreeBSD OS
 # layer: build TREE/nvidia for arm64 and summarise the compiler errors.
 #
-# Usage: scripts/build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm] [TREE] [LOG]
+# Usage: scripts/build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux] [TREE] [LOG]
 #   --module the module directory to build: nvidia (the default),
-#            nvidia-modeset or nvidia-drm. The module may also be named by
+#            nvidia-modeset, nvidia-drm, nvidia-linux (nvidia_linux.ko) or
+#            nvidia-modeset-linux (nvidia_modeset_linux.ko, Track #2363). The module may also be named by
 #            its bare word as the first argument (nvidia-modeset), the form
 #            the README's build recipe uses.
 #   TREE      prepared working tree (from scripts/prepare-tree.sh); defaults
@@ -92,7 +93,7 @@ SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # core file it replaces.
 MODULE=nvidia
 usage() {
-	echo "usage: build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm] [TREE] [LOG]" >&2
+	echo "usage: build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux] [TREE] [LOG]" >&2
 }
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -128,7 +129,7 @@ done
 # "nvidia-drm" are not plausible TREE paths.
 if [ $# -gt 0 ]; then
 	case $1 in
-	nvidia|nvidia-modeset|nvidia-drm)
+	nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux)
 		MODULE=$1
 		shift
 		;;
@@ -162,8 +163,22 @@ nvidia-drm)
 	RMOBNAME=
 	RMOBJDEF=
 	;;
+nvidia-linux)
+	# The Linux compat provider of nvidia.ko (Track #2363): our own BSD
+	# module, no RM core.
+	MODDIR=nvidia-linux
+	MODKO=nvidia_linux.ko
+	RMOBNAME=
+	RMOBJDEF=
+	;;
+nvidia-modeset-linux)
+	MODDIR=nvidia-modeset-linux
+	MODKO=nvidia_modeset_linux.ko
+	RMOBNAME=
+	RMOBJDEF=
+	;;
 *)
-	echo "build-shim: unknown module: $MODULE (nvidia, nvidia-modeset or nvidia-drm)" >&2
+	echo "build-shim: unknown module: $MODULE (nvidia, nvidia-modeset, nvidia-drm, nvidia-linux or nvidia-modeset-linux)" >&2
 	usage
 	exit 1
 	;;
@@ -347,10 +362,10 @@ printf '%s\n' "$sysstamp" > "$STAMPFILE"
 # would misreport what gets linked (pass-2 u04 #3). Only the disposable
 # TREE copy of the core object is ever touched; NVIDIA's own file under
 # src/ stays pristine.
-# The nvidia-drm module has no RM core: it is NVIDIA's own FreeBSD code
-# against drm-kmod, and no core object is copied into its directory.
-if [ "$MODULE" = nvidia-drm ]; then
-	echo "note: the nvidia-drm module has no RM core object; none is linked in"
+# A module with an empty RMOBNAME (nvidia-drm, nvidia-linux, nvidia-modeset-linux)
+# links no RM core object: nothing is copied into its directory.
+if [ -z "$RMOBNAME" ]; then
+	echo "note: the $MODULE module has no RM core object; none is linked in"
 else
 	RMOBJ=${RMOBJ:-$RMOBJDEF}
 	if [ -f "$RMOBJ" ]; then

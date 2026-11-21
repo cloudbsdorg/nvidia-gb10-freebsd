@@ -119,3 +119,30 @@ Tagged: BLOCKER (K1) the protection sat on nv_drm_remove, which never runs on Fr
 - Fable b, the WORDS: on the one reachable bypass (the driver unloads before the guard), keep IS the protection: the guard's MOD_UNLOAD runs after it and refuses with the kept line, the file stays loaded and every later unload is refused. Log line, docs 7.7 and the comments (lkpi, dma-buf, drv_prime, header) say so; the calls and mutants stay. The held/kept message branches on kept (nv_drm_pi_quiesce(&held, &kept)).
 - Cheap: -V is checkable (KIT-COMMIT with export-subst; -V must agree with HEAD or the archive's commit), git ls-files --error-unmatch before trusting a tree, PRIME_MNT / PRIME_ALLOW_DIRTY / PRIME_KO_ORDER_TOOL documented, the origin snapshot left behind and the ELF Tool Chain readelf dependency noted.
 - Lesson: the per-suite loops of earlier rounds printed rc=$? after a command substitution and could show rc=0 for a failing suite; the loop now captures the status first.
+
+# Track #2363 (agent/2363-linux-bridges-optional)
+Resume: read this file bottom-up.
+
+## Design decisions (2026-11-21)
+- nvidia.ko core: NV_SUPPORT_LINUX_COMPAT is no longer defined by default (zz patch on nv-freebsd.h). A legacy build with -DNV_CORE_LINUX_COMPAT (make NV_CORE_LINUX_COMPAT=yes) keeps the old in-core bridge (#2402 alias rule: old behaviour stays reachable). The core gets a small versioned KPI (nvidia_bridge.h/.c, our BSD files): nvidia_bridge_register/unregister plus cdev add/del notifications. The core holds no Linux code.
+- nvidia_linux.ko: Linux ioctl 0x4600-0x46ff translation plus linux_device_register_handler for nvidiactl and nvidiaN, through the KPI. MODULE_DEPEND nvidia (versions 1..2: matches today's 1 and the 2 that #2373 brings), linux64elf, linux_common.
+- nvidia_modeset_linux.ko: the NVKMS ioctl (magic m) and the nvidia-modeset device name. Needs no symbol from nvidia_modeset, only MODULE_DEPEND for unload order.
+- Unload veto: the bridge MODULE_DEPEND on the core keeps the core refcount above zero (kldunload nvidia is EBUSY while the bridge is loaded); the bridge refuses unload while a Linux ioctl is in flight.
+- Separate zz patch files and new src files so the #2373 merge is clean (2373 touches the nvidia_pci.c version line, nvidia_subr.c, a Makefile hunk and the prepare-tree.sh copy loop). My prepare-tree.sh edit is a separate function called after copy_repo_src.
+- uvm-bsd: own repo (nvidia-uvm-freebsd main); unmerged branches 2272/2295/2373 touch uvm_main.c, so the split there is a follow-up (nvidia_uvm_linux.ko).
+
+## 2026-11-21 progress (Track #2363)
+- RED first: tests/linux_bridge_test.sh against the old tree: 8 FAIL (nvidia.ko imports linux_*, no KPI export, modeset dependency on linux64elf, no nvidia_linux.ko, header defines NV_SUPPORT_LINUX_COMPAT unconditionally); every check has a plant (synthetic objects, pristine headers, a wrong-context patch).
+- GREEN: src/gb10-linux-bridge (KPI + two provider modules), zz patches (nv-freebsd.h, nvidia_ctl.c, nvidia_dev.c, nvidia/Makefile, modeset source and Makefile), prepare-tree.sh copy_bridge_src, build-shim.sh --module=nvidia-linux / nvidia-modeset-linux. All four modules build with LLD, 0 errors. kmod_symbols_test updated: nvidia.ko deps exactly {mem}, modeset exactly {nvidia}.
+- rc.d/nvidia_linux (nvidia_linux_mode AUTO/YES/NO), man/nvidia.4, man/nvidia_linux.4, README, test kit tests/linux-bridge-testboot (recorder, make-be.sh, summarize.sh) with tests.
+- Merge check with #2373: my zz patches apply at fuzz 0 on top of its subr, modeset-version and pci-version patches. Its Makefile and drm zz patches do not apply on f2cedf7 at all (their base predates the pageimport Makefile and the renamed lkpi patch): that is for the 2373 rebase, not mine.
+- prime_import_test passes with GB10_WORK=~/work/gb10/prime-import-work (139 checks); with the default work root it fails D6 on the unmodified base f2cedf7 too (stale tree), not mine.
+- Next: gate round 1, commit, push, Track comment.
+
+## 2026-11-21 gate round 1 (receipt-less: voices FINDINGS; 40 findings, all answered in REVIEW_ANSWERS)
+- BLOCKER: quality.3 (no execution test of nvidia_bridge.c): tests/nvidia_bridge_unit_test.sh, 21 checks, 8 mutants.
+- DEFECT fixed: KPI versioning contradiction (quality.1 and 3 more), legacy build ENXIO (quality.2), vacuous plants (quality.4, .5, correctness.3, falsification.5), manifest copy_one (quality.7), rc script (quality.8, .9, falsification.4), kit hard-codes and root writing through a user-owned log root (quality.12, security.1), kldunload by file name and C1 asserting reason and state (correctness.1), ioctl handler answering for foreign descriptors (security.3), uvm doc claims (falsification.2), summarize.sh skip handling (falsification.6), Xr to a missing page (interface.3).
+- Resolved by removal: the in-flight counter and drain (security.2, correctness.2): linux_ioctl_fallback holds linux_ioctl_sx shared across the handler (linux_ioctl.c:3865-3892) and unregister takes it exclusive (3991-4000).
+- REJECTED with evidence: falsification.1 (no unload veto): kern_kldunload checks refs > 1 before userrefs-- and returns EBUSY (kern_linker.c:1330-1335). The review did show the row proved nothing; C1 now asserts status, "Device busy" and state.
+- DEBT/NIT fixed: namelen, nbc_ctl removed (KPI still version 1), build-shim comment, README anchors, make-be hints.
+- Next: round 2 with REVIEW_ANSWERS, commit, push, Track comment.

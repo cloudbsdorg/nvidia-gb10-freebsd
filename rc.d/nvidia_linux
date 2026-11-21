@@ -1,0 +1,98 @@
+#!/bin/sh
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# PROVIDE: nvidia_linux
+# REQUIRE: kld linux
+# BEFORE: LOGIN
+# KEYWORD: nojail
+#
+# Load the Linux compatibility providers of the NVIDIA driver (Track #2363)
+# when the Linuxulator is configured. nvidia.ko and nvidia-modeset.ko need no
+# Linux layer; nvidia_linux.ko and nvidia_modeset_linux.ko give Linux binaries
+# (nvidia-smi, Linux libcuda, a Linux Vulkan ICD) the ioctl and device-name
+# translation. (nvidia-uvm.ko still depends on the Linuxulator itself until its
+# provider is split out.) See nvidia_linux(4).
+#
+# nvidia_linux_mode (not an rcvar: AUTO is not a yes/no value) is one of:
+#   AUTO (default)  load a provider when linux_enable is YES and the native
+#                   module it bridges is already loaded
+#   YES             load the providers whenever this script runs (they pull in
+#                   the core and the Linuxulator)
+#   NO              never load them
+# Any other value is refused with a warning and loads nothing.
+
+. /etc/rc.subr
+
+name=nvidia_linux
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+extra_commands="status"
+
+# nvidia_linux_wanted <mode> <linux_enable> <native-module-loaded 0|1>
+# prints yes or no.
+nvidia_linux_wanted()
+{
+	case $1 in
+	[Yy][Ee][Ss]) echo yes ;;
+	[Nn][Oo]) echo no ;;
+	[Aa][Uu][Tt][Oo])
+		case $2 in
+		[Yy][Ee][Ss]) [ "$3" = 1 ] && echo yes || echo no ;;
+		*) echo no ;;
+		esac
+		;;
+	*) echo no ;;
+	esac
+}
+
+# nvidia_linux_loaded <module name>: 1 or 0
+nvidia_linux_loaded()
+{
+	kldstat -q -m "$1" 2>/dev/null && echo 1 || echo 0
+}
+
+# nvidia_linux_load_one <provider module> <native module>: load the provider
+# when wanted and not already loaded; return kldload's status.
+nvidia_linux_load_one()
+{
+	case $nvidia_linux_mode in
+	[Yy][Ee][Ss]|[Nn][Oo]|[Aa][Uu][Tt][Oo]) ;;
+	*) warn "unknown nvidia_linux_mode '$nvidia_linux_mode': loading nothing"; return 0 ;;
+	esac
+	[ "$(nvidia_linux_wanted "$nvidia_linux_mode" "${linux_enable:-NO}" "$(nvidia_linux_loaded "$2")")" = yes ] || return 0
+	[ "$(nvidia_linux_loaded "$1")" = 0 ] || return 0
+	kldload "$1"
+}
+
+nvidia_linux_start()
+{
+	_rc=0
+	nvidia_linux_load_one nvidia_linux nvidia || _rc=1
+	nvidia_linux_load_one nvidia_modeset_linux nvidia_modeset || _rc=1
+	return $_rc
+}
+
+# The providers unload by FILE name (kldunload takes a file, kldstat -m a module).
+nvidia_linux_stop()
+{
+	_rc=0
+	if kldstat -q -m nvidia_modeset_linux; then kldunload nvidia_modeset_linux || _rc=1; fi
+	if kldstat -q -m nvidia_linux; then kldunload nvidia_linux || _rc=1; fi
+	return $_rc
+}
+
+nvidia_linux_status()
+{
+	for _m in nvidia_linux nvidia_modeset_linux; do
+		if kldstat -q -m $_m; then echo "$_m: loaded"; else echo "$_m: not loaded"; fi
+	done
+}
+
+# The tests source this file to reach the functions above.
+[ -n "${NVIDIA_LINUX_RC_SOURCE_ONLY:-}" ] && return 0 2>/dev/null
+
+load_rc_config $name
+: ${nvidia_linux_mode:=AUTO}
+run_rc_command "$1"
