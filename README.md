@@ -393,15 +393,17 @@ functions for `nvidia-uvm.ko` (the clean-room UVM driver, nvidia-uvm-freebsd):
 
 **Guarantees.** The table lock is a leaf lock: it is never held across an RM call (the RM can run
 a file's close destructor, which takes it, from inside an RM call), so the table is updated after
-the RM call returns and may lag it; every lag fails closed (an unrecorded new client is refused, a
-reused handle leaves both parties unowned, a free in flight keeps new holds out, a free of a
-handle the table has not recorded leaves a short-lived marker (a tombstone) while it runs, and one
-that freed a client is remembered for a while, so an allocation whose record lands during or after
-it is refused its record). A free of a client the table lists by a file that does not own it is refused with `EPERM` before the
+the RM call returns and may lag it; every lag fails closed. An unrecorded new client is refused. A reused handle leaves both parties
+unowned. A free in flight keeps new holds out. A free of a handle the table has not recorded leaves
+a short-lived marker (a tombstone) while it runs. A free of an unrecorded handle that the RM carried out is remembered
+(the last 64, `NVCO_FREELOG`), and an allocation that began before such a free ended is refused its
+record. A record that lands while a marker stands takes the marker over: no hold is granted on
+it until that free ends. If the RM refused that free, the owner keeps its record; nvidia-uvm requests on that client fail until
+the free ends, then work again. If the RM carried it out, the record is dropped with it. A free of a client the table lists by a file that does not own it is refused with `EPERM` before the
 RM is called, so a stranger can neither reach the RM in that window nor raise the count of a
 predictable handle. The owner's free first waits for the holds on the client, before the ioctl
 takes any other lock. A client freed leaves the table, a closing file forgets its clients, and only
-a control file can own one. The free count uses 64-bit generation numbers that are never 0.
+a control file can own one. The free counts use 64-bit generation numbers that are never 0.
 
 **Versions.** `nvidia.ko` is module version 2, and `nvidia-modeset.ko` and `nvidia-drm.ko` depend on
 exactly that, as does `nvidia-uvm.ko` from uvm-bsd branch `agent/2373-uvm-client-ownership` or
@@ -428,10 +430,15 @@ that one wait, and the client is never freed). A fatal signal, or a caught signa
 release without a matching hold; quote it in the report if you see it (a debug kernel panics
 with "client release without a matching hold" instead). A console line
 `RM client 0x... could not be recorded for nvidia-uvm` means the table and the RM disagreed about a
-handle (it was listed for another file, a free of it ran meanwhile, or memory ran out): nvidia-uvm refuses requests on that client until it is freed and allocated again. A free by a file that
-does not own a listed client fails with `EPERM` at once and changes nothing (free the client through the `/dev/nvidiactl` file that allocated it), so a stranger
-cannot starve the owner by freeing its predictable handle (a client the table has not recorded
-yet can be freed by anyone; the RM decides). `nvUvmInterfaceClientHold` must be called from a sleepable context with
+handle. The causes: the handle was listed for another file; a free of it that the RM carried out
+ended after the allocation began; 64 or more frees of other unrecorded handles that the RM carried out
+ended during the allocation (the log holds only the most recent ones); or memory ran out.
+nvidia-uvm refuses requests on that client until it is freed and allocated again. A free by a
+file that does not own a listed client fails with `EPERM` at once and changes nothing (free the
+client through the `/dev/nvidiactl` file that allocated it). A stranger therefore cannot free a
+client the table has recorded for its owner. While a handle is unrecorded (including while a free that found it
+unrecorded is in flight), any control file may free it and the RM decides: if the RM carries the free out, the owner
+loses that client. `nvUvmInterfaceClientHold` must be called from a sleepable context with
 no RM lock held, never from an RM callback; the same goes for `nvUvmInterfaceClientRelease`.
 
 **Tests.** `tests/client_owner_glue_test.sh` compiles the real glue (`src/gb10-client-owner/nvco_glue.h`)
