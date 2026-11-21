@@ -68,6 +68,11 @@
 # cannot fail is not a check.
 #
 # Run: sh tests/prime_import_test.sh    Exit 0 when every check passes.
+#
+# The gate-name check (D6) parses nvidia-drm-freebsd-lkpi.c and nvidia-drm-drv.c with clang and the module's own
+# compile line (clang -Xclang -ast-dump=json): it needs clang in PATH and a prepared nvidia-drm build tree,
+# PRIME_BUILD_TREE (default build/tree under GB10_WORK, which is ~/work/gb10 when unset; scripts/prepare-tree.sh and scripts/build-shim.sh
+# --module=nvidia-drm make one).  It never skips: without them the suite fails.
 
 set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
@@ -193,6 +198,106 @@ pp_lines() {
 	awk '{ if (sub(/\\[ \t\r]*$/, "")) { acc = acc $0; next } print acc $0; acc = "" } END { if (acc != "") print acc }' "$1" > "$TMPD/pp-joined.c"
 	strip_comments "$TMPD/pp-joined.c" "$TMPD/pp-nocomment.c"
 	cat "$TMPD/pp-nocomment.c"
+}
+
+# The names of the three gate functions and their types: one file, read by the text scan below and by the AST check
+GATE_NAMES=$repo/tests/data/gate_names.txt
+# the trigraphs phase 1 would map: ??= is #, ??/ a backslash, and ??' ??( ??) ??! ??< ??> ??-
+TRIGRAPH_RE="[?][?][=/'()!<>-]"
+
+# gate_occurrences <file>: every statement (the text between two of ; { }) of the file, as the preprocessor sees it
+# (spliced, comments gone, string literals emptied, white space folded), that holds a whole-token use of one of the
+# gate names, with the number of uses in it.  Whole token: no identifier character on either side, so the guard's
+# own nv_drm_pi_guard_handler is not one.  The list is compared with a pinned one: a new use, a lost use and a
+# definition in any spelling all change it.
+gate_occurrences() {
+	_galt=$(grep -v '^#' "$GATE_NAMES" | cut -f1 | paste -s -d'|' -)
+	[ -n "$_galt" ] || return 1
+	pp_lines "$1" | tr '\n' ' ' | awk -v alt="$_galt" 'BEGIN { re = "(^|[^A-Za-z0-9_])(" alt ")([^A-Za-z0-9_]|$)" } {
+		gsub(/"([^"\\]|\\.)*"/, "\"\"")
+		gsub(/[;{}]/, "\n"); n = split($0, seg, "\n")
+		for (i = 1; i <= n; i++) {
+			s = seg[i]; gsub(/[ \t]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s)
+			t = s; c = 0
+			while (match(t, re)) { c++; t = substr(t, RSTART + RLENGTH - 1) }
+			if (c > 0) print c " " s
+		}
+	}'
+}
+
+# trigraph_added <pristine> <new>: the lines <new> adds to <pristine> that hold a trigraph.  With -std=gnu17 they are
+# ignored, but that rests on build variables (CSTD, -trigraphs) that no reviewed patch pins, so the text is
+# refused.  Prints the first such line; returns 2, printing nothing, when the diff itself fails (the caller says so).
+trigraph_added() {
+	diff "$1" "$2" > "$TMPD/tri-diff.txt"; [ $? -le 1 ] || return 2
+	grep '^>' "$TMPD/tri-diff.txt" | grep -E "$TRIGRAPH_RE" | head -1
+	return 0
+}
+
+# gate_line_safe <compile line>: the line make prints for one object is run by the shell (it carries quoted -D
+# values), so it must be plain words: no command separator, pipe, redirection, substitution or newline.
+gate_line_safe() {
+	case $1 in
+	*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'`'*|*'$('*|*'
+'*) return 1 ;;
+	esac
+	case $1 in 'cc '*) return 0 ;; esac
+	return 1
+}
+
+# gate_ast <tree> <file>: the AST of one patched nvidia-drm source (lkpi.c or drv.c), parsed by clang with the
+# module's own compile line, so that macros, token pasting, typedefs and attributes are resolved before the
+# names are looked at.  The flags are the ones make prints for that object in a prepared build tree
+# (PRIME_BUILD_TREE, default $WORK/build/tree): the tree's generated headers and the kernel and drm-kmod trees it
+# was configured against (its .gb10-sysdir stamp) are what the source includes.  The patched file replaces the
+# one of the tree; the headers of the tree under test come first (a quoted include looks next to the file).
+# tests/data/gate_ast_check.py then refuses every declaration named exactly one of the gate names that is not
+# the external declaration.  Prints the first defect, or AST-OK as its only line when there is none: the caller
+# demands that word, so a run that died before it (a failed expansion, an unset variable) is a defect and never
+# reads as clean.  This never skips: no clang, no prepared tree, a source that does not parse is a defect.
+gate_ast() {
+	_gt=$1; _gb=$2
+	command -v clang > /dev/null 2>&1 || { echo "D6: clang is not installed: the AST check of the gate names cannot run, and it does not skip"; return; }
+	_gd=${PRIME_BUILD_TREE:-$WORK/build/tree}/nvidia-drm
+	_gs=$_gd/.gb10-sysdir
+	[ -f "$_gs" ] && [ -f "$_gd/Makefile" ] || { echo "D6: no prepared nvidia-drm build tree at $_gd (set PRIME_BUILD_TREE): the AST check of the gate names needs the compile line and the generated headers"; return; }
+	_gsys=$(awk '$1 == "sysdir" { print $2 }' "$_gs"); _gtop=$(awk '$1 == "bsdsrctop" { print $2 }' "$_gs"); _gdrm=$(awk '$1 == "drmkmoddir" { print $2 }' "$_gs")
+	[ -n "$_gsys" ] && [ -n "$_gtop" ] && [ -n "$_gdrm" ] || { echo "D6: $_gs does not name sysdir, bsdsrctop and drmkmoddir"; return; }
+	_gname=${_gb%.c}
+	( cd "$_gd" && env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX make -n -B \
+	    MACHINE=arm64 MACHINE_ARCH=aarch64 SYSDIR="$_gsys" BSDSRCTOP="$_gtop" DRMKMODDIR="$_gdrm" "$_gname.o" ) 2> "$TMPD/ast-make.err" | grep '^cc ' > "$TMPD/ast-cc.txt"
+	[ -s "$TMPD/ast-cc.txt" ] || { echo "D6: make prints no compile line for $_gname.o in $_gd: $(head -1 "$TMPD/ast-make.err")"; return; }
+	[ "$(wc -l < "$TMPD/ast-cc.txt" | tr -d ' ')" = 1 ] || { echo "D6: make prints more than one compile line for $_gname.o"; return; }
+	_gline=$(cat "$TMPD/ast-cc.txt")
+	gate_line_safe "$_gline" || { echo "D6: the compile line of $_gname.o is not plain words (a separator, pipe, redirection or substitution): it is not run"; return; }
+	# the line is shell syntax (it carries quoted -D values): split it by the shell, then drop what makes an object
+	eval "set -- $_gline"
+	shift
+	_gn=$#; _gskip=0
+	for _ga in "$@"; do
+		if [ "$_gskip" = 1 ]; then _gskip=0; continue; fi
+		case $_ga in
+		-MD|-c|-MF*|-MT*|*.c) ;;
+		-o) _gskip=1 ;;
+		*) set -- "$@" "$_ga" ;;
+		esac
+	done
+	shift "$_gn"
+	( cd "$_gd" && clang -I"$_gt/nvidia-drm" "$@" -fsyntax-only -Xclang -ast-dump=json -Xclang -ast-dump-filter=nv_drm_pi_ "$_gt/nvidia-drm/$_gb" ) > "$TMPD/ast-$_gname.json" 2> "$TMPD/ast-$_gname.err"
+	_grc=$?
+	[ "$_grc" -eq 0 ] || { echo "D6: clang does not parse $_gb with the module's flags (rc=$_grc): $(grep -m1 'error' "$TMPD/ast-$_gname.err")"; return; }
+	python3 -I -B "$repo/tests/data/gate_ast_check.py" "$GATE_NAMES" < "$TMPD/ast-$_gname.json" > "$TMPD/ast-$_gname.out" 2>&1 || { echo "D6: the AST check of $_gb did not run: $(head -1 "$TMPD/ast-$_gname.out")"; return; }
+	[ ! -s "$TMPD/ast-$_gname.out" ] || { echo "D6: $_gb: $(head -1 "$TMPD/ast-$_gname.out")"; return; }
+	echo AST-OK
+}
+
+# gate_ast_both <tree>: gate_ast over lkpi.c and drv.c; prints the first defect, or AST-OK when both are clean
+gate_ast_both() {
+	for _f in nvidia-drm-freebsd-lkpi.c nvidia-drm-drv.c; do
+		_ast=$(gate_ast "$1" "$_f")
+		[ "$_ast" = AST-OK ] || { echo "${_ast:-D6: the AST check of $_f printed nothing}"; return; }
+	done
+	echo AST-OK
 }
 
 check_tree() {
@@ -362,16 +467,60 @@ check_tree() {
 #endif
 CORE_PP_END
 	cmp -s "$TMPD/core-pp.txt" "$TMPD/core-pp.want" || { echo "D6: the preprocessor lines of gb10_pageimport.h are not the pinned list: $(diff "$TMPD/core-pp.want" "$TMPD/core-pp.txt" | head -2 | tr '\n' ' ')"; return; }
+	# no trigraph in anything the patches add, in the OS file or in the core header: phase 1 would turn ??= into a
+	# # (a directive the checks above never saw) when the build asks for it.  The files built from the patches are
+	# compared with the pristine ones (what a patch adds, whatever the patch file is called), and the patch files
+	# themselves are read as well, because a hunk that does not end up in a compared file is still a defect.
+	for _f in $DMABUF $DMABUFH $LKPI $DRV $SUBR $OSC $MKF; do
+		_tri=$(trigraph_added "$PRISTINE/$_f" "$_t/$_f"); _rc=$?
+		[ "$_rc" -eq 0 ] || { echo "D6: cannot compare $_f with the pristine source for trigraphs (diff failed)"; return; }
+		[ -z "$_tri" ] || { echo "D6: the patches add a trigraph to $_f ($_tri)"; return; }
+	done
+	for _f in $OSMEM $KAPIC; do
+		_tri=$(trigraph_added "$OGKMSRC/$_f" "$_t/ogkm/$_f"); _rc=$?
+		[ "$_rc" -eq 0 ] || { echo "D6: cannot compare $_f with the pristine source for trigraphs (diff failed)"; return; }
+		[ -z "$_tri" ] || { echo "D6: the patches add a trigraph to $_f ($_tri)"; return; }
+	done
+	for _f in nvidia/gb10_pageimport_os.c _core/gb10_pageimport.h; do
+		_tri=$(trigraph_added /dev/null "$_t/$_f"); _rc=$?
+		[ "$_rc" -eq 0 ] || { echo "D6: cannot read $_f for trigraphs (diff failed)"; return; }
+		[ -z "$_tri" ] || { echo "D6: $_f holds a trigraph ($_tri)"; return; }
+	done
+	set -- "$repo"/patches/patch-*
+	[ -f "$1" ] || { echo "D6: no patch files to read for trigraphs (patches/patch-* matched nothing)"; return; }
+	_pl=$(cat "$@" | grep '^+')
+	set -- "$repo"/patches/ogkm/patch-*
+	[ -f "$1" ] || { echo "D6: no patch files to read for trigraphs (patches/ogkm/patch-* matched nothing)"; return; }
+	_pl="$_pl
+$(cat "$@" | grep '^+')"
+	_tri=$(printf '%s\n' "$_pl" | grep -E "$TRIGRAPH_RE" | head -1)
+	[ -z "$_tri" ] || { echo "D6: a patch adds a trigraph ($_tri)"; return; }
 	# the three gate functions are declared once, as externs in the lkpi file, and defined nowhere else: a definition
 	# of the same name before the extern (a static stub, which the extern then agrees with) would shadow the real
-	# function for every call below it.  The lines are read as the preprocessor sees them (spliced, comments gone), at
-	# any indentation; a declaration or definition has a type word before the name and no `=` or `(` in between.
-	_gname='nv_drm_pi_(quiesce|live_holds|keep)'
-	for _f in $LKPI $DRV; do
-		pp_lines "$_t/$_f" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$TMPD/gate-lines.txt"
-		_decl=$(grep -E "(^| )(static|extern|inline|int|void|unsigned|long)( [^;{}()=]*)? \**${_gname} ?\(" "$TMPD/gate-lines.txt" | grep -vE '^extern (int nv_drm_pi_quiesce\(int \*held, int \*kept\)|int nv_drm_pi_live_holds\(void\)|void nv_drm_pi_keep\(void\));$')
-		[ -z "$_decl" ] || { echo "D6: $_f declares or defines a gate function other than the three externs ($(echo "$_decl" | head -1))"; return; }
-	done
+	# function for every call below it.  No declarator shapes are matched (style(9) puts the type on its own line, a
+	# name may be parenthesised, a function pointer, an attribute, a typedef or a comment can all sit between the
+	# type and the name): every whole-token occurrence of the gate names (tests/data/gate_names.txt) in lkpi.c and
+	# drv.c, after splicing, comment removal, string emptying and flattening, must be one of the pinned ones below,
+	# with the pinned count.  A new call shape goes into the list on purpose.  What this cannot see (a name made by
+	# token pasting) gate_ast() reads in the AST.
+	cat > "$TMPD/gate-occ-lkpi.want" <<'GATE_OCC_END'
+1 extern int nv_drm_pi_live_holds(void)
+1 extern int nv_drm_pi_quiesce(int *held, int *kept)
+1 extern void nv_drm_pi_keep(void)
+1 if (nv_drm_pi_live_holds() > 0)
+1 nv_drm_pi_keep()
+1 case MOD_QUIESCE: if (nv_drm_pi_quiesce(&held, &kept) != 0)
+1 case MOD_UNLOAD: if (nv_drm_pi_quiesce(&held, &kept) != 0)
+GATE_OCC_END
+	cat > "$TMPD/gate-occ-drv.want" <<'GATE_OCC_END'
+1 if (nv_drm_pi_live_holds() > 0)
+1 NV_DRM_LOG_ERR("" "" "" "" "", nv_drm_pi_live_holds())
+1 nv_drm_pi_keep()
+GATE_OCC_END
+	gate_occurrences "$_t/$LKPI" > "$TMPD/gate-occ-lkpi.txt" || { echo "D6: the gate names cannot be read from $GATE_NAMES"; return; }
+	gate_occurrences "$_t/$DRV" > "$TMPD/gate-occ-drv.txt" || { echo "D6: the gate names cannot be read from $GATE_NAMES"; return; }
+	cmp -s "$TMPD/gate-occ-lkpi.txt" "$TMPD/gate-occ-lkpi.want" || { echo "D6: the uses of the gate names in $LKPI are not the pinned list: $(diff "$TMPD/gate-occ-lkpi.want" "$TMPD/gate-occ-lkpi.txt" | head -3 | tr '\n' ' ')"; return; }
+	cmp -s "$TMPD/gate-occ-drv.txt" "$TMPD/gate-occ-drv.want" || { echo "D6: the uses of the gate names in $DRV are not the pinned list: $(diff "$TMPD/gate-occ-drv.want" "$TMPD/gate-occ-drv.txt" | head -3 | tr '\n' ' ')"; return; }
 	# D6 behaviour: the REAL functions of the patched sources, compiled against the core with stubs
 	# (tests/data/nvidia_drm_glue_harness.c): the spin lock is a flag the gate decisions assert, the GEM
 	# reference, the device destroy and the pdev detach are counters.
@@ -454,6 +603,10 @@ CORE_PP_END
 	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/ex6.c" | grep -q 'nv_drm_pi_keep();' || { echo "D6: nv_bsd_drm_exit does not mark the devices as kept"; return; }
 	before "$TMPD/ex6.c" 'nv_drm_pi_live_holds() > 0' 'linux_pci_detach_device(' || { echo "D6: nv_bsd_drm_exit frees the pdevs the attachment uses without asking about the exports"; return; }
 	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/ex6.c" | grep -Eq '^[[:space:]]+return;' || { echo "D6: nv_bsd_drm_exit frees the pdevs even with an export open"; return; }
+	# the AST of the two sources, last because it parses them with the module's flags (about a second each); the
+	# answer must be the word AST-OK, so a check that died before it is a defect and never reads as clean
+	_ast=$(gate_ast_both "$_t")
+	[ "$_ast" = AST-OK ] || { echo "${_ast:-D6: the AST check of the gate names printed nothing}"; return; }
 }
 
 # O5, a property of the script and not of a source file.
@@ -526,7 +679,8 @@ r=$(check_tree "$TMPD/pristine")
     || bad "control: the pristine sources passed - the checks cannot see the defect"
 
 # --- mutants: each must be flagged ---------------------------------------
-# mutant <name> <file under the tree> <sed script>
+# mutant <name> <file under the tree> <sed script> [message]: with a message, the refusal must contain it (the
+# layer that was meant to see the mutant is the one that does)
 mutant() {
 	_m="$TMPD/m-$1"
 	rm -rf "$_m"
@@ -537,7 +691,33 @@ mutant() {
 		return
 	fi
 	r=$(check_tree "$_m")
-	[ -n "$r" ] && ok "control: mutant $1 is flagged ($r)" || bad "control: mutant $1 passed"
+	if [ -z "$r" ]; then
+		bad "control: mutant $1 passed"
+	else
+		case $r in
+		*"${4:-}"*) ok "control: mutant $1 is flagged ($r)" ;;
+		*) bad "control: mutant $1 is flagged by another check than the one meant to see it ($4): $r" ;;
+		esac
+	fi
+}
+
+# ast_mutant <name> <file under the tree> <sed script> <message>: the AST check alone (the text checks are not
+# run), on one mutated source; it must refuse with a message that contains <message>
+ast_mutant() {
+	_m="$TMPD/a-$1"
+	rm -rf "$_m"
+	cp -R "$TMPD/good" "$_m" || { bad "control ast $1: cannot copy the tree"; return; }
+	sed -e "$3" "$TMPD/good/$2" > "$_m/$2"
+	if cmp -s "$TMPD/good/$2" "$_m/$2"; then
+		bad "control ast $1: the mutation changed nothing (stale test)"
+		return
+	fi
+	r=$(gate_ast_both "$_m")
+	case $r in
+	*"$4"*) ok "control: the AST check refuses mutant $1 ($r)" ;;
+	AST-OK) bad "control: the AST check passed mutant $1" ;;
+	*) bad "control: the AST check refuses mutant $1 with another message than $4: $r" ;;
+	esac
 }
 
 if [ -z "$(check_tree "$TMPD/good")" ]; then
@@ -602,6 +782,65 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant gate-static-shadow-spliced $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int nv_drm_pi_qui\\\
 esce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
 &/'
+	# shadows of a gate function in every shape the declarator can take (style(9) line break, parenthesised name,
+	# function-pointer alias, attribute, typedef'd type, comment, a parameter, a trigraph, a name built by token
+	# pasting).  Each is valid C that compiles, and each must be refused by the layer named in the last argument
+	# (the message of that layer): the text scan of the occurrences, or the trigraph refusal.  The pasted name is
+	# invisible to both and reaches the AST check, which is last.  The AST check is also run alone, below.
+	mutant gate-static-shadow-style9 $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int\
+nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'are not the pinned list'
+	mutant gate-static-shadow-paren $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int (nv_drm_pi_quiesce)(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'are not the pinned list'
+	mutant gate-fnptr-alias $LKPI '/^extern int nv_drm_pi_quiesce(int \*held, int \*kept);/s/.*/static int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+static int (*const nv_drm_pi_quiesce)(int *, int *) = gate_s;/' 'are not the pinned list'
+	mutant gate-static-attr $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int __attribute__((__unused__))\
+nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'are not the pinned list'
+	mutant gate-typedef-ret $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/typedef int gate_rc_t;\
+static gate_rc_t nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'are not the pinned list'
+	mutant gate-comment-split $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int \/* x *\/ nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'are not the pinned list'
+	mutant gate-name-as-parameter $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int gate_p(int nv_drm_pi_quiesce) { return nv_drm_pi_quiesce; }\
+&/' 'are not the pinned list'
+	mutant gate-name-as-parameter-drv $DRV '/^void nv_drm_remove_devices/s/.*/static int gate_dp(int nv_drm_pi_keep) { return nv_drm_pi_keep; }\
+&/' 'are not the pinned list'
+	mutant gate-pasted-name $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int __CONCAT(nv_drm_pi_, quiesce)(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	mutant gate-second-use-in-log $DRV 's/^                       nv_drm_pi_live_holds());/                       nv_drm_pi_live_holds() + nv_drm_pi_live_holds());/' 'are not the pinned list'
+	mutant pp-trigraph $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/??=define nv_drm_pi_quiesce(h, k) (*(h) = 0, *(k) = 0, 0)\
+&/' 'add a trigraph'
+	# the AST check alone, on the tree with the pinned list not consulted: each branch of tests/data/gate_ast_check.py
+	# has a source that only it refuses (the last argument is its message)
+	ast_mutant style9 $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int\
+nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	ast_mutant paren $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int (nv_drm_pi_quiesce)(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	ast_mutant attr $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int __attribute__((__unused__))\
+nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	ast_mutant typedef-ret $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/typedef int gate_rc_t;\
+static gate_rc_t nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	ast_mutant comment-split $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int \/* x *\/ nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'is static, not an external declaration'
+	ast_mutant pasted-name $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int __CONCAT(nv_drm_pi_, quiesce)(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/' 'nvidia-drm-freebsd-lkpi.c:217 FunctionDecl nv_drm_pi_quiesce: is static'
+	ast_mutant fnptr-alias $LKPI '/^extern int nv_drm_pi_quiesce(int \*held, int \*kept);/s/.*/static int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+static int (*const nv_drm_pi_quiesce)(int *, int *) = gate_s;/' 'is not a function declaration'
+	ast_mutant parameter $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int gate_p(int nv_drm_pi_quiesce) { return nv_drm_pi_quiesce; }\
+&/' 'ParmVarDecl nv_drm_pi_quiesce: is not a function declaration'
+	ast_mutant pasted-parameter $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int gate_p(int __CONCAT(nv_drm_pi_, quiesce)) { return 0; }\
+&/' 'ParmVarDecl nv_drm_pi_quiesce: is not a function declaration'
+	ast_mutant parameter-drv $DRV '/^void nv_drm_remove_devices/s/.*/static int gate_dp(int nv_drm_pi_keep) { return nv_drm_pi_keep; }\
+&/' 'nvidia-drm-drv.c:2193 ParmVarDecl nv_drm_pi_keep'
+	ast_mutant wrong-type $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/int/long/' "has type 'long (void)', expected 'int (void)'"
+	ast_mutant attributed-extern $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/(void);/(void) __attribute__((__weak__));/' 'has a body or an attribute'
+	ast_mutant extern-with-body $LKPI '/^extern void nv_drm_pi_keep(void);/s/.*/extern void nv_drm_pi_keep(void) { }/' 'has a body or an attribute'
+	ast_mutant renamed-by-macro $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/#define nv_drm_pi_keep nv_drm_pi_keep_x\
+&/' 'no external declaration of nv_drm_pi_keep'
 	mutant pp-splice-digraph-ws $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/%\\ \
 :define SI_ORDER_LAST SI_ORDER_FIRST\
 &/'
@@ -641,6 +880,29 @@ int nv_drm_pi_quiesce(int *held, int *kept) { *held = 0; *kept = 0; return 0; }\
 	mutant drm-own-check $DMABUF 's/gb10_pi_page_claimable(/gb10_pi_page_claimableX(/'
 	mutant no-export $MKF 's/nv_unimport_pages/nv_unimport_pagesX/'
 fi
+
+# the gate check never skips and never reads a failure as clean
+r=$(PATH=/nonexistent gate_ast "$TMPD/good" nvidia-drm-drv.c)
+case $r in *"clang is not installed"*) ok "the AST check fails when clang is missing (it does not skip)" ;; *) bad "no clang: $r" ;; esac
+r=$(PRIME_BUILD_TREE=/nonexistent gate_ast "$TMPD/good" nvidia-drm-drv.c)
+case $r in *"no prepared nvidia-drm build tree"*) ok "the AST check fails when there is no prepared build tree (it does not skip)" ;; *) bad "no build tree: $r" ;; esac
+r=$(PRIME_BUILD_TREE= WORK= gate_ast "$TMPD/good" nvidia-drm-drv.c)
+case $r in AST-OK) bad "an empty build tree path passed the AST check" ;; *"D6:"*) ok "the AST check fails when the build tree path is empty" ;; *) bad "empty build tree: $r" ;; esac
+_gl='cc  -O2 -DNV_VERSION_STRING=\"580.178.04\" -DKBUILD_MODNAME='"'"'"nvidia-drm"'"'"' -Imachine -I../common/inc -std=gnu17 -c nvidia-drm-drv.c -o nvidia-drm-drv.o'
+_gok=1
+gate_line_safe "$_gl" || _gok=0
+for _gbad in "$_gl; rm -rf x" "$_gl | tee y" "$_gl > z" "$_gl \`id\`" "$_gl \$(id)" "$_gl & id" "ld -o x" "$_gl
+rm -rf x"; do
+	gate_line_safe "$_gbad" && _gok=0
+done
+[ "$_gok" -eq 1 ] && ok "a compile line of plain words is run; one with a separator, pipe, redirection, substitution, a newline or another command is not" || bad "the compile line filter accepts or refuses the wrong lines"
+# a reworded log message is not a gate change (the pin holds the shape of the statement, not its strings)
+sed 's/an earlier teardown already kept the devices/an earlier teardown kept the devices/' "$TMPD/good/$DRV" > "$TMPD/reworded-drv.c"
+gate_occurrences "$TMPD/reworded-drv.c" > "$TMPD/reworded-occ.txt"; gate_occurrences "$TMPD/good/$DRV" > "$TMPD/good-occ.txt"
+if ! cmp -s "$TMPD/reworded-drv.c" "$TMPD/good/$DRV" && cmp -s "$TMPD/reworded-occ.txt" "$TMPD/good-occ.txt"; then ok "rewording the log message that carries a gate call changes no pinned occurrence"; else bad "a reworded log message changes the pinned occurrences"; fi
+# a bad name in the names file is refused, not read as no names
+r=$(GATE_NAMES=/nonexistent/names gate_occurrences "$TMPD/good/$LKPI") && bad "gate_occurrences accepted a missing names file" || ok "a missing gate names file is an error, not an empty list"
+
 
 echo "passed: $passed failed: $failed"
 [ "$failed" -eq 0 ]
