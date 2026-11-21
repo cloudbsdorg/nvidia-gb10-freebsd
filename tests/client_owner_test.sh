@@ -81,15 +81,19 @@ plant freeing-ignored 's/ \&\& e->freeing == 0//'
 plant unhold-file-ignored 's/e->file != file || e->refs == 0/e->refs == 0/'
 plant evict-removes-held 's/if (e->refs != 0)$/if (0)/'
 plant begin-free-noop 's/e->freeing++;/e->freeing += 0;/'
-plant end-free-ignores-token 's/e->gen != token || //'
+plant end-free-ignores-token 's/e->fgen != token || //'
 plant gen-never-new 's/e->gen = nvco_new_gen(t);/e->gen = 1;/'
 plant gen-wrap-zero 's/if (++t->next_gen == 0)/if (0)/'
 plant free-not-logged 's/^		t->frees\[seq % NVCO_FREELOG\].handle = handle;/		(void)seq;/'
-plant tombstone-never 's/		e->tomb = 1;/		e->tomb = 0;/'
-plant junk-frees-logged 's/if (unlisted \&\& rm_freed) {/if (unlisted \&\& (rm_freed || unlisted)) {/'
+plant tombstone-never 's/^		e->tomb = 1;$/		e->tomb = 0;/'
+plant turnback-not-tomb 's/^	e->tomb = 1;$/	e->tomb = 0;/'
+plant fgen-narrowed 's/^\tuint64_t\tfgen;/\tuint32_t\tfgen;/'
+plant revert-drops-marker 's/else if (e->conv \&\& e->freeing != 0)/else if (0)/'
+plant log-ignores-entry-state 's/(unlisted || (e != NULL \&\& token != 0 \&\& e->fgen == token \&\& e->tomb))/unlisted/'
+plant junk-frees-logged 's/if (rm_freed \&\& (unlisted ||/if ((rm_freed || unlisted) \&\& (unlisted ||/'
 plant stale-ignores-overflow 's/if (t->seq - mark >= NVCO_FREELOG)/if (0)/'
 plant stale-ignores-handle 's/t->frees\[i\].seq > mark \&\& t->frees\[i\].handle == handle/t->frees[i].seq > mark \&\& t->frees[i].handle == handle + 1/'
-plant stranger-permitted 's/return (e == NULL || e->owner == who);/return (e == NULL || e->owner == who || e != NULL);/'
+plant stranger-permitted 's/return (e == NULL || e->tomb || e->owner == who);/return (e == NULL || e->tomb || e->owner == who || e != NULL);/'
 plant marked-ignores-mark 's/nvco_alloc_stale(t, h, mark)/nvco_alloc_stale(t, h, mark | ~mark)/'
 plant remove-owner-keeps-held 's/\t\t\tif (t->e\[i\].owner == owner)$/\t\t\tif (0)/'
 plant second-file-shares-hold 's/if (e->refs != 0 \&\& e->file != file)/if (0)/'
@@ -100,6 +104,17 @@ plant ownerless-keeps-stale 's/nvco_remove_handle(t, h);/(void)h;/'
 plant second-decoder 's/if (!nvco_is_client_op(nr, size, args))/if (0)/'
 plant root-client-class-missing 's/hClass == NVCO_CLASS_ROOT_CLIENT);/0);/'
 [ -d "$OGKM/src/nvidia/arch/nvalloc/unix/include" ] && plant escape-number-moved 's/#define\tNVCO_ESC_RM_FREE\t\t0x29/#define\tNVCO_ESC_RM_FREE\t\t0x2A/'
+plant second-free-listed 's/\*unlisted = (e == NULL || e->tomb);/*unlisted = (e == NULL);/'
+plant tomb-eperm 's/return (e == NULL || e->tomb || e->owner == who);/return (e == NULL || e->owner == who);/'
+plant gen-narrowed 's/^\tuint64_t\tgen;/\tuint32_t\tgen;/'
+plant next-gen-narrowed 's/^\tuint64_t\t\tnext_gen;/\tuint32_t\t\tnext_gen;/'
+plant token-narrowed '/^static inline uint64_t$/{N;s/uint64_t\nnvco_begin_free/uint32_t\nnvco_begin_free/;}'
+plant converted-kept-after-free 's/if (rm_freed \&\& e->conv \&\& !e->tomb) {/if (0) {/'
+plant conversion-keeps-gen 's/old->gen = nvco_new_gen(t);/(void)0;/'
+plant conv-never-cleared 's/\t\te->conv = 0;\t\t\/\* the free that covered/\t\t(void)0;\t\t\/* the free that covered/'
+plant tombstone-collides 's/\t\tif (old->tomb) {/\t\tif (0 \&\& old->tomb) {/'
+plant stale-log-hit-keeps-entry '/a free of this handle began while the allocation/{n;s/.*/\t\t(void)h;/;}'
+plant n1-fail-open 's/\*unlisted = (e == NULL || e->tomb);/*unlisted = (e == NULL);/;s/(unlisted || (e != NULL \&\& token != 0 \&\& e->fgen == token \&\& e->tomb))/unlisted/'
 plant status-ignored 's/ok = a64->status == 0;/ok = 1;/'
 
 has() { grep -qF -- "$2" "$1"; }	# quiet predicate
@@ -117,7 +132,16 @@ need "$REPO/README.md" 'version mismatch' "the README quotes the version-mismatc
 need "$REPO/README.md" 'keep the display' "the README warns that nvidia-modeset and nvidia-drm need the same build"
 need "$REPO/README.md" 'nvidia-uvm bug' "the README tells the reporter about the release diagnostic"
 need "$REPO/README.md" 'fails with `EPERM` at once' "the README says a stranger free is EPERM"
+# the README names the log size the header defines
+freelog=$(sed -n 's/^#define[[:space:]]*NVCO_FREELOG[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$HDR")
+if [ -n "$freelog" ] && grep -qF "the last $freelog, \`NVCO_FREELOG\`" "$REPO/README.md" && grep -qF "$freelog or more frees of other unrecorded handles" "$REPO/README.md"; then
+	ok "the README log size ($freelog) matches NVCO_FREELOG"
+else
+	bad "the README log size does not match NVCO_FREELOG ($freelog)"
+fi
 need "$REPO/README.md" 'nvcobusy' "the README names the wait channel of a waiting free"
+need "$REPO/README.md" 'fail until' "the README says what nvidia-uvm sees while a free covers the record"
+need "$REPO/README.md" 'began before such a free ended' "the README says which records the free log refuses"
 
 # MODULE_VERSION 2 and every dependent's window: an old (vulnerable) nvidia-uvm.ko must refuse to load
 need "$REPO/patches/patch-zz-nvidia_client_owner_version_pci.c" '+MODULE_VERSION(nvidia, 2);' "nvidia.ko is module version 2"

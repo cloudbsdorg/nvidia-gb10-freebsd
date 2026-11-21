@@ -107,9 +107,23 @@ static struct cdev_privdata pd_a, pd_b, pd_dev, pd_alias;
 static int ffA = 1, ffB = 2;	/* stand-ins for the nv_freebsd_file_private pointers */
 static struct file fa, fb, fdev, freg, fsock;
 
+static int rm_calls, rm_saw_lock, rm_freed_while_busy;
+
+/* every scenario ends with no table lock held and the RM never called with it held */
+static void
+scenario_end(const char *name)
+{
+	CHECK(rm_saw_lock == 0, "%s: the RM was called with the table lock held (%d times)", name, rm_saw_lock);
+	CHECK(nvco_sx.x == 0, "%s: the table lock is still held at the end", name);
+	CHECK(sx_trouble == 0, "%s: lock trouble (%d)", name, sx_trouble);
+}
+
 static void
 setup_files(void)
 {
+	/* a scenario that sets up again is checked before its state is erased */
+	CHECK(rm_saw_lock == 0, "the RM was called with the table lock held (%d times) before this set-up", rm_saw_lock);
+	rm_saw_lock = 0;
 	nvco_destroy(&nvco_table);	/* every scenario starts with an empty table */
 	pd_a = (struct cdev_privdata){ &ffA, nvidia_ctl_dtor };
 	pd_b = (struct cdev_privdata){ &ffB, nvidia_ctl_dtor };
@@ -127,7 +141,7 @@ setup_files(void)
  * lock is free and runs rm_step_hook, the "other thread" that acts while the RM works), end.  The layouts
  * and numbers are the header's, not a second copy.
  */
-static int rm_calls, rm_saw_lock, rm_freed_while_busy;
+
 static void (*rm_step_hook)(void);
 
 static int
@@ -329,13 +343,77 @@ scenario_late_record(void)
 	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
 	rm_step_hook = NULL;
 	CHECK(nvUvmInterfaceClientHold(&fa, H1) != NV_OK, "a late allocation record after a free of the unlisted handle grants no hold");
-	
+
 	/* a refused free of an unlisted handle leaves nothing and the next allocation is owned */
 	rm_ioctl_free(NULL, H2, 0, 0x1B);
 	CHECK(nvco_find(&nvco_table, H2) == NULL, "a refused free of an unlisted handle leaves no entry");
 	rm_ioctl_alloc(&ffA, H2, NVCO_CLASS_ROOT_CLIENT, 0, 0);
 	CHECK(nvUvmInterfaceClientHold(&fa, H2) == NV_OK, "the allocation after it is owned");
 	nvUvmInterfaceClientRelease(&fa, H2);
+}
+
+static void n1_free2(void) { rm_step_hook = NULL; rm_ioctl_free(NULL, H1, 0, 0); }	/* /dev/nvidia0: the RM frees the client */
+static void n1_free1(void) { rm_step_hook = n1_free2; rm_ioctl_free(&ffA, H1, 0, 0x1B); }	/* the allocator's other control file: its free fails (the client is already gone) */
+
+static void
+scenario_second_free(void)
+{
+	setup_files();
+	/* n1: B allocates H1; before B's record lands, two frees of H1 run, the second (nested in the first's RM
+	 * step, so the first's tombstone stands) is the one that frees the client */
+	rm_step_hook = n1_free1;
+	rm_ioctl_alloc(&ffB, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	rm_step_hook = NULL;
+	CHECK(nvUvmInterfaceClientHold(&fb, H1) != NV_OK, "n1: B is not granted a client the second free freed");
+	CHECK(nvco_table.n == 0 || nvco_find(&nvco_table, H1) == NULL || !nvco_owns(&nvco_table, &ffB, H1), "n1: B does not own H1");
+	CHECK(nvco_find(&nvco_table, H1) == NULL || !nvco_find(&nvco_table, H1)->tomb, "no tombstone is left behind");
+}
+
+static int owner_free_in_tomb;
+static void owner_free_under_tomb(void) { rm_step_hook = NULL; owner_free_in_tomb = rm_ioctl_free(&ffA, H1, 0, 0x1B); }
+
+static void
+scenario_tombstone(void)
+{
+	setup_files();
+	/* n2: while a free of an unlisted handle is in flight (a tombstone stands), a control file's own free of it is not
+	 * refused with EPERM, and the tombstone goes with the last free (the record that lands under one: see
+	 * scenario_record_under_tombstone) */
+	owner_free_in_tomb = -1;
+	rm_step_hook = owner_free_under_tomb;
+	rm_ioctl_free(NULL, H1, 0, 0x1B);
+	rm_step_hook = NULL;
+	CHECK(owner_free_in_tomb == 0, "n2: a free by a control file while a tombstone stands is not EPERM (%d)", owner_free_in_tomb);
+	CHECK(nvco_find(&nvco_table, H1) == NULL, "the tombstone goes with its last free");
+}
+
+static void alloc_in_tomb_hook(void) { rm_step_hook = NULL; rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0); }
+static void alloc_then_hold_hook(void) { alloc_in_tomb_hook(); try_hold_in_rm(); }
+
+static void
+scenario_record_under_tombstone(void)
+{
+	setup_files();
+	/* N1: A's record lands while a stranger's free of its (still unlisted) handle runs, and the RM refuses that free:
+	 * the tombstone became A's record, no hold during the free, a hold after it */
+	rm_step_hook = alloc_in_tomb_hook;
+	rm_ioctl_free(NULL, H1, 0, 0x1B);
+	rm_step_hook = NULL;
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) == NV_OK, "N1: a stranger's refused free does not cost the victim its record");
+	nvUvmInterfaceClientRelease(&fa, H1);
+	/* the same, with a hold tried while the free still runs: refused */
+	setup_files();
+	hold_during_rm_granted = 0;
+	rm_step_hook = alloc_then_hold_hook;
+	rm_ioctl_free(NULL, H1, 0, 0x1B);
+	rm_step_hook = NULL;
+	CHECK(hold_during_rm_granted == 0, "no hold is granted on the converted record while the free runs");
+	/* and if the RM did free the client, the record goes with it */
+	setup_files();
+	rm_step_hook = alloc_in_tomb_hook;
+	rm_ioctl_free(NULL, H1, 0, 0);
+	rm_step_hook = NULL;
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) != NV_OK && nvco_find(&nvco_table, H1) == NULL, "a free that freed the client removes the record it converted");
 }
 
 static int junk_i;
@@ -410,14 +488,29 @@ int
 main(void)
 {
 	scenario_hold_release();
+	scenario_end("hold_release");
 	scenario_recording();
+	scenario_end("recording");
 	scenario_free_waits();
+	scenario_end("free_waits");
 	scenario_stranger_free();
+	scenario_end("stranger_free");
 	scenario_late_record();
+	scenario_end("late_record");
+	scenario_second_free();
+	scenario_end("second_free");
+	scenario_tombstone();
+	scenario_end("tombstone");
+	scenario_record_under_tombstone();
+	scenario_end("record_under_tombstone");
 	scenario_junk_frees();
+	scenario_end("junk_frees");
 	scenario_leaf_and_diagnostics();
+	scenario_end("leaf_and_diagnostics");
 	scenario_free_interrupted();
+	scenario_end("free_interrupted");
 	scenario_close();
+	scenario_end("close");
 	CHECK(sx_trouble == 0, "no lock trouble overall (%d)", sx_trouble);
 	CHECK(runaway == 0, "no wait ran away (%d)", runaway);
 	if (fails != 0)

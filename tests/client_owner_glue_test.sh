@@ -81,6 +81,40 @@ mutant xlocked-guard-off 's/ || sx_xlocked(&nvco_sx)//'
 mutant recording-needs-the-rate-limiter 's/^    if (status == 0)$/    if (status == 0 \&\& ppsratecheck(\&nvco_rec_lasttime, \&nvco_rec_curpps, 1))/'
 mutant release-drops-wrong-handle 's/was_held = nvco_unhold(&nvco_table, fp, hClient);/was_held = nvco_unhold(\&nvco_table, fp, hClient + 0);\n    (void)0; if (hClient == 0xC1D00000u) was_held = 1;/'
 
+# a mutant that needs more than a one-line sed: <name> <perl -0 expression on the glue>
+pmut() {
+	perl -0pe "$2" "$T/real.inc" > "$T/mut.inc"
+	if cmp -s "$T/real.inc" "$T/mut.inc"; then echo "FAIL mutant $1 changed nothing"; rc=1; return; fi
+	run_glue "$T/mut.inc" "$T/mut.out" && r=0 || r=$?
+	case $r in
+	1) echo "ok   mutant $1 is red" ;;
+	2) echo "FAIL mutant $1 did not build: $(head -2 "$T/mut.out" | tr '\n' ' ')"; rc=1 ;;
+	*) echo "FAIL mutant $1 stays green"; rc=1 ;;
+	esac
+}
+# the table lock kept across the RM call on the free path (the end re-takes it only if it is not held, as a quiet guard would)
+pmut free-lock-held-across-rm 's/(c->counted = nvco_begin_free.*?\n)    sx_xunlock\(&nvco_sx\);\n    return wait_error;/$1    if (wait_error != 0)\n        sx_xunlock(&nvco_sx);\n    return wait_error;/s; s/(    if \(!c->client_op && !c->free_ok\)\n        return;\n)    sx_xlock\(&nvco_sx\);/$1    if (!sx_xlocked(&nvco_sx))\n        sx_xlock(&nvco_sx);/'
+
+# mutants of the table logic, run against the glue harness (a header copy first on the include path)
+HDR=$REPO/src/gb10-client-owner/nv_client_owner.h
+hmutant() {	# hmutant <name> <sed on the header>
+	mkdir -p "$T/hm"
+	sed -e "$2" "$HDR" > "$T/hm/nv_client_owner.h"
+	if cmp -s "$HDR" "$T/hm/nv_client_owner.h"; then echo "FAIL header mutant $1 changed nothing"; rc=1; return; fi
+	mkdir -p "$T/b"; cp "$T/real.inc" "$T/b/nvco_glue.h"
+	if ! cc -std=gnu11 -Wall -Wextra -Wno-unused-function -Werror -I "$T/hm" -I "$T/b" -I "$REPO/src/gb10-client-owner" \
+	    -o "$T/b/hm" "$REPO/tests/data/nvidia_glue_harness.c" >"$T/hm/out" 2>&1; then
+		echo "FAIL header mutant $1 did not build: $(head -2 "$T/hm/out" | tr '\n' ' ')"; rc=1; return
+	fi
+	if "$T/b/hm" >"$T/hm/out" 2>&1; then echo "FAIL header mutant $1 stays green in the glue harness"; rc=1; else echo "ok   header mutant $1 is red in the glue harness"; fi
+}
+# n1 needs both halves removed: the unlisted flag of a free that finds a marker, and the entry state the end of a free logs from
+hmutant n1-fail-open 's/\*unlisted = (e == NULL || e->tomb);/*unlisted = (e == NULL);/;s/(unlisted || (e != NULL \&\& token != 0 \&\& e->fgen == token \&\& e->tomb))/unlisted/'
+hmutant tomb-eperm 's/return (e == NULL || e->tomb || e->owner == who);/return (e == NULL || e->owner == who);/'
+hmutant tombstone-never 's/^		e->tomb = 1;$/		e->tomb = 0;/'
+hmutant tombstone-collides 's/		if (old->tomb) {/		if (0 \&\& old->tomb) {/'
+hmutant grants-ignore-freeing 's/ \&\& e->freeing == 0);/);/'
+
 # pins on the call sites in the handler and the close path: comment-stripped, no disabled forms,
 # and in order against fops_sx.  The patch's added lines carry the calls; its context lines carry fops_sx.
 pins_ok() {	# pins_ok <patch file>: prints problems
