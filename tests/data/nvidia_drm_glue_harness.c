@@ -92,7 +92,7 @@ static void sc_export_held(void)
 	EXPECT(nv_drm_pi_guard_handler(NULL, 99, NULL) == EOPNOTSUPP, "an unknown event is not supported");
 }
 
-/* the teardown with an export held (second line of defence): nothing destroyed, nothing freed; the gate is kept and closed */
+/* the teardown with an export held (the fallback for another module order): nothing destroyed, nothing freed; the gate is kept and closed */
 static void sc_teardown_held(void)
 {
 	nv_bsd_drm_exit();
@@ -104,7 +104,11 @@ static void sc_teardown_held(void)
 	/* the RM releases (the core does the count, as gb10_pi_release() does in nvidia.ko) */
 	__nv_drm_gem_dma_buf_pi_release(&gem);
 	gb10_pi_gate_drop(&__nv_drm_pi_gate);
-	EXPECT(gem_puts == 1 && nv_drm_pi_live_holds() == 0, "the release drops the reference and the count goes to zero");
+	EXPECT(gem_puts == 1 && gb10_pi_gate_live(&__nv_drm_pi_gate) == 0, "the release drops the reference and the count goes to zero");
+	/* the exports are closed and the module is unloaded again: the kept devices are still not torn down */
+	nv_bsd_drm_exit();
+	EXPECT(devs_destroyed == 0 && devs_unregistered == 0 && pdevs_detached == 0 && pdevs_freed == 0 && ndevs == 2, "a later teardown, after the exports closed, still keeps the devices and pdevs");
+	EXPECT(nv_drm_pi_live_holds() > 0, "a kept gate keeps reporting that the devices must stay");
 }
 
 /* no export held: the quiesce agrees and closes the gate; a closed gate gives no hold and takes no reference */

@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.c.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.c
-@@ -37,6 +37,136 @@
+@@ -37,6 +37,148 @@
  
  #include "linux/dma-buf.h"
  
@@ -62,29 +62,41 @@
 + */
 +static DEFINE_SPINLOCK(__nv_drm_pi_gate_lock);
 +
++/*
++ * Positive while the devices must not be torn down: live exports, or, once the devices were kept
++ * (nv_drm_pi_keep), for good: a later unload attempt must not tear down what the kept state left
++ * alone, even after the exports have closed.
++ */
 +int nv_drm_pi_live_holds(void)
 +{
-+    return gb10_pi_gate_live(&__nv_drm_pi_gate);
++    int n = gb10_pi_gate_live(&__nv_drm_pi_gate);
++
++    if (n == 0 && __atomic_load_n(&__nv_drm_pi_gate.kept, __ATOMIC_SEQ_CST))
++        n = 1;
++    return n;
 +}
 +
 +/* MOD_QUIESCE and MOD_UNLOAD: EBUSY while an export is held, else close the gate. */
-+int nv_drm_pi_quiesce(int *held)
++int nv_drm_pi_quiesce(int *held, int *kept)
 +{
 +    int rc;
 +
 +    spin_lock(&__nv_drm_pi_gate_lock);
 +    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);
-+    *held = gb10_pi_gate_live(&__nv_drm_pi_gate);  /* the reason, read with the decision */
++    *held = gb10_pi_gate_live(&__nv_drm_pi_gate);  /* the reasons, read with the decision */
++    *kept = __nv_drm_pi_gate.kept;
 +    spin_unlock(&__nv_drm_pi_gate_lock);
 +
 +    return rc != 0 ? EBUSY : 0;
 +}
 +
 +/*
-+ * The teardown kept the devices because an export was held (its second
-+ * line of defence, reached only if the guard module was bypassed): the gate
-+ * is closed for the rest of that unload, which nothing stops any more, so
-+ * this is a defensive assertion with a log line, not a protection.
++ * The teardown kept the devices because an export was held.  Reached only
++ * if the driver module is unloaded before the guard module (a different
++ * module order than the one the guard relies on): the gate is marked kept
++ * and closed, the guard's MOD_UNLOAD, which still runs, refuses with the
++ * kept message and the file stays loaded, and every later quiesce and
++ * unload is refused until the machine is restarted.
 + */
 +void nv_drm_pi_keep(void)
 +{
@@ -137,7 +149,7 @@
  static inline
  void __nv_drm_gem_dma_buf_free(struct nv_drm_gem_object *nv_gem)
  {
-@@ -50,6 +180,12 @@
+@@ -50,6 +192,12 @@
  
      drm_prime_gem_destroy(&nv_gem->base, nv_dma_buf->sgt);
  
@@ -150,7 +162,7 @@
      nv_drm_free(nv_dma_buf);
  }
  
-@@ -80,6 +216,16 @@
+@@ -80,6 +228,16 @@
       * through the same linuxkpi bits it seems (probably so it can be used
       * elsewhere), so dma_buf->file really is a native FreeBSD struct file...
       */
@@ -167,10 +179,12 @@
      if (!nv_gem->base.filp->f_op->mmap)
          return -EINVAL;
  
-@@ -126,6 +272,150 @@
-     return ret;
- }
+@@ -124,6 +282,150 @@
+ #endif
  
+     return ret;
++}
++
 +/*
 + * Import the pages of a dma-buf the RM's own import refused (on FreeBSD that
 + * is every dma-buf, see nv_dma_import_dma_buf()).  The scatter list is
@@ -313,12 +327,10 @@
 +    nv_drm_free(pages);
 +    nv_drm_free(segs);
 +    return NULL;
-+}
-+
+ }
+ 
  const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops = {
-     .free = __nv_drm_gem_dma_buf_free,
-     .create_mmap_offset = __nv_drm_gem_dma_buf_create_mmap_offset,
-@@ -144,11 +434,24 @@
+@@ -144,11 +446,24 @@
  
      if ((nv_dma_buf =
              nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
@@ -346,7 +358,7 @@
  
      pMemory = NULL;
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-@@ -157,6 +460,35 @@
+@@ -157,6 +472,35 @@
                                                    dma_buf->size - 1);
      }
  
@@ -382,7 +394,7 @@
      nv_drm_gem_object_init(nv_dev, &nv_dma_buf->base,
                             &__nv_gem_dma_buf_ops, dma_buf->size, pMemory);
  
-@@ -196,17 +528,46 @@
+@@ -196,17 +540,46 @@
      }
  
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
@@ -434,7 +446,7 @@
          }
      }
  
-@@ -220,8 +581,8 @@
+@@ -220,8 +593,8 @@
      }
  
      if (!nvKms->exportMemory(nv_dev->pDevice,

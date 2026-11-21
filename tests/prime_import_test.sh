@@ -326,6 +326,16 @@ check_tree() {
 		grep -q '"gb10_pageimport.h"' "$_t/$_f" || { echo "O4: $_f does not include the core header"; return; }
 	done
 	grep -q 'gb10_pageimport.h' "$_t/$DMABUF" "$_t/$DMABUFH" || { echo "O4: nvidia-drm does not include the core header"; return; }
+	# no preprocessor line but #include may be added to the nvidia-drm sources by the patches: a #define of a name the
+	# glue checks rely on (a macro for gb10_pi_gate_quiesce, SI_ORDER_LAST, nv_drm_pi_quiesce) or an #if 0 copy of a
+	# function would defeat every check below, which read the text and compile the extracted functions
+	for _f in $DMABUF $DMABUFH $LKPI $DRV; do
+		strip_comments "$PRISTINE/$_f" "$TMPD/pp-a.c"; strip_comments "$_t/$_f" "$TMPD/pp-b.c"
+		[ -f "$PRISTINE/$_f" ] && [ -f "$_t/$_f" ] || { echo "D6: cannot compare $_f with the pristine source (a file is missing: $PRISTINE/$_f)"; return; }
+		diff "$TMPD/pp-a.c" "$TMPD/pp-b.c" > "$TMPD/pp-diff.txt"; [ $? -le 1 ] || { echo "D6: diff of $_f against the pristine source failed"; return; }
+		_pp=$(grep '^>' "$TMPD/pp-diff.txt" | grep -E '^>[[:space:]]*(#|%:)' | grep -vE '^>[[:space:]]*(#|%:)[[:space:]]*include')
+		[ -z "$_pp" ] || { echo "D6: the patches add a preprocessor line other than #include to $_f ($(echo "$_pp" | head -1)): a macro or an #if can change what the checked functions mean"; return; }
+	done
 	# D6 behaviour: the REAL functions of the patched sources, compiled against the core with stubs
 	# (tests/data/nvidia_drm_glue_harness.c): the spin lock is a flag the gate decisions assert, the GEM
 	# reference, the device destroy and the pdev detach are counters.
@@ -391,7 +401,7 @@ check_tree() {
 	_r=$("$TMPD/ordermodel" "$_gsubv" "$_gordv" "$_dsub" "$_dord" 0 1)
 	[ "$_r" = "rc=0 teardown=1" ] || { echo "D6: an unload with no export held does not run the teardown ($_r)"; return; }
 	body "$_t/$LKPI" nv_drm_pi_guard_handler "$TMPD/g6.c" || { echo "D6: no guard handler"; return; }
-	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(&held\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(&held\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
+	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(&held, &kept\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(&held, &kept\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
 	grep -q 'printf("nvidia_drm: unload refused' "$TMPD/g6.c" || { echo "D6: a refused unload is silent"; return; }
 	# the real teardown path on FreeBSD: nv_bsd_drm_exit -> nv_drm_exit -> nv_drm_remove_devices
 	body "$_t/$DRV" nv_drm_remove_devices "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove_devices"; return; }
@@ -436,25 +446,35 @@ if r=$(make_tree "$TMPD/good" 1) && [ -z "$r" ]; then
 else
 	bad "the patches do not apply: $r"
 fi
-# The order of the guard in the module file the kit stages (the built nvidia-drm.ko of this
-# GB10_WORK, when there is one): the sysinit words are read from the file, for both modules
-# it declares.  The unload order is the reverse of the load order, so the guard must have the
+# The order of the guard in the module file the kit stages (PRIME_KO: the staged nvidia-drm.ko, not a build
+# tree): the sysinit words are read from the file, for both modules it declares.  The unload order is the reverse of the load order, so the guard must have the
 # same subsystem and a strictly greater order than the driver module.
 check_ko_order() {
-	_ko=$WORK/build/tree/nvidia-drm/nvidia-drm.ko
-	[ -f "$_ko" ] || { echo SKIP; return; }
-	python3 -I "$repo/tests/ko_sysinit_order.py" "$_ko" > "$TMPD/ko-order.txt" 2> "$TMPD/ko-order.err" || { echo "the sysinit words of $_ko cannot be read: $(head -2 "$TMPD/ko-order.err" | tr '\n' ' ')"; return; }
-	_g=$(awk '$1 == "nvidia_drm_pi_guard" { print $2 " " $3 }' "$TMPD/ko-order.txt")
-	_d=$(awk '$1 == "nvidia_drm" { print $2 " " $3 }' "$TMPD/ko-order.txt")
-	[ -n "$_g" ] && [ -n "$_d" ] || { echo "the built nvidia-drm.ko does not declare both nvidia_drm and nvidia_drm_pi_guard ($(tr '\n' ';' < "$TMPD/ko-order.txt"))"; return; }
-	set -- $_g $_d
-	[ "$1" = "$3" ] || { echo "the guard and the driver module are in different subsystems in the built file ($_g, $_d)"; return; }
-	[ "$2" -gt "$4" ] || { echo "the guard (order $2) does not load after the driver module (order $4) in the built file: it would unload last"; return; }
+	[ -n "${PRIME_KO:-}" ] || { echo SKIP; return; }
+	[ -f "$PRIME_KO" ] || { echo "PRIME_KO is set to $PRIME_KO, which is not a file"; return; }
+	python3 -I -B "$repo/tests/prime-import-testboot/ko_sysinit_order.py" --check "$PRIME_KO" > "$TMPD/ko-order.txt" 2>&1 || { echo "the staged nvidia-drm.ko: $(head -2 "$TMPD/ko-order.txt" | tr '\n' ' ')"; return; }
 }
+_pyt=$(python3 -I -B - "$repo/tests/prime-import-testboot/ko_sysinit_order.py" <<'PYT'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("k", sys.argv[1])
+k = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(k)
+D, ANY, LAST = 0x3100000, 0xf000000, 0xfffffff
+c = k.check
+good = c([("nvidia_drm", D, ANY), ("nvidia_drm_pi_guard", D, LAST)]) is None
+bad = [c([("nvidia_drm", D, ANY), ("nvidia_drm_pi_guard", D, ANY)]),
+       c([("nvidia_drm", D, LAST), ("nvidia_drm_pi_guard", D, ANY)]),
+       c([("nvidia_drm", D, ANY), ("nvidia_drm_pi_guard", D - 1, LAST)]),
+       c([("nvidia_drm", D, ANY)]),
+       c([("nvidia_drm_pi_guard", D, LAST)])]
+print("ok" if good and all(bad) else "wrong: %r %r" % (good, bad))
+PYT
+)
+[ "$_pyt" = ok ] && ok "the module order check accepts the guard after the driver and refuses an equal order, the reverse order, another subsystem and a missing module" || bad "the module order check: $_pyt"
 r=$(check_ko_order)
 case $r in
-SKIP) echo "SKIP: no built nvidia-drm.ko under $WORK/build/tree: the unload order of the built file is not checked here (the boot kit checks it with kldstat -v)" ;;
-'') ok "the built nvidia-drm.ko declares the guard in the same subsystem and with a greater order than the driver module (it loads last and unloads first)" ;;
+SKIP) echo "SKIP: PRIME_KO is not set: the unload order of the staged nvidia-drm.ko is not checked by this test (make-be.sh checks it before it clones, and the boot kit with kldstat -v). Set PRIME_KO=<staged nvidia-drm.ko> to run it." ;;
+"") ok "the staged nvidia-drm.ko declares the guard in the same subsystem and with a greater order than the driver module (it loads last and unloads first)" ;;
 *) bad "$r" ;;
 esac
 r=$(check_script)
@@ -504,11 +524,11 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant life-dropped-first $DMABUF 's/gb10_pi_life_drop(&nv_dma_buf->life);/;/;s/nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/gb10_pi_life_drop(\&nv_dma_buf->life); nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/'
 	mutant unload-no-gate-in-hold $DMABUF 's/rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);/rc = 0;/'
 	mutant unload-hold-without-lock $DMABUF '/^static int __nv_drm_gem_dma_buf_pi_hold/,/^}/s/spin_lock(&__nv_drm_pi_gate_lock);//'
-	mutant unload-unload-does-not-close $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/if (nv_drm_pi_quiesce(&held) != 0) {/if (nv_drm_pi_live_holds() > 0) {/'
+	mutant unload-unload-does-not-close $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/if (nv_drm_pi_quiesce(&held, &kept) != 0) {/if (nv_drm_pi_live_holds() > 0) {/'
 	mutant unload-module-counts-down $DMABUF '/^static void __nv_drm_gem_dma_buf_pi_release/,/^}/s/nv_drm_gem_object_unreference_unlocked(nv_gem);/nv_drm_gem_object_unreference_unlocked(nv_gem); gb10_pi_gate_drop(\&__nv_drm_pi_gate);/'
 	mutant unload-no-gate-on-desc $DMABUF 's/nv_dma_buf->pi_desc.gate = &__nv_drm_pi_gate;//'
 	mutant unload-quiesce-ignores-gate $DMABUF 's/rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/rc = 0;/'
-	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce(&held) != 0) {/if (0) {/'
+	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce(&held, &kept) != 0) {/if (0) {/'
 	mutant unload-only-on-unload $LKPI 's/    case MOD_QUIESCE:/    case MOD_QUIESCE + 1000:/'
 	mutant unload-unload-ok $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/return EBUSY;/return 0;/'
 	mutant closing-export-silent $OSF '/^gb10_pi_os_import/,/^}/s/printf("nvidia: cross-GPU export refused/(void)("nvidia: cross-GPU export refused/'
@@ -524,6 +544,21 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant quiesce-forgets-rc $DMABUF 's/^    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/    rc = gb10_pi_gate_quiesce(\&__nv_drm_pi_gate); rc = 0;/'
 	mutant quiesce-never-closes $DMABUF '/^int nv_drm_pi_quiesce/,/^}/s/rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/rc = 0;/'
 	mutant hold-after-closing $DMABUF '/^static int __nv_drm_gem_dma_buf_pi_hold/,/^}/s/rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);/rc = 0;/'
+	mutant pp-define-gate-quiesce $DMABUF 's/^static struct gb10_pi_gate __nv_drm_pi_gate;/#define gb10_pi_gate_quiesce(g) (0)\
+&/'
+	mutant pp-define-si-order $LKPI 's/^extern int nv_drm_pi_live_holds(void);/#define SI_ORDER_LAST SI_ORDER_FIRST\
+&/'
+	mutant pp-define-quiesce $LKPI 's/^extern int nv_drm_pi_live_holds(void);/#define nv_drm_pi_quiesce(h, k) (*(h) = 0, *(k) = 0, 0)\
+&/'
+	mutant pp-digraph-define $LKPI 's/^extern int nv_drm_pi_live_holds(void);/%:define SI_ORDER_LAST SI_ORDER_FIRST\
+&/'
+	mutant pp-comment-then-define $LKPI 's/^extern int nv_drm_pi_live_holds(void);/\/* x *\/ #define SI_ORDER_LAST SI_ORDER_FIRST\
+&/'
+	mutant live-holds-forgets-kept $DMABUF 's/if (n == 0 \&\& __atomic_load_n(&__nv_drm_pi_gate.kept, __ATOMIC_SEQ_CST))/if (0)/'
+	mutant pp-if0-decoy $DMABUF 's/^int nv_drm_pi_quiesce(int \*held, int \*kept)$/#if 0\
+int nv_drm_pi_quiesce(int *held, int *kept) { *held = 0; *kept = 0; return 0; }\
+#endif\
+&/'
 	mutant remove-devices-disabled $DRV '/^void nv_drm_remove_devices/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
 	mutant exit-disabled $LKPI '/^static void nv_bsd_drm_exit/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
 	mutant remove-devices-not-kept $DRV 's/^        nv_drm_pi_keep();//'

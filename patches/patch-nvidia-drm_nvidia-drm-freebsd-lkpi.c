@@ -1,12 +1,12 @@
 --- nvidia-drm/nvidia-drm-freebsd-lkpi.c.orig
 +++ nvidia-drm/nvidia-drm-freebsd-lkpi.c
-@@ -213,10 +213,31 @@
+@@ -213,10 +213,33 @@
      return 0;
  }
  
 +/* the gate of the exports of imported buffers, in nvidia-drm-gem-dma-buf.c */
 +extern int nv_drm_pi_live_holds(void);
-+extern int nv_drm_pi_quiesce(int *held);
++extern int nv_drm_pi_quiesce(int *held, int *kept);
 +extern void nv_drm_pi_keep(void);
 +
  static void nv_bsd_drm_exit(void)
@@ -15,15 +15,17 @@
  
 +    if (nv_drm_pi_live_holds() > 0) {
 +        /*
-+         * Not reached by an unload the guard module agreed to: its
-+         * MOD_QUIESCE and MOD_UNLOAD answer EBUSY while an export is held,
-+         * for kldunload -f as well.  Kept as a second line of defence:
-+         * nv_drm_exit() has left the devices alone (see
-+         * nv_drm_remove_devices()), and the pdevs they use (the dma-buf
-+         * attachment keeps &pdev->dev) stay too, and the module must not
-+         * unload later: the gate is closed, and nothing stops this same
-+         * unload, which the guard already agreed to.  A defensive assertion,
-+         * not a protection: see docs/PRIME-IMPORT.md 7.7.
++         * Not reached in the unload order the guard module relies on (the
++         * guard loads last and so unloads first, and answers EBUSY while an
++         * export is held, for kldunload -f as well).  Reached if the driver
++         * module is ever unloaded BEFORE the guard (a different module
++         * order): then nv_drm_exit() has left the devices alone (see
++         * nv_drm_remove_devices()), the pdevs they use (the dma-buf
++         * attachment keeps &pdev->dev) stay too, and the gate is marked
++         * kept and closed.  The guard's MOD_UNLOAD still runs after this and
++         * refuses with the kept message, the file stays loaded, and every
++         * later quiesce and unload is refused until the machine is
++         * restarted: there, this IS the protection.  See docs/PRIME-IMPORT.md 7.7.
 +         */
 +        nv_drm_pi_keep();
 +        return;
@@ -32,7 +34,7 @@
      // After doing the common DRM teardown, free any linuxkpi devices we
      // allocated during init
      for (int i = 0; i < NV_MAX_DEVICES; i++) {
-@@ -237,5 +258,82 @@
+@@ -237,5 +260,85 @@
  MODULE_DEPEND(nvidia_drm, drmn, 2, 2, 2);
  MODULE_DEPEND(nvidia_drm, dmabuf, 1, 1, 1);
  MODULE_DEPEND(nvidia_drm, nvidia, 1, 1, 1);
@@ -62,22 +64,23 @@
 +static int
 +nv_drm_pi_guard_handler(module_t mod, int what, void *arg)
 +{
-+    int held;
++    int held, kept;
 +
 +    switch (what) {
 +    case MOD_LOAD:
 +        return 0;
 +    case MOD_QUIESCE:
-+        if (nv_drm_pi_quiesce(&held) != 0) {
-+            if (held > 0) {
++        if (nv_drm_pi_quiesce(&held, &kept) != 0) {
++            if (kept) {
++                printf("nvidia_drm: unload refused: the driver was torn down "
++                       "while RM exports were open and its display devices "
++                       "were kept; restart the machine before unloading this "
++                       "module\n");
++            } else {
 +                printf("nvidia_drm: unload refused: %d RM export(s) of "
 +                       "imported buffers are still open; close the processes "
 +                       "that hold them (fstat /dev/nvidiactl) and try again\n",
 +                       held);
-+            } else {
-+                printf("nvidia_drm: unload refused: an earlier unload attempt "
-+                       "left the display devices in place; restart the "
-+                       "machine before unloading this module\n");
 +            }
 +            return EBUSY;
 +        }
@@ -93,15 +96,17 @@
 +         * unloaded (it loads last, SI_ORDER_LAST), so it answers before the
 +         * driver's own teardown has run: see docs/PRIME-IMPORT.md 7.7.
 +         */
-+        if (nv_drm_pi_quiesce(&held) != 0) {
-+            if (held > 0) {
++        if (nv_drm_pi_quiesce(&held, &kept) != 0) {
++            if (kept) {
++                printf("nvidia_drm: unload refused, also for kldunload -f: "
++                       "the driver was torn down while RM exports were open "
++                       "and its display devices were kept; restart the "
++                       "machine\n");
++            } else {
 +                printf("nvidia_drm: unload refused, also for kldunload -f: "
 +                       "%d RM export(s) of imported buffers are still open; "
 +                       "close the processes that hold them (fstat "
-+                       "/dev/nvidiactl)\n", held);
-+            } else {
-+                printf("nvidia_drm: unload refused: the display devices were "
-+                       "kept by an earlier teardown; restart the machine\n");
++                       "/dev/nvidiactl) and try again\n", held);
 +            }
 +            return EBUSY;
 +        }

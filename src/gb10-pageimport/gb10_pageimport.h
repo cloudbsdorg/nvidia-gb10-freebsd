@@ -148,7 +148,7 @@ struct gb10_pi_ops {
 struct gb10_pi_gate {
 	int	holds;
 	int	closing;
-	int	kept;		/* the teardown kept the devices because an export was held (a defensive assertion: the guard should have refused first): no new export, and the quiesce refuses */
+	int	kept;		/* the driver was torn down while an export was held and the devices were kept (only if it unloads before the guard): no new export, and every later quiesce refuses */
 };
 
 /* take a hold: 0, or -1 when the gate is closing (nothing is counted) */
@@ -172,7 +172,7 @@ gb10_pi_gate_quiesce(struct gb10_pi_gate *g)
 	return (0);
 }
 
-/* the teardown kept the devices (second line of defence, reached only if the guard was bypassed): close the gate and refuse a later quiesce */
+/* the teardown kept the devices (the driver unloaded before the guard): close the gate, and the guard's own unload and every later quiesce refuse */
 static inline void
 gb10_pi_gate_keep(struct gb10_pi_gate *g)
 {

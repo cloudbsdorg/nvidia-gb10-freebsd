@@ -578,15 +578,15 @@ functions on the guard's real order:
   module's refused unload: the loop that unloads the modules of the file returns the module's error
   whatever the flags. The guard loads last and so is unloaded first (see above), so its `EBUSY` stops even a forced
   unload before the driver's own teardown has run. A forced unload with no export held proceeds, the gate closed.
-* As a second line of defence, `nv_drm_exit()` (through `nv_drm_remove_devices()`) does not destroy the
-  devices and `nv_bsd_drm_exit()` does not free the pdevs while an export is held (the dma-buf
-  attachment uses `&pdev->dev`); they are not reached by an unload the guard agreed to. They are reached only if the guard was bypassed, since the guard has refused or closed the gate
-  before the driver's teardown. If they are reached, this same unload goes on regardless (the guard already agreed to it, and the
-  linker frees the text when the modules have unloaded), so they are a defensive assertion with a log line, not a
-  protection: the log says that the exports will call into freed text and that the machine must be restarted.
-  They close the gate, which only matters for the rest of that unload. On FreeBSD the
-  teardown path is `nv_bsd_drm_exit` -> `nv_drm_exit` -> `nv_drm_remove_devices`; the KAPI `.remove`
-  callback that calls `nv_drm_remove()` is registered only by the Linux build of nvidia-modeset.
+* A fallback, for a module order other than the one the guard relies on: `nv_drm_exit()`
+  (through `nv_drm_remove_devices()`) does not destroy the devices and `nv_bsd_drm_exit()` does not free the
+  pdevs while an export is held (the dma-buf attachment uses `&pdev->dev`), and the gate is marked kept and
+  closed. This is reached only if the driver module is unloaded before the guard (for example, if the drm-kmod
+  build orders its modules differently): the guard's `MOD_UNLOAD` still runs after it and refuses with the "kept"
+  line, the file stays loaded, and every later quiesce and unload is refused until the machine is restarted. In
+  that order this is the protection. On FreeBSD the teardown path is `nv_bsd_drm_exit` -> `nv_drm_exit` ->
+  `nv_drm_remove_devices`; the KAPI `.remove` callback that calls `nv_drm_remove()` is registered only by the
+  Linux build of nvidia-modeset.
 * The count is taken in the hold, under a LinuxKPI spin lock (a default mutex there; a few instructions, nothing sleeps inside) together with the closing test, and counted down by
   the core in `nvidia.ko` after the module's own release function has returned (`gb10_pi_release()`),
   so no instruction of `nvidia-drm.ko` runs after the count reaches zero. The descriptor counts the
@@ -608,7 +608,7 @@ fail, for the reverse probe too. It requests a dead-man restart at the start
 (`prime_import_testboot_deadman`, default 60 minutes, longer than the bounded worst case of about
 32 minutes; 0 disables), checks that the request is really pending (a fail row otherwise), and
 cancels it at the done row. A probe stuck inside the kernel cannot be killed by a signal; the
-dead-man restart is what ends that run. The kit that boots is built from `git archive <reviewed commit>` extracted into a fresh directory and run with `make-be.sh -V <commit>`: `make-be.sh` refuses a git work tree with uncommitted changes and an extracted kit without `-V`, records the commit in the boot environment, and the run records it in the row `kit-version`. If anything fails after the clone exists, `make-be.sh` unmounts and removes the half-built boot environment (and says so, or says it could not). `make-be.sh` turns off every other `*_testboot_enable` in the
+dead-man restart is what ends that run. The kit that boots is built from `git archive <reviewed commit>` extracted into a fresh directory and run with `make-be.sh -V <commit>`: `make-be.sh` refuses a git work tree with uncommitted changes (and one whose `make-be.sh` the repository does not track), and a kit that is neither a git work tree nor a `git archive` (its `KIT-COMMIT` file carries the commit through `export-subst`); a `-V` is checked against that commit and refused when it differs (in an archive the commit is the one `KIT-COMMIT` records: a record, not a proof of the content; in a git work tree the content of every installed file is compared with the committed one). It records the commit in the boot environment, the run records it in the row `kit-version`, and the staged `nvidia-drm.ko` is read before anything is cloned: the guard must be declared after the driver module (the tool needs python3 and `readelf`, which on FreeBSD is the ELF Tool Chain one). `PRIME_MNT` sets the mount point of the clone; `PRIME_ALLOW_DIRTY=1` and `PRIME_KO_ORDER_TOOL` are test hooks. If anything fails after the clone exists, `make-be.sh` unmounts and removes the half-built boot environment (and says so, or says it could not; the snapshot the clone was made from stays on the base boot environment, see `bectl list -s`). `make-be.sh` turns off every other `*_testboot_enable` in the
 clone of the base boot environment (`/etc/rc.conf`, `/etc/rc.conf.local` and every file under
 `/etc/rc.conf.d`) and removes an `nvidia-uvm.ko` the base left in
 `/boot/modules.nvtest` unless `-u` gives one. The kit runs from rc, before sddm and any user session,

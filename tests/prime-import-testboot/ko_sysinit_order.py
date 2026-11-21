@@ -2,7 +2,7 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# ko_sysinit_order.py <module.ko> - run as python3 -I ko_sysinit_order.py FILE; print "<module name> <subsystem> <order>" (decimal) for
+# ko_sysinit_order.py [--check] <module.ko> - run as python3 -I ko_sysinit_order.py FILE; print "<module name> <subsystem> <order>" (decimal) for
 # every module a kernel module file declares with DECLARE_MODULE (SYSINIT of
 # module_register_init), read from the built file: the sysinit structure holds the
 # subsystem and the order, its udata points at the moduledata, whose first word
@@ -10,7 +10,10 @@
 # order of the unload guard in the file the kit really stages (not in the source).
 # aarch64 ELF only (it reads R_AARCH64_ABS64 and the RELATIVE relocations of an arm64 module;
 # an amd64 module uses other relocation types and is refused).  Usage: one argument, else exit 2;
-# anything unexpected in the file ends the program with a message on stderr (exit 1).
+# anything unexpected in the file ends the program with a message on stderr (exit 1).  With --check it
+# prints "ok" (exit 0) when the guard module loads strictly after the driver module in the same
+# subsystem (so it unloads first), else the reason (exit 1): make-be.sh and prime_import_test.sh both use it.
+# Needs readelf (on FreeBSD the ELF Tool Chain one) and python3.
 import re
 import struct
 import subprocess
@@ -65,11 +68,31 @@ def main(path):
         out.append((data[no:end].decode(), sub, order))
     if not out:
         raise SystemExit("ko_sysinit_order: no module sysinit found")
-    for name, sub, order in out:
-        print(name, sub, order)
+    return out
+
+
+def check(out):
+    """None when the guard loads strictly after the driver module in the same subsystem, else the reason."""
+    g = [(sub, order) for name, sub, order in out if name == "nvidia_drm_pi_guard"]
+    d = [(sub, order) for name, sub, order in out if name == "nvidia_drm"]
+    if not g or not d:
+        return "the file does not declare both nvidia_drm and nvidia_drm_pi_guard (it declares: %s)" % ", ".join(n for n, _, _ in out)
+    if g[0][0] != d[0][0]:
+        return "the guard and the driver module are in different subsystems (%#x and %#x)" % (g[0][0], d[0][0])
+    if g[0][1] <= d[0][1]:
+        return "the guard (order %#x) does not load after the driver module (order %#x): it would unload last" % (g[0][1], d[0][1])
+    return None
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) == 2:
+        for name, sub, order in main(sys.argv[1]):
+            print(name, sub, order)
+    elif len(sys.argv) == 3 and sys.argv[1] == "--check":
+        why = check(main(sys.argv[2]))
+        if why:
+            print(why)
+            sys.exit(1)
+        print("ok")
+    else:
         sys.exit(2)
-    main(sys.argv[1])

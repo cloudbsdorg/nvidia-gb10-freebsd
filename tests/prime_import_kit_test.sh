@@ -185,6 +185,8 @@ cat > "$TMPD/fake-bectl" <<'FEOF'
 echo "bectl $*" >> "$FAKE_BECTL_LOG"
 # bectl mount <be> <dir>: the base BE's files, when the test provides some
 if [ "$1" = mount ] && [ -n "${FAKE_BASE_DIR:-}" ]; then cp -R "$FAKE_BASE_DIR/." "$3/"; fi
+# a signal arrives while the clone is mounting (the fake mount signals its parent, the make-be.sh shell)
+if [ "$1" = mount ] && [ -n "${FAKE_MOUNT_SIGNAL:-}" ]; then kill -"$FAKE_MOUNT_SIGNAL" "$PPID"; fi
 # a failure to order, after the clone exists
 case " ${FAKE_BECTL_FAIL:-none} " in *" $1 "*) exit 1 ;; esac
 exit 0
@@ -196,14 +198,24 @@ printf 'b' > "$TMPD/mods/nvidia-modeset/nvidia-modeset.ko"
 printf 'c' > "$TMPD/mods/nvidia-drm/nvidia-drm.ko"
 printf 'u' > "$TMPD/uvm.ko"
 
+# the module order tool of the fake runs: a good order unless a test says otherwise
+printf 'import sys\nprint("ok")\n' > "$TMPD/ko-tool-good"
+# A shell that is started from a background job inherits SIGINT ignored, and a signal ignored on entry cannot be trapped:
+# make-be.sh is started through a launcher that puts the default action back (also SIGPIPE, which Python ignores), as it has in a terminal.
+cat > "$TMPD/unignore.py" <<'PYLAUNCH'
+import os, signal, sys
+for sg in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGPIPE):
+    signal.signal(sg, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])
+PYLAUNCH
 # run_be <script> <args...>: run a make-be.sh against the fake bectl
 run_be() {
 	_s=$1
 	shift
 	rm -rf "${TMPD:?}/mnt"
 	: > "$TMPD/bectl.log"
-	PRIME_ALLOW_DIRTY="${PRIME_ALLOW_DIRTY_OVERRIDE-1}" FAKE_BECTL_FAIL="${FAKE_BECTL_FAIL:-none}" FAKE_BASE_DIR="${FAKE_BASE_DIR:-}" FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
-	    sh "$_s" "$@" 2>&1
+	GB10_TEST_HOOKS=1 PRIME_KO_ORDER_TOOL="${PRIME_KO_TOOL_OVERRIDE:-$TMPD/ko-tool-good}" FAKE_MOUNT_SIGNAL="${FAKE_MOUNT_SIGNAL:-}" PRIME_ALLOW_DIRTY="${PRIME_ALLOW_DIRTY_OVERRIDE-1}" FAKE_BECTL_FAIL="${FAKE_BECTL_FAIL:-none}" FAKE_BASE_DIR="${FAKE_BASE_DIR:-}" FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
+	    python3 -I "$TMPD/unignore.py" sh "$_s" "$@" 2>&1
 }
 # the clone of a base BE that has other kits armed and an old nvidia-uvm.ko
 mkdir -p "$TMPD/base/etc/rc.conf.d" "$TMPD/base/boot/modules.nvtest"
@@ -282,6 +294,20 @@ if [ "$rc" -ne 0 ] && grep -q 'destroy -F nvidia-prime-import-test-20261120-6' "
 else
 	bad "(d) a failed run left the half-built BE: rc=$rc $(cat "$TMPD/bectl.log" | tr '\n' '|')"
 fi
+# a failed create leaves nothing to clean up: no umount and no destroy (the clone is not ours until it exists)
+out=$(FAKE_BECTL_FAIL=create run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'create' "$TMPD/bectl.log" && ! grep -q 'umount\|destroy' "$TMPD/bectl.log"; then ok "(d) a failed create runs no umount and no destroy"; else bad "(d) a failed create cleaned up something: rc=$rc $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
+# a base equal to the target name is refused before anything runs (a failure would remove the base)
+out=$(run_be "$KIT/make-be.sh" -b nvidia-prime-import-test-20261120-7 -D 20261120 -n 7 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -eq 2 ] && ! grep -q 'create\|destroy' "$TMPD/bectl.log"; then ok "(d) a base boot environment with the target's name is refused before anything is created or removed"; else bad "(d) base equal to the target: rc=$rc $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
+# a signal while mounting (INT, TERM, HUP): the exit code says which, and the half-built BE is removed
+for sg in INT:130 TERM:143 HUP:129; do
+	out=$(FAKE_MOUNT_SIGNAL="${sg%%:*}" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
+	if [ "$rc" -eq "${sg##*:}" ] && grep -q 'destroy -F nvidia-prime-import-test-20261120-6' "$TMPD/bectl.log"; then ok "(d) $sg while mounting: exit ${sg##*:} and the half-built BE is removed"; else bad "(d) $sg while mounting: rc=$rc log: $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
+done
+# the final umount fails: the BE is not done, so it is removed
+out=$(FAKE_BECTL_FAIL=umount run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'destroy -F nvidia-prime-import-test-20261120-6' "$TMPD/bectl.log"; then ok "(d) a failing final umount removes the half-built BE"; else bad "(d) a failing final umount: rc=$rc log: $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
 out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
 if [ "$rc" -eq 0 ] && ! grep -q 'destroy' "$TMPD/bectl.log"; then ok "(d) a successful run removes nothing"; else bad "(d) a successful run destroyed something: $(cat "$TMPD/bectl.log" | tr '\n' '|')"; fi
 mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
@@ -327,6 +353,18 @@ if mut_be no-cleanup-trap -e 's/^trap cleanup EXIT$/:/'; then
 	FAKE_BECTL_FAIL=mount run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods" > /dev/null 2>&1
 	grep -q 'destroy' "$TMPD/bectl.log" && bad "(d) control no-cleanup-trap: a make-be.sh without the trap was not seen" || ok "(d) control: a make-be.sh without the cleanup trap is seen"
 fi
+if mut_be be-made-early -e 's/^BE_MADE=0$/BE_MADE=1/'; then
+	FAKE_BECTL_FAIL=create run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods" > /dev/null 2>&1
+	grep -q 'destroy' "$TMPD/bectl.log" && ok "(d) control: a make-be.sh that counts the BE as made before it exists removes a BE it did not make, and the test above sees it" || bad "(d) control be-made-early: not seen"
+fi
+if mut_be no-signal-traps -e "/^trap 'exit 1[0-9][0-9]' [A-Z]*\$/s/.*/:/"; then
+	FAKE_MOUNT_SIGNAL=TERM run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods" > /dev/null 2>&1
+	grep -q 'destroy' "$TMPD/bectl.log" && bad "(d) control no-signal-traps: a make-be.sh without the signal traps was not seen" || ok "(d) control: a make-be.sh without the signal traps leaves the half-built BE, and the test above sees it"
+fi
+if mut_be done-early -e 's/^run "\$BECTL" umount "\$BE"$/BE_DONE=1; run "$BECTL" umount "$BE"/'; then
+	FAKE_BECTL_FAIL=umount run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods" > /dev/null 2>&1
+	grep -q 'destroy -F' "$TMPD/bectl.log" && bad "(d) control done-early: a make-be.sh that marks the BE done before the umount was not seen" || ok "(d) control: a make-be.sh that marks the BE done before the final umount keeps a half-built BE, and the test above sees it"
+fi
 out=$(FAKE_BECTL_FAIL="mount destroy" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods")
 case $out in *"COULD NOT remove the half-built boot environment"*) ok "(d) when the half-built BE cannot be removed, the message says so" ;; *) bad "(d) a failed removal is reported as a success: $out" ;; esac
 if mut_be keep-other-kits -e '/^	grep -Eq .*_testboot_enable=.* || return 0$/s/.*/	return 0/'; then
@@ -337,38 +375,118 @@ if mut_be keep-uvm -e '/^	run rm -f "\$MNT"\/boot\/modules.nvtest\/nvidia-uvm.ko
 	FAKE_BASE_DIR="$TMPD/base" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
 	[ -e "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" ] && ok "(d) control: a make-be.sh that keeps the base's nvidia-uvm.ko is seen" || bad "(d) control keep-uvm: not seen"
 fi
-# the kit that boots comes from a committed state: a dirty git work tree is refused, a clean one is recorded, an archive needs -V
+# the kit that boots comes from a committed state: a dirty git work tree is refused, a clean one is recorded, an
+# archive carries its commit in KIT-COMMIT (git archive expands it), and -V is checked against it, never trusted
 rm -rf "$TMPD/gitkit"; mkdir -p "$TMPD/gitkit"; cp "$KIT"/* "$TMPD/gitkit/"
+printf 'KIT-COMMIT export-subst\n' > "$TMPD/gitkit/.gitattributes"
+# the order checker that sits in the kit: a stand-in that accepts (the staged module of these tests is not an ELF file)
+cp "$TMPD/ko-tool-good" "$TMPD/gitkit/ko_sysinit_order.py"
 ( cd "$TMPD/gitkit" && git init -q . && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m kit ) > /dev/null 2>&1
 gsha=$(git -C "$TMPD/gitkit" rev-parse --verify HEAD 2>/dev/null)
 case $gsha in ''|*[!0-9a-f]*) bad "(d) the test could not make a git repository of the kit to commit in" ;; esac
+bev() { cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null; }
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
-if [ "$rc" -eq 0 ] && [ "$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)" = "$gsha" ]; then
-	ok "(d) a clean git work tree builds the BE and records its HEAD"
-else
-	bad "(d) a clean git work tree: rc=$rc version='$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)' want '$gsha' $out"
-fi
+if [ "$rc" -eq 0 ] && [ "$(bev)" = "$gsha" ]; then ok "(d) a clean git work tree builds the BE and records its HEAD"; else bad "(d) a clean git work tree: rc=$rc version='$(bev)' want '$gsha' $out"; fi
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$(echo "$gsha" | cut -c1-8)"); rc=$?
+[ "$rc" -eq 0 ] && ok "(d) in a git work tree, a -V that is a prefix of HEAD is accepted" || bad "(d) -V prefix of HEAD refused: rc=$rc $out"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) in a git work tree, a -V that is not HEAD is refused" || bad "(d) -V that is not HEAD: rc=$rc"
 echo "# changed" >> "$TMPD/gitkit/make-be.sh"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 case $out in *"uncommitted changes"*) [ "$rc" -eq 2 ] && ok "(d) a dirty git work tree is refused (exit 2)" || bad "(d) a dirty tree is refused with rc=$rc" ;; *) bad "(d) a dirty git work tree builds a BE: rc=$rc" ;; esac
 git -C "$TMPD/gitkit" checkout -q -- make-be.sh 2>/dev/null
-rm -rf "$TMPD/archkit"; mkdir -p "$TMPD/archkit"; cp "$KIT"/* "$TMPD/archkit/"
+# git state that hides a change from git status does not hide it from the content comparison
+git -C "$TMPD/gitkit" update-index --assume-unchanged make-be.sh
+echo "# hidden change" >> "$TMPD/gitkit/make-be.sh"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) a change hidden with assume-unchanged is still refused" || bad "(d) assume-unchanged hides a change: rc=$rc"
+git -C "$TMPD/gitkit" update-index --no-assume-unchanged make-be.sh
+git -C "$TMPD/gitkit" checkout -q -- make-be.sh 2>/dev/null
+# the hooks are marked: -V under the dirty hook never looks like a checked commit; a replaced order tool needs the hook
+out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
+[ "$rc" -eq 0 ] && [ "$(bev)" = "unchecked-0123abc" ] && ok "(d) a -V under the dirty-tree hook is recorded as unchecked" || bad "(d) -V under the hook: rc=$rc version='$(bev)'"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-bad" run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 0 ] && [ "$(bev)" = "$gsha" ] && ok "(d) a replaced order tool is ignored outside the dirty-tree hook (the kit's own checker ran)" || bad "(d) a replaced order tool was honoured outside the hook: rc=$rc version='$(bev)'"
+rm -rf "$TMPD/archkit"; mkdir -p "$TMPD/archkit"
+git -C "$TMPD/gitkit" archive HEAD | tar -x -C "$TMPD/archkit"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
-[ "$rc" -eq 2 ] && ok "(d) a kit that is not in a git work tree needs -V" || bad "(d) an extracted kit without -V built a BE: rc=$rc"
+[ "$rc" -eq 0 ] && [ "$(bev)" = "$gsha" ] && ok "(d) a kit from git archive records the commit its KIT-COMMIT carries (no -V needed)" || bad "(d) archive kit: rc=$rc version='$(bev)' $out"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$(echo "$gsha" | cut -c1-8)"); rc=$?
+[ "$rc" -eq 0 ] && ok "(d) a -V that agrees with the archive's commit is accepted" || bad "(d) -V agreeing with the archive refused: rc=$rc $out"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
-[ "$rc" -eq 0 ] && [ "$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)" = 0123abc ] && ok "(d) an extracted kit with -V records the named commit" || bad "(d) -V: rc=$rc $out"
+[ "$rc" -eq 2 ] && ok "(d) a -V that differs from the archive's commit is refused" || bad "(d) -V differing from the archive: rc=$rc"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V a); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) a one-digit -V is refused (at least 7 hex digits)" || bad "(d) one-digit -V: rc=$rc"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$(echo "$gsha" | cut -c1-8 | tr a-f A-F)"); rc=$?
+[ "$rc" -eq 0 ] && ok "(d) an upper-case -V that is the commit is accepted" || bad "(d) upper-case -V refused: rc=$rc $out"
+rm -rf "$TMPD/outer2"; mkdir -p "$TMPD/outer2/inner"; cp -R "$TMPD/archkit/." "$TMPD/outer2/inner/"
+( cd "$TMPD/outer2" && git init -q . && printf 'junk\n' > junk && git add junk && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer2/inner/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 0 ] && ok "(d) a git archive extracted inside some other git work tree is accepted (its KIT-COMMIT decides)" || bad "(d) an archive inside a git tree refused: rc=$rc $out"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 'not hex'); rc=$?
 [ "$rc" -eq 2 ] && ok "(d) a -V that is not hex is refused" || bad "(d) -V not hex rc=$rc"
-echo "# changed" >> "$TMPD/gitkit/make-be.sh"
-sed '/^	if \[ -n "\$(git -C "\$KITDIR" status --porcelain/s/.*/	if false; then/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
-cp "$KIT/prime_import_testboot" "$TMPD/gitkit/" ; echo "# dirty" >> "$TMPD/gitkit/prime_import_testboot"
+rm -rf "$TMPD/plaink"; mkdir -p "$TMPD/plaink"; cp "$KIT"/* "$TMPD/plaink/"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/plaink/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) a copied kit (no git, no expanded KIT-COMMIT) is refused even with -V: the commit cannot be checked" || bad "(d) a copied kit with -V built a BE: rc=$rc"
+# a kit that sits untracked (here: ignored) inside somebody else's repository is not a committed kit
+rm -rf "$TMPD/outer"; mkdir -p "$TMPD/outer/kit"; cp "$KIT"/* "$TMPD/outer/kit/"; cp "$TMPD/ko-tool-good" "$TMPD/outer/kit/ko_sysinit_order.py"
+( cd "$TMPD/outer" && git init -q . && printf 'kit/\n' > .gitignore && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"not tracked"*) [ "$rc" -eq 2 ] && ok "(d) a kit that is not tracked by the repository around it is refused" || bad "(d) untracked kit rc=$rc" ;; *) bad "(d) an untracked kit inside another repository builds a BE: rc=$rc" ;; esac
+rm -rf "$TMPD/outer3"; mkdir -p "$TMPD/outer3/kit"; cp "$KIT"/* "$TMPD/outer3/kit/"
+( cd "$TMPD/outer3" && git init -q . && printf 'kit/*\n!kit/make-be.sh\n' > .gitignore && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer3/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"prime_import_testboot is not tracked"*) [ "$rc" -eq 2 ] && ok "(d) a kit of which only make-be.sh is tracked is refused, naming the untracked file" || bad "(d) partly tracked kit rc=$rc" ;; *) bad "(d) a partly tracked kit builds a BE: rc=$rc $out" ;; esac
+out=$(GB10_TEST_HOOKS=1 PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
+case $out in *"module order"*"NOT checked"*) ok "(d) a dry run says that it does not check the module order" ;; *) bad "(d) a dry run is silent about the module order" ;; esac
+# controls: the dirty check, the ls-files check and the -V check each seen when removed
+cp "$KIT/prime_import_testboot" "$TMPD/gitkit/"; echo "# dirty" >> "$TMPD/gitkit/prime_import_testboot"
+sed -e '/^	if \[ -n "\$(git -C "\$KITDIR" status --porcelain/s/.*/	if false; then/' -e '/^		\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
 if cmp -s "$KIT/make-be.sh" "$TMPD/gitkit/make-be.sh"; then bad "(d) control dirty-check: the mutation changed nothing (stale test)"; else
 	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh without the dirty check builds from a dirty tree, and the test above sees it" || bad "(d) control dirty-check: not seen ($rc)"
 fi
-PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" > "$TMPD/nob.out" 2>&1; rc=$?
+sed -e '/^		git -C "\$KITDIR" ls-files --error-unmatch/s/.*/		true || {/' -e '/^		\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/outer/kit/make-be.sh"
+if cmp -s "$KIT/make-be.sh" "$TMPD/outer/kit/make-be.sh"; then bad "(d) control ls-files: the mutation changed nothing (stale test)"; else
+	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh without the tracked-file check builds an untracked kit, and the test above sees it" || bad "(d) control ls-files: not seen ($rc)"
+fi
+sed 's/^	if \[ -n "\$COMMIT" \] \&\& ! same_commit "\$COMMIT" "\$ARCHIVE_SHA"; then/	if false; then/' "$KIT/make-be.sh" > "$TMPD/archkit/make-be.sh"
+if cmp -s "$KIT/make-be.sh" "$TMPD/archkit/make-be.sh"; then bad "(d) control -V check: the mutation changed nothing (stale test)"; else
+	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
+	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh that takes -V on trust builds with a wrong commit, and the test above sees it" || bad "(d) control -V check: not seen ($rc)"
+fi
+# the module order of the staged nvidia-drm.ko is checked before anything is created
+for kv in bad:order noguard:declare garbage:cannot; do
+	_kt="$TMPD/ko-tool-${kv%%:*}"
+	case ${kv%%:*} in
+	bad) printf 'print("the guard (order 0xf000000) does not load after the driver module (order 0xfffffff): it would unload last")\nraise SystemExit(1)\n' > "$_kt" ;;
+	noguard) printf 'print("the file does not declare both nvidia_drm and nvidia_drm_pi_guard")\nraise SystemExit(1)\n' > "$_kt" ;;
+	garbage) printf 'import sys\nsys.exit("not an arm64 module")\n' > "$_kt" ;;
+	esac
+	: > "$TMPD/bectl.log"
+	out=$(PRIME_KO_TOOL_OVERRIDE="$_kt" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+	if [ "$rc" -eq 2 ] && [ ! -s "$TMPD/bectl.log" ] && case $out in *"nvidia-drm.ko:"*"rebuild from the committed tree"*) true ;; *) false ;; esac; then ok "(d) a staged nvidia-drm.ko with a module order problem ('${kv%%:*}') is refused before anything runs, with the reason and the next step"; else bad "(d) ko order '${kv%%:*}': rc=$rc out: $out log: $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
+done
+# the staged module changes after its order was checked: refused (the checked file is the one installed)
+printf 'import sys\nopen(sys.argv[-1], "ab").write(b"x")\nprint("ok")\n' > "$TMPD/ko-tool-swap"
+cp "$TMPD/mods/nvidia-drm/nvidia-drm.ko" "$TMPD/nvidia-drm.ko.keep"
+out=$(PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-swap" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+cp "$TMPD/nvidia-drm.ko.keep" "$TMPD/mods/nvidia-drm/nvidia-drm.ko"
+case $out in *"changed after its module order was checked"*) [ "$rc" -ne 0 ] && ok "(d) a module that changes after its order was checked is refused" || bad "(d) swap: rc=$rc" ;; *) bad "(d) a module swapped after the order check was installed: rc=$rc" ;; esac
+if mut_be ko-swap -e 's/^		if \[ "\$b" = nvidia-drm.ko \] \&\& \[ "\$want" != "\$KO_SHA" \]; then/		if false; then/'; then
+	PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-swap" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" > /dev/null 2>&1; rc=$?
+	cp "$TMPD/nvidia-drm.ko.keep" "$TMPD/mods/nvidia-drm/nvidia-drm.ko"
+	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh that does not compare the checked file with the installed one installs a swapped module, and the test above sees it" || bad "(d) control ko-swap: not seen ($rc)"
+fi
+if mut_be ko-order -e 's/^	_ko_out=\$(python3 -I -B "\$KO_TOOL" --check .*$/	_ko_out=ok/'; then
+	: > "$TMPD/bectl.log"
+	PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-bad" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" > /dev/null 2>&1
+	grep -q 'create' "$TMPD/bectl.log" && ok "(d) control: a make-be.sh that does not compare the order builds with a guard that unloads last, and the test above sees it" || bad "(d) control ko-order: not seen"
+fi
+GB10_TEST_HOOKS=1 PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" > "$TMPD/nob.out" 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "(d) make-be.sh without -b exits 2" || bad "(d) make-be.sh without -b rc=$rc"
-out=$(PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
+out=$(GB10_TEST_HOOKS=1 PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
 case $out in
 *"bectl create -e base nvidia-prime-import-test-20261120-3"*) ok "(d) the BE is named nvidia-prime-import-test-<date>-<n>" ;;
 *) bad "(d) dry-run plan lacks the create line: $out" ;;
