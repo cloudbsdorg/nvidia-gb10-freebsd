@@ -391,16 +391,26 @@ functions for `nvidia-uvm.ko` (the clean-room UVM driver, nvidia-uvm-freebsd):
   per `NV_OK`, never after a refusal. Holds are per client and nest, so an RM call made under
   a hold delays only a free of that one client, not other users.
 
-**Guarantees.** Root-client allocations and frees run under the table lock
-together with their table change (other RM calls take no lock), and a free first waits for
-the holds on that client. A client freed through any
-file leaves the table, a closing file forgets its clients, and only a control file can own
-one. `MODULE_VERSION` stays 1: an `nvidia.ko` without the exports makes `nvidia-uvm.ko` fail
-to load, which is the safe answer. If `kldload nvidia-uvm` fails (it prints "an error occurred
-while loading module") and `dmesg` shows `symbol nvUvmInterfaceClientHold undefined` (or
-`...ClientRelease`), the loaded `nvidia.ko` was built without the
-`patch-zz-nvidia_client_owner_*` patches: rebuild it from a tree made by
-`scripts/prepare-tree.sh` and reload both modules.
+**Guarantees.** The table lock is a leaf lock: it is never held across an RM call (the RM can run
+a file's close destructor, which takes it, from inside an RM call), so the table is updated after
+the RM call returns and may lag it; every lag fails closed (an unrecorded new client is refused, a
+reused handle leaves both parties unowned, the owner's own free keeps new holds out). A free of a
+client first waits for the holds on it, before the ioctl takes any other lock. A client freed
+through any file leaves the table, a closing file forgets its clients, and only a control file can
+own one.
+
+**Versions.** `nvidia.ko` is module version 2, and `nvidia-modeset.ko` and `nvidia-drm.ko` depend on
+exactly that, as does `nvidia-uvm.ko` from uvm-bsd branch `agent/2373-uvm-client-ownership` or
+later (its `MODULE_DEPEND` is in that repository). Updating `nvidia.ko` alone does not fix the
+cross-user hole: an older `nvidia-uvm.ko` (depending on version 1) refuses to load against it
+(module version mismatch), and the new one refuses an old `nvidia.ko`. If `kldload nvidia-uvm` fails (it
+prints "an error occurred while loading module") and `dmesg` shows a version mismatch or
+`symbol nvUvmInterfaceClientHold undefined` (or `...ClientRelease`), the loaded `nvidia.ko` was
+built without the `patch-zz-nvidia_client_owner_*` patches, or a module of the set is from another
+build (`kldload` fails with a `version mismatch` or `undefined` message in `dmesg`). Rebuild all four
+modules (`nvidia`, `nvidia-modeset`, `nvidia-drm`, `nvidia-uvm`) from one tree made by
+`scripts/prepare-tree.sh` and reload them together: `nvidia-modeset` and `nvidia-drm` depend on
+version 2 as well, so replacing `nvidia.ko` alone also stops the display.
 
 **A stuck free.** A free of a client waits for the holds on it, in an interruptible sleep with
 wait channel `nvcobusy`, and every other ioctl on the same file waits behind it. `nvidia-uvm.ko`
@@ -419,7 +429,8 @@ client's owner stops new holds while it waits, so a stranger cannot starve the o
 its predictable handle. `nvUvmInterfaceClientHold` must be called from a sleepable context with
 no RM lock held, never from an RM callback; the same goes for `nvUvmInterfaceClientRelease`.
 
-**Tests.** `tests/client_owner_test.sh` reads `GB10_WORK` (a directory with `sources/` holding the
+**Tests.** `tests/client_owner_glue_test.sh` compiles the real glue (`src/gb10-client-owner/nvco_glue.h`)
+against fakes of the kernel and runs it, with mutants that must fail. `tests/client_owner_test.sh` reads `GB10_WORK` (a directory with `sources/` holding the
 pinned open-gpu-kernel-modules 580.178.04 checkout and the NVIDIA FreeBSD tarball) and `TMPDIR`;
 without them the layout and prepare-tree checks are skipped (a failure under `CI` or
 `REQUIRE_INPUTS`). It runs the table logic (layouts compared with the real `nvos.h`), checks the

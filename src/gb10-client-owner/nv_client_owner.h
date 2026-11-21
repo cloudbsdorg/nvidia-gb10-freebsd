@@ -10,7 +10,8 @@
  * first.  Handles are predictable (the first client of a boot is
  * 0xC1D00000), so a handle is a name, not a secret.
  *
- * The table is one global list of (handle, owning file) pairs, filled from
+ * The table is one global list of (handle, owning file) pairs, filled (after
+ * the RM call returned) from
  * the ioctls that create a client and emptied from the ones that free it:
  *   - NV_ESC_RM_ALLOC (0x2B, NVOS21 or NVOS64) and NV_ESC_RM_ALLOC_OBJECT
  *     (0x28, NVOS05) with hClass NV01_ROOT (0x0), NV01_ROOT_NON_PRIV
@@ -36,10 +37,15 @@
  * The includer defines NVCO_MALLOC(bytes) and NVCO_FREE(ptr), and includes
  * the type definitions (uint32_t, size_t) first.  The kernel uses
  * malloc(9) with M_WAITOK, the test uses malloc.  The table is not
- * locked: the includer serialises calls (nvidia_subr.c holds an sx lock,
- * nvco_sx, because the add may sleep in malloc(M_WAITOK); a mutex would be
- * wrong).  The includer also holds that lock across the RM call of every
- * operation nvco_is_client_op names, so the table changes in RM's order.
+ * locked: the includer serialises calls with a LEAF lock (nvidia_subr.c: an
+ * sx lock, nvco_sx, because the add may sleep in malloc(M_WAITOK); a mutex
+ * would be wrong).  The lock is never held across the RM call: RM can run the
+ * file's close destructor, which takes it, from inside an RM call.  So the
+ * table is updated AFTER the RM call returns and may lag the RM by that
+ * window; every lag fails closed: a new client not yet recorded is unknown
+ * and refused; a freed handle that the RM reuses before the free is recorded
+ * collides in nvco_add (both parties unowned); the owner's free count keeps
+ * new holds out while the free is in flight.
  * A lookup is a linear scan: a process has a handful of clients.
  */
 
@@ -95,7 +101,8 @@ struct nvco_entry {
 	uint32_t	handle;
 	const void	*owner;
 	uint32_t	refs;	/* holds in flight (nvco_hold); a free of the client waits for zero */
-	uint32_t	freeing;	/* frees by the owner waiting for refs to reach zero (a count): no new holds */
+	uint32_t	freeing;	/* frees of the client in flight (a count; any file's): no new holds */
+	uint32_t	gen;	/* which client this entry is: a reused handle gets a new one */
 	const void	*file;	/* the open file the holds in flight were taken on (struct file *), for the release */
 	uint32_t	revoked;	/* ownership withdrawn while holds were in flight: kept only until they end */
 };
@@ -104,6 +111,7 @@ struct nvco_table {
 	struct nvco_entry	*e;
 	size_t			n;
 	size_t			cap;
+	uint32_t		next_gen;
 };
 
 static inline struct nvco_entry *
@@ -187,6 +195,7 @@ nvco_add(struct nvco_table *t, uint32_t handle, const void *owner)
 	t->e[t->n].owner = owner;
 	t->e[t->n].refs = 0;
 	t->e[t->n].freeing = 0;
+	t->e[t->n].gen = ++t->next_gen;
 	t->e[t->n].file = NULL;
 	t->e[t->n].revoked = 0;
 	t->n++;
@@ -243,7 +252,7 @@ nvco_hold(struct nvco_table *t, const void *owner, const void *file, uint32_t ha
 	if (!nvco_grants(e, owner) || file == NULL)
 		return (0);
 	if (e->refs != 0 && e->file != file)
-		return (0);	/* one open file per owner: anything else is a caller bug */
+		return (0);	/* tripwire: one nvffp is one open file, so this cannot happen */
 	e->file = file;
 	e->refs++;
 	return (1);
@@ -278,36 +287,35 @@ nvco_busy(const struct nvco_table *t, uint32_t handle)
 }
 
 /*
- * A free of the client is starting on `owner`'s file.  It waits for the holds
- * in flight; if the freeing file is the client's owner it also stops new
- * holds (a count: several frees may wait), so the holds drain.  A stranger's
- * free waits without blocking the owner (the owner must not be starved by
- * someone else's request).  Returns 1 when it was counted: pass the same to
- * nvco_end_free.  0 when the client is not listed or the file is not its owner.
+ * A free of the client is starting, by whichever file: the holds in flight
+ * drain and no new one is granted until the free ends, because the RM will
+ * free the client in the window after the includer drops the table lock.  The
+ * delay of the owner's holds is bounded by the holds in flight plus one RM
+ * call.  Returns a token (nonzero) naming this client, or 0 when the handle
+ * is not listed; pass the token to nvco_end_free.
  */
-static inline int
-nvco_begin_free(struct nvco_table *t, const void *owner, uint32_t handle)
+static inline uint32_t
+nvco_begin_free(struct nvco_table *t, uint32_t handle)
 {
 	struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e == NULL || owner == NULL || e->owner != owner)
+	if (e == NULL)
 		return (0);
 	e->freeing++;
-	return (1);
+	return (e->gen + 1);
 }
 
 /*
- * The free is over (done, interrupted or refused by the RM); counted is
- * nvco_begin_free's answer for the same owner.  The count is only given back
- * to an entry that still belongs to that owner: the handle may have been freed
- * and reused by another file while the free slept.
+ * The free is over (done, interrupted or refused by the RM).  The count is
+ * given back only to the client the token names: the handle may have been
+ * freed and reused by another client while the free slept.
  */
 static inline void
-nvco_end_free(struct nvco_table *t, uint32_t handle, const void *owner, int counted)
+nvco_end_free(struct nvco_table *t, uint32_t handle, uint32_t token)
 {
 	struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e != NULL && counted && e->owner == owner && e->freeing != 0)
+	if (e != NULL && token != 0 && e->gen + 1 == token && e->freeing != 0)
 		e->freeing--;
 }
 

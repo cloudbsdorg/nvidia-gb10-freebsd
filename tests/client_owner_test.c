@@ -292,6 +292,7 @@ test_hold_lifecycle(void)
 {
 	struct nvco_free_params refused = { CB, CB, CB, 0x1B }, done = { CB, CB, CB, 0 };
 	struct nvco_free_params fc = { CB, CB, CB + 1, 0 };
+	uint32_t tk, tk2;
 	int ok;
 
 	fresh();
@@ -318,39 +319,42 @@ test_hold_lifecycle(void)
 	    "a same-owner re-add under a hold revokes");
 	CHECK(nvco_unhold(&t, A_FP, CA), "released");
 	CHECK(nvco_alloc_handle(&(struct nvco_alloc64_params){ .hObjectNew = 0x1234 }) == 0x1234, "the new handle is read from the shared offset");
-	/* a free in progress refuses new holds so that the holds drain */
+	/* a free in progress (by any file) refuses new holds so that the holds drain */
 	fresh();
 	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds");
-	CHECK(nvco_begin_free(&t, B_FILE, CB) == 1, "a free of a listed client begins");
+	tk = nvco_begin_free(&t, CB);
+	CHECK(tk != 0, "a free of a listed client begins");
 	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "no new hold while a free waits");
 	CHECK(nvco_busy(&t, CB), "the hold in flight still counts");
 	CHECK(nvco_unhold(&t, B_FP, CB) && !nvco_busy(&t, CB), "it drains");
-	nvco_end_free(&t, CB, B_FILE, 1);
+	nvco_end_free(&t, CB, tk);
 	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "a free that did not happen lets holds in again");
 	CHECK(nvco_unhold(&t, B_FP, CB), "released");
-	CHECK(nvco_begin_free(&t, B_FILE, CB + 50) == 0, "a free of an unlisted client begins nothing");
-	/* a refused free (params status) clears the flag; a done free removes the entry */
-	CHECK(nvco_begin_free(&t, B_FILE, CB) == 1, "free begins");
+	CHECK(nvco_begin_free(&t, CB + 50) == 0, "a free of an unlisted client begins nothing");
+	/* a refused free (params status): the kernel ends the count whatever the result */
+	tk = nvco_begin_free(&t, CB);
 	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(refused), &refused);
-	nvco_end_free(&t, CB, B_FILE, 1);	/* what the kernel does after the call, whatever the result */
+	nvco_end_free(&t, CB, tk);
 	CHECK(nvco_owns(&t, B_FILE, CB), "the RM refused the free: owned again");
-	CHECK(nvco_begin_free(&t, B_FILE, CB) == 1, "free begins again");
+	tk = nvco_begin_free(&t, CB);
 	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(done), &done);
 	CHECK(nvco_find(&t, CB) == NULL, "the free happened: gone");
 	/* frees are counted: one interrupted free must not let holds in while another still waits */
 	fresh();
-	CHECK(nvco_begin_free(&t, B_FILE, CB) == 1 && nvco_begin_free(&t, B_FILE, CB) == 1, "two frees wait");
-	nvco_end_free(&t, CB, B_FILE, 1);
+	tk = nvco_begin_free(&t, CB);
+	tk2 = nvco_begin_free(&t, CB);
+	CHECK(tk != 0 && tk == tk2, "two frees wait on the same client");
+	nvco_end_free(&t, CB, tk);
 	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "one free is still waiting: no new hold");
-	nvco_end_free(&t, CB, B_FILE, 1);
+	nvco_end_free(&t, CB, tk2);
 	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "both ended: holds are allowed again");
 	CHECK(nvco_unhold(&t, B_FP, CB), "released");
-	nvco_end_free(&t, CB, B_FILE, 1);
+	nvco_end_free(&t, CB, tk);
 	CHECK(nvco_owns(&t, B_FILE, CB), "an unmatched end_free does not underflow the count");
-	/* a stranger's free does not block the owner */
-	CHECK(nvco_begin_free(&t, A_FILE, CB) == 0, "a free by another file is not counted");
-	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "the owner can still hold while a stranger's free waits");
-	CHECK(nvco_unhold(&t, B_FP, CB), "released");
+	/* a stranger's free is counted too: the RM frees in the window after the lock drops */
+	tk = nvco_begin_free(&t, CB);
+	CHECK(tk != 0 && !nvco_hold(&t, B_FILE, B_FP, CB), "a free by any file keeps new holds out until it ends");
+	nvco_end_free(&t, CB, tk);
 	/* a hold must come from one open file */
 	CHECK(nvco_hold(&t, B_FILE, B_FP, CB) && !nvco_hold(&t, B_FILE, A_FP, CB), "a second file cannot share the hold");
 	CHECK(!nvco_unhold(&t, A_FP, CB) && nvco_unhold(&t, B_FP, CB), "only the file that held can release");
@@ -359,14 +363,15 @@ test_hold_lifecycle(void)
 	nvco_remove_owner(&t, B_FILE);
 	CHECK(!nvco_owns(&t, B_FILE, CB) && !nvco_hold(&t, B_FILE, B_FP, CB), "close revokes a held entry");
 	CHECK(nvco_unhold(&t, B_FP, CB) && nvco_find(&t, CB) == NULL, "the holder can still release it, and it goes");
-	/* a count is only given back to the owner that took it: the handle was freed and reused meanwhile */
+	/* a count is only given back to the client its token names: the handle was freed and reused meanwhile */
 	fresh();
-	CHECK(nvco_begin_free(&t, A_FILE, CA) == 1, "A's free of CA begins");
+	tk = nvco_begin_free(&t, CA);
 	free_obj(B_FILE, CA, CA, 0);
 	alloc64(C_FILE, CA, NVCO_CLASS_ROOT, 0);
-	CHECK(nvco_begin_free(&t, C_FILE, CA) == 1, "C's free of the reused CA begins");
-	nvco_end_free(&t, CA, A_FILE, 1);
-	CHECK(!nvco_hold(&t, C_FILE, C_FILE, CA), "A's end must not release C's free");
+	tk2 = nvco_begin_free(&t, CA);
+	CHECK(tk2 != 0 && tk2 != tk, "the reused handle is a different client (token %u vs %u)", (unsigned)tk2, (unsigned)tk);
+	nvco_end_free(&t, CA, tk);
+	CHECK(!nvco_hold(&t, C_FILE, C_FILE, CA), "the old free's end must not release the new client's free");
 	/* the two free decoders agree */
 	(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(done), &done, &ok);
 	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(done), &done), "decoders agree on a client free");
@@ -374,6 +379,40 @@ test_hold_lifecycle(void)
 	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fc), &fc), "decoders agree on a child free");
 	(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fc) - 1, &fc, &ok);
 	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fc) - 1, &fc), "decoders agree on an odd size");
+}
+
+static void
+test_rm_lag(void)
+{
+	struct nvco_free_params done = { CB, CB, CB, 0 };
+	struct nvco_alloc64_params a64;
+
+	/* the table is updated after the RM call returned (nothing is locked across it): every lag fails closed */
+	fresh();
+	/* (a) a new client the RM created but the table has not recorded yet is unknown: refused */
+	CHECK(!nvco_hold(&t, A_FILE, A_FP, CA + 0x300), "RM returned, not yet recorded: no hold");
+	/* (b) the owner's free is in flight (counted): holds are refused until it ends */
+	CHECK(nvco_begin_free(&t, CB) != 0, "B's free begins");
+	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "RM free in flight: no new hold");
+	/* (c) the RM freed CB and another file's alloc reused the handle before B's free was recorded */
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CB;
+	a64.hClass = NVCO_CLASS_ROOT;
+	CHECK(nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64) == -1, "the reuse collides with the unrecorded free");
+	CHECK(!nvco_owns(&t, A_FILE, CB) && !nvco_owns(&t, B_FILE, CB), "both parties are unowned");
+	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(done), &done);
+	nvco_end_free(&t, CB, 1);
+	CHECK(!nvco_owns(&t, B_FILE, CB) && !nvco_owns(&t, A_FILE, CB), "the late record of the free changes nothing");
+	/* (d) a reuse that is recorded cleanly after the free is recorded is owned by the new file */
+	alloc64(A_FILE, CB, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_owns(&t, A_FILE, CB) && !nvco_owns(&t, B_FILE, CB), "a clean reuse belongs to the new owner");
+	/* (e) a hold taken before the RM free was recorded keeps the entry: the late free cannot drop it under the holder */
+	fresh();
+	CHECK(nvco_hold(&t, A_FILE, A_FP, CA), "A holds CA");
+	nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_FREE, sizeof((struct nvco_free_params){ CA, CA, CA, 0 }),
+	    &(struct nvco_free_params){ CA, CA, CA, 0 });
+	CHECK(nvco_busy(&t, CA) && !nvco_owns(&t, A_FILE, CA), "late free under a hold: revoked, still held");
+	CHECK(nvco_unhold(&t, A_FP, CA) && nvco_find(&t, CA) == NULL, "the holder releases; the entry goes");
 }
 
 static void
@@ -407,6 +446,7 @@ main(void)
 	test_recording();
 	test_decoding_and_holds();
 	test_hold_lifecycle();
+	test_rm_lag();
 	test_close_and_growth();
 	nvco_destroy(&t);
 

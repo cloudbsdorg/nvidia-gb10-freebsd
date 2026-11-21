@@ -42,3 +42,14 @@ Next: write header.
 
 ## 2026-11-21T05:22:28Z
 - Round 8 (receipt 46ce47a3): doc and diagnostic wording only. Commit after this receipt.
+
+## 2026-11-21T06:45:29Z (#2373 fix round 3, after the crash)
+- State: working tree (uncommitted) has: nvco_glue.h (all glue, leaf lock: begin before fops_sx, RM call with no table lock, end after unlock), patch-zz subr patch reduced to include + 3 call sites, nv_client_owner.h comment, tests/client_owner_glue_test.sh + tests/data/nvidia_glue_harness.c (real glue vs kernel fakes; 15 mutants + 7 pin mutants red), tests/pins_lib.sh, rm-lag model rows. prepare-tree copies nvco_glue.h.
+- TODO nv: drop nothing else; MODULE_VERSION 2 + depends (nvidia_pci, modeset, drm patch); run client_owner_test.sh + glue test on git archive; gate 2 rounds; commit; then phase0 merge branch (agent/2373-nv-client-owner-phase0) with Makefile hunk context regenerated; then uvm side (harness, pins strip, CAP_IOCTL, PROVENANCE, C-Q, probe rows, race loops, JSON).
+- Gate budget: exactly 2 rounds per commit; open findings -> Stewardship Review-open + Track.
+
+## 2026-11-21T06:49:05Z
+- nv work done in tree: leaf lock glue, harness (glue test), MODULE_VERSION 2 patches, README. Built LLD OK. Gate round 1 running (log tmp/sec-2373/gate-n2-1.log). Next: round 2 with answers, commit, push; then phase0 merge branch.
+
+## 2026-11-21T06:58:06Z
+- nv round 1 receipt 739a635617fd487f67670383df74191f6192b5769ee31b3192f0b345a88c8915 fixed (token counting of any free, end under fops_sx, goto label, separate limiters, real pins, harness scenarios). Gate ROUND 2 running (gate-n2-2.log). After it: commit with Review-open list, push; then phase0 merge branch.

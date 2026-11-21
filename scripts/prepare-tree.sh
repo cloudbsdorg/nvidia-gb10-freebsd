@@ -152,15 +152,10 @@ apply_patches() {
 # Space: O(F) manifest lines.
 copy_repo_src() {
 	mkdir -p "$TREE/nvidia"
-	cp "$REPO/src/gb10-memattr/gb10_memattr.h" "$TREE/nvidia/gb10_memattr.h"
-	printf '%s  %s\n' "src/gb10-memattr/gb10_memattr.h" \
-	    "$(sha256 -q "$REPO/src/gb10-memattr/gb10_memattr.h")" \
-	    >> "$TREE/.prepared.patches"
-	# the client ownership table nvidia_subr.c includes (Track #2373)
-	cp "$REPO/src/gb10-client-owner/nv_client_owner.h" "$TREE/nvidia/nv_client_owner.h"
-	printf '%s  %s\n' "src/gb10-client-owner/nv_client_owner.h" \
-	    "$(sha256 -q "$REPO/src/gb10-client-owner/nv_client_owner.h")" \
-	    >> "$TREE/.prepared.patches"
+	for f in gb10-memattr/gb10_memattr.h gb10-client-owner/nv_client_owner.h gb10-client-owner/nvco_glue.h; do
+		cp "$REPO/src/$f" "$TREE/nvidia/$(basename "$f")"
+		printf '%s  %s\n' "src/$f" "$(sha256 -q "$REPO/src/$f")" >> "$TREE/.prepared.patches"
+	done
 }
 
 # finalize_marker - rewrite TREE/.prepared at the very end: the gb10 marker
