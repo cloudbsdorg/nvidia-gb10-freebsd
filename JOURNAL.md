@@ -146,3 +146,11 @@ Resume: read this file bottom-up.
 - REJECTED with evidence: falsification.1 (no unload veto): kern_kldunload checks refs > 1 before userrefs-- and returns EBUSY (kern_linker.c:1330-1335). The review did show the row proved nothing; C1 now asserts status, "Device busy" and state.
 - DEBT/NIT fixed: namelen, nbc_ctl removed (KPI still version 1), build-shim comment, README anchors, make-be hints.
 - Next: round 2 with REVIEW_ANSWERS, commit, push, Track comment.
+
+## 2026-11-21 commit e0ad747 pushed; round 2 receipt dce6243a; follow-up commit in progress
+- e0ad747 pushed to origin agent/2363-linux-bridges-optional. Track comment posted (activity 16595).
+- Follow-up (own 2 gate rounds) for the round-2 Review-open items: unit-test harness counts a non-building mutant as FAIL; new host test of the ioctl translation, name match, fd filter and modevent (nvbridge_ioctl_unit_test.sh, 24 checks, 10 mutants); devvn_refthread in the fd filter; core tracks acceptance per device (no del after a refused add, 26 checks, 9 mutants); summarize.sh requires the modeset rows; phase C reordered (nvidia_linux the only holder at the veto); kit plants are real moves; hermetic run_kit; rc script warns once and says when AUTO skips; docs (kld_list synopsis, load by path, no tracker tag); modeset provider returns the registration error and is documented as not for a legacy modeset.
+- Open for the boot (not testable here): amd64 provider build; a Linux /dev/null 0x4600 row; modeset provider with a legacy modeset (documented limit, no detection).
+
+## 2026-11-21 follow-up commit, gate round 2
+Round 1 findings (33) answered; one core policy (a refused device is not provided, registration never fails for it), shared mutant harness, phase C reorder with holders named, per-row summarize hints. Quota is nearly used: commit and push after round 2.

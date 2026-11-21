@@ -17,13 +17,17 @@ static char evlog[MAXEV][64];
 static int nev;
 static int refuse_at = -1;	/* refuse the add with this 1-based index */
 static int adds_seen;
+static int accepted;	/* adds the fake provider accepted since the last reset() */
 
 static int fake_add(const struct nvidia_bridge_cdev *c)
 {
 	adds_seen++;
 	if (nev < MAXEV)
 		snprintf(evlog[nev++], 64, "add %s %d %d", c->nbc_name, c->nbc_major, c->nbc_minor);
-	return (adds_seen == refuse_at ? ENODEV : 0);
+	if (adds_seen == refuse_at)
+		return (ENODEV);
+	accepted++;
+	return (0);
 }
 static void fake_del(const struct nvidia_bridge_cdev *c)
 {
@@ -34,8 +38,9 @@ static struct nvidia_bridge_ops good = { NVIDIA_BRIDGE_KPI_VERSION, sizeof(struc
 
 static int fails;
 #define CHECK(c, msg) do { if (!(c)) { printf("FAIL: %s\n", msg); fails++; } else printf("PASS: %s\n", msg); } while (0)
-static void reset(void) { nev = 0; adds_seen = 0; refuse_at = -1; }
+static void reset(void) { nev = 0; adds_seen = 0; accepted = 0; refuse_at = -1; }
 static int ev_is(int i, const char *s) { return i < nev && strcmp(evlog[i], s) == 0; }
+static int ev_has(const char *s) { int i; for (i = 0; i < nev; i++) if (strstr(evlog[i], s) != NULL) return (1); return (0); }
 
 int main(void)
 {
@@ -83,14 +88,42 @@ int main(void)
 	reset();
 	nvidia_bridge_cdev_added("nvidia3", 195, 3);
 	CHECK(nev == 0, "no provider: a new device is not announced");
-	/* a provider that refuses the 2nd device is rolled back, and holds nothing */
+	/* a provider that refuses the 2nd device at replay still registers, and holds only what it accepted */
 	reset();
 	refuse_at = 2;
-	CHECK(nvidia_bridge_register(&good) == ENODEV, "a provider that refuses a device fails to register with its error");
-	CHECK(nev == 3 && ev_is(0, "add nvidiactl 195 255") && ev_is(1, "add nvidia0 195 0") && ev_is(2, "del nvidiactl 255"), "only the devices it accepted are taken back");
+	CHECK(nvidia_bridge_register(&good) == 0, "a provider that refuses one device at replay still registers");
+	CHECK(nev == 4 && accepted == 3, "it was offered every device and accepted the others");
 	reset();
-	CHECK(nvidia_bridge_register(&good) == 0, "after a failed registration another can register");
+	CHECK(nvidia_bridge_unregister(&good) == 0, "unregister after a refused replay");
+	CHECK(nev == 3 && !ev_has("del nvidia0 0"), "unregister deletes only the three accepted devices, not the refused nvidia0");
+	reset();
+	CHECK(nvidia_bridge_register(&good) == 0, "registering again offers the refused device again (it is accepted now)");
+	CHECK(accepted == 4, "all four devices are provided after the second registration");
 	CHECK(nvidia_bridge_unregister(&good) == 0, "and unregister");
+	/* a live add the provider refuses: never deleted from it, on removal or on unregister */
+	reset();
+	CHECK(nvidia_bridge_register(&good) == 0, "register again");
+	reset();
+	refuse_at = adds_seen + 1;
+	nvidia_bridge_cdev_added("nvidia9", 195, 9);
+	CHECK(nev == 1 && ev_is(0, "add nvidia9 195 9") && accepted == 0, "the refused live add was offered");
+	reset();
+	nvidia_bridge_cdev_added("nvidia8", 195, 8);
+	reset();
+	CHECK(nvidia_bridge_unregister(&good) == 0, "unregister while the refused device is still listed");
+	CHECK(!ev_has("nvidia9") && ev_has("del nvidia8 8"), "unregister does not delete the refused nvidia9, and deletes the accepted nvidia8");
+	nvidia_bridge_cdev_removed("nvidia9", 9);
+	CHECK(nvidia_bridge_register(&good) == 0, "register once more");
+	reset();
+	nvidia_bridge_cdev_added("nvidia7", 195, 7);
+	refuse_at = adds_seen + 1;
+	nvidia_bridge_cdev_added("nvidia6", 195, 6);
+	reset();
+	nvidia_bridge_cdev_removed("nvidia6", 6);
+	CHECK(nev == 0, "a device whose add was refused is not deleted from the provider on removal");
+	CHECK(nvidia_bridge_unregister(&good) == 0, "and unregister");
+	nvidia_bridge_cdev_removed("nvidia8", 8);
+	nvidia_bridge_cdev_removed("nvidia7", 7);
 	/* clean up the core's list */
 	nvidia_bridge_cdev_removed("nvidiactl", 255);
 	nvidia_bridge_cdev_removed("nvidia0", 0);

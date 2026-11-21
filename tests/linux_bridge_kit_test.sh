@@ -24,14 +24,18 @@ for f in linux_bridge_testboot summarize.sh make-be.sh; do
 done
 
 row() { printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" "$3"; }
-{ row start info x; row A1 pass ok; row A2-no-linux pass ok; row A4-nvrm-info pass ok; row B2-nvidia_linux pass ok; row B4-cuda pass ok; row C1-veto-nvidia pass ok; row done info end; } > "$TMPD/good.jsonl"
-{ row start info x; row A1 pass ok; row A2-no-linux pass ok; row A4-nvrm-info pass ok; row B2-nvidia_linux pass ok; row B4-cuda pass ok; row C1-veto-nvidia fail bad; row done info end; } > "$TMPD/fail.jsonl"
-{ row start info x; row A1 pass ok; row B4 running cuda; } > "$TMPD/died.jsonl"
+{ row start info x; for r in $(sh "$KIT/summarize.sh" --required); do row "$r" pass ok; done; row done info end; } > "$TMPD/good.jsonl"
+sed 's/"row":"C1-veto-nvidia","result":"pass"/"row":"C1-veto-nvidia","result":"fail"/' "$TMPD/good.jsonl" > "$TMPD/fail.jsonl"
+{ row start info x; row A1-modeset pass ok; row B4-cuda running cuda; } > "$TMPD/died.jsonl"
 { row start info x; row A1 skip no; row done info end; } > "$TMPD/nopass.jsonl"
 sh "$KIT/summarize.sh" "$TMPD/good.jsonl" > /dev/null && pass "a finished clean run is OK" || fail "a good run was refused"
 sh "$KIT/summarize.sh" "$TMPD/fail.jsonl" > /dev/null && fail "plant: a failed row was accepted" || pass "plant: a failed row is refused"
 sh "$KIT/summarize.sh" "$TMPD/died.jsonl" > /dev/null && fail "plant: a run that died in a step was accepted" || pass "plant: a trailing running row is refused"
+grep -v 'C1-veto-modeset\|B2-modeset_linux' "$TMPD/good.jsonl" > "$TMPD/nomodeset.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/nomodeset.jsonl" > /dev/null && fail "plant: a run without the modeset provider rows was accepted" || pass "plant: a run without the modeset rows is refused"
 sed 's/"row":"A4-nvrm-info","result":"pass"/"row":"A4-nvrm-info","result":"skip"/' "$TMPD/good.jsonl" > "$TMPD/skipped.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/skipped.jsonl" 2>&1 | grep -q 'SUMMARIZE_ALLOW_SKIP' && pass "the failure for a skipped row names SUMMARIZE_ALLOW_SKIP and the make-be.sh flags" || fail "the skipped-row failure does not say how to fix it"
+sh "$KIT/summarize.sh" "$TMPD/fail.jsonl" 2>&1 | grep -q 'make-be.sh\|SUMMARIZE_ALLOW_SKIP' && fail "a failed C1 row gets a make-be or skip hint" || pass "a failed row gets no skip or make-be hint"
 sh "$KIT/summarize.sh" "$TMPD/skipped.jsonl" > /dev/null && fail "plant: a skipped required row was accepted" || pass "plant: a skipped required row is refused"
 SUMMARIZE_ALLOW_SKIP=1 sh "$KIT/summarize.sh" "$TMPD/skipped.jsonl" > /dev/null && pass "a skipped row is accepted only with SUMMARIZE_ALLOW_SKIP=1" || fail "SUMMARIZE_ALLOW_SKIP=1 was ignored"
 sh "$KIT/summarize.sh" "$TMPD/nopass.jsonl" > /dev/null && fail "plant: a run with no pass row was accepted" || pass "plant: a run with no pass row is refused"
@@ -50,22 +54,39 @@ sh "$KIT/make-be.sh" -b base --dry-run -V 'a;b' > /dev/null 2>&1 && fail "plant:
 
 # recorder structure, as functions that a mutant of the recorder must fail
 K=$KIT/linux_bridge_testboot
-# order_ok FILE: the no-Linux row precedes the Linuxulator load, and the
-# veto rows precede the first provider unload.
+# order_ok FILE: the no-Linux row precedes the Linuxulator load; the modeset
+# veto precedes the modeset provider's unload; the nvidia veto comes after
+# nvidia-modeset is unloaded (so nvidia_linux is the only holder of nvidia) and
+# before nvidia_linux is unloaded.
 order_ok() {
 	a=$(grep -n 'row A2-no-linux ' "$1" | head -1 | cut -d: -f1)
 	b=$(grep -n 'service linux onestart' "$1" | head -1 | cut -d: -f1)
-	v=$(grep -n 'veto C1-veto-nvidia' "$1" | head -1 | cut -d: -f1)
-	w=$(grep -n 'kldunload nvidia_modeset_linux' "$1" | head -1 | cut -d: -f1)
-	[ -n "$a" ] && [ -n "$b" ] && [ -n "$v" ] && [ -n "$w" ] && [ "$a" -lt "$b" ] && [ "$v" -lt "$w" ]
+	vm=$(grep -n 'veto C1-veto-modeset' "$1" | head -1 | cut -d: -f1)
+	um=$(grep -n 'kldunload nvidia_modeset_linux' "$1" | head -1 | cut -d: -f1)
+	xm=$(grep -n 'kldunload nvidia-modeset' "$1" | head -1 | cut -d: -f1)
+	vn=$(grep -n 'veto C1-veto-nvidia nvidia nvidia' "$1" | head -1 | cut -d: -f1)
+	un=$(grep -n 'kldunload nvidia_linux' "$1" | head -1 | cut -d: -f1)
+	[ -n "$a" ] && [ -n "$b" ] && [ -n "$vm" ] && [ -n "$um" ] && [ -n "$xm" ] && [ -n "$vn" ] && [ -n "$un" ] || return 1
+	[ "$a" -lt "$b" ] && [ "$vm" -lt "$um" ] && [ "$xm" -lt "$vn" ] && [ "$vn" -lt "$un" ]
 }
 order_ok "$K" && pass "the recorder runs phase A before the Linuxulator load and the veto before the provider unload" || fail "recorder order"
-# plant 1: the Linuxulator load moved above the no-Linux row
-awk '/service linux onestart/ && !moved { held=$0; moved=1; next } { print } /row start info/ && held { print held; held="" }' "$K" > "$TMPD/mut1"
+# move_line FILE PATTERN AFTER: the first line matching PATTERN is moved to just after the first line matching AFTER
+move_line() {
+	awk -v pat="$2" -v aft="$3" 'NR == FNR { if (!held && $0 ~ pat) { held = $0; hn = FNR } next }
+	    FNR == hn { next } { print } !done && $0 ~ aft { print held; done = 1 }' "$1" "$1"
+}
+# plant 1: the Linuxulator load moved above the no-Linux row (and the mutant still has the line)
+move_line "$K" 'service linux onestart' 'row start info' > "$TMPD/mut1"
+grep -q 'service linux onestart' "$TMPD/mut1" && pass "plant 1 really moves the line (it is still there)" || fail "plant 1 deleted the line instead of moving it"
 order_ok "$TMPD/mut1" && fail "plant: a recorder that loads linux64 first passed the order check" || pass "plant: loading linux64 first fails the order check"
-# plant 2: the veto line moved below the first provider unload
-awk '/veto C1-veto-nvidia nvidia nvidia/ { held=$0; next } { print } /kldunload nvidia_modeset_linux/ && held { print held; held="" }' "$K" > "$TMPD/mut2"
-order_ok "$TMPD/mut2" && fail "plant: a recorder that unloads before the veto passed" || pass "plant: unloading before the veto fails the order check"
+# plant 2: the nvidia veto moved above the nvidia-modeset unload (nvidia-modeset still holds nvidia)
+move_line "$K" 'veto C1-veto-nvidia nvidia nvidia' 'kldunload nvidia_modeset_linux' > "$TMPD/mut2"
+grep -q 'veto C1-veto-nvidia nvidia nvidia' "$TMPD/mut2" && pass "plant 2 really moves the line" || fail "plant 2 deleted the line"
+order_ok "$TMPD/mut2" && fail "plant: a nvidia veto while nvidia-modeset still holds nvidia passed" || pass "plant: the nvidia veto before the modeset unload fails the order check"
+# plant 3: the modeset veto moved below the modeset provider's unload
+move_line "$K" 'veto C1-veto-modeset nvidia-modeset' 'kldunload nvidia_modeset_linux' > "$TMPD/mut-veto-modeset"
+grep -q 'veto C1-veto-modeset nvidia-modeset' "$TMPD/mut-veto-modeset" && pass "plant 3 really moves the line" || fail "plant 3 deleted the line"
+order_ok "$TMPD/mut-veto-modeset" && fail "plant: a modeset veto after the provider unload passed" || pass "plant: the modeset veto after the provider unload fails the order check"
 # kldunload takes FILE names: the hyphenated modules must not be named by module name
 if grep -Eq 'kldunload (nvidia_modeset|nvidia_uvm)([^_A-Za-z]|$)' "$K"; then fail "the recorder unloads nvidia_modeset or nvidia_uvm by module name (kldunload takes the file name)"; else pass "the recorder unloads by file name"; fi
 printf 'kldunload nvidia_modeset > x\n' > "$TMPD/mut3"
@@ -87,6 +108,8 @@ run_kit() {	# run_kit <logroot>: source the recorder with rc.subr stubbed out, c
 		. "$2"
 		linux_bridge_testboot_logroot="$1"
 		linux_bridge_testboot_owner=$(id -u)
+		linux_bridge_testboot_nvrm_info=/nonexistent/nvrm-info
+		linux_bridge_testboot_nvrm_proof=/nonexistent/boot_nvrm_info.sh
 		linux_bridge_testboot_deadman=0
 		linux_bridge_testboot_start' sh "$1" "${2:-$K}" 2>&1
 }
@@ -104,6 +127,8 @@ ln -s "$TMPD/lr" "$TMPD/lrlink"
 run_kit "$TMPD/lrlink" > "$TMPD/lrlink.out" || true
 grep -q 'refusing log root' "$TMPD/lrlink.out" && pass "a symbolic-link log root is refused" || fail "a symbolic-link log root was accepted: $(head -2 "$TMPD/lrlink.out")"
 sh "$KIT/make-be.sh" -b base --dry-run -U x > /dev/null 2>&1 && fail "plant: -U without -C was accepted" || pass "plant: -U without -C is refused"
+sh "$KIT/make-be.sh" -b base --dry-run -U x -C /p/run.sh > /dev/null 2>&1 && fail "plant: -U and -C without -u was accepted" || pass "plant: -U and -C without -u is refused"
+sh "$KIT/make-be.sh" -b base --dry-run 2>&1 | grep -q 'row A4' && pass "make-be.sh warns that A4 will be a skip without -i and -p" || fail "no warning for the missing nvrm-info"
 sh "$KIT/make-be.sh" -b base --dry-run -L 'rel/path' > /dev/null 2>&1 && fail "plant: a relative -L was accepted" || pass "plant: a relative -L is refused"
 
 [ "$fails" -eq 0 ] || { echo "linux_bridge_kit_test: $fails FAILED" >&2; exit 1; }

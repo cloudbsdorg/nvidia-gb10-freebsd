@@ -449,7 +449,7 @@ while IFS= read -r _ms_dep; do
 	case $_ms_dep in
 	kernel|nvidia) ;;
 	*)
-		fail "nvidia-modeset.ko declares an unexpected dependency: $_ms_dep (allowed: kernel, nvidia; the Linux bridge is nvidia_modeset_linux.ko, Track #2363)"
+		fail "nvidia-modeset.ko declares an unexpected dependency: $_ms_dep (allowed: kernel, nvidia; the Linux bridge is nvidia_modeset_linux.ko)"
 		;;
 	esac
 done < "$TMPD/ms-deps"

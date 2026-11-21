@@ -71,31 +71,44 @@ nvbridge_translate_cmd(u_long lcmd, u_long *out)
 	return (0);
 }
 
+/* Is d_name one of the NULL-terminated names? (pure: host-tested) */
+static inline int
+nvbridge_name_match(const char *d_name, const char *const *names)
+{
+	for (; *names != NULL; names++) {
+		if (strcmp(d_name, *names) == 0)
+			return (1);
+	}
+	return (0);
+}
+
 /*
  * Is the descriptor one of the provider's devices? The Linuxulator chooses a
  * handler by command number alone, so a handler must answer ENOIOCTL for a
  * descriptor that is not its own (0x4600 is also the Linux framebuffer range).
- * The cdevsw name is matched against a NULL-terminated list. A descriptor that
- * cannot be taken is "not ours": the fallback then reports the error.
+ * The cdevsw name is matched against a NULL-terminated list, with the cdevsw
+ * held by devvn_refthread() so that a device destroyed meanwhile cannot go
+ * under us. A descriptor that cannot be taken is "not ours": the fallback then
+ * reports the error. The check is made once, at entry: a descriptor replaced
+ * by another thread (dup2) between this check and the ioctl is not re-checked,
+ * and affects only that process's own descriptors.
  */
 static inline int
 nvbridge_fd_is_ours(struct thread *td, int fd, const char *const *names)
 {
 	struct file *fp;
-	struct vnode *vp;
+	struct cdevsw *csw;
 	struct cdev *dev;
-	int ours = 0;
+	int ours = 0, ref;
 
 	if (fget(td, fd, &cap_ioctl_rights, &fp) != 0)
 		return (0);
-	if (fp->f_type == DTYPE_VNODE && (vp = fp->f_vnode) != NULL &&
-	    vp->v_type == VCHR && (dev = vp->v_rdev) != NULL &&
-	    dev->si_devsw != NULL) {
-		for (; *names != NULL; names++) {
-			if (strcmp(dev->si_devsw->d_name, *names) == 0) {
-				ours = 1;
-				break;
-			}
+	if (fp->f_type == DTYPE_VNODE && fp->f_vnode != NULL &&
+	    fp->f_vnode->v_type == VCHR) {
+		csw = devvn_refthread(fp->f_vnode, &dev, &ref);
+		if (csw != NULL) {
+			ours = nvbridge_name_match(csw->d_name, names);
+			dev_relthread(dev, ref);
 		}
 	}
 	fdrop(fp, td);

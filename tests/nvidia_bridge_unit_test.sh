@@ -25,6 +25,8 @@ build() {
 	cp "$SRC/nvidia_bridge.h" "$TMPD/inc/nvidia_bridge.h"
 	cc -std=gnu11 -Wall -Werror -D_KERNEL "$@" -I"$HERE/data/nvbridge_stubs" -I"$TMPD/inc" -o "$_o" "$HERE/data/nvidia_bridge_unit_test.c" 2> "$TMPD/cc.err"
 }
+build_unit() { build "$1" "$2"; }
+. "$HERE/lib/mutant.sh"
 
 if ! build "$SRC/nvidia_bridge.c" "$TMPD/good"; then echo "FAIL: the unit test does not build: $(head -3 "$TMPD/cc.err")"; exit 1; fi
 if "$TMPD/good" > "$TMPD/good.out"; then echo "PASS: the unit test passes on nvidia_bridge.c ($(grep -c '^PASS' "$TMPD/good.out") checks)"; else echo "FAIL: the unit test fails on nvidia_bridge.c"; grep FAIL "$TMPD/good.out"; fails=$((fails + 1)); fi
@@ -33,21 +35,15 @@ if "$TMPD/good" > "$TMPD/good.out"; then echo "PASS: the unit test passes on nvi
 if build "$SRC/nvidia_bridge.c" "$TMPD/legacy" -DNV_CORE_LINUX_COMPAT && "$TMPD/legacy" > "$TMPD/legacy.out"; then echo "PASS: a build with NV_CORE_LINUX_COMPAT refuses a provider"; else echo "FAIL: the legacy build check: $(head -2 "$TMPD/legacy.out" "$TMPD/cc.err" 2>/dev/null)"; fails=$((fails + 1)); fi
 
 # mutants: each must turn the test red
-mutant() {	# mutant <name> <sed expression>
-	sed "$2" "$SRC/nvidia_bridge.c" > "$TMPD/mut.c"
-	if cmp -s "$TMPD/mut.c" "$SRC/nvidia_bridge.c"; then echo "FAIL: mutant $1 did not change the file"; fails=$((fails + 1)); return; fi
-	if build "$TMPD/mut.c" "$TMPD/mut" && "$TMPD/mut" > "$TMPD/mut.out" 2>&1; then
-		echo "FAIL: mutant $1 was not caught"; fails=$((fails + 1))
-	else
-		echo "PASS: mutant $1 is caught"
-	fi
-}
-mutant rollback-to-end 's/u != d;/u != NULL;/'
+mutant() { mutant_check "$1" "$SRC/nvidia_bridge.c" "$2"; }
+mutant replay-failure-fatal 's/d->provided = ops->nbo_cdev_add(&d->cdev) == 0;/if (ops->nbo_cdev_add(\&d->cdev) != 0) { sx_xunlock(\&nvb_lock); return (ENODEV); } d->provided = 1;/'
 mutant size-check-removed 's/ops->nbo_size != sizeof(\*ops) ||//'
 mutant version-check-removed 's/ops->nbo_version != NVIDIA_BRIDGE_KPI_VERSION ||//'
 mutant busy-check-removed 's/if (nvb_ops != NULL) {$/if (0) {/'
-mutant no-replay 's/TAILQ_FOREACH(d, &nvb_devs, link) {$/TAILQ_FOREACH(d, \&nvb_devs, link) { if (0)/'
-mutant forget-to-del-on-unregister 's/ops->nbo_cdev_del(&d->cdev);$/(void)d;/'
+mutant no-replay 's/TAILQ_FOREACH(d, &nvb_devs, link)$/TAILQ_FOREACH(d, \&nvb_devs, link) if (0)/'
+mutant forget-to-del-on-unregister 's/^\t\t\tops->nbo_cdev_del(&d->cdev);$/\t\t\t(void)d;/'
+mutant unregister-dels-refused 's/^\t\tif (d->provided)$/\t\tif (1)/'
+mutant del-after-refused-add 's/if (nvb_ops != NULL && d->provided)/if (nvb_ops != NULL)/'
 mutant leak-on-remove 's/free(d, M_NVBRIDGE);/(void)d;/'
 mutant removed-ignores-minor 's/d->cdev.nbc_minor == minor \&\&/1 \&\&/'
 

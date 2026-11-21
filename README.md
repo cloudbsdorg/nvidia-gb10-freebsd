@@ -76,7 +76,7 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
 ### Kernel
 
 `nvidia.ko` needs no kernel change: its symbols resolve against a stock 16.0-CURRENT kernel alone.
-It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies (Track #2363); the
+It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
 Linux ioctl bridges are the optional modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
 (see [Linux bridges](#linux-bridges-nvidia_linuxko) below). An **Ampere Altra** does need kernel workarounds for its PCIe
 (32-bit configuration reads, emulation of misaligned device accesses); those are kernel
@@ -96,8 +96,9 @@ from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_
 - `git`, `gmake`, `zstd`; the base system's `clang` and `ld.lld`.
 - For `nvidia-smi` (and any Linux binary): the Linuxulator (`linux64.ko`), `nvidia_linux.ko` and
   `linux_base-rl9`. `nvidia.ko` no longer loads the Linuxulator; load `nvidia_linux.ko` for Linux
-  programs, or install `rc.d/nvidia_linux` in `/usr/local/etc/rc.d`, set `linux_enable=YES` and let it do
-  it at boot.
+  programs, or install `rc.d/nvidia_linux` in `/usr/local/etc/rc.d`, put `nvidia` (and `nvidia_modeset` if you use it) in `kld_list`, set
+  `linux_enable=YES` and let it do it at boot (`nvidia_linux_mode=AUTO` loads a provider only for a
+  driver that is already loaded).
 - An Ampere-generation or newer GPU (RTX 30 series and later, and data-centre parts of the
   same generations). Those run the `gsp_ga10x` firmware this repository builds; Turing needs
   `gsp_tu10x`, which is not built yet.
@@ -423,7 +424,7 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
-| `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` (Track #2363) |
+| `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` |
 | `rc.d/nvidia_linux` | loads the providers when the Linuxulator is configured |
 | `src/nvidia-drm-render/` | `nvidia-drm-render.h`, the render uAPI of nvidia-drm: layouts and ioctl numbers for the kernel work packages and the Mesa `nvdrm` backend; MIT |
 | `man/` | `nvidia_drm_render(4)`, the manual page of that interface; `nvidia(4)` and `nvidia_linux(4)`, the native driver and its Linux providers |
@@ -448,8 +449,9 @@ that belong to the Linuxulator:
 ```sh
 sh scripts/build-shim.sh --module=nvidia-linux           # nvidia_linux.ko
 sh scripts/build-shim.sh --module=nvidia-modeset-linux   # nvidia_modeset_linux.ko
-kldload nvidia                    # no Linux layer
-kldload nvidia_linux              # loads linux64 and linux_common, then bridges nvidia
+kldload $GB10_WORK/build/tree/nvidia/nvidia.ko                          # no Linux layer
+kldload $GB10_WORK/build/tree/nvidia-linux/nvidia_linux.ko              # loads linux64 and linux_common, then bridges nvidia
+# or, once the modules are installed in /boot/modules and kldxref has run: kldload nvidia_linux
 kldunload nvidia                  # refused (Device busy) while nvidia_linux is loaded
 kldunload nvidia_linux            # unload the bridge first
 ```

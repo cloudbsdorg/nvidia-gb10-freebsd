@@ -6,7 +6,9 @@
  * nvidia-modeset.ko (Track #2363): the NVKMS ioctl for Linux binaries and the
  * nvidia-modeset device name. It takes no symbol from nvidia-modeset.ko; it
  * depends on it only so that kldunload of nvidia-modeset is refused (EBUSY)
- * while this module is loaded.
+ * while this module is loaded. Do not load it with a nvidia-modeset built
+ * with NVKMS_CORE_LINUX_COMPAT: that module carries the same bridge and the
+ * Linuxulator would then hold two handlers for the same ioctl.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -58,8 +60,7 @@ static struct linux_ioctl_handler nvmlinux_handler = {
 static int
 nvmlinux_load(void)
 {
-	(void)linux_device_register_handler(&nvmlinux_device);
-	return (0);
+	return (linux_device_register_handler(&nvmlinux_device));
 }
 
 static void

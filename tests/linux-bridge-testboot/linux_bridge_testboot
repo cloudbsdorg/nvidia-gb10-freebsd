@@ -107,7 +107,7 @@ linux_bridge_testboot_start()
 
 	echo "== phase A: no Linux layer"
 	loaded nvidia && row A1-nvidia pass "nvidia is loaded" || row A1-nvidia fail "nvidia is not loaded"
-	loaded nvidia_modeset && row A1-modeset pass "nvidia_modeset is loaded" || row A1-modeset info "nvidia_modeset is not loaded (not in kld_list)"
+	loaded nvidia_modeset && row A1-modeset pass "nvidia_modeset is loaded" || row A1-modeset fail "nvidia_modeset is not loaded: add it to kld_list"
 	_l=$(linux_kmods | tr '\n' ' ')
 	[ -z "$_l" ] && row A2-no-linux pass "no linux, linux64 or linux_common kmod is loaded" \
 	    || row A2-no-linux fail "Linuxulator modules are loaded: $_l"
@@ -170,20 +170,45 @@ linux_bridge_testboot_start()
 			row "$1" fail "kldunload $2: rc $_rc, output [$(tail -1 "$OUT/veto-$2.txt")], $3 loaded: $(loaded "$3" && echo yes || echo no)"
 		fi
 	}
-	loaded nvidia_linux && veto C1-veto-nvidia nvidia nvidia
-	loaded nvidia_modeset_linux && veto C1-veto-modeset nvidia-modeset nvidia_modeset
+	# The veto of a native module is only a proof of its provider when the provider is the
+	# only holder: nvidia-modeset, nvidia-uvm and nvidia-drm also depend on nvidia, so what
+	# can go goes first, and a holder that stays turns the veto row into a skip that names it.
+	holders() {	# holders <modules...>: the ones still loaded, space separated
+		for _h in "$@"; do loaded "$_h" && printf '%s ' "$_h"; done
+	}
+	running C1-veto-modeset "unload of nvidia-modeset is tried while nvidia_modeset_linux is loaded"
+	if ! loaded nvidia_modeset_linux; then
+		row C1-veto-modeset fail "nvidia_modeset_linux is not loaded"
+	elif [ -n "$(holders nvidia_drm)" ]; then
+		row C1-veto-modeset skip "nvidia_drm is loaded and also holds nvidia_modeset"
+	else
+		veto C1-veto-modeset nvidia-modeset nvidia_modeset
+	fi
+	running C3-modeset_linux "nvidia_modeset_linux unloads first"
+	loaded nvidia_modeset_linux && { kldunload nvidia_modeset_linux > "$OUT/unload-ms.txt" 2>&1 && row C3-modeset_linux pass "nvidia_modeset_linux unloaded" || row C3-modeset_linux fail "kldunload nvidia_modeset_linux: $(tail -1 "$OUT/unload-ms.txt")"; }
 	if loaded nvidia_uvm; then
+		running C2-uvm "kldunload nvidia-uvm"
 		kldunload nvidia-uvm > "$OUT/unload-uvm.txt" 2>&1 && row C2-uvm pass "nvidia-uvm unloaded" || row C2-uvm info "nvidia-uvm did not unload: $(tail -1 "$OUT/unload-uvm.txt")"
 	fi
-	running C3-unload "providers unload in reverse order"
-	loaded nvidia_modeset_linux && { kldunload nvidia_modeset_linux > "$OUT/unload-ms.txt" 2>&1 && row C3-modeset_linux pass "nvidia_modeset_linux unloaded" || row C3-modeset_linux fail "kldunload nvidia_modeset_linux: $(tail -1 "$OUT/unload-ms.txt")"; }
+	if loaded nvidia_modeset && ! loaded nvidia_drm; then
+		running C4-modeset "unload of nvidia-modeset after its provider"
+		kldunload nvidia-modeset > "$OUT/unload-ms2.txt" 2>&1 && row C4-modeset pass "nvidia-modeset unloaded after its provider" || row C4-modeset fail "kldunload nvidia-modeset: $(tail -1 "$OUT/unload-ms2.txt")"
+	fi
+	running C1-veto-nvidia "unload of nvidia is tried while nvidia_linux is loaded"
+	if ! loaded nvidia_linux; then
+		row C1-veto-nvidia fail "nvidia_linux is not loaded"
+	elif [ -n "$(holders nvidia_modeset nvidia_uvm nvidia_drm)" ]; then
+		row C1-veto-nvidia skip "other holders of nvidia are still loaded: $(holders nvidia_modeset nvidia_uvm nvidia_drm)"
+	else
+		veto C1-veto-nvidia nvidia nvidia
+	fi
+	running C3-nvidia_linux "nvidia_linux unloads"
 	loaded nvidia_linux && { kldunload nvidia_linux > "$OUT/unload-nl.txt" 2>&1 && row C3-nvidia_linux pass "nvidia_linux unloaded" || row C3-nvidia_linux fail "kldunload nvidia_linux: $(tail -1 "$OUT/unload-nl.txt")"; }
 	loaded nvidia && row C3-core-stays pass "nvidia is still loaded after its provider left" || row C3-core-stays fail "nvidia left with its provider"
 	if loaded nvidia_drm; then
 		row C4-core skip "nvidia_drm is loaded; the core stays"
 	else
-		running C4-core "kldunload of the native modules in reverse order"
-		loaded nvidia_modeset && { kldunload nvidia-modeset > "$OUT/unload-ms2.txt" 2>&1 && row C4-modeset pass "nvidia-modeset unloaded after its provider" || row C4-modeset fail "kldunload nvidia-modeset: $(tail -1 "$OUT/unload-ms2.txt")"; }
+		running C4-core "kldunload nvidia"
 		kldunload nvidia > "$OUT/unload-nvidia.txt" 2>&1 && row C4-nvidia pass "nvidia unloaded after its provider" \
 		    || row C4-nvidia fail "kldunload nvidia: $(tail -1 "$OUT/unload-nvidia.txt")"
 	fi

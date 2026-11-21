@@ -33,14 +33,16 @@ struct nvidia_bridge_ops {
 	unsigned int	nbo_size;	/* sizeof(struct nvidia_bridge_ops) */
 	/* A device appeared; called with the core's bridge lock held, may sleep. */
 	int		(*nbo_cdev_add)(const struct nvidia_bridge_cdev *);
-	/* A device is about to go; same locking. */
+	/* A device the provider accepted is about to go; same locking. A device whose add failed is never deleted. */
 	void		(*nbo_cdev_del)(const struct nvidia_bridge_cdev *);
 };
 
 /*
  * 0; EBUSY (a provider is registered); EINVAL (bad version, size or table);
  * ENXIO when the core was built with NV_CORE_LINUX_COMPAT, which carries the
- * Linux bridge itself and has nothing for a provider to do.
+ * Linux bridge itself and has nothing for a provider to do. A device that
+ * nbo_cdev_add refuses, at registration or later, does not fail anything: the
+ * provider is not told about that device again.
  */
 int nvidia_bridge_register(const struct nvidia_bridge_ops *);
 /* 0, or EINVAL when ops is not the registered provider. */

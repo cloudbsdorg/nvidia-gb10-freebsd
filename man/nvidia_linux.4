@@ -19,7 +19,8 @@ nvidia_modeset_linux_load="YES"
 or, in
 .Xr rc.conf 5 :
 .Bd -literal -offset indent
-kld_list="nvidia nvidia_modeset nvidia_linux nvidia_modeset_linux"
+kld_list="nvidia nvidia_modeset"
+linux_enable="YES"
 nvidia_linux_mode="AUTO"
 .Ed
 .Sh DESCRIPTION
@@ -52,8 +53,8 @@ so that
 and
 .Pa /proc
 show them to Linux programs.
-The ioctl handler answers only for descriptors that are one of these devices;
-for any other descriptor it returns
+The ioctl handler answers only for descriptors that are one of these devices,
+checked once when the call enters; for any other descriptor it returns
 .Er ENOIOCTL
 and the Linuxulator carries on with its other handlers.
 It uses the compat provider interface that
@@ -101,9 +102,25 @@ The old behaviour, in which loading
 loaded the Linuxulator, is reachable by building the core with
 .Ev NV_CORE_LINUX_COMPAT Ns = Ns Cm yes
 and
-.Ev NVKMS_CORE_LINUX_COMPAT Ns = Ns Cm yes ,
-or by listing the providers in
-.Va kld_list .
+.Ev NVKMS_CORE_LINUX_COMPAT Ns = Ns Cm yes .
+Do not load a provider with a core built that way: a legacy
+.Nm nvidia
+refuses a provider
+.Pq Er ENXIO ,
+and a legacy
+.Pa nvidia-modeset.ko
+carries the same bridge, so loading
+.Nm nvidia_modeset_linux
+beside it would register a second handler for the same ioctl.
+.Pp
+Listing the providers in
+.Va kld_list
+loads them, and with them the Linuxulator, whatever
+.Va nvidia_linux_mode
+says.
+The rc script skips a provider that is already loaded, and says so in
+.Cm AUTO
+mode when it skips one because the driver is not loaded yet.
 .Sh UNLOADING
 The providers depend on the native modules, so
 .Xr kldunload 8

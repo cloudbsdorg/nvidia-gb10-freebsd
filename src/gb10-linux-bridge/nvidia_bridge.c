@@ -22,6 +22,7 @@ struct nvb_dev {
 	TAILQ_ENTRY(nvb_dev)	link;
 	char			*name;
 	struct nvidia_bridge_cdev cdev;
+	int			provided;	/* the provider accepted this device */
 };
 
 static TAILQ_HEAD(, nvb_dev) nvb_devs = TAILQ_HEAD_INITIALIZER(nvb_devs);
@@ -30,14 +31,15 @@ static struct sx nvb_lock;
 SX_SYSINIT(nvb_lock, &nvb_lock, "nvidia bridge");
 
 /*
- * Replay the devices that exist to a new provider. If the provider refuses
- * one, take back what it accepted so it holds nothing, and fail.
+ * Replay the devices that exist to a new provider. The policy is the same as
+ * for a device that appears later: a device the provider refuses is left
+ * without it (provided stays 0) and never offered or deleted again until the
+ * provider registers anew; the registration itself does not fail for it.
  */
 int
 nvidia_bridge_register(const struct nvidia_bridge_ops *ops)
 {
-	struct nvb_dev *d, *u;
-	int error = 0;
+	struct nvb_dev *d;
 
 #ifdef NV_CORE_LINUX_COMPAT
 	/* The in-core Linux bridge serves Linux binaries; a provider would
@@ -53,19 +55,11 @@ nvidia_bridge_register(const struct nvidia_bridge_ops *ops)
 		sx_xunlock(&nvb_lock);
 		return (EBUSY);
 	}
-	TAILQ_FOREACH(d, &nvb_devs, link) {
-		error = ops->nbo_cdev_add(&d->cdev);
-		if (error != 0) {
-			for (u = TAILQ_FIRST(&nvb_devs); u != d;
-			    u = TAILQ_NEXT(u, link))
-				ops->nbo_cdev_del(&u->cdev);
-			break;
-		}
-	}
-	if (error == 0)
-		nvb_ops = ops;
+	TAILQ_FOREACH(d, &nvb_devs, link)
+		d->provided = ops->nbo_cdev_add(&d->cdev) == 0;
+	nvb_ops = ops;
 	sx_xunlock(&nvb_lock);
-	return (error);
+	return (0);
 }
 
 /* Withdraw the provider; it is told to drop every device it holds. */
@@ -79,8 +73,11 @@ nvidia_bridge_unregister(const struct nvidia_bridge_ops *ops)
 		sx_xunlock(&nvb_lock);
 		return (EINVAL);
 	}
-	TAILQ_FOREACH(d, &nvb_devs, link)
-		ops->nbo_cdev_del(&d->cdev);
+	TAILQ_FOREACH(d, &nvb_devs, link) {
+		if (d->provided)
+			ops->nbo_cdev_del(&d->cdev);
+		d->provided = 0;
+	}
 	nvb_ops = NULL;
 	sx_xunlock(&nvb_lock);
 	return (0);
@@ -98,11 +95,13 @@ nvidia_bridge_cdev_added(const char *name, int major, int minor)
 	d->cdev.nbc_name = d->name;
 	d->cdev.nbc_major = major;
 	d->cdev.nbc_minor = minor;
+	d->provided = 0;
 	sx_xlock(&nvb_lock);
 	TAILQ_INSERT_TAIL(&nvb_devs, d, link);
-	/* A refusing provider does not stop the native device. */
+	/* A refusing provider does not stop the native device; it is simply
+	 * never told about it again (provided stays 0). */
 	if (nvb_ops != NULL)
-		(void)nvb_ops->nbo_cdev_add(&d->cdev);
+		d->provided = nvb_ops->nbo_cdev_add(&d->cdev) == 0;
 	sx_xunlock(&nvb_lock);
 }
 
@@ -119,7 +118,7 @@ nvidia_bridge_cdev_removed(const char *name, int minor)
 	}
 	if (d != NULL) {
 		TAILQ_REMOVE(&nvb_devs, d, link);
-		if (nvb_ops != NULL)
+		if (nvb_ops != NULL && d->provided)
 			nvb_ops->nbo_cdev_del(&d->cdev);
 	}
 	sx_xunlock(&nvb_lock);

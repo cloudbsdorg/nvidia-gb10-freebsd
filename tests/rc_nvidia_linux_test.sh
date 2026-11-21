@@ -33,7 +33,7 @@ table() {
 }
 
 cat > "$TMPD/want" <<'EOT'
-AUTO YES 0 no
+AUTO YES 0 no-native
 AUTO YES 1 yes
 AUTO NO 0 no
 AUTO NO 1 no
@@ -90,7 +90,7 @@ run_start() { # mode linux_enable loaded...  (STUB_KLDLOAD_FAIL=1 makes kldload 
 	: > "$TMPD/log"; : > "$TMPD/loaded"
 	for m in "$@"; do echo "$m" >> "$TMPD/loaded"; done
 	STUB_LOADED=$TMPD/loaded STUB_LOG=$TMPD/log PATH=$TMPD/bin:$PATH NVIDIA_LINUX_RC_SOURCE_ONLY=1 \
-	    sh -c '. "$1"; nvidia_linux_mode=$2; linux_enable=$3; nvidia_linux_start' sh "$RC" "$_mode" "$_lin"
+	    sh -c '. "$1"; nvidia_linux_mode=$2; linux_enable=$3; nvidia_linux_start' sh "$RC" "$_mode" "$_lin" > "$TMPD/start.out" 2>&1
 	tr '\n' ' ' < "$TMPD/log"
 }
 r=$(run_start AUTO YES nvidia nvidia_modeset)
@@ -110,6 +110,22 @@ r=$(run_start AUTO YES nvidia nvidia_linux)
 # an unknown mode loads nothing
 r=$(run_start OFF YES nvidia nvidia_modeset)
 [ -z "$r" ] && pass "an unknown mode loads nothing" || fail "unknown mode OFF: got [$r]"
+# the unknown-mode warning is printed once and names the valid values
+run_start OFF YES nvidia nvidia_modeset > /dev/null
+_n=$(grep -c 'AUTO, YES or NO' "$TMPD/start.out")
+[ "$_n" = 1 ] && pass "the unknown-mode warning is printed once and names AUTO, YES or NO" || fail "unknown mode: $_n warning lines (want 1): $(head -3 "$TMPD/start.out")"
+# AUTO that skips the core's provider because the driver is not loaded says so ...
+run_start AUTO YES > /dev/null
+grep -q 'not loaded: skipping nvidia_linux ' "$TMPD/start.out" && pass "AUTO says when it skips nvidia_linux because nvidia is not loaded" || fail "AUTO skipped silently: $(head -2 "$TMPD/start.out")"
+# ... but not for the modeset pair: a compute-only host has no nvidia_modeset
+run_start AUTO YES nvidia > /dev/null
+grep -q 'skipping nvidia_modeset_linux' "$TMPD/start.out" && fail "AUTO nags about nvidia_modeset on a compute-only host" || pass "AUTO is silent about nvidia_modeset_linux when nvidia_modeset is not loaded"
+# ... and says nothing when the Linuxulator is off
+run_start AUTO NO > /dev/null
+[ ! -s "$TMPD/start.out" ] && pass "AUTO with the Linuxulator off is silent" || fail "AUTO with the Linuxulator off printed: $(head -2 "$TMPD/start.out")"
+# a decision that is no for another reason prints nothing, whatever the reason token says elsewhere
+NVIDIA_LINUX_RC_SOURCE_ONLY=1 sh -c '. "$1"; nvidia_linux_wanted() { echo no; }; nvidia_linux_mode=AUTO; linux_enable=YES; nvidia_linux_load_one nvidia_linux nvidia 1' sh "$RC" > "$TMPD/other.out" 2>&1
+[ ! -s "$TMPD/other.out" ] && pass "a plain no from nvidia_linux_wanted prints nothing" || fail "a plain no printed: $(head -1 "$TMPD/other.out")"
 # kldload failure is reported by start
 export STUB_KLDLOAD_FAIL=1
 STUB_LOADED=$TMPD/loaded; echo nvidia > "$TMPD/loaded"; : > "$TMPD/log"

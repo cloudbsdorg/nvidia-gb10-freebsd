@@ -412,6 +412,34 @@ fi
 grep -q 'return (ENOIOCTL)' "$BRDIR/nvbridge_ioctl.h" && pass "(j) the handler returns ENOIOCTL for a foreign descriptor" || fail "(j) no ENOIOCTL path in the handler"
 grep -q 'refused ENXIO\|ENXIO' "$BRDIR/nvidia_bridge.c" && pass "(j) the legacy build refuses a provider (ENXIO)" || fail "(j) no ENXIO for the legacy build"
 
+# the mutant harness is defined once
+_n=$(grep -l 'cmp -s "\$TMPD/mut' "$REPO"/tests/nvidia_bridge_unit_test.sh "$REPO"/tests/nvbridge_ioctl_unit_test.sh | wc -l | tr -d ' ')
+[ "$_n" = 0 ] && [ -f "$REPO/tests/lib/mutant.sh" ] && pass "(j) the mutant harness lives only in tests/lib/mutant.sh" || fail "(j) a unit test script carries its own copy of the mutant harness ($_n)"
+# the descriptor filter holds the cdevsw with devvn_refthread and never reads si_devsw by hand
+if grep -q 'devvn_refthread' "$BRDIR/nvbridge_ioctl.h" && ! grep -q 'si_devsw->d_name' "$BRDIR/nvbridge_ioctl.h"; then pass "(j) the descriptor filter takes the cdevsw with devvn_refthread"; else fail "(j) the descriptor filter reads si_devsw without a thread reference"; fi
+printf 'x = dev->si_devsw->d_name;\n' > "$TMPD/hdr_bad.h"
+if grep -q 'devvn_refthread' "$TMPD/hdr_bad.h" && ! grep -q 'si_devsw->d_name' "$TMPD/hdr_bad.h"; then fail "plant (j): a header reading si_devsw by hand was accepted"; else pass "plant (j): a header reading si_devsw by hand is refused"; fi
+# user docs carry no tracker references
+_docs_ok=1
+for d in README.md man/nvidia.4 man/nvidia_linux.4; do [ -f "$REPO/$d" ] || { fail "(j) no $d to check"; _docs_ok=0; }; done
+if [ "$_docs_ok" = 1 ]; then
+	grep -q 'Track #2363' "$REPO/README.md" "$REPO/man/nvidia.4" "$REPO/man/nvidia_linux.4" && _rc=0 || _rc=$?
+	if [ "$_rc" = 1 ]; then pass "(j) no Track #2363 in README or the man pages"; else fail "(j) a Track #2363 reference is in the user documents (grep rc $_rc)"; fi
+fi
+printf 'see Track #2363\n' > "$TMPD/doc_bad.md"
+grep -q 'Track #2363' "$TMPD/doc_bad.md" && pass "plant (j): the Track-reference pattern fires" || fail "plant (j): the Track-reference pattern cannot fire"
+# the rc.conf synopsis does not list a provider in kld_list
+if ! sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep -q 'kld_list='; then fail "(j) the nvidia_linux(4) synopsis has no kld_list line to check"
+elif sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep 'kld_list=' | grep -q '_linux'; then fail "(j) the nvidia_linux(4) synopsis puts a provider in kld_list"; else pass "(j) the nvidia_linux(4) synopsis kld_list holds no provider"; fi
+printf 'kld_list="nvidia nvidia_linux"\n' | grep 'kld_list=' | grep -q '_linux' && pass "plant (j): the synopsis pattern fires" || fail "plant (j): the synopsis pattern cannot fire"
+# the README loads the providers by path (nothing installs them)
+readme_block() { sed -n '/^## Linux bridges/,/^## Licence/p' "$1"; }
+sed 's/^## Linux bridges/### Linux bridges/' "$REPO/README.md" > "$TMPD/README.retitled"
+if readme_block "$TMPD/README.retitled" | grep -q '^kldload'; then fail "plant (j): a re-levelled heading still yields a block"; else pass "plant (j): a re-levelled README heading gives an empty block (refused below)"; fi
+if ! readme_block "$REPO/README.md" | grep -q '^kldload \$GB10_WORK/build/tree/nvidia/nvidia.ko'; then fail "(j) the README bridges block is empty or lacks the nvidia.ko kldload line"
+elif readme_block "$REPO/README.md" | grep '^kldload' | grep -v '^kldload \$GB10_WORK/' | grep -q .; then fail "(j) a README kldload line loads by module name with no install step"; else pass "(j) every README kldload line in the bridges block is a path"; fi
+printf 'kldload nvidia_linux\n' | grep '^kldload' | grep -v '^kldload \$GB10_WORK/' | grep -q . && pass "plant (j): the README pattern fires" || fail "plant (j): the README pattern cannot fire"
+
 if [ "$fails" -ne 0 ]; then
 	echo "linux_bridge_test: $fails FAILED" >&2
 	exit 1

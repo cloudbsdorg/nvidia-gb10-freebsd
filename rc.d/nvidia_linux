@@ -31,7 +31,8 @@ status_cmd="${name}_status"
 extra_commands="status"
 
 # nvidia_linux_wanted <mode> <linux_enable> <native-module-loaded 0|1>
-# prints yes or no.
+# prints yes, no, or no-native (AUTO with the Linuxulator on and the native
+# module not loaded: the one refusal worth a message).
 nvidia_linux_wanted()
 {
 	case $1 in
@@ -39,7 +40,7 @@ nvidia_linux_wanted()
 	[Nn][Oo]) echo no ;;
 	[Aa][Uu][Tt][Oo])
 		case $2 in
-		[Yy][Ee][Ss]) [ "$3" = 1 ] && echo yes || echo no ;;
+		[Yy][Ee][Ss]) [ "$3" = 1 ] && echo yes || echo no-native ;;
 		*) echo no ;;
 		esac
 		;;
@@ -53,24 +54,34 @@ nvidia_linux_loaded()
 	kldstat -q -m "$1" 2>/dev/null && echo 1 || echo 0
 }
 
-# nvidia_linux_load_one <provider module> <native module>: load the provider
-# when wanted and not already loaded; return kldload's status.
+# nvidia_linux_load_one <provider module> <native module> <say 1|0>: load the
+# provider when wanted and not already loaded; return kldload's status. When
+# nvidia_linux_wanted answers no-native and <say> is 1, name the reason (only
+# the core's provider says it: a compute-only host has no nvidia_modeset).
 nvidia_linux_load_one()
 {
-	case $nvidia_linux_mode in
-	[Yy][Ee][Ss]|[Nn][Oo]|[Aa][Uu][Tt][Oo]) ;;
-	*) warn "unknown nvidia_linux_mode '$nvidia_linux_mode': loading nothing"; return 0 ;;
+	_want=$(nvidia_linux_wanted "$nvidia_linux_mode" "${linux_enable:-NO}" "$(nvidia_linux_loaded "$2")")
+	case $_want in
+	yes) ;;
+	no-native)
+		[ "$3" = 1 ] && echo "nvidia_linux: $2 is not loaded: skipping $1 (nvidia_linux_mode=AUTO); put $2 in kld_list"
+		return 0
+		;;
+	*) return 0 ;;
 	esac
-	[ "$(nvidia_linux_wanted "$nvidia_linux_mode" "${linux_enable:-NO}" "$(nvidia_linux_loaded "$2")")" = yes ] || return 0
 	[ "$(nvidia_linux_loaded "$1")" = 0 ] || return 0
 	kldload "$1"
 }
 
 nvidia_linux_start()
 {
+	case $nvidia_linux_mode in
+	[Yy][Ee][Ss]|[Nn][Oo]|[Aa][Uu][Tt][Oo]) ;;
+	*) warn "nvidia_linux_mode must be AUTO, YES or NO (got '$nvidia_linux_mode'); loading nothing"; return 0 ;;
+	esac
 	_rc=0
-	nvidia_linux_load_one nvidia_linux nvidia || _rc=1
-	nvidia_linux_load_one nvidia_modeset_linux nvidia_modeset || _rc=1
+	nvidia_linux_load_one nvidia_linux nvidia 1 || _rc=1
+	nvidia_linux_load_one nvidia_modeset_linux nvidia_modeset 0 || _rc=1
 	return $_rc
 }
 

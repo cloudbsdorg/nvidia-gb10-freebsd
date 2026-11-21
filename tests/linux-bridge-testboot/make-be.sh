@@ -109,10 +109,17 @@ if [ -n "$CUDAUSER$CUDARUN" ] && { [ -z "$CUDAUSER" ] || [ -z "$CUDARUN" ]; }; t
 	echo "make-be.sh: -U and -C go together" >&2
 	exit 2
 fi
+if [ -n "$CUDAUSER" ] && [ -z "$UVMKO" ]; then
+	echo "make-be.sh: -U and -C need -u (the CUDA smoke loads nvidia-uvm.ko)" >&2
+	exit 2
+fi
 if [ -n "$NVINFO$NVPROOF" ] && { [ -z "$NVINFO" ] || [ -z "$NVPROOF" ]; }; then
 	echo "make-be.sh: -i and -p go together" >&2
 	exit 2
 fi
+
+[ -n "$NVINFO" ] || echo "make-be.sh: warning: no -i and -p: row A4 (nvrm-info) will be a skip, and summarize.sh will fail it unless SUMMARIZE_ALLOW_SKIP=1" >&2
+[ -n "$CUDAUSER" ] || echo "make-be.sh: warning: no -U and -C: row B4 (Linux CUDA) will be a skip, and summarize.sh will fail it unless SUMMARIZE_ALLOW_SKIP=1" >&2
 
 BE=nvidia-linux-bridge-test-$DATE-$SEQ
 MNT=${LB_MNT:-$WORK/tmp/$BE.mnt}
