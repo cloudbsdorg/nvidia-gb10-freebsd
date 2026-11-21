@@ -15,11 +15,11 @@
 +         * the file stays loaded and every later unload is refused, so this
 +         * is the protection in that order.
 +         */
-+        NV_DRM_LOG_ERR("%d RM export(s) of imported buffers are still "
-+                       "open and the driver was torn down anyway: its "
-+                       "devices are kept and this module now refuses every "
-+                       "unload.  Restart the machine before closing those "
-+                       "exports",
++        NV_DRM_LOG_ERR("%d RM export(s) of imported buffers are open, or "
++                       "an earlier teardown already kept the devices: the "
++                       "driver was torn down anyway, its devices are kept "
++                       "and this module now refuses every unload.  Restart "
++                       "the machine before closing those exports",
 +                       nv_drm_pi_live_holds());
 +        nv_drm_pi_keep();
 +        return;

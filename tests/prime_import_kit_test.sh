@@ -377,7 +377,10 @@ if mut_be keep-uvm -e '/^	run rm -f "\$MNT"\/boot\/modules.nvtest\/nvidia-uvm.ko
 fi
 # the kit that boots comes from a committed state: a dirty git work tree is refused, a clean one is recorded, an
 # archive carries its commit in KIT-COMMIT (git archive expands it), and -V is checked against it, never trusted
-rm -rf "$TMPD/gitkit"; mkdir -p "$TMPD/gitkit"; cp "$KIT"/* "$TMPD/gitkit/"
+# a copy of the kit with the literal KIT-COMMIT of the work tree (when the suite itself runs from an archive,
+# $KIT/KIT-COMMIT is the expanded commit, which must not leak into the fake repositories)
+kitcopy() { rm -rf "$1"; mkdir -p "$1"; cp "$KIT"/* "$1/"; printf '%s\n' '$Format:%H$' > "$1/KIT-COMMIT"; }
+kitcopy "$TMPD/gitkit"
 printf 'KIT-COMMIT export-subst\n' > "$TMPD/gitkit/.gitattributes"
 # the order checker that sits in the kit: a stand-in that accepts (the staged module of these tests is not an ELF file)
 cp "$TMPD/ko-tool-good" "$TMPD/gitkit/ko_sysinit_order.py"
@@ -402,6 +405,26 @@ out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 2
 [ "$rc" -eq 2 ] && ok "(d) a change hidden with assume-unchanged is still refused" || bad "(d) assume-unchanged hides a change: rc=$rc"
 git -C "$TMPD/gitkit" update-index --no-assume-unchanged make-be.sh
 git -C "$TMPD/gitkit" checkout -q -- make-be.sh 2>/dev/null
+# a tracked KIT-COMMIT that holds a hex id (forged, or committed expanded) does not make the archive branch run
+printf '%s\n' "$gsha" > "$TMPD/gitkit/KIT-COMMIT"
+echo "# edited after the forged record" >> "$TMPD/gitkit/make-be.sh"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"differs from the committed"*) [ "$rc" -eq 2 ] && ok "(d) a forged hex KIT-COMMIT in a git work tree with an edited make-be.sh is refused" || bad "(d) forged KIT-COMMIT rc=$rc" ;; *) bad "(d) a forged KIT-COMMIT made a dirty work tree build: rc=$rc $out" ;; esac
+git -C "$TMPD/gitkit" checkout -q -- make-be.sh KIT-COMMIT 2>/dev/null
+# the same with KIT-COMMIT taken out of the index, and with the hex record committed: the work tree is still checked
+git -C "$TMPD/gitkit" rm -q --cached KIT-COMMIT; printf '%s\n' "$gsha" > "$TMPD/gitkit/KIT-COMMIT"; echo "# edited" >> "$TMPD/gitkit/make-be.sh"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"differs from the committed"* | *"is not tracked"*) [ "$rc" -eq 2 ] && ok "(d) an untracked forged KIT-COMMIT beside a tracked make-be.sh is refused" || bad "(d) un-tracked KIT-COMMIT rc=$rc" ;; *) bad "(d) an index entry removed for KIT-COMMIT made a dirty tree build: rc=$rc $out" ;; esac
+git -C "$TMPD/gitkit" reset -q -- KIT-COMMIT; git -C "$TMPD/gitkit" checkout -q -- make-be.sh KIT-COMMIT 2>/dev/null
+printf '%s\n' "$gsha" > "$TMPD/gitkit/KIT-COMMIT"; git -C "$TMPD/gitkit" -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -am forged
+echo "# edited after the hex record was committed" >> "$TMPD/gitkit/make-be.sh"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"differs from the committed"*) [ "$rc" -eq 2 ] && ok "(d) a committed hex KIT-COMMIT with an edited make-be.sh is refused" || bad "(d) committed hex KIT-COMMIT rc=$rc" ;; *) bad "(d) a committed hex KIT-COMMIT made a dirty tree build: rc=$rc $out" ;; esac
+git -C "$TMPD/gitkit" reset -q --hard HEAD~1
+# a repository that git cannot read is refused, never taken for "no repository"
+kitcopy "$TMPD/badrepo"; printf '%s\n' "$gsha" > "$TMPD/badrepo/KIT-COMMIT"; printf 'gitdir: %s/nowhere\n' "$TMPD" > "$TMPD/badrepo/.git"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/badrepo/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"cannot read here"*) [ "$rc" -eq 2 ] && ok "(d) a kit inside a git repository that git cannot read is refused, whatever its KIT-COMMIT says" || bad "(d) unreadable repository rc=$rc" ;; *) bad "(d) an unreadable repository was taken for none: rc=$rc $out" ;; esac
 # the hooks are marked: -V under the dirty hook never looks like a checked commit; a replaced order tool needs the hook
 out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
 [ "$rc" -eq 0 ] && [ "$(bev)" = "unchecked-0123abc" ] && ok "(d) a -V under the dirty-tree hook is recorded as unchecked" || bad "(d) -V under the hook: rc=$rc version='$(bev)'"
@@ -425,15 +448,15 @@ out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer2/inner/make-be.sh" -b bas
 [ "$rc" -eq 0 ] && ok "(d) a git archive extracted inside some other git work tree is accepted (its KIT-COMMIT decides)" || bad "(d) an archive inside a git tree refused: rc=$rc $out"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 'not hex'); rc=$?
 [ "$rc" -eq 2 ] && ok "(d) a -V that is not hex is refused" || bad "(d) -V not hex rc=$rc"
-rm -rf "$TMPD/plaink"; mkdir -p "$TMPD/plaink"; cp "$KIT"/* "$TMPD/plaink/"
+kitcopy "$TMPD/plaink"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/plaink/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
 [ "$rc" -eq 2 ] && ok "(d) a copied kit (no git, no expanded KIT-COMMIT) is refused even with -V: the commit cannot be checked" || bad "(d) a copied kit with -V built a BE: rc=$rc"
 # a kit that sits untracked (here: ignored) inside somebody else's repository is not a committed kit
-rm -rf "$TMPD/outer"; mkdir -p "$TMPD/outer/kit"; cp "$KIT"/* "$TMPD/outer/kit/"; cp "$TMPD/ko-tool-good" "$TMPD/outer/kit/ko_sysinit_order.py"
+kitcopy "$TMPD/outer/kit"; cp "$TMPD/ko-tool-good" "$TMPD/outer/kit/ko_sysinit_order.py"
 ( cd "$TMPD/outer" && git init -q . && printf 'kit/\n' > .gitignore && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 case $out in *"not tracked"*) [ "$rc" -eq 2 ] && ok "(d) a kit that is not tracked by the repository around it is refused" || bad "(d) untracked kit rc=$rc" ;; *) bad "(d) an untracked kit inside another repository builds a BE: rc=$rc" ;; esac
-rm -rf "$TMPD/outer3"; mkdir -p "$TMPD/outer3/kit"; cp "$KIT"/* "$TMPD/outer3/kit/"
+kitcopy "$TMPD/outer3/kit"
 ( cd "$TMPD/outer3" && git init -q . && printf 'kit/*\n!kit/make-be.sh\n' > .gitignore && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer3/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 case $out in *"prime_import_testboot is not tracked"*) [ "$rc" -eq 2 ] && ok "(d) a kit of which only make-be.sh is tracked is refused, naming the untracked file" || bad "(d) partly tracked kit rc=$rc" ;; *) bad "(d) a partly tracked kit builds a BE: rc=$rc $out" ;; esac
@@ -441,17 +464,17 @@ out=$(GB10_TEST_HOOKS=1 PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" -b base -D 2026
 case $out in *"module order"*"NOT checked"*) ok "(d) a dry run says that it does not check the module order" ;; *) bad "(d) a dry run is silent about the module order" ;; esac
 # controls: the dirty check, the ls-files check and the -V check each seen when removed
 cp "$KIT/prime_import_testboot" "$TMPD/gitkit/"; echo "# dirty" >> "$TMPD/gitkit/prime_import_testboot"
-sed -e '/^	if \[ -n "\$(git -C "\$KITDIR" status --porcelain/s/.*/	if false; then/' -e '/^		\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
+sed -e '/^[[:space:]]*if \[ -n "\$(git -C "\$KITDIR" status --porcelain/s/.*/	if false; then/' -e '/^[[:space:]]*\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
 if cmp -s "$KIT/make-be.sh" "$TMPD/gitkit/make-be.sh"; then bad "(d) control dirty-check: the mutation changed nothing (stale test)"; else
 	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh without the dirty check builds from a dirty tree, and the test above sees it" || bad "(d) control dirty-check: not seen ($rc)"
 fi
-sed -e '/^		git -C "\$KITDIR" ls-files --error-unmatch/s/.*/		true || {/' -e '/^		\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/outer/kit/make-be.sh"
+sed -e '/^[[:space:]]*git -C "\$KITDIR" ls-files --error-unmatch/s/.*/		true || {/' -e '/^[[:space:]]*\[ "\$(git -C "\$KITDIR" hash-object/s/.*/		true || {/' "$KIT/make-be.sh" > "$TMPD/outer/kit/make-be.sh"
 if cmp -s "$KIT/make-be.sh" "$TMPD/outer/kit/make-be.sh"; then bad "(d) control ls-files: the mutation changed nothing (stale test)"; else
 	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer/kit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh without the tracked-file check builds an untracked kit, and the test above sees it" || bad "(d) control ls-files: not seen ($rc)"
 fi
-sed 's/^	if \[ -n "\$COMMIT" \] \&\& ! same_commit "\$COMMIT" "\$ARCHIVE_SHA"; then/	if false; then/' "$KIT/make-be.sh" > "$TMPD/archkit/make-be.sh"
+sed 's/^[[:space:]]*if \[ -n "\$COMMIT" \] \&\& ! same_commit "\$COMMIT" "\$ARCHIVE_SHA"; then/if false; then/' "$KIT/make-be.sh" > "$TMPD/archkit/make-be.sh"
 if cmp -s "$KIT/make-be.sh" "$TMPD/archkit/make-be.sh"; then bad "(d) control -V check: the mutation changed nothing (stale test)"; else
 	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
 	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh that takes -V on trust builds with a wrong commit, and the test above sees it" || bad "(d) control -V check: not seen ($rc)"
@@ -474,6 +497,14 @@ cp "$TMPD/mods/nvidia-drm/nvidia-drm.ko" "$TMPD/nvidia-drm.ko.keep"
 out=$(PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-swap" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 cp "$TMPD/nvidia-drm.ko.keep" "$TMPD/mods/nvidia-drm/nvidia-drm.ko"
 case $out in *"changed after its module order was checked"*) [ "$rc" -ne 0 ] && ok "(d) a module that changes after its order was checked is refused" || bad "(d) swap: rc=$rc" ;; *) bad "(d) a module swapped after the order check was installed: rc=$rc" ;; esac
+printf '%s\n' "$gsha" > "$TMPD/gitkit/KIT-COMMIT"
+sed 's/^	if \[ "\$_trk" != yes \] \&\& \[ -n "\$ARCHIVE_SHA" \]; then/	if [ -n "$ARCHIVE_SHA" ]; then/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
+if cmp -s "$KIT/make-be.sh" "$TMPD/gitkit/make-be.sh"; then bad "(d) control forged KIT-COMMIT: the mutation changed nothing (stale test)"; else
+	echo "# edited" >> "$TMPD/gitkit/make-be.sh"
+	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh that trusts a tracked KIT-COMMIT builds from a dirty tree, and the test above sees it" || bad "(d) control forged KIT-COMMIT: not seen ($rc)"
+fi
+git -C "$TMPD/gitkit" checkout -q -- make-be.sh KIT-COMMIT 2>/dev/null
 if mut_be ko-swap -e 's/^		if \[ "\$b" = nvidia-drm.ko \] \&\& \[ "\$want" != "\$KO_SHA" \]; then/		if false; then/'; then
 	PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-swap" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" > /dev/null 2>&1; rc=$?
 	cp "$TMPD/nvidia-drm.ko.keep" "$TMPD/mods/nvidia-drm/nvidia-drm.ko"

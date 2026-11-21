@@ -188,6 +188,13 @@ make_tree() {
 }
 
 # check_tree <dir>: print the first defect found, nothing when there is none.
+# the text of a C file as the preprocessor sees its lines: backslash-newline joined first, then comments removed
+pp_lines() {
+	awk '{ if (sub(/\\[ \t\r]*$/, "")) { acc = acc $0; next } print acc $0; acc = "" } END { if (acc != "") print acc }' "$1" > "$TMPD/pp-joined.c"
+	strip_comments "$TMPD/pp-joined.c" "$TMPD/pp-nocomment.c"
+	cat "$TMPD/pp-nocomment.c"
+}
+
 check_tree() {
 	_t=$1
 	# R1
@@ -330,11 +337,40 @@ check_tree() {
 	# glue checks rely on (a macro for gb10_pi_gate_quiesce, SI_ORDER_LAST, nv_drm_pi_quiesce) or an #if 0 copy of a
 	# function would defeat every check below, which read the text and compile the extracted functions
 	for _f in $DMABUF $DMABUFH $LKPI $DRV; do
-		strip_comments "$PRISTINE/$_f" "$TMPD/pp-a.c"; strip_comments "$_t/$_f" "$TMPD/pp-b.c"
 		[ -f "$PRISTINE/$_f" ] && [ -f "$_t/$_f" ] || { echo "D6: cannot compare $_f with the pristine source (a file is missing: $PRISTINE/$_f)"; return; }
+		pp_lines "$PRISTINE/$_f" > "$TMPD/pp-a.c"; pp_lines "$_t/$_f" > "$TMPD/pp-b.c"
 		diff "$TMPD/pp-a.c" "$TMPD/pp-b.c" > "$TMPD/pp-diff.txt"; [ $? -le 1 ] || { echo "D6: diff of $_f against the pristine source failed"; return; }
 		_pp=$(grep '^>' "$TMPD/pp-diff.txt" | grep -E '^>[[:space:]]*(#|%:)' | grep -vE '^>[[:space:]]*(#|%:)[[:space:]]*include')
 		[ -z "$_pp" ] || { echo "D6: the patches add a preprocessor line other than #include to $_f ($(echo "$_pp" | head -1)): a macro or an #if can change what the checked functions mean"; return; }
+	done
+	# the core header is part of what the checks read: its preprocessor lines are pinned to the list below, so a
+	# #define of a gate function under an #ifdef _KERNEL (which no kernel-less test would see) is caught
+	[ -f "$_t/_core/gb10_pageimport.h" ] || { echo "D6: no copy of the core header in the tree under test"; return; }
+	pp_lines "$_t/_core/gb10_pageimport.h" | grep -E '^[[:space:]]*(#|%:)' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$TMPD/core-pp.txt"
+	cat > "$TMPD/core-pp.want" <<'CORE_PP_END'
+#ifndef _GB10_PAGEIMPORT_H_
+#define _GB10_PAGEIMPORT_H_
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+#define GB10_PI_MAX_BYTES (1ULL << 32)
+#define GB10_PI_STATUS_RETRY 3U
+#define GB10_PI_STATUS_REFUSED 0x56U
+#define GB10_PI_DESC_MAGIC 0x0000474232305049ULL
+#define GB10_PI_DIRTY_SPIN_BUDGET 100
+#define GB10_PI_DIRTY_SPIN_US 10
+#endif
+CORE_PP_END
+	cmp -s "$TMPD/core-pp.txt" "$TMPD/core-pp.want" || { echo "D6: the preprocessor lines of gb10_pageimport.h are not the pinned list: $(diff "$TMPD/core-pp.want" "$TMPD/core-pp.txt" | head -2 | tr '\n' ' ')"; return; }
+	# the three gate functions are declared once, as externs in the lkpi file, and defined nowhere else: a definition
+	# of the same name before the extern (a static stub, which the extern then agrees with) would shadow the real
+	# function for every call below it.  The lines are read as the preprocessor sees them (spliced, comments gone), at
+	# any indentation; a declaration or definition has a type word before the name and no `=` or `(` in between.
+	_gname='nv_drm_pi_(quiesce|live_holds|keep)'
+	for _f in $LKPI $DRV; do
+		pp_lines "$_t/$_f" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$TMPD/gate-lines.txt"
+		_decl=$(grep -E "(^| )(static|extern|inline|int|void|unsigned|long)( [^;{}()=]*)? \**${_gname} ?\(" "$TMPD/gate-lines.txt" | grep -vE '^extern (int nv_drm_pi_quiesce\(int \*held, int \*kept\)|int nv_drm_pi_live_holds\(void\)|void nv_drm_pi_keep\(void\));$')
+		[ -z "$_decl" ] || { echo "D6: $_f declares or defines a gate function other than the three externs ($(echo "$_decl" | head -1))"; return; }
 	done
 	# D6 behaviour: the REAL functions of the patched sources, compiled against the core with stubs
 	# (tests/data/nvidia_drm_glue_harness.c): the spin lock is a flag the gate decisions assert, the GEM
@@ -441,6 +477,7 @@ check_script() {
 # --- the patched sources must pass ---------------------------------------
 mkdir -p "$TMPD/good" "$TMPD/pristine"
 if r=$(make_tree "$TMPD/good" 1) && [ -z "$r" ]; then
+	mkdir -p "$TMPD/good/_core"; cp "$repo/src/gb10-pageimport/gb10_pageimport.h" "$TMPD/good/_core/"
 	r=$(check_tree "$TMPD/good")
 	[ -z "$r" ] && ok "the patched sources pass every check" || bad "patched sources: $r"
 else
@@ -555,6 +592,23 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant pp-comment-then-define $LKPI 's/^extern int nv_drm_pi_live_holds(void);/\/* x *\/ #define SI_ORDER_LAST SI_ORDER_FIRST\
 &/'
 	mutant live-holds-forgets-kept $DMABUF 's/if (n == 0 \&\& __atomic_load_n(&__nv_drm_pi_gate.kept, __ATOMIC_SEQ_CST))/if (0)/'
+	mutant pp-splice-digraph $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/%\\\
+:define SI_ORDER_LAST SI_ORDER_FIRST\
+&/'
+	mutant gate-static-shadow $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/'
+	mutant gate-static-shadow-indented $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/\	static int nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/'
+	mutant gate-static-shadow-spliced $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/static int nv_drm_pi_qui\\\
+esce(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/'
+	mutant pp-splice-digraph-ws $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/%\\ \
+:define SI_ORDER_LAST SI_ORDER_FIRST\
+&/'
+	mutant core-define-under-kernel _core/gb10_pageimport.h '/^#endif \/\* _GB10_PAGEIMPORT_H_ \*\//s/.*/#ifdef _KERNEL\
+#define gb10_pi_gate_quiesce(g) (0)\
+#endif\
+&/'
 	mutant pp-if0-decoy $DMABUF 's/^int nv_drm_pi_quiesce(int \*held, int \*kept)$/#if 0\
 int nv_drm_pi_quiesce(int *held, int *kept) { *held = 0; *kept = 0; return 0; }\
 #endif\

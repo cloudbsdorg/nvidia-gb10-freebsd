@@ -64,8 +64,8 @@
 +
 +/*
 + * Positive while the devices must not be torn down: live exports, or, once the devices were kept
-+ * (nv_drm_pi_keep), for good: a later unload attempt must not tear down what the kept state left
-+ * alone, even after the exports have closed.
++ * (nv_drm_pi_keep), for good.  A released module's handler is never called again (kern_linker.c),
++ * so the second teardown this keeps out is not reachable today: the branch is an assertion.
 + */
 +int nv_drm_pi_live_holds(void)
 +{

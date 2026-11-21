@@ -16,11 +16,11 @@
 #               nvidia-drm.ko (default $GB10_WORK/testboot-prime-import/mods, each in
 #               its own subdirectory: the staging directory, not a build tree)
 #   -u UVM_KO   a nvidia-uvm.ko to put in the BE for the CUDA smoke row
-#   -V COMMIT   the commit this kit was extracted from (hex).  A kit that boots is built from
-#               `git archive COMMIT` extracted into a fresh directory, never from a live work
-#               tree: inside a git work tree this script refuses to run when the tree has
-#               uncommitted changes (and records HEAD); outside one it refuses to run without -V.
-#               The commit is recorded in the BE and in the run's results (row kit-version).
+#   -V COMMIT   at least 7 hex digits of the commit this kit comes from.  A kit that boots is built
+#               from `git archive COMMIT` extracted into a fresh directory (its KIT-COMMIT file then
+#               carries the commit) or from a clean git work tree (its HEAD).  -V is optional and is
+#               checked against that commit: a different one is refused.  A kit with neither is
+#               refused.  The commit is recorded in the BE and in the run's results (row kit-version).
 #   --dry-run   print every command and change nothing
 #   --activate  finish with `bectl activate -t`.  Without it the BE is left
 #               unactivated: arming a boot is the orchestrator's decision.
@@ -99,44 +99,68 @@ same_commit() {	# same_commit PREFIX FULL
 if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "${PRIME_ALLOW_DIRTY:-0}" = 1 ]; then
 	# a test hook: whatever -V says, the value is marked, so the row never looks like a checked build
 	COMMIT=unchecked-${COMMIT:-dirty-allowed}
-elif [ -n "$ARCHIVE_SHA" ]; then
-	# an extraction of git archive (its KIT-COMMIT is expanded), wherever it was extracted, even inside a git work tree
-	if [ -n "$COMMIT" ] && ! same_commit "$COMMIT" "$ARCHIVE_SHA"; then
-		echo "make-be.sh: -V $COMMIT is not the commit this kit was archived from ($ARCHIVE_SHA)" >&2
-		exit 2
-	fi
-	COMMIT=$ARCHIVE_SHA
-elif git -C "$KITDIR" rev-parse --git-dir > /dev/null 2>&1; then
-	# every file of the kit that is installed must be tracked: an untracked or ignored kit inside somebody
-	# else's repository is not a committed kit
-	for _kf in make-be.sh prime_import_testboot prime_import_probe.c prime_import_probe.8 summarize.sh ko_sysinit_order.py KIT-COMMIT; do
-		git -C "$KITDIR" ls-files --error-unmatch -- "$_kf" > /dev/null 2>&1 || {
-			echo "make-be.sh: $_kf is not tracked by the git repository around it; build from git archive of the reviewed commit" >&2
-			exit 2
-		}
-	done
-	# the content of each installed file is compared with the committed one: assume-unchanged, skip-worktree, ignore
-	# rules and status settings cannot hide a difference from git hash-object
-	_prefix=$(git -C "$KITDIR" rev-parse --show-prefix)
-	for _kf in make-be.sh prime_import_testboot prime_import_probe.c prime_import_probe.8 summarize.sh ko_sysinit_order.py KIT-COMMIT; do
-		[ "$(git -C "$KITDIR" hash-object -- "$_kf" 2>/dev/null)" = "$(git -C "$KITDIR" rev-parse "HEAD:$_prefix$_kf" 2>/dev/null)" ] || {
-			echo "make-be.sh: $_kf differs from the committed one (uncommitted changes); build from git archive of the reviewed commit extracted into a fresh directory" >&2
-			exit 2
-		}
-	done
-	if [ -n "$(git -C "$KITDIR" status --porcelain 2>/dev/null)" ]; then
-		echo "make-be.sh: the work tree of this kit has uncommitted changes; build from git archive of the reviewed commit extracted into a fresh directory" >&2
-		exit 2
-	fi
-	_head=$(git -C "$KITDIR" rev-parse HEAD)
-	if [ -n "$COMMIT" ] && ! same_commit "$COMMIT" "$_head"; then
-		echo "make-be.sh: -V $COMMIT is not the commit of this work tree ($_head)" >&2
-		exit 2
-	fi
-	COMMIT=$_head
 else
-	echo "make-be.sh: this kit is neither in a git work tree nor from git archive (no expanded KIT-COMMIT), so its commit cannot be checked: run git archive <commit> | tar -x -C <new directory> and use the make-be.sh there" >&2
-	exit 2
+	# Where is the kit?  A repository around it is found by looking for .git upward (not by asking git, which
+	# also answers "no" for a repository it will not read), and make-be.sh itself must be tracked by it: a kit whose
+	# make-be.sh a work tree tracks is a work tree kit, whatever its KIT-COMMIT says.
+	_repo=0; _d=$KITDIR
+	while :; do
+		[ -e "$_d/.git" ] && { _repo=1; break; }
+		[ "$_d" = / ] && break
+		_d=$(dirname -- "$_d")
+	done
+	_trk=none
+	if [ "$_repo" -eq 1 ]; then
+		git -C "$KITDIR" rev-parse --git-dir > /dev/null 2>&1 || {
+			echo "make-be.sh: the kit is inside a git repository that git cannot read here (ownership? run as the owner); build from git archive of the reviewed commit" >&2
+			exit 2
+		}
+		_rc=0; git -C "$KITDIR" ls-files --error-unmatch -- make-be.sh > /dev/null 2>&1 || _rc=$?
+		case $_rc in
+		0) _trk=yes ;;
+		1) _trk=no ;;
+		*) echo "make-be.sh: git could not say whether make-be.sh is tracked (exit $_rc)" >&2; exit 2 ;;
+		esac
+	fi
+	if [ "$_trk" != yes ] && [ -n "$ARCHIVE_SHA" ]; then
+		# an extraction of git archive (its KIT-COMMIT is expanded), also inside some other work tree
+		if [ -n "$COMMIT" ] && ! same_commit "$COMMIT" "$ARCHIVE_SHA"; then
+			echo "make-be.sh: -V $COMMIT is not the commit this kit was archived from ($ARCHIVE_SHA)" >&2
+			exit 2
+		fi
+		COMMIT=$ARCHIVE_SHA
+	elif [ "$_repo" -eq 1 ]; then
+		# every file of the kit that is installed must be tracked: an untracked or ignored kit inside somebody
+		# else's repository is not a committed kit
+		for _kf in make-be.sh prime_import_testboot prime_import_probe.c prime_import_probe.8 summarize.sh ko_sysinit_order.py KIT-COMMIT; do
+			git -C "$KITDIR" ls-files --error-unmatch -- "$_kf" > /dev/null 2>&1 || {
+				echo "make-be.sh: $_kf is not tracked by the git repository around it; build from git archive of the reviewed commit" >&2
+				exit 2
+			}
+		done
+		# the content of each installed file is compared with the committed one: assume-unchanged, skip-worktree, ignore
+		# rules and status settings cannot hide a difference from git hash-object
+		_prefix=$(git -C "$KITDIR" rev-parse --show-prefix)
+		for _kf in make-be.sh prime_import_testboot prime_import_probe.c prime_import_probe.8 summarize.sh ko_sysinit_order.py KIT-COMMIT; do
+			[ "$(git -C "$KITDIR" hash-object -- "$_kf" 2>/dev/null)" = "$(git -C "$KITDIR" rev-parse "HEAD:$_prefix$_kf" 2>/dev/null)" ] || {
+				echo "make-be.sh: $_kf differs from the committed one (uncommitted changes); build from git archive of the reviewed commit extracted into a fresh directory" >&2
+				exit 2
+			}
+		done
+		if [ -n "$(git -C "$KITDIR" status --porcelain 2>/dev/null)" ]; then
+			echo "make-be.sh: the work tree of this kit has uncommitted changes; build from git archive of the reviewed commit extracted into a fresh directory" >&2
+			exit 2
+		fi
+		_head=$(git -C "$KITDIR" rev-parse HEAD)
+		if [ -n "$COMMIT" ] && ! same_commit "$COMMIT" "$_head"; then
+			echo "make-be.sh: -V $COMMIT is not the commit of this work tree ($_head)" >&2
+			exit 2
+		fi
+		COMMIT=$_head
+	else
+		echo "make-be.sh: this kit is neither in a git work tree nor from git archive (no expanded KIT-COMMIT), so its commit cannot be checked: run git archive <commit> | tar -x -C <new directory> and use the make-be.sh there" >&2
+		exit 2
+	fi
 fi
 case $DATE in
 [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
