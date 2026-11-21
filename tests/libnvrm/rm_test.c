@@ -386,6 +386,7 @@ test_property_failures(void)
 	ctx = enum_rm(&rc, err, sizeof(err));
 	i = info0(ctx);
 	CHECK(!NVRM_HAVE(i->pci_subsystem_vendor));
+	CHECK_EQ(i->pci_subsystem_vendor.reason, NVRM_R_VALUE_UNUSABLE);
 	CHECK(!NVRM_HAVE(i->pci_subsystem_device));
 	CHECK(!NVRM_HAVE(i->pci_revision));
 	CHECK(NVRM_HAVE(i->pci_vendor));
@@ -540,15 +541,19 @@ test_alloc_and_real_calls(void)
 }
 
 static void
-test_query_only(void)
+test_least_privilege(void)
 {
-	nvrm_enum_opts o = { "rm", 1 };
+	nvrm_enum_opts o = { "rm" };		/* the default */
+	nvrm_enum_opts full = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };	/* explicit opt-in */
 	nvrm_ctx *ctx;
 	char err[200];
 
 	reset_kernel();
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_OK);
+	nvrm_close(ctx);
+	CHECK_EQ(K.nlive, 0);
+	CHECK_EQ(nvrm_enumerate(&ctx, &full, err, sizeof(err)), NVRM_OK);
 	nvrm_close(ctx);
 	CHECK_EQ(K.nlive, 0);
 }
@@ -606,7 +611,7 @@ main(void)
 	test_gpu_failures();
 	test_property_failures();
 	test_alloc_and_real_calls();
-	test_query_only();
+	test_least_privilege();
 	test_misc();
 	return (t_done("rm_test"));
 }

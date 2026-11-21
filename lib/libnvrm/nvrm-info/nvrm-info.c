@@ -195,7 +195,7 @@ report_failure(enum mode mode, const char *code, const char *msg)
 int
 main(int argc, char **argv)
 {
-	nvrm_enum_opts opts = { NULL, 1 };	/* query only: no alloc, no map */
+	nvrm_enum_opts opts = { NULL, 0 };	/* no flags: least privilege */
 	nvrm_ctx *ctx;
 	enum mode mode = M_TEXT;
 	char msg[512];
@@ -213,15 +213,16 @@ main(int argc, char **argv)
 	rc = nvrm_enumerate(&ctx, &opts, msg, sizeof(msg));
 	if (rc != NVRM_OK) {
 		if (rc == NVRM_E_NOBACKEND && opts.backend == NULL)
-			strlcat(msg, "; nvrm-info: --backend fake selects it",
+			strlcat(msg, " (for nvrm-info: --backend fake)",
 			    sizeof(msg));
 		return (report_failure(mode, nvrm_error_id(rc), msg));
 	}
 	/* Capability mode: from here on only the open descriptors work.  A
 	 * kernel without it is a failure, not a silent unsandboxed run. */
 	if (cap_enter() != 0) {
-		snprintf(msg, sizeof(msg), "cannot enter capability mode: %s",
-		    strerror(errno));
+		snprintf(msg, sizeof(msg), "cannot enter capability mode: %s%s",
+		    strerror(errno), errno == ENOSYS ? " (this kernel lacks "
+		    "Capsicum: build it with options CAPABILITY_MODE)" : "");
 		nvrm_close(ctx);
 		return (report_failure(mode,
 		    nvrm_error_id(NVRM_E_CAPSICUM), msg));

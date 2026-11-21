@@ -189,7 +189,7 @@ test_enumerate(void)
 	CHECK_EQ(rc, NVRM_E_NOBACKEND);
 	CHECK(ctx == NULL);
 	CHECK(strstr(err, "kernel module is not loaded") != NULL);
-	CHECK(strstr(err, "NVRM_BACKEND=fake") != NULL);
+	CHECK(strstr(err, "NVRM_BACKEND=fake") != NULL && strstr(err, "set-user-ID") != NULL);
 	/* an unknown name is a different message */
 	o.backend = "nope";
 	rc = nvrm_enumerate(&ctx, &o, err, sizeof(err));
@@ -360,11 +360,11 @@ test_model_unknown_and_sparse(void)
 	i = info_of(ctx, 0);
 	CHECK_EQ(i->architecture.value, 0xfff0);
 	CHECK(!NVRM_HAVE(i->family));
-	CHECK_EQ(i->family.reason, NVRM_R_NO_FAMILY);
+	CHECK_EQ(i->family.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK(!NVRM_HAVE(i->cls_gpfifo) && !NVRM_HAVE(i->cls_compute));
 	CHECK(!NVRM_HAVE(i->cls_eng3d) && !NVRM_HAVE(i->cls_copy));
 	CHECK(!NVRM_HAVE(i->page_sizes));
-	CHECK_EQ(i->page_sizes.reason, NVRM_R_NO_FAMILY);
+	CHECK_EQ(i->page_sizes.reason, NVRM_R_FAMILY_UNKNOWN);
 	/* the RM says SM version 0: the GPU does not support the query */
 	CHECK(!NVRM_HAVE(i->sm_version_major));
 	CHECK_EQ(i->sm_version_major.reason, NVRM_R_RM_UNSUPPORTED);
@@ -487,7 +487,7 @@ test_model_injections(void)
 	CHECK_STR(i->family.value, "ada");
 	CHECK(NVRM_HAVE(i->cls_eng3d));
 	CHECK(!NVRM_HAVE(i->cls_copy));
-	CHECK_EQ(i->cls_copy.reason, NVRM_R_NO_FAMILY);
+	CHECK_EQ(i->cls_copy.reason, NVRM_R_FAMILY_NO_CLASS);	/* family known */
 	nvrm_close(ctx);
 	reset_env();
 }
@@ -661,6 +661,32 @@ test_names_and_fields(void)
 	CHECK_EQ(nvrm_ngroups, 3);
 	for (i = 0; i < nvrm_nfields; i++)
 		CHECK(nvrm_fields[i].offset < sizeof(nvrm_device_info));
+	/* every member of nvrm_device_info before the capabilities has exactly
+	 * one table row: the rows tile [0, offsetof(caps)) with no gap and no
+	 * overlap, so a new member without a row is caught here */
+	{
+		size_t pos = 0, sz = 0;
+		unsigned j, found, rows = 0;
+
+		while (pos < offsetof(nvrm_device_info, caps)) {
+			found = 0;
+			sz = sizeof(nvrm_u64);		/* progress on a gap */
+			for (j = 0; j < nvrm_nfields; j++) {
+				if (nvrm_fields[j].offset != pos)
+					continue;
+				found++;
+				sz = nvrm_fields[j].kind == NVRM_K_U64 ?
+				    sizeof(nvrm_u64) :
+				    nvrm_fields[j].kind == NVRM_K_STR ?
+				    sizeof(nvrm_str) : sizeof(nvrm_list);
+			}
+			CHECK_EQ(found, 1);
+			rows += found;
+			pos += sz;
+		}
+		CHECK_EQ(pos, offsetof(nvrm_device_info, caps));
+		CHECK_EQ(rows, nvrm_nfields);
+	}
 	/* a fresh info says "not queried" everywhere */
 	{
 		nvrm_device_info info;
@@ -751,7 +777,7 @@ test_field_reason_and_masks(void)
 {
 	nvrm_device_info info;
 	nvrm_field bad = { "gpu", "x", 99, 0, 0, "x" };
-	nvrm_enum_opts o = { "fake", 1 };
+	nvrm_enum_opts o = { "fake" };
 	nvrm_ctx *ctx;
 	char err[100];
 	pid_t pid;
@@ -775,16 +801,28 @@ test_field_reason_and_masks(void)
 	nvrm_fake_inject_value(NVRM_P_GPC_MASK, (1ULL << 40) | 1);
 	ctx = must_enum("discrete");
 	CHECK(!NVRM_HAVE(info_of(ctx, 0)->gpc_count));
+	CHECK_EQ(info_of(ctx, 0)->gpc_count.reason, NVRM_R_VALUE_UNUSABLE);
 	CHECK(!NVRM_HAVE(info_of(ctx, 0)->tpc_count));
 	CHECK(!NVRM_HAVE(info_of(ctx, 0)->sm_count));
 	nvrm_close(ctx);
 	reset_env();
 
-	/* query-only descriptors still enumerate and refresh */
+	/* the default (least privilege) descriptors still enumerate and refresh */
 	setenv("NVRM_FAKE_PROFILE", "discrete", 1);
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_OK);
 	nvrm_close(ctx);
+	/* the explicit opt-in for allocation and mapping */
+	o.flags = NVRM_ENUM_ALLOW_ALLOC_MAP;
+	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	nvrm_close(ctx);
+	/* a bit the library does not know, including the retired bit 0 of the
+	 * old positional member, is refused rather than read as a privilege */
+	o.flags = 1;
+	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK(ctx == NULL && strstr(err, "unknown enumeration flags") != NULL);
+	o.flags = NVRM_ENUM_ALLOW_ALLOC_MAP | 0x100;
+	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
 }
 
 /* ---- Capsicum helper ----------------------------------------------------- */

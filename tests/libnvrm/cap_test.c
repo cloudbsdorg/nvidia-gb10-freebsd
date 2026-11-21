@@ -19,6 +19,7 @@
 #include <sys/capsicum.h>
 #include <sys/filio.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 #include <errno.h>
@@ -59,7 +60,7 @@ static void
 fake_case(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { "fake" };
+	nvrm_enum_opts o = { .backend = "fake", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };
 	char err[200];
 	cap_rights_t have;
 	const nvrm_device_info *i;
@@ -114,7 +115,7 @@ static void
 rm_case(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { "rm" };
+	nvrm_enum_opts o = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };
 	char err[200];
 	const nvrm_device_info *i;
 	int rc;
@@ -169,6 +170,10 @@ rm_case(void)
 		    NVOS21_PARAMETERS), &ap), -1);
 		CHECK_EQ(errno, ENOTTY);
 	}
+	/* ... and with the opt-in the mapping right is held (the pipe itself
+	 * cannot be mapped, but the refusal is not the capability check) */
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED, K.last_fd, 0) == MAP_FAILED);
+	CHECK(errno != ENOTCAPABLE);
 	/* a new enumeration cannot open the control device: the real open
 	 * is refused in capability mode, and the library says so */
 	nvrm_rm_set_sys(NULL);
@@ -176,13 +181,13 @@ rm_case(void)
 	CHECK(strstr(err, "capability mode") != NULL);
 }
 
-/* A query-only enumeration keeps only the RM controls and frees and no
+/* The default enumeration (no NVRM_ENUM_ALLOW_ALLOC_MAP) keeps only the RM controls and frees and no
  * mapping right: the allocation escape is refused after cap_enter. */
 static void
-query_only_cases(void)
+default_cases(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { "rm", 1 };
+	nvrm_enum_opts o = { "rm" };	/* the default: least privilege */
 	char err[200];
 	cap_rights_t have;
 	NVOS21_PARAMETERS ap;
@@ -202,6 +207,8 @@ query_only_cases(void)
 	CHECK_EQ(ioctl(K.last_fd, _IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC,
 	    NVOS21_PARAMETERS), &ap), -1);
 	CHECK_EQ(errno, ENOTCAPABLE);			/* no allocation */
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED, K.last_fd, 0) == MAP_FAILED);
+	CHECK_EQ(errno, ENOTCAPABLE);			/* no mapping */
 	memset(&cp, 0, sizeof(cp));
 	CHECK_EQ(ioctl(K.last_fd, _IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL,
 	    NVOS54_PARAMETERS), &cp), -1);
@@ -215,10 +222,10 @@ query_only_cases(void)
 }
 
 static void
-fake_query_only(void)
+fake_default(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { "fake", 1 };
+	nvrm_enum_opts o = { "fake" };
 	char err[200];
 	cap_rights_t have;
 
@@ -256,8 +263,8 @@ main(void)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	bad += run_child("cap_test fake", fake_case);
 	bad += run_child("cap_test rm", rm_case);
-	bad += run_child("cap_test rm query-only", query_only_cases);
-	bad += run_child("cap_test fake query-only", fake_query_only);
+	bad += run_child("cap_test rm default (least privilege)", default_cases);
+	bad += run_child("cap_test fake default (least privilege)", fake_default);
 	printf("cap_test: %s\n", bad == 0 ? "all passed" : "FAILED");
 	return (bad == 0 ? 0 : 1);
 }

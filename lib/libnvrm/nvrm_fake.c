@@ -450,13 +450,13 @@ fake_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 }
 
 static int
-fake_limit(nvrm_backend *be, int query_only)
+fake_limit(nvrm_backend *be, int allow_alloc_map)
 {
 	static const unsigned long cmds[] = { FIONREAD };
 
 	if (strcmp(be->fail, "limit") == 0)
 		return (NVRM_E_CAPSICUM);
-	return (nvrm_cap_limit_fd(be->fd, cmds, 1, !query_only));
+	return (nvrm_cap_limit_fd(be->fd, cmds, 1, allow_alloc_map));
 }
 
 const nvrm_backend_ops nvrm_backend_fake_ops = {

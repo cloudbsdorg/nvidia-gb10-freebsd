@@ -24,7 +24,8 @@ export PATH LC_ALL
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$HERE/.." && pwd)
 GB10=${GB10_WORK:-$HOME/work/gb10}
-OGKM=${OGKM:-$GB10/sources/open-gpu-kernel-modules-580.178.04}
+TAG=$(awk '$1 == "ogkm_tag" { print $2 }' "$REPO/SOURCES")
+OGKM=${OGKM:-$GB10/sources/open-gpu-kernel-modules-$TAG}
 mkdir -p "$GB10/tmp" || exit 1
 W=$(mktemp -d "$GB10/tmp/libnvrm-test.XXXXXXXX") || exit 1
 trap 'rm -rf "$W"' EXIT INT TERM
@@ -82,7 +83,7 @@ VAL="python3 -I $T/schema_validate.py $SCHEMA"
 
 # drift mutant: change a field description in the table; the build must fail
 M=$W/mut-drift
-mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib"
+mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib" && cp "$SRC/SOURCES" "$M/SOURCES"
 sed -i '' 's/"PCI domain"/"PCI domain (changed)"/' "$M/lib/libnvrm/nvrm_fields.c"
 grep -q "changed" "$M/lib/libnvrm/nvrm_fields.c"
 rc=$?
@@ -109,7 +110,7 @@ cc $CINC -o "$W/cov/cap_test" "$T/cap_test.c" $LIBSRC >"$W/cc3.log" 2>&1
 rc=$?
 expect_rc "cap_test compiles" $rc 0
 
-(cd "$W/cov" && LLVM_PROFILE_FILE=core.profraw ./core_test)
+(cd "$W/cov" && LLVM_PROFILE_FILE=core.%p.profraw ./core_test)
 rc=$?
 expect_rc "core_test (registry, enumeration, model, decorators, JSON, fake)" $rc 0
 (cd "$W/cov" && LLVM_PROFILE_FILE=rm.profraw ./rm_test)
@@ -119,9 +120,9 @@ expect_rc "rm_test (RM backend against the scripted kernel)" $rc 0
 rc=$?
 expect_rc "cap_test (works in Capsicum capability mode, fake and rm)" $rc 0
 
-(cd "$W/cov" && llvm-profdata merge -o core.profdata core.profraw && llvm-profdata merge -o rm.profdata rm.profraw)
-GATED="nvrm.c nvrm_cap.c nvrm_fake.c nvrm_json.c nvrm_names.c"
-(cd "$W/cov" && llvm-cov export ./core_test -instr-profile=core.profdata --summary-only $L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_json.c $L/nvrm_names.c | python3 -I "$T/coverage_gate.py" $GATED)
+(cd "$W/cov" && llvm-profdata merge -o core.profdata core.*.profraw && llvm-profdata merge -o rm.profdata rm.profraw)
+GATED="nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fields.c nvrm_json.c nvrm_names.c"
+(cd "$W/cov" && llvm-cov export ./core_test -instr-profile=core.profdata --summary-only $L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c | python3 -I "$T/coverage_gate.py" $GATED)
 rc=$?
 expect_rc "core + fake backend: 100% line and branch coverage" $rc 0
 (cd "$W/cov" && llvm-cov export ./rm_test -instr-profile=rm.profdata --summary-only $L/nvrm_rm.c | python3 -I "$T/coverage_gate.py" nvrm_rm.c)
@@ -169,7 +170,13 @@ mutant rm-classes-max nvrm_rm.c 's/lim = max < /lim = 1000 < /' rm_test
 mutant json-comma nvrm_json.c 's/k++ != 0 ? "," : ""/i != 0 ? "," : ""/' core_test
 mutant decorator-bound nvrm.c 's/if ((unsigned)d->caps\[i\].index >= NVRM_NCAPS)/if (0)/' core_test
 mutant refresh-status nvrm.c 's/NVRM_E_IO : NVRM_OK/NVRM_OK : NVRM_OK/' core_test
-mutant rm-queryonly nvrm_rm.c 's/if (query_only)/if (0)/' cap_test
+mutant rm-least-privilege nvrm_rm.c 's/if (!allow_alloc_map)/if (0)/' cap_test
+mutant opts-default nvrm.c 's/opts != NULL \&\& (opts->flags \& NVRM_ENUM_ALLOW_ALLOC_MAP) != 0/1/' cap_test
+mutant struct-member include/nvrm/nvrm.h 's/nvrm_u64	vram_size, bar1_size/nvrm_u64	l2_size, vram_size, bar1_size/' core_test
+mutant fields-bound nvrm_fields.c 's/index < nvrm_nfields ?/1 ?/' core_test
+mutant fields-abort nvrm_fields.c 's/abort();/return (NULL);/' core_test
+mutant family-no-value nvrm.c 's/NVRM_R_FAMILY_NO_CLASS, NVRM_S_FAMILY/NVRM_R_FAMILY_UNKNOWN, NVRM_S_FAMILY/' core_test
+mutant pci-unusable nvrm_rm.c 's/return (NVRM_R_VALUE_UNUSABLE);/return (NVRM_R_RM_FAILED);/' rm_test
 mutant rm-pci-nocard nvrm_rm.c 's/if (!g->have_card)/if (0)/' rm_test
 mutant gpc-width nvrm.c 's/(mask >> NVRM_MAX_GPCS) != 0/0/' core_test
 mutant enumerate-call-failure nvrm.c 's/if (info_has_call_failure(&ctx->dev\[i\].info))/if (0)/' core_test
@@ -363,6 +370,41 @@ expect_rc "boot script: validates --json and --jsonl against the schema" $rc 0
 grep -q '^PASS GPU 0 sm_count' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: compares GPU values" $rc 0
 
+# the version has one source: a header naming another version fails the build
+M=$W/mut-version
+mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib" && cp "$SRC/SOURCES" "$M/SOURCES"
+sed -i '' 's/NVRM_RM_VERSION		"[0-9.]*"/NVRM_RM_VERSION		"1.2.3"/' "$M/lib/libnvrm/include/nvrm/nvrm.h"
+mkdir -p "$W/mv-lib"
+(cd "$M/lib/libnvrm" && MAKEOBJDIR=$W/mv-lib OGKM=$OGKM make >"$W/mv.log" 2>&1); rc=$?
+if [ $rc -ne 0 ] && grep -q 'NVRM_RM_VERSION 1.2.3' "$W/mv.log" && grep -q "ogkm_tag says $TAG" "$W/mv.log"; then ok "version plant: a header with another version fails the build"; else bad "version plant: build accepted it (rc=$rc)"; fi
+M=$W/mut-nosources
+mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib"
+mkdir -p "$W/mn-lib"
+(cd "$M/lib/libnvrm" && MAKEOBJDIR=$W/mn-lib OGKM=$OGKM make >"$W/mn.log" 2>&1); rc=$?
+if [ $rc -ne 0 ] && grep -q 'has no ogkm_tag line' "$W/mn.log"; then ok "version plant: a tree without SOURCES says so"; else bad "version plant: missing SOURCES not reported (rc=$rc)"; fi
+# the unknown-flag guard and the old positional meaning are core_test cases
+# boot script: a missing schema and a loaded linux kmod are FAILs, the fake backend is not a proof
+mkdir -p "$W/boot2" "$W/boot3"
+BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boot2" "$INFO" "$W/no-such-schema.json" >/dev/null 2>&1
+grep -q "^FAIL schema $W/no-such-schema.json does not exist" "$W/boot2/results.txt"; rc=$?
+expect_rc "boot script: a schema argument that does not exist is a FAIL naming it" $rc 0
+grep -q '^FAIL BOOT_ALLOW_FAKE is set' "$W/boot2/results.txt" && ! grep -q '^PASS nvrm-info used the rm backend' "$W/boot2/results.txt"; rc=$?
+expect_rc "boot script: the fake backend is a FAIL and never a PASS for rm" $rc 0
+printf '#!/bin/sh\necho "Id Refs Address Size Name"\necho " 1 5 0x0 0x0 linux64.ko"\n' >"$W/kldstub.sh"
+BOOT_KLDSTAT="sh $W/kldstub.sh" BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boot3" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q '^FAIL a linux or linux64 kmod is loaded' "$W/boot3/results.txt"; rc=$?
+expect_rc "boot script: a loaded linux kmod is a FAIL" $rc 0
+# without BOOT_ALLOW_FAKE the stub is ignored: the record shows the real kldstat
+mkdir -p "$W/boot4"
+printf '#!/bin/sh\necho " 1 5 0x0 0x0 STUBMARK.ko"\n' >"$W/kldstub2.sh"
+BOOT_KLDSTAT="sh $W/kldstub2.sh" sh "$T/boot_nvrm_info.sh" "$W/boot4" "$INFO" >/dev/null 2>&1
+! grep -q STUBMARK "$W/boot4/kldstat.txt"; rc=$?
+expect_rc "boot script: BOOT_KLDSTAT is ignored unless BOOT_ALLOW_FAKE is set" $rc 0
+grep -q '^PASS nvrm-info was built for the SOURCES ogkm_tag' "$W/boot/results.txt"; rc=$?
+expect_rc "boot script: the built-for version is checked against SOURCES" $rc 0
+[ -s "$W/boot4/schema.json" ]; rc=$?
+expect_rc "boot script: with no schema argument it takes the schema nvrm-info prints" $rc 0
+
 # ---- core lint and its plant --------------------------------------------
 sh "$T/lint_core.sh" "$L" 2>"$W/lint.err"; rc=$?
 expect_rc "core and build files name no chip and no Linux layer" $rc 0
@@ -432,10 +474,29 @@ for code in $(grep -oE 'NVRM_E_[A-Z]+' "$L/include/nvrm/nvrm.h" | sort -u | grep
 	grep -q "$code" "$L/man/nvrm.3"; rc=$?
 	expect_rc "nvrm(3) documents $code" $rc 0
 done
+for r in not_queried rm_control_failed rm_not_supported os_not_reported family_unknown family_has_no_class input_unavailable no_numa_node backend_does_not_provide class_absent os_call_failed value_unusable; do
+	grep -q "$r" "$L/man/nvrm.7"; rc=$?
+	expect_rc "nvrm(7) documents reason $r" $rc 0
+done
 for cap in dmabuf_export ats self_hosted display_enabled soc coherent_gpu_memory os_device_wc_active; do
 	grep -q "$cap" "$L/man/nvrm.7"; rc=$?
 	expect_rc "nvrm(7) documents capability $cap" $rc 0
 done
+for f in NVRM_ENUM_ALLOW_ALLOC_MAP; do
+	grep -qi "$f" "$L/man/nvrm.3" && grep -qi "$f" "$L/man/nvrm.7"; rc=$?
+	expect_rc "nvrm(3) and nvrm(7) document $f" $rc 0
+done
+grep -qi "zero-initialize" "$L/man/nvrm.3"; rc=$?
+expect_rc "nvrm(3) tells callers to zero-initialize the options" $rc 0
+sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$L/man/nvrm.3" | grep -oE '^\.Fn nvrm_[a-z_0-9]+' | awk '{print $2}' | sort -u >"$W/man-fn.txt"
+grep -oE '^\.Nm nvrm_[a-z_0-9]+' "$L/man/nvrm.3" | awk '{print $2}' | sort -u >"$W/man-nm.txt"
+sed -n '/^NVRM_FUNCS=/,/^\.for/p' "$L/Makefile" | tr -d '\\' | tr ' \t' '\n\n' | grep '^nvrm_' | sort -u >"$W/mk-funcs.txt"
+cmp -s "$W/exported.txt" "$W/man-fn.txt"; rc=$?
+expect_rc "nvrm(3) SYNOPSIS has every exported function" $rc 0
+cmp -s "$W/exported.txt" "$W/man-nm.txt"; rc=$?
+expect_rc "nvrm(3) NAME has every exported function" $rc 0
+cmp -s "$W/exported.txt" "$W/mk-funcs.txt"; rc=$?
+expect_rc "the Makefile man links cover every exported function" $rc 0
 grep -q 'nvrm_enumerate' "$L/man/nvrm.3" && grep -q 'nvrm_json_schema' "$L/man/nvrm.3" && grep -q -- '--jsonl' "$L/nvrm-info/nvrm-info.8"
 rc=$?
 expect_rc "man pages cover the calls and every nvrm-info option" $rc 0

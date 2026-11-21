@@ -85,7 +85,7 @@ typedef struct nvrm_backend_ops {
 	int	(*gpu_classes)(nvrm_gpu *gpu, uint32_t *list, unsigned max,
 		    unsigned *n);
 	/* Limit the descriptors for Capsicum.  Returns enum nvrm_error. */
-	int	(*limit)(nvrm_backend *be, int query_only);
+	int	(*limit)(nvrm_backend *be, int allow_alloc_map);
 } nvrm_backend_ops;
 
 /* Registry. */

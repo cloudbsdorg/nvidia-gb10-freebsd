@@ -6,14 +6,26 @@
 .Sh NAME
 .Nm nvrm_enumerate ,
 .Nm nvrm_close ,
+.Nm nvrm_backend_name ,
+.Nm nvrm_rm_running_version ,
 .Nm nvrm_device_count ,
 .Nm nvrm_device_get ,
 .Nm nvrm_device_info_get ,
 .Nm nvrm_device_refresh ,
-.Nm nvrm_json_document ,
-.Nm nvrm_json_schema ,
+.Nm nvrm_strerror ,
+.Nm nvrm_error_id ,
+.Nm nvrm_reason_id ,
+.Nm nvrm_reason_text ,
+.Nm nvrm_source_name ,
+.Nm nvrm_cap_name ,
 .Nm nvrm_info_nfields ,
-.Nm nvrm_info_field
+.Nm nvrm_info_field ,
+.Nm nvrm_json_document ,
+.Nm nvrm_json_header ,
+.Nm nvrm_json_device ,
+.Nm nvrm_json_end ,
+.Nm nvrm_json_error ,
+.Nm nvrm_json_schema
 .Nd NVIDIA Resource Manager device discovery
 .Sh LIBRARY
 libnvrm
@@ -39,6 +51,30 @@ libnvrm
 .Fn nvrm_info_nfields void
 .Ft const nvrm_field *
 .Fn nvrm_info_field "unsigned index"
+.Ft const char *
+.Fn nvrm_backend_name "const nvrm_ctx *ctx"
+.Ft const nvrm_str *
+.Fn nvrm_rm_running_version "const nvrm_ctx *ctx"
+.Ft const char *
+.Fn nvrm_strerror "int error"
+.Ft const char *
+.Fn nvrm_error_id "int error"
+.Ft const char *
+.Fn nvrm_reason_id "int reason"
+.Ft const char *
+.Fn nvrm_reason_text "int reason"
+.Ft const char *
+.Fn nvrm_source_name "int source"
+.Ft const char *
+.Fn nvrm_cap_name "unsigned index"
+.Ft int
+.Fn nvrm_json_header "const nvrm_ctx *ctx" "FILE *fp"
+.Ft int
+.Fn nvrm_json_device "const nvrm_device *dev" "FILE *fp"
+.Ft int
+.Fn nvrm_json_end "unsigned count" "FILE *fp"
+.Ft int
+.Fn nvrm_json_error "const char *code" "const char *message" "FILE *fp"
 .Sh DESCRIPTION
 The
 .Nm libnvrm
@@ -85,6 +121,26 @@ if not
 .Dv NULL ,
 holds one line saying why.
 .Pp
+.Va opts->flags
+selects privileges.
+Zero-initialize the structure
+.Pq Li "nvrm_enum_opts o = { 0 };" :
+with no flag set, or with
+.Fa opts
+.Dv NULL ,
+the descriptors keep only the RM control and free escapes and no mapping
+right, which is all that reading device information needs.
+A caller that will allocate RM objects or map memory after
+.Xr cap_enter 2
+sets
+.Dv NVRM_ENUM_ALLOW_ALLOC_MAP
+before the limit is applied: Capsicum rights can only be narrowed, never
+widened, so they cannot be asked for later.
+A flag bit the library does not know makes
+.Fn nvrm_enumerate
+fail with
+.Dv NVRM_E_INVAL .
+.Pp
 .Fn nvrm_close
 releases everything, including the RM objects.
 .Pp
@@ -129,6 +185,23 @@ describe the members of
 the text view of
 .Xr nvrm-info 8
 all walk this one table.
+.Pp
+.Fn nvrm_backend_name
+names the backend in use and
+.Fn nvrm_rm_running_version
+returns the version of the running kernel module, or why it is unknown.
+.Fn nvrm_strerror
+and
+.Fn nvrm_error_id
+give text and a stable identifier for an error code;
+.Fn nvrm_reason_id
+and
+.Fn nvrm_reason_text
+for a reason a value is unavailable;
+.Fn nvrm_source_name
+names the layer that supplied a value and
+.Fn nvrm_cap_name
+a capability flag by its stable index.
 .Pp
 .Fn nvrm_json_document
 writes the whole description as one JSON line, schema

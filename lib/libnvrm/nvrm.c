@@ -209,7 +209,7 @@ query_gpu_class(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	/* GPC, TPC and SM counts from the enabled-unit masks. */
 	r = ops->gpu_u64(g, NVRM_P_GPC_MASK, 0, &mask);
 	if (r == 0 && (mask >> NVRM_MAX_GPCS) != 0)
-		r = NVRM_R_RM_FAILED;	/* more GPCs than the TPC walk covers */
+		r = NVRM_R_VALUE_UNUSABLE; /* more GPCs than the TPC walk covers */
 	if (r != 0) {
 		unavail(&info->gpc_count, r, NVRM_S_RM);
 		unavail(&info->tpc_count, NVRM_R_INPUT_MISSING, NVRM_S_DERIVED);
@@ -294,7 +294,7 @@ static void
 family_class(nvrm_u64 *f, const nvrm_device_info *info, uint32_t cls)
 {
 	if (cls == 0)
-		unavail(f, NVRM_R_NO_FAMILY, NVRM_S_FAMILY);
+		unavail(f, NVRM_R_FAMILY_NO_CLASS, NVRM_S_FAMILY);
 	else if (!class_listed(&info->classes, cls))
 		unavail(f, NVRM_R_CLASS_ABSENT, NVRM_S_FAMILY);
 	else
@@ -315,7 +315,7 @@ nvrm_apply_family(nvrm_device_info *info, const nvrm_family *table,
 	else {
 		fam = nvrm_family_match(table, n, info->classes.value,
 		    info->classes.count);
-		reason = NVRM_R_NO_FAMILY;
+		reason = NVRM_R_FAMILY_UNKNOWN;
 	}
 
 	info->family.source = NVRM_S_FAMILY;
@@ -453,9 +453,9 @@ choose_backend(const nvrm_enum_opts *opts, char *err, size_t errlen)
 		    "no such backend (known: rm, fake)" :
 		    "no usable backend: /dev/nvidiactl is missing, so the "
 		    "NVIDIA kernel module is not loaded (kldload nvidia); for "
-		    "tests without hardware use the fake backend (name it in "
-		    "the options, or set NVRM_BACKEND=fake in a process that "
-		    "is not set-user-ID)");
+		    "tests without hardware select the fake backend "
+		    "(opts->backend = \"fake\", or NVRM_BACKEND=fake unless "
+		    "the process is set-user-ID)");
 	return (ops);
 }
 
@@ -502,6 +502,11 @@ nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts, char *err,
 
 	*ctxp = NULL;
 	set_err(err, errlen, "");
+	if (opts != NULL && (opts->flags & ~NVRM_ENUM_KNOWN_FLAGS) != 0) {
+		set_err(err, errlen, "unknown enumeration flags: the options "
+		    "were built for another version of libnvrm");
+		return (NVRM_E_INVAL);
+	}
 	ops = choose_backend(opts, err, errlen);
 	if (ops == NULL)
 		return (NVRM_E_NOBACKEND);
@@ -519,7 +524,7 @@ nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts, char *err,
 	ops->running_version(ctx->be, &ctx->running);
 	rc = open_devices(ctx, err, errlen);
 	if (rc == NVRM_OK)
-		rc = ops->limit(ctx->be, opts != NULL && opts->query_only);
+		rc = ops->limit(ctx->be, opts != NULL && (opts->flags & NVRM_ENUM_ALLOW_ALLOC_MAP) != 0);
 	if (rc == NVRM_E_CAPSICUM)
 		set_err(err, errlen,
 		    "cannot limit the descriptors for capability mode");

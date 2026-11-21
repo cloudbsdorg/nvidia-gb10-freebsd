@@ -25,7 +25,7 @@ compute classes the GPU lists: family name, the channel, compute, 3D and copy
 classes and the page size candidates.
 A GPU the table does not know is still described; the family values are then
 unavailable with the reason
-.Li no_family_entry .
+.Li family_unknown .
 The library core names no chip.
 .It board decorators
 Entries keyed by PCI subsystem identifiers that only add or override options.
@@ -42,6 +42,35 @@ or
 .Li board .
 An unavailable value is never reported as a number.
 VRAM size 0 on a unified-memory part is available, with the value 0.
+.Ss Reasons
+The reason identifiers of an unavailable value:
+.Bl -tag -width "family_has_no_class" -compact
+.It Li not_queried
+the value was not queried.
+.It Li rm_control_failed
+the RM control returned an error.
+.It Li rm_not_supported
+the RM reports the control is not supported on this GPU.
+.It Li os_not_reported
+the OS layer does not report the value.
+.It Li family_unknown
+the GPU matched no row of the generation table (the family is unknown).
+.It Li family_has_no_class
+the family is known and has no class of this kind.
+.It Li input_unavailable
+a value this one is computed from is unavailable.
+.It Li no_numa_node
+the GPU is not attached to a NUMA node.
+.It Li backend_does_not_provide
+the backend does not provide the value.
+.It Li class_absent
+the GPU does not list the class.
+.It Li os_call_failed
+the system call to the driver failed.
+.It Li value_unusable
+the RM answered, but the answer failed a consistency check (it names another
+device, or exceeds what the library can count).
+.El
 .Ss Capabilities
 A fixed, indexed set of flags; the index is stable and new flags are only
 appended.
@@ -75,8 +104,20 @@ was built for; otherwise it refuses to run and says which version it found.
 Synthetic data for tests and for machines without a GPU.
 .El
 .Ss Capsicum
-The descriptors are limited to ioctl, mmap and event rights and to the RM
-escapes allocate, control and free.
+The default is least privilege.
+After enumeration the descriptors are limited to the ioctl and event rights
+and to the RM escapes control and free: enough to read device information and
+to release it, with no allocation and no mapping.
+A caller that will allocate RM objects or map memory after
+.Xr cap_enter 2
+sets
+.Dv NVRM_ENUM_ALLOW_ALLOC_MAP
+in the enumeration option flags; the descriptors then also keep the allocate escape
+and the mapping right.
+It must say so before the limit is applied, because Capsicum rights can only be
+narrowed, never widened.
+.Xr nvrm-info 8
+uses the default.
 After enumeration the process may call
 .Xr cap_enter 2
 and keep calling
@@ -84,7 +125,8 @@ and keep calling
 OS-layer values (sysctl, card list) are read before and kept.
 .Ss JSON
 Schema
-.Li nvrm-info/1 ;
+.Li nvrm-info/1 ,
+minor 1;
 documents name it in the
 .Li schema
 member.

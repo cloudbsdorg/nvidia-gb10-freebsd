@@ -60,7 +60,7 @@ static const struct { const char *id, *text; } reasons[NVRM_R__COUNT] = {
 	    "the RM reports the control is not supported on this GPU" },
 	[NVRM_R_OS_NOT_REPORTED] = { "os_not_reported",
 	    "the OS layer does not report this value" },
-	[NVRM_R_NO_FAMILY] = { "no_family_entry",
+	[NVRM_R_FAMILY_UNKNOWN] = { "family_unknown",
 	    "the GPU is not in the generation table" },
 	[NVRM_R_INPUT_MISSING] = { "input_unavailable",
 	    "a value this one is computed from is unavailable" },
@@ -72,6 +72,11 @@ static const struct { const char *id, *text; } reasons[NVRM_R__COUNT] = {
 	    "the GPU does not list the class" },
 	[NVRM_R_OS_CALL_FAILED] = { "os_call_failed",
 	    "the system call to the driver failed" },
+	[NVRM_R_VALUE_UNUSABLE] = { "value_unusable",
+	    "the RM answered, but the answer failed a consistency check (it "
+	    "names another device, or exceeds what the library can count)" },
+	[NVRM_R_FAMILY_NO_CLASS] = { "family_has_no_class",
+	    "the GPU family is known and has no class of this kind" },
 };
 
 const char *

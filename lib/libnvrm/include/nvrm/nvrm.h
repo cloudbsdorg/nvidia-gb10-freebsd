@@ -55,12 +55,14 @@ enum nvrm_reason {
 	NVRM_R_RM_FAILED,
 	NVRM_R_RM_UNSUPPORTED,
 	NVRM_R_OS_NOT_REPORTED,
-	NVRM_R_NO_FAMILY,
+	NVRM_R_FAMILY_UNKNOWN,	/* the GPU matched no generation table row */
 	NVRM_R_INPUT_MISSING,
 	NVRM_R_NO_NUMA,
 	NVRM_R_BACKEND_NONE,
 	NVRM_R_CLASS_ABSENT,
 	NVRM_R_OS_CALL_FAILED,	/* the system call to the driver failed */
+	NVRM_R_VALUE_UNUSABLE,	/* the RM answered; the library cannot verify it */
+	NVRM_R_FAMILY_NO_CLASS,	/* the family is known and has no class of this kind */
 	NVRM_R__COUNT
 };
 
@@ -142,10 +144,23 @@ typedef struct nvrm_field {
 typedef struct nvrm_ctx nvrm_ctx;
 typedef struct nvrm_device nvrm_device;
 
+#define NVRM_ENUM_ALLOW_ALLOC_MAP	0x2	/* bit 0 was a retired flag: refused */
+#define NVRM_ENUM_KNOWN_FLAGS		NVRM_ENUM_ALLOW_ALLOC_MAP
+
 typedef struct nvrm_enum_opts {
 	const char	*backend;	/* NULL: NVRM_BACKEND, else best probe */
-	int		query_only;	/* limit the descriptors to RM controls and
-					 * frees: no allocation, no mapping */
+	/*
+	 * Zero-initialize the structure: nvrm_enum_opts o = { 0 };.  With no
+	 * flag set, or with opts NULL, the descriptors keep only the RM control
+	 * and free escapes and no mapping right (least privilege), which is all
+	 * that reading device information needs.  A caller that will allocate
+	 * RM objects or map memory after cap_enter() must set
+	 * NVRM_ENUM_ALLOW_ALLOC_MAP before the limit is applied: Capsicum rights
+	 * can only be narrowed, so they cannot be asked for later.  A bit this
+	 * library does not know is refused with NVRM_E_INVAL, so a caller built
+	 * for an older meaning of the member cannot silently get other rights.
+	 */
+	unsigned	flags;
 } nvrm_enum_opts;
 
 __BEGIN_DECLS

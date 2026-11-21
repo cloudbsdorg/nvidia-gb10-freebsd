@@ -535,7 +535,7 @@ pci_info(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
 		return (NVRM_R_OS_NOT_REPORTED);
 	if ((b.pciDeviceId & 0xffff) != g->card.pci_info.vendor_id ||
 	    (b.pciDeviceId >> 16) != g->card.pci_info.device_id)
-		return (NVRM_R_RM_FAILED);
+		return (NVRM_R_VALUE_UNUSABLE);
 	if (p == NVRM_P_PCI_SUBSYSTEM_VENDOR)
 		*out = b.pciSubSystemId & 0xffff;
 	else if (p == NVRM_P_PCI_SUBSYSTEM_DEVICE)
@@ -764,16 +764,16 @@ rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 /* Descriptors: rights and the escape allow list.  After this the process may
  * enter capability mode and keep querying through the same descriptor. */
 static int
-rm_limit(nvrm_backend *be, int query_only)
+rm_limit(nvrm_backend *be, int allow_alloc_map)
 {
 	static const unsigned long full[] = {
 		IOC_RM_ALLOC, IOC_RM_CONTROL, IOC_RM_FREE
 	};
 	static const unsigned long query[] = { IOC_RM_CONTROL, IOC_RM_FREE };
 
-	/* A query-only user (nvrm-info) never allocates or maps: it keeps
-	 * only the controls and the frees, and no mapping right. */
-	if (query_only)
+	/* The default keeps only the controls and the frees and no mapping
+	 * right; allocation and mapping need the caller's explicit request. */
+	if (!allow_alloc_map)
 		return (nvrm_cap_limit_fd(be->fd, query, 2, 0));
 	return (nvrm_cap_limit_fd(be->fd, full, 3, 1));
 }
