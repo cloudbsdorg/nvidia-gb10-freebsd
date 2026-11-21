@@ -68,7 +68,12 @@ mutant forget-does-nothing 's/nvco_remove_owner(&nvco_table, nvffp);/(void)nvffp
 mutant vnode-check-off 's/vp->v_type != VCHR/0/'
 mutant filetype-check-off 's/fp->f_type != DTYPE_VNODE/0/'
 mutant dtor-check-off 's/p->cdpd_dtr != nvidia_ctl_dtor/0/'
-mutant free-not-counted 's/c->counted = nvco_begin_free(&nvco_table, c->free_h);/c->counted = 0;/'
+mutant stranger-free-reaches-rm 's/if (!nvco_free_permitted(&nvco_table, who, c->free_h)) {/if (0 \&\& !nvco_free_permitted(\&nvco_table, who, c->free_h)) {/'
+mutant alloc-mark-not-taken 's/c->mark = nvco_alloc_mark(&nvco_table);/c->mark = ~(uint64_t)0;/'
+mutant record-ignores-the-mark 's/nvco_after_ioctl_marked(&nvco_table, who, nr, size, args, c->mark)/nvco_after_ioctl_marked(\&nvco_table, who, nr, size, args, nvco_alloc_mark(\&nvco_table))/'
+mutant free-success-not-logged 's/nvco_free_succeeded(nr, size, args, status));/0);/'
+mutant junk-frees-logged 's/nvco_free_succeeded(nr, size, args, status));/1);/'
+mutant free-not-counted 's/c->counted = nvco_begin_free(&nvco_table, c->free_h, &c->unlisted);/c->counted = 0;/'
 mutant no-own-file-reference 's/if (!fhold(fp)) {/if (0) {/'
 mutant end-free-skipped 's/^    if (c->free_ok)$/    if (0)/'
 mutant failed-ioctl-recorded 's/^    if (status == 0)$/    if (status == 0 || 1)/'
@@ -84,7 +89,7 @@ pins_ok() {	# pins_ok <patch file>: prints problems
 	pin_strip "$T/pa.c" > "$T/pa.stripped"
 	_t=$(cat "$T/pa.stripped")
 	pin_dead "$_t" || echo "the patch has a disabled-code form (if (0, 0 &&, || 1)"
-	pin_has "$_t" 'nvco_error = nvco_ioctl_begin\(&nvco_ctx, nr, size, args\);' || echo "no begin call in the handler"
+	pin_has "$_t" 'nvco_error = nvco_ioctl_begin\(&nvco_ctx, nvco_who, nr, size, args\);' || echo "no begin call in the handler"
 	pin_has "$_t" '^    if \(nvco_error != 0\) \{' || echo "the begin error is not acted on"
 	pin_has "$_t" '^        goto nvco_out;' || echo "the begin error does not skip the ioctl (goto nvco_out)"
 	pin_has "$_t" '^nvco_out:' || echo "no nvco_out label before the copy-out and free"
@@ -128,7 +133,7 @@ gmutant() {	# gmutant <name> <sed on the glue>: the glue pins must fail
 gmutant shared-rate-limiter 's/ppsratecheck(&nvco_rel_lasttime, &nvco_rel_curpps, 1)/ppsratecheck(\&nvco_rec_lasttime, \&nvco_rec_curpps, 1)/'
 gmutant wait-commented 's|^        wait_error = sx_sleep(.*|        wait_error = 0; /* sx_sleep(\&nvco_table, \&nvco_sx, PCATCH, "nvcobusy", 0); */|'
 pmutant who-for-every-file 's|^+    const void \*nvco_who = (nv->flags \& NV_FLAG_CONTROL) != 0 ? nvffp : NULL;|+    const void *nvco_who = nvffp;|'
-pmutant begin-commented 's|^+    int nvco_error = nvco_ioctl_begin(&nvco_ctx, nr, size, args);|+    int nvco_error = 0; /* nvco_error = nvco_ioctl_begin(\&nvco_ctx, nr, size, args); */|'
+pmutant begin-commented 's|^+    int nvco_error = nvco_ioctl_begin(&nvco_ctx, nvco_who, nr, size, args);|+    int nvco_error = 0; /* nvco_error = nvco_ioctl_begin(\&nvco_ctx, nvco_who, nr, size, args); */|'
 pmutant begin-disabled 's|^+    if (nvco_error != 0) {|+    if (0 \&\& nvco_error != 0) {|'
 pmutant begin-error-not-skipping 's|^+        goto nvco_out;|+        (void)0;|'
 pmutant end-after-unlock 's|^+    nvco_ioctl_end(&nvco_ctx, nvco_who, status, nr, size, args);.*|+    sx_xunlock(\&nvffp->fops_sx);\

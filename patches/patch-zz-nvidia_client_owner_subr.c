@@ -22,10 +22,10 @@
 +     */
 +    struct nvco_ioctl_ctx nvco_ctx;
 +    const void *nvco_who = (nv->flags & NV_FLAG_CONTROL) != 0 ? nvffp : NULL;
-+    int nvco_error = nvco_ioctl_begin(&nvco_ctx, nr, size, args);
++    int nvco_error = nvco_ioctl_begin(&nvco_ctx, nvco_who, nr, size, args);
 +
 +    if (nvco_error != 0) {
-+        status = nvco_error;    /* EINTR, or ERESTART for a restartable signal: nothing was freed */
++        status = nvco_error;    /* EPERM (not the owner), EINTR or ERESTART: nothing was freed */
 +        goto nvco_out;
      }
  
