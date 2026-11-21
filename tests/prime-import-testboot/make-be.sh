@@ -6,7 +6,7 @@
 # buffer import (Track #2228, docs/PRIME-IMPORT.md, section 5).
 #
 # Usage: make-be.sh -b BASE_BE [-D YYYYMMDD] [-n SEQ] [-m MODDIR] [-u UVM_KO]
-#                   [--dry-run] [--activate]
+#                   [-V COMMIT] [--dry-run] [--activate]
 #   -b BASE_BE  the boot environment to clone (required; it must already load
 #               amdgpu and the nvidia stack from /boot/modules.nvtest through
 #               kld_list, as the earlier test BEs do)
@@ -16,6 +16,11 @@
 #               nvidia-drm.ko (default $GB10_WORK/build/tree, each in its own
 #               subdirectory, as scripts/build-shim.sh leaves them)
 #   -u UVM_KO   a nvidia-uvm.ko to put in the BE for the CUDA smoke row
+#   -V COMMIT   the commit this kit was extracted from (hex).  A kit that boots is built from
+#               `git archive COMMIT` extracted into a fresh directory, never from a live work
+#               tree: inside a git work tree this script refuses to run when the tree has
+#               uncommitted changes (and records HEAD); outside one it refuses to run without -V.
+#               The commit is recorded in the BE and in the run's results (row kit-version).
 #   --dry-run   print every command and change nothing
 #   --activate  finish with `bectl activate -t`.  Without it the BE is left
 #               unactivated: arming a boot is the orchestrator's decision.
@@ -40,6 +45,7 @@ DATE=$(date -u +%Y%m%d)
 SEQ=1
 MODDIR=$WORK/build/tree
 UVMKO=
+COMMIT=
 DRY=0
 ACTIVATE=0
 
@@ -59,6 +65,7 @@ while [ $# -gt 0 ]; do
 	-n) need "$1" "$#"; SEQ=$2; shift 2 ;;
 	-m) need "$1" "$#"; MODDIR=$2; shift 2 ;;
 	-u) need "$1" "$#"; UVMKO=$2; shift 2 ;;
+	-V) need "$1" "$#"; COMMIT=$2; shift 2 ;;
 	--dry-run) DRY=1; shift ;;
 	--activate) ACTIVATE=1; shift ;;
 	-h | --help) usage ;;
@@ -67,6 +74,23 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$BASE" ] || { echo "make-be.sh: -b BASE_BE is required" >&2; usage; }
+case $COMMIT in
+'') ;;
+*[!0-9a-fA-F]*) echo "make-be.sh: -V takes a hex commit id" >&2; exit 2 ;;
+esac
+# the kit must come from a committed state: a clean git work tree (its HEAD), or an extracted archive named by -V
+if [ "${PRIME_ALLOW_DIRTY:-0}" = 1 ]; then
+	[ -n "$COMMIT" ] || COMMIT=unknown-dirty-allowed
+elif git -C "$KITDIR" rev-parse --git-dir > /dev/null 2>&1; then
+	if [ -n "$(git -C "$KITDIR" status --porcelain 2>/dev/null)" ]; then
+		echo "make-be.sh: the work tree of this kit has uncommitted changes; build from git archive of the reviewed commit extracted into a fresh directory (and name it with -V)" >&2
+		exit 2
+	fi
+	[ -n "$COMMIT" ] || COMMIT=$(git -C "$KITDIR" rev-parse HEAD)
+elif [ -z "$COMMIT" ]; then
+	echo "make-be.sh: this kit is not in a git work tree; name the commit it was extracted from with -V" >&2
+	exit 2
+fi
 case $DATE in
 [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
 *) echo "make-be.sh: -D must be YYYYMMDD" >&2; exit 2 ;;
@@ -99,7 +123,32 @@ PROBE=$WORK/tmp/prime_import_probe.$$
 run cc -o "$PROBE" "$KITDIR/prime_import_probe.c" -I/usr/local/include \
     -I/usr/local/include/libdrm -L/usr/local/lib -ldrm
 
+# Any failure after the clone exists removes the half-built boot environment
+# (unmounted first): a failed run must not leave an unfinished BE that looks like a built one.
+BE_MADE=0
+BE_DONE=0
+cleanup() {
+	_rc=$?
+	trap '' INT TERM HUP
+	[ "$DRY" -eq 0 ] && rm -f "$PROBE"
+	if [ "$BE_MADE" -eq 1 ] && [ "$BE_DONE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+		echo "make-be.sh: failed (exit $_rc); removing the half-built boot environment $BE" >&2
+		"$BECTL" umount -f "$BE" > /dev/null 2>&1 || true
+		if "$BECTL" destroy -F "$BE" > /dev/null 2>&1; then
+			echo "make-be.sh: the half-built boot environment $BE is removed" >&2
+		else
+			echo "make-be.sh: COULD NOT remove the half-built boot environment $BE: remove it by hand with bectl(8) before using the name again" >&2
+		fi
+	fi
+	exit "$_rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 run "$BECTL" create -e "$BASE" "$BE"
+BE_MADE=1
 run mkdir -p "$MNT"
 run "$BECTL" mount "$BE" "$MNT"
 
@@ -111,27 +160,41 @@ run "$BECTL" mount "$BE" "$MNT"
 # the files and directories of the clone that can arm a kit (relative to its root)
 RC_FILES="etc/rc.conf etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local"
 RC_DIRS="etc/rc.conf.d usr/local/etc/rc.conf.d"
+
+# turn_off FILE: turn off every other kit in one file of the clone.  A missing file is nothing to do;
+# a symbolic link, or a path that resolves outside the clone, is never written through.
+turn_off() {
+	_f=$1
+	[ -f "$_f" ] || return 0
+	if [ -L "$_f" ]; then echo "make-be.sh: $_f is a symbolic link; it is not rewritten (it could point outside the clone)" >&2; return 0; fi
+	case $(realpath "$_f" 2>/dev/null) in "$(realpath "$MNT")"/*) ;; *) echo "make-be.sh: $_f resolves outside the clone (a symbolic link in its path); it is not rewritten" >&2; return 0 ;; esac
+	grep -Eq '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=' "$_f" || return 0
+	sed -E -e '/^[[:space:]]*prime_import_testboot_enable=/b' \
+	    -e 's/^([[:space:]]*[A-Za-z0-9_]+_testboot_enable)=.*/\1="NO"/' "$_f" > "$_f.prime-new" \
+	    || { rm -f "$_f.prime-new"; echo "make-be.sh: cannot rewrite $_f" >&2; exit 1; }
+	if cmp -s "$_f" "$_f.prime-new"; then
+		rm -f "$_f.prime-new"
+	else
+		cat "$_f.prime-new" > "$_f" && rm -f "$_f.prime-new" \
+		    || { echo "make-be.sh: cannot write $_f" >&2; exit 1; }
+		echo "turned off the other test-boot kits in $_f"
+	fi
+}
+
 if [ "$DRY" -eq 1 ]; then
 	echo "+ turn off every other *_testboot_enable in the clone's $RC_FILES and in every regular file under $RC_DIRS"
 else
-	_list=
-	for _n in $RC_FILES; do _list="$_list $MNT/$_n"; done
-	for _n in $RC_DIRS; do _list="$_list $(find "$MNT/$_n" -type f 2>/dev/null)"; done
-	for _f in $_list; do
-		[ -f "$_f" ] || continue
-		if [ -L "$_f" ]; then echo "make-be.sh: $_f is a symbolic link; it is not rewritten (it could point outside the clone)" >&2; continue; fi
-		case $(realpath "$_f" 2>/dev/null) in "$(realpath "$MNT")"/*) ;; *) echo "make-be.sh: $_f resolves outside the clone (a symbolic link in its path); it is not rewritten" >&2; continue ;; esac
-		grep -Eq '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=' "$_f" || continue
-		sed -E -e '/^[[:space:]]*prime_import_testboot_enable=/b' \
-		    -e 's/^([[:space:]]*[A-Za-z0-9_]+_testboot_enable)=.*/\1="NO"/' "$_f" > "$_f.prime-new" \
-		    || { rm -f "$_f.prime-new"; echo "make-be.sh: cannot rewrite $_f; the BE is left mounted at $MNT: fix the file by hand or remove the boot environment $BE and start again" >&2; exit 1; }
-		if cmp -s "$_f" "$_f.prime-new"; then
-			rm -f "$_f.prime-new"
-		else
-			cat "$_f.prime-new" > "$_f" && rm -f "$_f.prime-new" \
-			    || { echo "make-be.sh: cannot write $_f; the BE is left mounted at $MNT: fix the file by hand or remove the boot environment $BE and start again" >&2; exit 1; }
-			echo "turned off the other test-boot kits in $_f"
-		fi
+	for _n in $RC_FILES; do
+		turn_off "$MNT/$_n"
+	done
+	for _n in $RC_DIRS; do
+		[ -d "$MNT/$_n" ] || continue
+		find "$MNT/$_n" -type f > "$WORK/tmp/make-be-files.$$" 2>/dev/null || :
+		# one file name per line (a name with a newline in it is not supported)
+		while IFS= read -r _g; do
+			turn_off "$_g"
+		done < "$WORK/tmp/make-be-files.$$"
+		rm -f "$WORK/tmp/make-be-files.$$"
 	done
 fi
 run mkdir -p "$MNT/boot/modules.nvtest"
@@ -145,7 +208,7 @@ for m in $modules; do
 		want=$(sha256 -q "$MODDIR/$m")
 		got=$(sha256 -q "$MNT/boot/modules.nvtest/$b")
 		if [ "$want" != "$got" ]; then
-			echo "make-be.sh: $b differs after the copy ($want, $got); BE left mounted at $MNT" >&2
+			echo "make-be.sh: $b differs after the copy ($want, $got); the half-built BE is removed" >&2
 			exit 1
 		fi
 		echo "$b $got"
@@ -166,13 +229,15 @@ if [ "$DRY" -eq 1 ]; then
 else
 	mkdir -p "$MNT/etc/rc.conf.d"
 	printf 'prime_import_testboot_enable="YES"\n' > "$MNT/etc/rc.conf.d/prime_import_testboot"
+	printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/prime_import_testboot.version"
 fi
 
 run "$BECTL" umount "$BE"
+BE_DONE=1
 run rm -f "$PROBE"
 if [ "$ACTIVATE" -eq 1 ]; then
 	run "$BECTL" activate -t "$BE"
-	echo "armed: $BE boots once; results land in $(sed -n 's/^LOGROOT=//p' "$KITDIR/prime_import_testboot")/prime-import-<stamp>/"
+	echo "armed: $BE boots once; results land in $(sed -n 's/^: "${prime_import_testboot_logroot:=\(.*\)}"$/\1/p' "$KITDIR/prime_import_testboot")/prime-import-<stamp>/"
 else
 	echo "built: $BE (not armed; the orchestrator arms it with a one-shot boot environment activation)"
 fi

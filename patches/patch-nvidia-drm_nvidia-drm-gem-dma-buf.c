@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.c.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.c
-@@ -37,6 +37,130 @@
+@@ -37,6 +37,136 @@
  
  #include "linux/dma-buf.h"
  
@@ -55,7 +55,11 @@
 + * of this module runs after the count reaches zero.
 + */
 +static struct gb10_pi_gate __nv_drm_pi_gate;
-+/* a spin lock: the sections are a few instructions, and the RM may call the hold from a context that must not sleep */
++/*
++ * A LinuxKPI spin_lock, which is a default mutex with the thread pinned: the sections are a
++ * few instructions and nothing sleeps inside.  Not mutex_lock (an sx lock that may sleep):
++ * the RM calls the hold from its import path, whose context this module does not know.
++ */
 +static DEFINE_SPINLOCK(__nv_drm_pi_gate_lock);
 +
 +int nv_drm_pi_live_holds(void)
@@ -64,12 +68,13 @@
 +}
 +
 +/* MOD_QUIESCE and MOD_UNLOAD: EBUSY while an export is held, else close the gate. */
-+int nv_drm_pi_quiesce(void)
++int nv_drm_pi_quiesce(int *held)
 +{
 +    int rc;
 +
 +    spin_lock(&__nv_drm_pi_gate_lock);
 +    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);
++    *held = gb10_pi_gate_live(&__nv_drm_pi_gate);  /* the reason, read with the decision */
 +    spin_unlock(&__nv_drm_pi_gate_lock);
 +
 +    return rc != 0 ? EBUSY : 0;
@@ -77,8 +82,9 @@
 +
 +/*
 + * The teardown kept the devices because an export was held (its second
-+ * line of defence): from now on the module must never unload, a later plain
-+ * kldunload included, or the kept devices would call into freed text.
++ * line of defence, reached only if the guard module was bypassed): the gate
++ * is closed for the rest of that unload, which nothing stops any more, so
++ * this is a defensive assertion with a log line, not a protection.
 + */
 +void nv_drm_pi_keep(void)
 +{
@@ -131,7 +137,7 @@
  static inline
  void __nv_drm_gem_dma_buf_free(struct nv_drm_gem_object *nv_gem)
  {
-@@ -50,6 +174,12 @@
+@@ -50,6 +180,12 @@
  
      drm_prime_gem_destroy(&nv_gem->base, nv_dma_buf->sgt);
  
@@ -144,7 +150,7 @@
      nv_drm_free(nv_dma_buf);
  }
  
-@@ -80,6 +210,16 @@
+@@ -80,6 +216,16 @@
       * through the same linuxkpi bits it seems (probably so it can be used
       * elsewhere), so dma_buf->file really is a native FreeBSD struct file...
       */
@@ -161,7 +167,7 @@
      if (!nv_gem->base.filp->f_op->mmap)
          return -EINVAL;
  
-@@ -126,6 +266,150 @@
+@@ -126,6 +272,150 @@
      return ret;
  }
  
@@ -312,7 +318,7 @@
  const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops = {
      .free = __nv_drm_gem_dma_buf_free,
      .create_mmap_offset = __nv_drm_gem_dma_buf_create_mmap_offset,
-@@ -144,11 +428,24 @@
+@@ -144,11 +434,24 @@
  
      if ((nv_dma_buf =
              nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
@@ -340,7 +346,7 @@
  
      pMemory = NULL;
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-@@ -157,6 +454,35 @@
+@@ -157,6 +460,35 @@
                                                    dma_buf->size - 1);
      }
  
@@ -376,7 +382,7 @@
      nv_drm_gem_object_init(nv_dev, &nv_dma_buf->base,
                             &__nv_gem_dma_buf_ops, dma_buf->size, pMemory);
  
-@@ -196,17 +522,46 @@
+@@ -196,17 +528,46 @@
      }
  
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
@@ -428,7 +434,7 @@
          }
      }
  
-@@ -220,8 +575,8 @@
+@@ -220,8 +581,8 @@
      }
  
      if (!nvKms->exportMemory(nv_dev->pDevice,

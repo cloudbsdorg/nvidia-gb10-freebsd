@@ -92,10 +92,16 @@ trap 'rm -rf -- "$TMPD"' EXIT INT TERM
 # in list order and a refused unload returns the error whatever the flags).  The sysinits load
 # in (subsystem, order) order; a tie is not specified, so the model takes the worst case for the guard (it loads first).  This model is the two functions
 # above in 40 lines; its input is the real order of the guard, read from the patched source.
+SIDATA=$repo/tests/data/si_values.txt
+kval() { awk -v n="$1" '$1 == n { print $2; exit }' "$SIDATA"; }
+# the vendored values agree with the kernel source when one is at hand (SYSDIR, or the default tree)
 SYSDIR=${SYSDIR:-$HOME/src/csrc-90dcf68/sys}
-KERNELH=$SYSDIR/sys/kernel.h
-[ -f "$KERNELH" ] || { echo "FAIL: no $KERNELH (set SYSDIR to the kernel source the modules are built against)"; exit 1; }
-kval() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p" "$KERNELH" | head -1; }
+if [ -f "$SYSDIR/sys/kernel.h" ]; then
+	_drift=$(sed -nE 's/^[[:space:]]*(SI_(SUB|ORDER)_[A-Z_0-9]*)[[:space:]]*=[[:space:]]*(0x[0-9a-fA-F]*).*/\1 \3/p' "$SYSDIR/sys/kernel.h" | awk '!seen[$1]++' | while read -r _n _v; do [ "$(kval "$_n")" = "$_v" ] || echo "$_n"; done)
+	[ -z "$_drift" ] || { echo "FAIL: tests/data/si_values.txt differs from $SYSDIR/sys/kernel.h: $_drift"; exit 1; }
+else
+	echo "NOTE: no $SYSDIR/sys/kernel.h: the vendored sysinit values in tests/data/si_values.txt are not compared with a kernel source here"
+fi
 cat > "$TMPD/ordermodel.c" <<'MODEL'
 #include <stdio.h>
 #include <stdlib.h>
@@ -320,6 +326,30 @@ check_tree() {
 		grep -q '"gb10_pageimport.h"' "$_t/$_f" || { echo "O4: $_f does not include the core header"; return; }
 	done
 	grep -q 'gb10_pageimport.h' "$_t/$DMABUF" "$_t/$DMABUFH" || { echo "O4: nvidia-drm does not include the core header"; return; }
+	# D6 behaviour: the REAL functions of the patched sources, compiled against the core with stubs
+	# (tests/data/nvidia_drm_glue_harness.c): the spin lock is a flag the gate decisions assert, the GEM
+	# reference, the device destroy and the pdev detach are counters.
+	_g="$TMPD/glue"; rm -rf "$_g"; mkdir -p "$_g"
+	strip_comments "$_t/$DMABUF" "$_g/dma-nocomment.c"
+	grep -E '^static (struct gb10_pi_gate __nv_drm_pi_gate;|DEFINE_SPINLOCK\(__nv_drm_pi_gate_lock\);)' "$_g/dma-nocomment.c" > "$_g/glue_decls.h"
+	[ "$(wc -l < "$_g/glue_decls.h" | tr -d ' ')" = 2 ] || { echo "D6: the gate and its lock are not declared as the harness expects"; return; }
+	: > "$_g/glue_funcs.h"
+	# the list is "<file> <function>[|<return type line>]": the extractor starts at the line that holds the
+	# function name, so a type written on the line before it is given after the bar
+	for _fn in "$DMABUF nv_drm_pi_live_holds" "$DMABUF nv_drm_pi_quiesce" "$DMABUF nv_drm_pi_keep" "$DMABUF __nv_drm_gem_dma_buf_pi_hold" "$DMABUF __nv_drm_gem_dma_buf_pi_release" "$LKPI nv_drm_pi_guard_handler|static int" "$LKPI nv_bsd_drm_exit" "$DRV nv_drm_remove_devices"; do
+		_pre=${_fn#*|}; [ "$_pre" = "$_fn" ] && _pre=
+		_fn=${_fn%%|*}
+		_file=${_fn% *}; _name=${_fn#* }
+		body "$_t/$_file" "$_name" "$_g/one.c" || { echo "D6: the harness cannot extract $_name"; return; }
+		if head -1 "$_g/one.c" | grep -Eq "^[[:space:]]*$_name[[:space:]]*\("; then printf '%s\n' "$_pre" >> "$_g/glue_funcs.h"; fi
+		cat "$_g/one.c" >> "$_g/glue_funcs.h"
+		echo >> "$_g/glue_funcs.h"
+	done
+	cc -std=gnu11 -w -I"$repo/src/gb10-pageimport" -I"$_g" -o "$_g/harness" "$repo/tests/data/nvidia_drm_glue_harness.c" 2> "$_g/cc.err" || { echo "D6: the glue harness does not compile against these sources: $(head -2 "$_g/cc.err" | tr '\n' ' ')"; return; }
+	"$_g/harness" > "$_g/out.txt" 2>&1
+	_gf=$(grep '^FAIL' "$_g/out.txt" | head -1)
+	[ -z "$_gf" ] || { echo "D6 behaviour: ${_gf#FAIL }"; return; }
+	grep -q '^glue ok' "$_g/out.txt" || { echo "D6: the glue harness did not finish: $(tail -1 "$_g/out.txt")"; return; }
 	# the exporter reference is held across the failure points: the caller creates the GEM object whatever the import returns
 	body "$_t/$DMABUF" nv_drm_gem_prime_import_sg_table "$TMPD/imp2.c" || { echo "D4: no import function"; return; }
 	_mid=$(awk '/__nv_drm_gem_dma_buf_import_pages\(/ { on = 1 } /nv_drm_gem_object_init\(/ { on = 0 } on' "$TMPD/imp2.c")
@@ -341,7 +371,9 @@ check_tree() {
 	awk '/if \(rc != 0\) \{/ { on = 1; next } on && /\}/ { exit } on { gsub(/[[:space:]]/, ""); print }' "$TMPD/h6s.c" | tr -d '\n' | grep -qx 'returnrc;' || { echo "D6: a refused hold does more than return (a reference taken for an export that was refused leaks)"; return; }
 	body "$_t/$DMABUF" nv_drm_pi_keep "$TMPD/k6.c" && grep -q 'spin_lock(' "$TMPD/k6.c" && grep -q 'gb10_pi_gate_keep(&__nv_drm_pi_gate)' "$TMPD/k6.c" || { echo "D6: no way to mark the devices as kept, so a later unload is not refused for good"; return; }
 	grep -q 'nv_drm_pi_live_holds' "$_t/$DMABUFH" && grep -q 'nv_drm_pi_quiesce' "$_t/$DMABUFH" || { echo "D6: the gate functions are not declared for the other files of nvidia-drm"; return; }
-	tr '\n' ' ' < "$_t/$LKPI" > "$TMPD/lkpi-flat.c"
+	strip_comments "$_t/$LKPI" "$TMPD/lkpi-nocomment.c"
+	tr '\n' ' ' < "$TMPD/lkpi-nocomment.c" > "$TMPD/lkpi-flat.c"
+	[ "$(grep -o 'DECLARE_MODULE(nvidia_drm_pi_guard,' "$TMPD/lkpi-flat.c" | wc -l | tr -d ' ')" = 1 ] || { echo "D6: the guard module is not declared exactly once outside comments"; return; }
 	# the unload order: a file's modules unload in the reverse of their load order, so the guard must LOAD after the driver module
 	_dm=$(grep -Eo 'DECLARE_MODULE\(nvidia_drm_pi_guard,[^)]*\)' "$TMPD/lkpi-flat.c" | head -1)
 	[ -n "$_dm" ] || { echo "D6: there is no second module that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
@@ -359,7 +391,7 @@ check_tree() {
 	_r=$("$TMPD/ordermodel" "$_gsubv" "$_gordv" "$_dsub" "$_dord" 0 1)
 	[ "$_r" = "rc=0 teardown=1" ] || { echo "D6: an unload with no export held does not run the teardown ($_r)"; return; }
 	body "$_t/$LKPI" nv_drm_pi_guard_handler "$TMPD/g6.c" || { echo "D6: no guard handler"; return; }
-	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
+	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(&held\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(&held\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
 	grep -q 'printf("nvidia_drm: unload refused' "$TMPD/g6.c" || { echo "D6: a refused unload is silent"; return; }
 	# the real teardown path on FreeBSD: nv_bsd_drm_exit -> nv_drm_exit -> nv_drm_remove_devices
 	body "$_t/$DRV" nv_drm_remove_devices "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove_devices"; return; }
@@ -404,6 +436,27 @@ if r=$(make_tree "$TMPD/good" 1) && [ -z "$r" ]; then
 else
 	bad "the patches do not apply: $r"
 fi
+# The order of the guard in the module file the kit stages (the built nvidia-drm.ko of this
+# GB10_WORK, when there is one): the sysinit words are read from the file, for both modules
+# it declares.  The unload order is the reverse of the load order, so the guard must have the
+# same subsystem and a strictly greater order than the driver module.
+check_ko_order() {
+	_ko=$WORK/build/tree/nvidia-drm/nvidia-drm.ko
+	[ -f "$_ko" ] || { echo SKIP; return; }
+	python3 -I "$repo/tests/ko_sysinit_order.py" "$_ko" > "$TMPD/ko-order.txt" 2> "$TMPD/ko-order.err" || { echo "the sysinit words of $_ko cannot be read: $(head -2 "$TMPD/ko-order.err" | tr '\n' ' ')"; return; }
+	_g=$(awk '$1 == "nvidia_drm_pi_guard" { print $2 " " $3 }' "$TMPD/ko-order.txt")
+	_d=$(awk '$1 == "nvidia_drm" { print $2 " " $3 }' "$TMPD/ko-order.txt")
+	[ -n "$_g" ] && [ -n "$_d" ] || { echo "the built nvidia-drm.ko does not declare both nvidia_drm and nvidia_drm_pi_guard ($(tr '\n' ';' < "$TMPD/ko-order.txt"))"; return; }
+	set -- $_g $_d
+	[ "$1" = "$3" ] || { echo "the guard and the driver module are in different subsystems in the built file ($_g, $_d)"; return; }
+	[ "$2" -gt "$4" ] || { echo "the guard (order $2) does not load after the driver module (order $4) in the built file: it would unload last"; return; }
+}
+r=$(check_ko_order)
+case $r in
+SKIP) echo "SKIP: no built nvidia-drm.ko under $WORK/build/tree: the unload order of the built file is not checked here (the boot kit checks it with kldstat -v)" ;;
+'') ok "the built nvidia-drm.ko declares the guard in the same subsystem and with a greater order than the driver module (it loads last and unloads first)" ;;
+*) bad "$r" ;;
+esac
 r=$(check_script)
 [ -z "$r" ] && ok "prepare-tree.sh installs the core header" || bad "$r"
 r=$(check_rm_rule)
@@ -451,11 +504,11 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant life-dropped-first $DMABUF 's/gb10_pi_life_drop(&nv_dma_buf->life);/;/;s/nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/gb10_pi_life_drop(\&nv_dma_buf->life); nvKms->freeMemory(nv_dev->pDevice, nv_dma_buf->base.pMemory);/'
 	mutant unload-no-gate-in-hold $DMABUF 's/rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);/rc = 0;/'
 	mutant unload-hold-without-lock $DMABUF '/^static int __nv_drm_gem_dma_buf_pi_hold/,/^}/s/spin_lock(&__nv_drm_pi_gate_lock);//'
-	mutant unload-unload-does-not-close $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/if (nv_drm_pi_quiesce() != 0) {/if (nv_drm_pi_live_holds() > 0) {/'
+	mutant unload-unload-does-not-close $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/if (nv_drm_pi_quiesce(&held) != 0) {/if (nv_drm_pi_live_holds() > 0) {/'
 	mutant unload-module-counts-down $DMABUF '/^static void __nv_drm_gem_dma_buf_pi_release/,/^}/s/nv_drm_gem_object_unreference_unlocked(nv_gem);/nv_drm_gem_object_unreference_unlocked(nv_gem); gb10_pi_gate_drop(\&__nv_drm_pi_gate);/'
 	mutant unload-no-gate-on-desc $DMABUF 's/nv_dma_buf->pi_desc.gate = &__nv_drm_pi_gate;//'
 	mutant unload-quiesce-ignores-gate $DMABUF 's/rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/rc = 0;/'
-	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce() != 0) {/if (0) {/'
+	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce(&held) != 0) {/if (0) {/'
 	mutant unload-only-on-unload $LKPI 's/    case MOD_QUIESCE:/    case MOD_QUIESCE + 1000:/'
 	mutant unload-unload-ok $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/return EBUSY;/return 0;/'
 	mutant closing-export-silent $OSF '/^gb10_pi_os_import/,/^}/s/printf("nvidia: cross-GPU export refused/(void)("nvidia: cross-GPU export refused/'
@@ -466,6 +519,11 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant unload-guard-before-sub $LKPI 's/SI_SUB_DRIVERS, SI_ORDER_LAST);/SI_SUB_KLD, SI_ORDER_LAST);/'
 	mutant quiesce-outside-lock $DMABUF '/^int nv_drm_pi_quiesce/,/^}/{s/    spin_lock(&__nv_drm_pi_gate_lock);//;s/    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/    rc = gb10_pi_gate_quiesce(\&__nv_drm_pi_gate);\n    spin_lock(\&__nv_drm_pi_gate_lock);/;}'
 	mutant refused-hold-takes-a-reference $DMABUF 's/^        return rc;/        drm_gem_object_get(\&nv_gem->base); return rc;/'
+	mutant remove-devices-keep-then-fall-through $DRV 's/^        nv_drm_pi_keep();/        nv_drm_pi_keep(); if (0)/'
+	mutant exit-keep-then-fall-through $LKPI 's/^        nv_drm_pi_keep();/        nv_drm_pi_keep(); if (0)/'
+	mutant quiesce-forgets-rc $DMABUF 's/^    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/    rc = gb10_pi_gate_quiesce(\&__nv_drm_pi_gate); rc = 0;/'
+	mutant quiesce-never-closes $DMABUF '/^int nv_drm_pi_quiesce/,/^}/s/rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/rc = 0;/'
+	mutant hold-after-closing $DMABUF '/^static int __nv_drm_gem_dma_buf_pi_hold/,/^}/s/rc = gb10_pi_gate_hold(&__nv_drm_pi_gate);/rc = 0;/'
 	mutant remove-devices-disabled $DRV '/^void nv_drm_remove_devices/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
 	mutant exit-disabled $LKPI '/^static void nv_bsd_drm_exit/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
 	mutant remove-devices-not-kept $DRV 's/^        nv_drm_pi_keep();//'

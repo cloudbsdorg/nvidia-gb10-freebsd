@@ -1,12 +1,12 @@
 --- nvidia-drm/nvidia-drm-freebsd-lkpi.c.orig
 +++ nvidia-drm/nvidia-drm-freebsd-lkpi.c
-@@ -213,10 +213,29 @@
+@@ -213,10 +213,31 @@
      return 0;
  }
  
 +/* the gate of the exports of imported buffers, in nvidia-drm-gem-dma-buf.c */
 +extern int nv_drm_pi_live_holds(void);
-+extern int nv_drm_pi_quiesce(void);
++extern int nv_drm_pi_quiesce(int *held);
 +extern void nv_drm_pi_keep(void);
 +
  static void nv_bsd_drm_exit(void)
@@ -21,7 +21,9 @@
 +         * nv_drm_exit() has left the devices alone (see
 +         * nv_drm_remove_devices()), and the pdevs they use (the dma-buf
 +         * attachment keeps &pdev->dev) stay too, and the module must not
-+         * unload later: the guard refuses for good.
++         * unload later: the gate is closed, and nothing stops this same
++         * unload, which the guard already agreed to.  A defensive assertion,
++         * not a protection: see docs/PRIME-IMPORT.md 7.7.
 +         */
 +        nv_drm_pi_keep();
 +        return;
@@ -30,7 +32,7 @@
      // After doing the common DRM teardown, free any linuxkpi devices we
      // allocated during init
      for (int i = 0; i < NV_MAX_DEVICES; i++) {
-@@ -237,5 +256,75 @@
+@@ -237,5 +258,82 @@
  MODULE_DEPEND(nvidia_drm, drmn, 2, 2, 2);
  MODULE_DEPEND(nvidia_drm, dmabuf, 1, 1, 1);
  MODULE_DEPEND(nvidia_drm, nvidia, 1, 1, 1);
@@ -48,7 +50,7 @@
 + * kernel has no call that undoes a quiesce, so after a quiesce that was
 + * followed by an aborted unload, exports of imported buffers are refused.
 + * MOD_UNLOAD is refused while a hold is live as well, for a forced unload
-+ * (kldunload -f skips a refused quiesce).  The guard must be UNLOADED
++ * (kldunload -f ignores a refused quiesce).  The guard must be UNLOADED
 + * FIRST, before nvidia_drm's own teardown can run.  A file's modules are
 + * unloaded in the reverse of their load order (module_register_init() moves
 + * each loaded module to the head of the file's list, linker_file_unload()
@@ -60,16 +62,18 @@
 +static int
 +nv_drm_pi_guard_handler(module_t mod, int what, void *arg)
 +{
++    int held;
++
 +    switch (what) {
 +    case MOD_LOAD:
 +        return 0;
 +    case MOD_QUIESCE:
-+        if (nv_drm_pi_quiesce() != 0) {
-+            if (nv_drm_pi_live_holds() > 0) {
++        if (nv_drm_pi_quiesce(&held) != 0) {
++            if (held > 0) {
 +                printf("nvidia_drm: unload refused: %d RM export(s) of "
 +                       "imported buffers are still open; close the processes "
 +                       "that hold them (fstat /dev/nvidiactl) and try again\n",
-+                       nv_drm_pi_live_holds());
++                       held);
 +            } else {
 +                printf("nvidia_drm: unload refused: an earlier unload attempt "
 +                       "left the display devices in place; restart the "
@@ -89,11 +93,16 @@
 +         * unloaded (it loads last, SI_ORDER_LAST), so it answers before the
 +         * driver's own teardown has run: see docs/PRIME-IMPORT.md 7.7.
 +         */
-+        if (nv_drm_pi_quiesce() != 0) {
-+            printf("nvidia_drm: unload refused, also for kldunload -f: %d RM "
-+                   "export(s) of imported buffers are still open; close the "
-+                   "processes that hold them (fstat /dev/nvidiactl)\n",
-+                   nv_drm_pi_live_holds());
++        if (nv_drm_pi_quiesce(&held) != 0) {
++            if (held > 0) {
++                printf("nvidia_drm: unload refused, also for kldunload -f: "
++                       "%d RM export(s) of imported buffers are still open; "
++                       "close the processes that hold them (fstat "
++                       "/dev/nvidiactl)\n", held);
++            } else {
++                printf("nvidia_drm: unload refused: the display devices were "
++                       "kept by an earlier teardown; restart the machine\n");
++            }
 +            return EBUSY;
 +        }
 +        return 0;

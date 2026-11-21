@@ -57,6 +57,7 @@ stop_cmd=:
 : "${prime_import_testboot_probe_timeout:=120}"	# seconds for one probe run
 : "${prime_import_testboot_loop_timeout:=20}"	# seconds for one probe of the wire loop
 : "${prime_import_testboot_lockfile:=/var/run/noshutdown}"
+: "${prime_import_testboot_version:=/usr/local/etc/prime_import_testboot.version}"
 : "${prime_import_testboot_deadman:=60}"	# minutes until the dead-man timer fires; 0 disables.
 # Longer than the bounded worst case of the run, every timeout plus its -k 5:
 # import 125 s + loops x 25 s + reverse 125 s + CUDA 305 s + Vulkan 125 s =
@@ -148,6 +149,8 @@ prime_import_testboot_start()
 	dmesg > "$OUT/dmesg-before.txt" 2>&1
 
 	imported=0
+	# which kit this is: the commit make-be.sh recorded in the boot environment
+	row kit-version info "kit commit $(cat "$prime_import_testboot_version" 2>/dev/null || echo unknown)"
 	echo "== 5.0 stack"
 	if kldstat | grep -q 'nvidia-drm' && kldstat | grep -q 'amdgpu'; then
 		row stack pass "nvidia-drm and amdgpu are loaded"

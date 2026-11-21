@@ -581,12 +581,13 @@ functions on the guard's real order:
 * As a second line of defence, `nv_drm_exit()` (through `nv_drm_remove_devices()`) does not destroy the
   devices and `nv_bsd_drm_exit()` does not free the pdevs while an export is held (the dma-buf
   attachment uses `&pdev->dev`); they are not reached by an unload the guard agreed to. They are reached only if the guard was bypassed, since the guard has refused or closed the gate
-  before the driver's teardown. If they are reached, the module is marked kept and not unloadable (the gate
-  is closed and the guard refuses every later unload) and the operator must restart the machine: a later plain
-  unload would otherwise free the text the kept devices still call into. On FreeBSD the
+  before the driver's teardown. If they are reached, this same unload goes on regardless (the guard already agreed to it, and the
+  linker frees the text when the modules have unloaded), so they are a defensive assertion with a log line, not a
+  protection: the log says that the exports will call into freed text and that the machine must be restarted.
+  They close the gate, which only matters for the rest of that unload. On FreeBSD the
   teardown path is `nv_bsd_drm_exit` -> `nv_drm_exit` -> `nv_drm_remove_devices`; the KAPI `.remove`
   callback that calls `nv_drm_remove()` is registered only by the Linux build of nvidia-modeset.
-* The count is taken in the hold, under a spin lock together with the closing test, and counted down by
+* The count is taken in the hold, under a LinuxKPI spin lock (a default mutex there; a few instructions, nothing sleeps inside) together with the closing test, and counted down by
   the core in `nvidia.ko` after the module's own release function has returned (`gb10_pi_release()`),
   so no instruction of `nvidia-drm.ko` runs after the count reaches zero. The descriptor counts the
   holds taken on it (one object can be exported twice) and a release without a hold does nothing.
@@ -607,7 +608,7 @@ fail, for the reverse probe too. It requests a dead-man restart at the start
 (`prime_import_testboot_deadman`, default 60 minutes, longer than the bounded worst case of about
 32 minutes; 0 disables), checks that the request is really pending (a fail row otherwise), and
 cancels it at the done row. A probe stuck inside the kernel cannot be killed by a signal; the
-dead-man restart is what ends that run. `make-be.sh` turns off every other `*_testboot_enable` in the
+dead-man restart is what ends that run. The kit that boots is built from `git archive <reviewed commit>` extracted into a fresh directory and run with `make-be.sh -V <commit>`: `make-be.sh` refuses a git work tree with uncommitted changes and an extracted kit without `-V`, records the commit in the boot environment, and the run records it in the row `kit-version`. If anything fails after the clone exists, `make-be.sh` unmounts and removes the half-built boot environment (and says so, or says it could not). `make-be.sh` turns off every other `*_testboot_enable` in the
 clone of the base boot environment (`/etc/rc.conf`, `/etc/rc.conf.local` and every file under
 `/etc/rc.conf.d`) and removes an `nvidia-uvm.ko` the base left in
 `/boot/modules.nvtest` unless `-u` gives one. The kit runs from rc, before sddm and any user session,

@@ -185,6 +185,8 @@ cat > "$TMPD/fake-bectl" <<'FEOF'
 echo "bectl $*" >> "$FAKE_BECTL_LOG"
 # bectl mount <be> <dir>: the base BE's files, when the test provides some
 if [ "$1" = mount ] && [ -n "${FAKE_BASE_DIR:-}" ]; then cp -R "$FAKE_BASE_DIR/." "$3/"; fi
+# a failure to order, after the clone exists
+case " ${FAKE_BECTL_FAIL:-none} " in *" $1 "*) exit 1 ;; esac
 exit 0
 FEOF
 chmod +x "$TMPD/fake-bectl"
@@ -200,7 +202,7 @@ run_be() {
 	shift
 	rm -rf "${TMPD:?}/mnt"
 	: > "$TMPD/bectl.log"
-	FAKE_BASE_DIR="${FAKE_BASE_DIR:-}" FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
+	PRIME_ALLOW_DIRTY="${PRIME_ALLOW_DIRTY_OVERRIDE-1}" FAKE_BECTL_FAIL="${FAKE_BECTL_FAIL:-none}" FAKE_BASE_DIR="${FAKE_BASE_DIR:-}" FAKE_BECTL_LOG="$TMPD/bectl.log" BECTL="$TMPD/fake-bectl" PRIME_MNT="$TMPD/mnt" GB10_WORK="$WORK" \
 	    sh "$_s" "$@" 2>&1
 }
 # the clone of a base BE that has other kits armed and an old nvidia-uvm.ko
@@ -264,29 +266,109 @@ fi
 case $out in *"is a symbolic link"*) ok "(d) ... and says so" ;; *) bad "(d) a symbolic link is skipped silently" ;; esac
 out=$(FAKE_BASE_DIR="$TMPD/base" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 9 -m "$TMPD/mods" -u "$TMPD/uvm.ko")
 [ "$(cat "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" 2>/dev/null)" = u ] && ok "(d) with -u the given nvidia-uvm.ko is the one in the clone" || bad "(d) -u did not give the clone its nvidia-uvm.ko"
-mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
-sed 's/^		if \[ -L "\$_f" \]; then .*$/		:/' "$KIT/make-be.sh" > "$TMPD/ctl2/make-be.sh"
-if cmp -s "$KIT/make-be.sh" "$TMPD/ctl2/make-be.sh"; then
-	bad "(d) control symlink-guard: the mutation changed nothing (stale test)"
+# a base BE with neither rc.conf.d directory, and one with only /usr/local/etc/rc.conf.d: the clone still builds
+mkdir -p "$TMPD/base3/etc" "$TMPD/base4/etc" "$TMPD/base4/usr/local/etc/rc.conf.d"
+printf 'hostname="y"\n' > "$TMPD/base3/etc/rc.conf"
+printf 'hostname="z"\n' > "$TMPD/base4/etc/rc.conf"
+printf 'only_testboot_enable="YES"\n' > "$TMPD/base4/usr/local/etc/rc.conf.d/only"
+out=$(FAKE_BASE_DIR="$TMPD/base3" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 3 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 0 ] && grep -q 'prime_import_testboot_enable="YES"' "$TMPD/mnt/etc/rc.conf.d/prime_import_testboot" && ok "(d) a base with neither /etc/rc.conf.d nor /usr/local/etc/rc.conf.d: the clone builds" || bad "(d) a base without rc.conf.d directories: rc=$rc $out"
+out=$(FAKE_BASE_DIR="$TMPD/base4" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 4 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 0 ] && grep -q '^only_testboot_enable="NO"' "$TMPD/mnt/usr/local/etc/rc.conf.d/only" && ok "(d) a base with only /usr/local/etc/rc.conf.d: the clone builds and that kit is turned off" || bad "(d) a base with one rc.conf.d directory: rc=$rc $out"
+# a failure after the clone exists removes the half-built boot environment
+out=$(FAKE_BECTL_FAIL=mount run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'destroy -F nvidia-prime-import-test-20261120-6' "$TMPD/bectl.log" && grep -q 'umount -f nvidia-prime-import-test-20261120-6' "$TMPD/bectl.log"; then
+	ok "(d) a failure after the clone exists unmounts and removes the half-built boot environment"
 else
-	printf 'link_testboot_enable="YES"\n' > "$TMPD/outside-rc"
-	FAKE_BASE_DIR="$TMPD/base2" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods" > /dev/null 2>&1
-	[ "$(cat "$TMPD/outside-rc")" = 'link_testboot_enable="YES"' ] && bad "(d) control symlink-guard: a make-be.sh without the guard was not seen" || ok "(d) control: a make-be.sh that writes through a symbolic link on the rc.conf path is seen"
+	bad "(d) a failed run left the half-built BE: rc=$rc $(cat "$TMPD/bectl.log" | tr '\n' '|')"
 fi
-_f="$TMPD/ctl2/make-be.sh"
-sed 's/^	for _f in "\$MNT\/etc\/rc.conf" .*; do$/	for _f in; do/' "$KIT/make-be.sh" > "$_f"
-if cmp -s "$KIT/make-be.sh" "$_f"; then bad "(d) control keep-other-kits: the mutation changed nothing (stale test)"; else
-	FAKE_BASE_DIR="$TMPD/base" run_be "$_f" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
+out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q 'destroy' "$TMPD/bectl.log"; then ok "(d) a successful run removes nothing"; else bad "(d) a successful run destroyed something: $(cat "$TMPD/bectl.log" | tr '\n' '|')"; fi
+mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
+# bases for the two path guards: a symbolic link INSIDE the clone (only the -L guard stops it), and a
+# directory of the clone that is a symbolic link to a directory outside it (only the realpath guard stops it)
+mkdir -p "$TMPD/base5/etc" "$TMPD/outside-etc/rc.conf.d" "$TMPD/base5/usr/local"
+printf 'hostname="w"\n' > "$TMPD/base5/etc/rc.conf"
+printf 'esc_testboot_enable="YES"\n' > "$TMPD/outside-etc/rc.conf.d/esc"
+ln -s "$TMPD/outside-etc" "$TMPD/base5/usr/local/etc"
+mkdir -p "$TMPD/base6/etc"
+printf 'hostname="v"\n' > "$TMPD/base6/etc/rc.conf"
+printf 'inl_testboot_enable="YES"\n' > "$TMPD/base6/etc/real-local"
+ln -s real-local "$TMPD/base6/etc/rc.conf.local"
+out=$(FAKE_BASE_DIR="$TMPD/base5" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods")
+if [ "$(cat "$TMPD/outside-etc/rc.conf.d/esc")" = 'esc_testboot_enable="YES"' ]; then
+	ok "(d) a directory of the clone that is a symbolic link out of it is not written through"
+else
+	bad "(d) make-be.sh wrote outside the clone through a symbolic link directory: $(cat "$TMPD/outside-etc/rc.conf.d/esc")"
+fi
+case $out in *"resolves outside the clone"*) ok "(d) ... and says so" ;; *) bad "(d) the escaping path is skipped silently" ;; esac
+out=$(FAKE_BASE_DIR="$TMPD/base6" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods")
+[ "$(cat "$TMPD/mnt/etc/real-local")" = 'inl_testboot_enable="YES"' ] && case $out in *"is a symbolic link"*) ok "(d) a symbolic link inside the clone is skipped and named" ;; *) bad "(d) the in-clone symbolic link is skipped silently" ;; esac || bad "(d) an in-clone symbolic link was written through"
+# mut_be <name> <sed arguments>: the mutated make-be.sh goes to ctl2/make-be.sh; false when the mutation changed nothing
+mut_be() {
+	_mn=$1; shift
+	sed "$@" "$KIT/make-be.sh" > "$TMPD/ctl2/make-be.sh"
+	if cmp -s "$KIT/make-be.sh" "$TMPD/ctl2/make-be.sh"; then bad "(d) control $_mn: the mutation changed nothing (stale test)"; return 1; fi
+	return 0
+}
+if mut_be symlink-guard -e '/^	if \[ -L "\$_f" \]; then/s/.*/	:/'; then
+	FAKE_BASE_DIR="$TMPD/base6" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods" > /dev/null 2>&1
+	[ "$(cat "$TMPD/mnt/etc/real-local")" = 'inl_testboot_enable="YES"' ] && bad "(d) control symlink-guard: a make-be.sh without the -L guard was not seen" || ok "(d) control: a make-be.sh without the symbolic-link guard writes through an in-clone link, and the test sees it"
+fi
+if mut_be realpath-guard -e '/^	case \$(realpath/s/.*/	:/'; then
+	FAKE_BASE_DIR="$TMPD/base5" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods" > /dev/null 2>&1
+	[ "$(cat "$TMPD/outside-etc/rc.conf.d/esc")" = 'esc_testboot_enable="YES"' ] && bad "(d) control realpath-guard: a make-be.sh without the realpath guard was not seen" || ok "(d) control: a make-be.sh without the realpath guard writes outside the clone, and the test sees it"
+	printf 'esc_testboot_enable="YES"\n' > "$TMPD/outside-etc/rc.conf.d/esc"
+fi
+if mut_be dir-guard -e '/^		\[ -d "\$MNT\/\$_n" \] || continue$/s/.*/		:/' -e 's/ 2>\/dev\/null || :$/ 2>\/dev\/null/'; then
+	( FAKE_BASE_DIR="$TMPD/base3" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 3 -m "$TMPD/mods" > /dev/null 2>&1 ) && bad "(d) control dir-guard: a make-be.sh that dies on a missing directory was not seen" || ok "(d) control: a make-be.sh that dies on a missing rc.conf.d directory is seen"
+fi
+if mut_be no-cleanup-trap -e 's/^trap cleanup EXIT$/:/'; then
+	FAKE_BECTL_FAIL=mount run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods" > /dev/null 2>&1
+	grep -q 'destroy' "$TMPD/bectl.log" && bad "(d) control no-cleanup-trap: a make-be.sh without the trap was not seen" || ok "(d) control: a make-be.sh without the cleanup trap is seen"
+fi
+out=$(FAKE_BECTL_FAIL="mount destroy" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods")
+case $out in *"COULD NOT remove the half-built boot environment"*) ok "(d) when the half-built BE cannot be removed, the message says so" ;; *) bad "(d) a failed removal is reported as a success: $out" ;; esac
+if mut_be keep-other-kits -e '/^	grep -Eq .*_testboot_enable=.* || return 0$/s/.*/	return 0/'; then
+	FAKE_BASE_DIR="$TMPD/base" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
 	grep -q '^other_testboot_enable="YES"' "$TMPD/mnt/etc/rc.conf" && ok "(d) control: a make-be.sh that leaves the other kits armed is seen" || bad "(d) control keep-other-kits: not seen"
 fi
-sed 's/^	run rm -f "\$MNT"\/boot\/modules.nvtest\/nvidia-uvm.ko .*/	:/' "$KIT/make-be.sh" > "$_f"
-if cmp -s "$KIT/make-be.sh" "$_f"; then bad "(d) control keep-uvm: the mutation changed nothing (stale test)"; else
-	FAKE_BASE_DIR="$TMPD/base" run_be "$_f" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
+if mut_be keep-uvm -e '/^	run rm -f "\$MNT"\/boot\/modules.nvtest\/nvidia-uvm.ko /s/.*/	:/'; then
+	FAKE_BASE_DIR="$TMPD/base" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 8 -m "$TMPD/mods" > /dev/null
 	[ -e "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" ] && ok "(d) control: a make-be.sh that keeps the base's nvidia-uvm.ko is seen" || bad "(d) control keep-uvm: not seen"
 fi
-sh "$KIT/make-be.sh" > "$TMPD/nob.out" 2>&1; rc=$?
+# the kit that boots comes from a committed state: a dirty git work tree is refused, a clean one is recorded, an archive needs -V
+rm -rf "$TMPD/gitkit"; mkdir -p "$TMPD/gitkit"; cp "$KIT"/* "$TMPD/gitkit/"
+( cd "$TMPD/gitkit" && git init -q . && git add -A . && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m kit ) > /dev/null 2>&1
+gsha=$(git -C "$TMPD/gitkit" rev-parse --verify HEAD 2>/dev/null)
+case $gsha in ''|*[!0-9a-f]*) bad "(d) the test could not make a git repository of the kit to commit in" ;; esac
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)" = "$gsha" ]; then
+	ok "(d) a clean git work tree builds the BE and records its HEAD"
+else
+	bad "(d) a clean git work tree: rc=$rc version='$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)' want '$gsha' $out"
+fi
+echo "# changed" >> "$TMPD/gitkit/make-be.sh"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+case $out in *"uncommitted changes"*) [ "$rc" -eq 2 ] && ok "(d) a dirty git work tree is refused (exit 2)" || bad "(d) a dirty tree is refused with rc=$rc" ;; *) bad "(d) a dirty git work tree builds a BE: rc=$rc" ;; esac
+git -C "$TMPD/gitkit" checkout -q -- make-be.sh 2>/dev/null
+rm -rf "$TMPD/archkit"; mkdir -p "$TMPD/archkit"; cp "$KIT"/* "$TMPD/archkit/"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) a kit that is not in a git work tree needs -V" || bad "(d) an extracted kit without -V built a BE: rc=$rc"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 0123abc); rc=$?
+[ "$rc" -eq 0 ] && [ "$(cat "$TMPD/mnt/usr/local/etc/prime_import_testboot.version" 2>/dev/null)" = 0123abc ] && ok "(d) an extracted kit with -V records the named commit" || bad "(d) -V: rc=$rc $out"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 'not hex'); rc=$?
+[ "$rc" -eq 2 ] && ok "(d) a -V that is not hex is refused" || bad "(d) -V not hex rc=$rc"
+echo "# changed" >> "$TMPD/gitkit/make-be.sh"
+sed '/^	if \[ -n "\$(git -C "\$KITDIR" status --porcelain/s/.*/	if false; then/' "$KIT/make-be.sh" > "$TMPD/gitkit/make-be.sh"
+cp "$KIT/prime_import_testboot" "$TMPD/gitkit/" ; echo "# dirty" >> "$TMPD/gitkit/prime_import_testboot"
+if cmp -s "$KIT/make-be.sh" "$TMPD/gitkit/make-be.sh"; then bad "(d) control dirty-check: the mutation changed nothing (stale test)"; else
+	out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/gitkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
+	[ "$rc" -eq 0 ] && ok "(d) control: a make-be.sh without the dirty check builds from a dirty tree, and the test above sees it" || bad "(d) control dirty-check: not seen ($rc)"
+fi
+PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" > "$TMPD/nob.out" 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "(d) make-be.sh without -b exits 2" || bad "(d) make-be.sh without -b rc=$rc"
-out=$(sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
+out=$(PRIME_ALLOW_DIRTY=1 sh "$KIT/make-be.sh" -b base -D 20261120 -n 3 --dry-run 2>&1)
 case $out in
 *"bectl create -e base nvidia-prime-import-test-20261120-3"*) ok "(d) the BE is named nvidia-prime-import-test-<date>-<n>" ;;
 *) bad "(d) dry-run plan lacks the create line: $out" ;;
@@ -337,7 +419,7 @@ else
 	bad "(d) make-be.sh -b rc=$rc $(head -2 "$TMPD/need.out")"
 fi
 run_be "$KIT/make-be.sh" -b base -D 20261120 -n 11 -m "$TMPD/mods" --activate > "$TMPD/act.out"
-want=$(sed -n 's/^LOGROOT=//p' "$KIT/prime_import_testboot")
+want=$(sed -n 's/^: "${prime_import_testboot_logroot:=\(.*\)}"$/\1/p' "$KIT/prime_import_testboot")
 if grep -q "results land in $want/prime-import-" "$TMPD/act.out"; then
 	ok "(d) the armed message names the rc script's real log directory"
 else
@@ -425,6 +507,7 @@ printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kerne
 printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
 chmod +x "$FAKE"/bin/*
 echo 1000 > "$FAKE/wired"
+echo abcdef0123 > "$FAKE/version"
 printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 31 nvidia_drm_pi_guard\n\t\t 30 nvidia_drm\n' > "$FAKE/kldv-good"
 printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 30 nvidia_drm\n\t\t 31 nvidia_drm_pi_guard\n' > "$FAKE/kldv-bad"
 printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 30 nvidia_drm\n' > "$FAKE/kldv-noguard"
@@ -439,7 +522,7 @@ rc_run() {
 	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
 	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
 	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
-	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-60} prime_import_testboot_lockfile="$FAKE/noshutdown" prime_import_testboot_linuxroot="$FAKE/none" \
+	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-60} prime_import_testboot_lockfile="$FAKE/noshutdown" prime_import_testboot_version="$FAKE/version" prime_import_testboot_linuxroot="$FAKE/none" \
 	    prime_import_testboot_cudarun="$FAKE/none" timeout 90 sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
 	ls -d "$FAKE/logs-$_n"/prime-import-* 2>/dev/null | head -1
 }
@@ -462,6 +545,7 @@ if [ -n "$d" ] && [ -f "$d/results.jsonl" ]; then
 	r=$(rowres "$d/results.jsonl" import)
 	[ "$r" = "running pass " ] && ok "(f2) a good probe: import goes running, then pass" || bad "(f2) good probe: import rows are '$r'"
 	[ -f "$FAKE/running-seen" ] && ok "(f2) the running row is on disk before the probe starts (a panic leaves evidence)" || bad "(f2) the running row was not written before the probe"
+	grep '"row":"kit-version"' "$d/results.jsonl" | grep -q 'kit commit abcdef0123' && ok "(f2) the run records which kit commit it is (kit-version row)" || bad "(f2) no kit-version row with the commit"
 	[ "$(rowres "$d/results.jsonl" done)" = "info " ] && ok "(f2) a finished run ends with a done row" || bad "(f2) no done row"
 	[ "$(rowres "$d/results.jsonl" dirty-refused)" = "pass " ] && ok "(f2) the tripwire counter reads 0: dirty-refused passes" || bad "(f2) dirty-refused rows: $(rowres "$d/results.jsonl" dirty-refused)"
 	sh "$KIT/summarize.sh" "$d" > "$TMPD/sum-good.txt" 2>&1; rc=$?

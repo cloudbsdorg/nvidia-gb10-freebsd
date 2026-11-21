@@ -36,7 +36,7 @@
  
 +/* The RM holds on exported imported buffers; nonzero forbids unloading nvidia-drm. */
 +int nv_drm_pi_live_holds(void);
-+int nv_drm_pi_quiesce(void);
++int nv_drm_pi_quiesce(int *held);
 +void nv_drm_pi_keep(void);
 +
  extern const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops;

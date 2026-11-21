@@ -14,10 +14,10 @@
 +         * instead of destroyed.
 +         */
 +        NV_DRM_LOG_ERR("%d RM export(s) of imported buffers are still "
-+                       "open and this unload got past the guard module "
-+                       "(which should have refused it): the device "
-+                       "structures are kept and the module is marked "
-+                       "not unloadable; restart the machine",
++                       "open, and the driver is being unloaded anyway: the "
++                       "programs that hold them will crash the kernel when "
++                       "they close.  Restart the machine now, before "
++                       "closing them",
 +                       nv_drm_pi_live_holds());
 +        nv_drm_pi_keep();
 +        return;
