@@ -108,12 +108,19 @@ run "$BECTL" mount "$BE" "$MNT"
 # (a second kit would load other modules, run other probes and reboot on its
 # own), and an nvidia-uvm.ko the base left behind is removed unless -u gives
 # one: the kit tests the three modules it was built with, nothing else.
+# the files and directories of the clone that can arm a kit (relative to its root)
+RC_FILES="etc/rc.conf etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local"
+RC_DIRS="etc/rc.conf.d usr/local/etc/rc.conf.d"
 if [ "$DRY" -eq 1 ]; then
-	echo "+ turn off every other *_testboot_enable in $MNT/etc/rc.conf, $MNT/etc/rc.conf.local and every regular file under $MNT/etc/rc.conf.d"
+	echo "+ turn off every other *_testboot_enable in the clone's $RC_FILES and in every regular file under $RC_DIRS"
 else
-	for _f in "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" $(find "$MNT/etc/rc.conf.d" -type f 2>/dev/null); do
+	_list=
+	for _n in $RC_FILES; do _list="$_list $MNT/$_n"; done
+	for _n in $RC_DIRS; do _list="$_list $(find "$MNT/$_n" -type f 2>/dev/null)"; done
+	for _f in $_list; do
 		[ -f "$_f" ] || continue
 		if [ -L "$_f" ]; then echo "make-be.sh: $_f is a symbolic link; it is not rewritten (it could point outside the clone)" >&2; continue; fi
+		case $(realpath "$_f" 2>/dev/null) in "$(realpath "$MNT")"/*) ;; *) echo "make-be.sh: $_f resolves outside the clone (a symbolic link in its path); it is not rewritten" >&2; continue ;; esac
 		grep -Eq '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=' "$_f" || continue
 		sed -E -e '/^[[:space:]]*prime_import_testboot_enable=/b' \
 		    -e 's/^([[:space:]]*[A-Za-z0-9_]+_testboot_enable)=.*/\1="NO"/' "$_f" > "$_f.prime-new" \

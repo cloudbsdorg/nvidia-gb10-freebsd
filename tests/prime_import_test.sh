@@ -86,6 +86,60 @@ TMPD=$(mktemp -d "$WORK/tmp/prime-import-test.XXXXXXXX") || exit 1
 trap 'rm -rf -- "$TMPD"' EXIT INT TERM
 . "$repo/tests/csrc_lib.sh"
 
+# The order in which a file's modules unload (sys/kern/kern_module.c module_register_init():
+# each loaded module goes to the HEAD of the file's list; sys/kern/kern_linker.c
+# linker_file_unload(): a refused quiesce is ignored when forced, then each module is unloaded
+# in list order and a refused unload returns the error whatever the flags).  The sysinits load
+# in (subsystem, order) order; a tie is not specified, so the model takes the worst case for the guard (it loads first).  This model is the two functions
+# above in 40 lines; its input is the real order of the guard, read from the patched source.
+SYSDIR=${SYSDIR:-$HOME/src/csrc-90dcf68/sys}
+KERNELH=$SYSDIR/sys/kernel.h
+[ -f "$KERNELH" ] || { echo "FAIL: no $KERNELH (set SYSDIR to the kernel source the modules are built against)"; exit 1; }
+kval() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p" "$KERNELH" | head -1; }
+cat > "$TMPD/ordermodel.c" <<'MODEL'
+#include <stdio.h>
+#include <stdlib.h>
+#define EBUSY_ 16
+struct mod { int guard; unsigned long sub, ord; };
+int main(int argc, char **argv)
+{
+	struct mod decl[2], list[2], t;
+	int holds, force, i, n = 0, rc = 0, teardown = 0;
+
+	if (argc != 7)
+		return 2;
+	/* declaration order in the file: the driver module, then the guard */
+	decl[0] = (struct mod){ 0, strtoul(argv[3], 0, 0), strtoul(argv[4], 0, 0) };
+	decl[1] = (struct mod){ 1, strtoul(argv[1], 0, 0), strtoul(argv[2], 0, 0) };
+	holds = atoi(argv[5]);
+	force = atoi(argv[6]);
+	/* sysinit order: (subsystem, order); a tie is unspecified: the guard is taken to load first (the bad case) */
+	if (decl[1].sub < decl[0].sub || (decl[1].sub == decl[0].sub && decl[1].ord <= decl[0].ord)) {
+		t = decl[0]; decl[0] = decl[1]; decl[1] = t;
+	}
+	/* load: each module goes to the head of the list */
+	for (i = 0; i < 2; i++) {
+		list[1] = list[0];
+		list[0] = decl[i];
+		n++;
+	}
+	/* quiesce pass: a refusal aborts unless forced */
+	for (i = 0; i < n; i++)
+		if (list[i].guard && holds > 0 && !force) { printf("rc=%d teardown=%d\n", EBUSY_, teardown); return 0; }
+	/* unload pass: a refusal aborts whatever the flags */
+	for (i = 0; i < n; i++) {
+		if (list[i].guard) {
+			if (holds > 0) { rc = EBUSY_; break; }
+		} else {
+			teardown = 1;
+		}
+	}
+	printf("rc=%d teardown=%d\n", rc, teardown);
+	return 0;
+}
+MODEL
+cc -o "$TMPD/ordermodel" "$TMPD/ordermodel.c" || { echo "FAIL: the unload-order model does not compile"; exit 1; }
+
 passed=0
 failed=0
 ok() { echo "PASS: $1"; passed=$((passed + 1)); }
@@ -253,7 +307,8 @@ check_tree() {
 	grep -q 'gb10_pi_unregister(' "$TMPD/ug.c" && grep -Eq '\*import_sgt[[:space:]]*=' "$TMPD/ug.c" && grep -Eq '\*import_priv[[:space:]]*=' "$TMPD/ug.c" || { echo "O3: gb10_pi_os_unregister does not unwire and hand back the descriptor and the owner"; return; }
 	body "$_t/$SUBR" nv_dma_import_sgt "$TMPD/is.c" || { echo "O3: no nv_dma_import_sgt"; return; }
 	grep -q 'gb10_pi_os_import(' "$TMPD/is.c" || { echo "O3: nv_dma_import_sgt does not take the owner"; return; }
-	body "$_t/$OSF" gb10_pi_os_import "$TMPD/oi.c" && grep -q 'gb10_pi_import(' "$TMPD/oi.c" || { echo "O3: gb10_pi_os_import does not take the owner through the core"; return; }
+	body "$_t/$OSF" gb10_pi_os_import "$TMPD/oi.c" && grep -q 'GB10_PI_CLOSING' "$TMPD/oi.c" && grep -q 'ppsratecheck(&gb10_pi_closing_lasttime' "$TMPD/oi.c" && grep -q 'printf(' "$TMPD/oi.c" || { echo "O3: a refused export (closed gate) is not logged, rate limited on its own"; return; }
+	grep -q 'gb10_pi_import(' "$TMPD/oi.c" || { echo "O3: gb10_pi_os_import does not take the owner through the core"; return; }
 	body "$_t/$SUBR" nv_dma_release_sgt "$TMPD/rl.c" || { echo "O3: no nv_dma_release_sgt"; return; }
 	grep -q 'gb10_pi_os_release(' "$TMPD/rl.c" || { echo "O3: nv_dma_release_sgt does not drop the owner"; return; }
 	body "$_t/$OSF" gb10_pi_os_release "$TMPD/or.c" && grep -q 'gb10_pi_release(' "$TMPD/or.c" || { echo "O3: gb10_pi_os_release does not drop the owner through the core"; return; }
@@ -280,9 +335,29 @@ check_tree() {
 	grep -q 'gate_drop\|atomic_\|holds' "$TMPD/r6.c" && { echo "D6: this module counts the hold down itself: the core does it in nvidia.ko after the release has returned"; return; }
 	grep -Eq 'pi_desc\.gate[[:space:]]*=[[:space:]]*&__nv_drm_pi_gate;' "$_t/$DMABUF" || { echo "D6: the descriptor does not carry the gate, so the release is never counted down"; return; }
 	body "$_t/$DMABUF" nv_drm_pi_quiesce "$TMPD/q6.c" && grep -q 'spin_lock(' "$TMPD/q6.c" && grep -q 'gb10_pi_gate_quiesce(&__nv_drm_pi_gate)' "$TMPD/q6.c" && grep -q 'EBUSY' "$TMPD/q6.c" || { echo "D6: the quiesce is not the gate's, under the lock, answering EBUSY"; return; }
+	strip_comments "$TMPD/h6.c" "$TMPD/h6s.c"; strip_comments "$TMPD/q6.c" "$TMPD/q6s.c"
+	before "$TMPD/q6s.c" 'spin_lock(' 'gb10_pi_gate_quiesce(' && before "$TMPD/q6s.c" 'gb10_pi_gate_quiesce(' 'spin_unlock(' || { echo "D6: the quiesce does not decide between the lock and the unlock"; return; }
+	before "$TMPD/h6s.c" 'spin_lock(' 'gb10_pi_gate_hold(' && before "$TMPD/h6s.c" 'gb10_pi_gate_hold(' 'spin_unlock(' || { echo "D6: the hold does not decide between the lock and the unlock"; return; }
+	awk '/if \(rc != 0\) \{/ { on = 1; next } on && /\}/ { exit } on { gsub(/[[:space:]]/, ""); print }' "$TMPD/h6s.c" | tr -d '\n' | grep -qx 'returnrc;' || { echo "D6: a refused hold does more than return (a reference taken for an export that was refused leaks)"; return; }
+	body "$_t/$DMABUF" nv_drm_pi_keep "$TMPD/k6.c" && grep -q 'spin_lock(' "$TMPD/k6.c" && grep -q 'gb10_pi_gate_keep(&__nv_drm_pi_gate)' "$TMPD/k6.c" || { echo "D6: no way to mark the devices as kept, so a later unload is not refused for good"; return; }
 	grep -q 'nv_drm_pi_live_holds' "$_t/$DMABUFH" && grep -q 'nv_drm_pi_quiesce' "$_t/$DMABUFH" || { echo "D6: the gate functions are not declared for the other files of nvidia-drm"; return; }
 	tr '\n' ' ' < "$_t/$LKPI" > "$TMPD/lkpi-flat.c"
-	grep -Eq 'DECLARE_MODULE\(nvidia_drm_pi_guard,[^;]*SI_ORDER_FIRST\)' "$TMPD/lkpi-flat.c" || { echo "D6: there is no second module, ordered first, that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
+	# the unload order: a file's modules unload in the reverse of their load order, so the guard must LOAD after the driver module
+	_dm=$(grep -Eo 'DECLARE_MODULE\(nvidia_drm_pi_guard,[^)]*\)' "$TMPD/lkpi-flat.c" | head -1)
+	[ -n "$_dm" ] || { echo "D6: there is no second module that can refuse the unload (LKPI_DRIVER_MODULE cannot)"; return; }
+	_gsub=$(echo "$_dm" | sed -E 's/.*,[[:space:]]*(SI_SUB_[A-Z_]+)[[:space:]]*,.*/\1/')
+	_gord=$(echo "$_dm" | sed -E 's/.*,[[:space:]]*(SI_ORDER_[A-Z_]+)[[:space:]]*\).*/\1/')
+	_gsubv=$(kval "$_gsub"); _gordv=$(kval "$_gord")
+	[ -n "$_gsubv" ] && [ -n "$_gordv" ] || { echo "D6: the guard's order $_gsub/$_gord is not a value of sys/kernel.h"; return; }
+	grep -q 'LKPI_DRIVER_MODULE(nvidia_drm,' "$_t/$LKPI" || { echo "D6: the driver module is no longer LKPI_DRIVER_MODULE(nvidia_drm, ...)"; return; }
+	# LKPI_DRIVER_MODULE registers at SI_SUB_DRIVERS, SI_ORDER_ANY
+	_dsub=$(kval SI_SUB_DRIVERS); _dord=$(kval SI_ORDER_ANY)
+	_r=$("$TMPD/ordermodel" "$_gsubv" "$_gordv" "$_dsub" "$_dord" 1 1)
+	[ "$_r" = "rc=16 teardown=0" ] || { echo "D6: kldunload -f with an export held runs the driver teardown before the guard can refuse ($_r): the guard must load AFTER the driver module (unload order is the reverse of load order)"; return; }
+	_r=$("$TMPD/ordermodel" "$_gsubv" "$_gordv" "$_dsub" "$_dord" 1 0)
+	[ "$_r" = "rc=16 teardown=0" ] || { echo "D6: a plain kldunload with an export held runs the driver teardown ($_r)"; return; }
+	_r=$("$TMPD/ordermodel" "$_gsubv" "$_gordv" "$_dsub" "$_dord" 0 1)
+	[ "$_r" = "rc=0 teardown=1" ] || { echo "D6: an unload with no export held does not run the teardown ($_r)"; return; }
 	body "$_t/$LKPI" nv_drm_pi_guard_handler "$TMPD/g6.c" || { echo "D6: no guard handler"; return; }
 	tr '\n' ' ' < "$TMPD/g6.c" | grep -Eq 'case MOD_QUIESCE:[[:space:]]*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;[[:space:]]*\}[[:space:]]*return 0;[[:space:]]*case MOD_UNLOAD:.*if \(nv_drm_pi_quiesce\(\) != 0\) \{.*return EBUSY;' || { echo "D6: MOD_QUIESCE does not take the gate and MOD_UNLOAD does not refuse while an export is held"; return; }
 	grep -q 'printf("nvidia_drm: unload refused' "$TMPD/g6.c" || { echo "D6: a refused unload is silent"; return; }
@@ -290,9 +365,15 @@ check_tree() {
 	body "$_t/$DRV" nv_drm_remove_devices "$TMPD/rm6.c" || { echo "D6: no nv_drm_remove_devices"; return; }
 	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/rm6.c" > "$TMPD/rm6b.c"
 	grep -Eq '^[[:space:]]+return;' "$TMPD/rm6b.c" || { echo "D6: nv_drm_remove_devices destroys the devices while an export is still open"; return; }
+	strip_comments "$TMPD/rm6.c" "$TMPD/rm6s.c"
+	[ "$(awk '/struct nv_drm_device \*nv_dev;/ { on = 1; next } on && NF { print; exit }' "$TMPD/rm6s.c" | sed -E 's/^[[:space:]]+//')" = 'if (nv_drm_pi_live_holds() > 0) {' ] || { echo "D6: the first statement of nv_drm_remove_devices is not the plain test of the live holds (a disabled form such as if (0) is refused)"; return; }
+	grep -q 'nv_drm_pi_keep();' "$TMPD/rm6b.c" || { echo "D6: nv_drm_remove_devices does not mark the devices as kept"; return; }
 	before "$TMPD/rm6.c" 'nv_drm_pi_live_holds() > 0' 'nv_drm_pop_device()' || { echo "D6: nv_drm_remove_devices pops devices before it asks about the exports"; return; }
 	body "$_t/$LKPI" nv_bsd_drm_exit "$TMPD/ex6.c" || { echo "D6: no nv_bsd_drm_exit"; return; }
 	before "$TMPD/ex6.c" 'nv_drm_exit()' 'nv_drm_pi_live_holds() > 0' || { echo "D6: nv_bsd_drm_exit does not ask about the exports after the common teardown"; return; }
+	strip_comments "$TMPD/ex6.c" "$TMPD/ex6s.c"
+	[ "$(awk '/nv_drm_exit\(\);/ { on = 1; next } on && NF { print; exit }' "$TMPD/ex6s.c" | sed -E 's/^[[:space:]]+//')" = 'if (nv_drm_pi_live_holds() > 0) {' ] || { echo "D6: the statement after nv_drm_exit() in nv_bsd_drm_exit is not the plain test of the live holds"; return; }
+	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/ex6.c" | grep -q 'nv_drm_pi_keep();' || { echo "D6: nv_bsd_drm_exit does not mark the devices as kept"; return; }
 	before "$TMPD/ex6.c" 'nv_drm_pi_live_holds() > 0' 'linux_pci_detach_device(' || { echo "D6: nv_bsd_drm_exit frees the pdevs the attachment uses without asking about the exports"; return; }
 	awk '/nv_drm_pi_live_holds\(\) > 0\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$TMPD/ex6.c" | grep -Eq '^[[:space:]]+return;' || { echo "D6: nv_bsd_drm_exit frees the pdevs even with an export open"; return; }
 }
@@ -377,9 +458,19 @@ if [ -z "$(check_tree "$TMPD/good")" ]; then
 	mutant unload-quiesce-ok $LKPI 's/if (nv_drm_pi_quiesce() != 0) {/if (0) {/'
 	mutant unload-only-on-unload $LKPI 's/    case MOD_QUIESCE:/    case MOD_QUIESCE + 1000:/'
 	mutant unload-unload-ok $LKPI '/^    case MOD_UNLOAD:/,/^    default:/s/return EBUSY;/return 0;/'
+	mutant closing-export-silent $OSF '/^gb10_pi_os_import/,/^}/s/printf("nvidia: cross-GPU export refused/(void)("nvidia: cross-GPU export refused/'
 	mutant unload-guard-silent $LKPI 's/printf("nvidia_drm: unload refused/(void)("nvidia_drm: unload refused/'
 	mutant unload-no-guard-module $LKPI 's/DECLARE_MODULE(nvidia_drm_pi_guard,/DECLARE_MODULE(nvidia_drm_pi_guardX,/'
-	mutant unload-guard-not-first $LKPI 's/SI_ORDER_FIRST);/SI_ORDER_ANY);/'
+	mutant unload-guard-loads-first $LKPI 's/SI_ORDER_LAST);/SI_ORDER_FIRST);/'
+	mutant unload-guard-same-order $LKPI 's/SI_ORDER_LAST);/SI_ORDER_ANY);/'
+	mutant unload-guard-before-sub $LKPI 's/SI_SUB_DRIVERS, SI_ORDER_LAST);/SI_SUB_KLD, SI_ORDER_LAST);/'
+	mutant quiesce-outside-lock $DMABUF '/^int nv_drm_pi_quiesce/,/^}/{s/    spin_lock(&__nv_drm_pi_gate_lock);//;s/    rc = gb10_pi_gate_quiesce(&__nv_drm_pi_gate);/    rc = gb10_pi_gate_quiesce(\&__nv_drm_pi_gate);\n    spin_lock(\&__nv_drm_pi_gate_lock);/;}'
+	mutant refused-hold-takes-a-reference $DMABUF 's/^        return rc;/        drm_gem_object_get(\&nv_gem->base); return rc;/'
+	mutant remove-devices-disabled $DRV '/^void nv_drm_remove_devices/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
+	mutant exit-disabled $LKPI '/^static void nv_bsd_drm_exit/,/^}/s/^    if (nv_drm_pi_live_holds() > 0) {/    if (0 \&\& nv_drm_pi_live_holds() > 0) {/'
+	mutant remove-devices-not-kept $DRV 's/^        nv_drm_pi_keep();//'
+	mutant exit-not-kept $LKPI 's/^        nv_drm_pi_keep();//'
+	mutant keep-sets-nothing $DMABUF '/^void nv_drm_pi_keep/,/^}/s/gb10_pi_gate_keep(&__nv_drm_pi_gate);//'
 	mutant remove-devices-ignores-holds $DRV '/^void nv_drm_remove_devices/,/^}/s/if (nv_drm_pi_live_holds() > 0) {/if (0) {/'
 	mutant remove-devices-falls-through $DRV '/nv_drm_pi_live_holds() > 0) {/,/^    }/s/^        return;/        ;/'
 	mutant exit-frees-pdevs $LKPI '/^static void nv_bsd_drm_exit/,/^}/s/if (nv_drm_pi_live_holds() > 0) {/if (0) {/'

@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-drv.c.orig
 +++ nvidia-drm/nvidia-drm-drv.c
-@@ -2193,6 +2193,20 @@
+@@ -2193,6 +2193,24 @@
  void nv_drm_remove_devices(void)
  {
      struct nv_drm_device *nv_dev;
@@ -14,8 +14,12 @@
 +         * instead of destroyed.
 +         */
 +        NV_DRM_LOG_ERR("%d RM export(s) of imported buffers are still "
-+                       "open: the device structures are kept",
++                       "open and this unload got past the guard module "
++                       "(which should have refused it): the device "
++                       "structures are kept and the module is marked "
++                       "not unloadable; restart the machine",
 +                       nv_drm_pi_live_holds());
++        nv_drm_pi_keep();
 +        return;
 +    }
  

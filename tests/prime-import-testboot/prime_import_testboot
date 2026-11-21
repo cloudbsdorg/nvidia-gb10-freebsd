@@ -155,6 +155,22 @@ prime_import_testboot_start()
 		row stack fail "nvidia-drm or amdgpu is not loaded: see kldstat.txt"
 	fi
 
+	# The unload order of nvidia-drm.ko's modules: kldstat -v lists a file's modules in unload order
+	# (first listed, first unloaded).  The guard module, which refuses an unload while an export is
+	# held, must be listed before nvidia_drm, or the driver's teardown runs before it can refuse.
+	kldstat -v > "$OUT/kldstat-v.txt" 2>&1
+	gl=$(grep -nE '^[[:space:]]+[0-9]+[[:space:]]+nvidia_drm_pi_guard[[:space:]]*$' "$OUT/kldstat-v.txt" | head -1 | cut -d: -f1)
+	dl=$(grep -nE '^[[:space:]]+[0-9]+[[:space:]]+nvidia_drm[[:space:]]*$' "$OUT/kldstat-v.txt" | head -1 | cut -d: -f1)
+	if [ -z "$dl" ]; then
+		row guard-order skip "nvidia_drm is not listed by kldstat -v: see kldstat-v.txt"
+	elif [ -z "$gl" ]; then
+		row guard-order fail "nvidia_drm is loaded but nvidia_drm_pi_guard is not: an export could outlive the module (kldstat-v.txt); do not use this build, restage nvidia-drm.ko from the committed tree"
+	elif [ "$gl" -lt "$dl" ]; then
+		row guard-order pass "nvidia_drm_pi_guard is listed before nvidia_drm: it is unloaded first and can refuse before the driver's teardown"
+	else
+		row guard-order fail "nvidia_drm_pi_guard is listed after nvidia_drm: the driver's teardown would run before the guard can refuse (kldstat-v.txt); do not use this build: the guard must load last (SI_ORDER_LAST), restage nvidia-drm.ko from the committed tree"
+	fi
+
 	echo "== 5.1 the panic is gone"
 	# We got here: the boot did not panic.  The same Wayland login that
 	# panicked drives ADDFB2 with an imported handle, which the probe below
@@ -177,7 +193,7 @@ prime_import_testboot_start()
 		refused0=$(diff "$OUT/dmesg-before.txt" "$OUT/dmesg-mid.txt" | grep -c 'cannot be imported\|Could not wire\|does not match this nvidia-drm')
 		imported=0
 		if [ "$prc" -ne 0 ]; then
-			if [ "$prc" -eq 124 ] || [ "$prc" -eq 137 ]; then
+			if [ "$prc" -eq 124 ]; then
 				row import fail "prime_import_probe did not finish in $prime_import_testboot_probe_timeout seconds and was stopped (exit $prc; a probe stuck inside the kernel cannot be stopped and the dead-man timer is what ends the run): see probe-import.jsonl and dmesg-mid.txt"
 			else
 				row import fail "prime_import_probe exited $prc: $(head -c 200 "$OUT/probe-import.err")"
@@ -226,7 +242,7 @@ prime_import_testboot_start()
 		timeout -k 5 "$prime_import_testboot_probe_timeout" "$PROBE" --jsonl -s 256x256 "$prime_import_testboot_dst" "$prime_import_testboot_src" > "$OUT/probe-reverse.jsonl" 2> "$OUT/probe-reverse.err"
 		rrc=$?
 		cat "$OUT/probe-reverse.jsonl"
-		if [ "$rrc" -eq 124 ] || [ "$rrc" -eq 137 ]; then
+		if [ "$rrc" -eq 124 ]; then
 			row reverse fail "the reverse probe did not finish in $prime_import_testboot_probe_timeout seconds and was stopped (exit $rrc): an export that hangs is not a clean refusal"
 		else
 			row reverse info "exit $rrc; a clean errno is the expected answer (an NVIDIA video-memory buffer cannot be exported): $(head -c 300 "$OUT/probe-reverse.jsonl")"

@@ -213,6 +213,8 @@ printf 'local_testboot_enable="YES"\n' > "$TMPD/base/etc/rc.conf.local"
 printf 'quiet_testboot_enable="NO"\n' > "$TMPD/base/etc/rc.conf.d/quiet"
 printf 'out_testboot_enable="YES"\n' > "$TMPD/outside-kit"
 ln -s "$TMPD/outside-kit" "$TMPD/base/etc/rc.conf.d/link"
+mkdir -p "$TMPD/base/usr/local/etc/rc.conf.d"
+printf 'ports_testboot_enable="YES"\n' > "$TMPD/base/usr/local/etc/rc.conf.d/ports"
 printf 'old' > "$TMPD/base/boot/modules.nvtest/nvidia-uvm.ko"
 printf 'oldd' > "$TMPD/base/boot/modules.nvtest/nvidia-uvm.ko.debug"
 printf 'k' > "$TMPD/base/boot/modules.nvtest/other.ko"
@@ -231,6 +233,11 @@ if [ "$(cat "$TMPD/outside-kit")" = 'out_testboot_enable="YES"' ]; then
 else
 	bad "(d) make-be.sh wrote through a symbolic link: $(cat "$TMPD/outside-kit")"
 fi
+if grep -q '^ports_testboot_enable="NO"' "$M/usr/local/etc/rc.conf.d/ports"; then
+	ok "(d) a kit armed under /usr/local/etc/rc.conf.d is turned off too"
+else
+	bad "(d) a kit armed under /usr/local/etc/rc.conf.d survives the clone"
+fi
 if grep -q '^other_testboot_enable="NO"' "$M/etc/rc.conf" && grep -q '^foo_testboot_enable="NO"' "$M/etc/rc.conf.d/foo_testboot" \
     && grep -q 'foo_testboot_other="keep"' "$M/etc/rc.conf.d/foo_testboot" && grep -q '^hostname="x"' "$M/etc/rc.conf" \
     && grep -q '^bar_testboot_enable="NO"' "$M/etc/rc.conf.d/sub/bar" && grep -q '^local_testboot_enable="NO"' "$M/etc/rc.conf.local" \
@@ -244,9 +251,28 @@ if [ ! -e "$M/boot/modules.nvtest/nvidia-uvm.ko" ] && [ ! -e "$M/boot/modules.nv
 else
 	bad "(d) the base BE's nvidia-uvm.ko survives the clone"
 fi
+# a symbolic link on the rc.conf path itself (find -type f would not see it): not written through
+mkdir -p "$TMPD/base2/etc"
+printf 'link_testboot_enable="YES"\n' > "$TMPD/outside-rc"
+ln -s "$TMPD/outside-rc" "$TMPD/base2/etc/rc.conf"
+out=$(FAKE_BASE_DIR="$TMPD/base2" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods")
+if [ "$(cat "$TMPD/outside-rc")" = 'link_testboot_enable="YES"' ]; then
+	ok "(d) a symbolic link on the rc.conf path itself is not written through"
+else
+	bad "(d) make-be.sh wrote through a symbolic link on the rc.conf path: $(cat "$TMPD/outside-rc")"
+fi
+case $out in *"is a symbolic link"*) ok "(d) ... and says so" ;; *) bad "(d) a symbolic link is skipped silently" ;; esac
 out=$(FAKE_BASE_DIR="$TMPD/base" run_be "$KIT/make-be.sh" -b base -D 20261120 -n 9 -m "$TMPD/mods" -u "$TMPD/uvm.ko")
 [ "$(cat "$TMPD/mnt/boot/modules.nvtest/nvidia-uvm.ko" 2>/dev/null)" = u ] && ok "(d) with -u the given nvidia-uvm.ko is the one in the clone" || bad "(d) -u did not give the clone its nvidia-uvm.ko"
 mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
+sed 's/^		if \[ -L "\$_f" \]; then .*$/		:/' "$KIT/make-be.sh" > "$TMPD/ctl2/make-be.sh"
+if cmp -s "$KIT/make-be.sh" "$TMPD/ctl2/make-be.sh"; then
+	bad "(d) control symlink-guard: the mutation changed nothing (stale test)"
+else
+	printf 'link_testboot_enable="YES"\n' > "$TMPD/outside-rc"
+	FAKE_BASE_DIR="$TMPD/base2" run_be "$TMPD/ctl2/make-be.sh" -b base -D 20261120 -n 5 -m "$TMPD/mods" > /dev/null 2>&1
+	[ "$(cat "$TMPD/outside-rc")" = 'link_testboot_enable="YES"' ] && bad "(d) control symlink-guard: a make-be.sh without the guard was not seen" || ok "(d) control: a make-be.sh that writes through a symbolic link on the rc.conf path is seen"
+fi
 _f="$TMPD/ctl2/make-be.sh"
 sed 's/^	for _f in "\$MNT\/etc\/rc.conf" .*; do$/	for _f in; do/' "$KIT/make-be.sh" > "$_f"
 if cmp -s "$KIT/make-be.sh" "$_f"; then bad "(d) control keep-other-kits: the mutation changed nothing (stale test)"; else
@@ -387,18 +413,29 @@ fi
 # kldstat, dmesg, bectl, su and pgrep first in PATH.  The paths are rc.conf
 # variables, so nothing outside TMPD is touched.
 FAKE=$TMPD/fake; mkdir -p "$FAKE/bin"
-for t in kldstat dmesg bectl pgrep pkill shutdown sync; do
-	printf '#!/bin/sh\ncase "$0" in *kldstat) echo "nvidia-drm.ko amdgpu.ko";; *pgrep) [ -e "%s/pgrep-miss" ] && exit 1; grep -q "shutdown -r" "%s/dead-man.log" 2>/dev/null && exit 0; exit 1;; *shutdown) echo "$0 $*" >> "%s/dead-man.log";; *pkill) echo "$0 $*" >> "%s/dead-man.log"; [ -e "%s/pkill-fail" ] && exit 1;; *sync) echo s >> "%s/sync.log";; esac\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/$t"
+for t in kldstat dmesg bectl sync; do
+	printf '#!/bin/sh\ncase "$0" in *kldstat) if [ "$1" = -v ]; then cat "%s/kldv" 2>/dev/null; else echo "nvidia-drm.ko amdgpu.ko"; fi;; *sync) echo s >> "%s/sync.log";; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/$t"
 done
+# a fake process table: pgrep -f and pkill -f match their pattern against the command lines in it (the rc script's
+# own command line is always there, as on the box), and a restart request that is not refused adds its own line
+printf '#!/bin/sh\n[ "$1" = -f ] || exit 2\ngrep -Eq -- "$2" "%s/ptable"\n' "$FAKE" > "$FAKE/bin/pgrep"
+printf '#!/bin/sh\necho "$0 $*" >> "%s/dead-man.log"\n[ "$1" = -f ] || exit 2\ngrep -Eq -- "$2" "%s/ptable" || exit 1\ngrep -Ev -- "$2" "%s/ptable" > "%s/ptable.new"\nmv "%s/ptable.new" "%s/ptable"\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/pkill"
+printf '#!/bin/sh\necho "$0 $*" >> "%s/dead-man.log"\n[ -e "%s/shutdown-refuse" ] && exit 0\necho "shutdown $*" >> "%s/ptable"\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/shutdown"
 printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kernel/kernel;; vm.stats.vm.v_wire_count) cat "%s/wired";; hw.nvidia_unlock_dirty_refused) cat "%s/refused" 2>/dev/null;; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/sysctl"
 printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
 chmod +x "$FAKE"/bin/*
 echo 1000 > "$FAKE/wired"
+printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 31 nvidia_drm_pi_guard\n\t\t 30 nvidia_drm\n' > "$FAKE/kldv-good"
+printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 30 nvidia_drm\n\t\t 31 nvidia_drm_pi_guard\n' > "$FAKE/kldv-bad"
+printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nvidia-drm.ko)\n\tContains modules:\n\t\tId Name\n\t\t 30 nvidia_drm\n' > "$FAKE/kldv-noguard"
+printf 'Id Refs Address Size Name\n 1 4 0xffff 1 kernel\n' > "$FAKE/kldv-none"
+cp "$FAKE/kldv-good" "$FAKE/kldv"
 echo 0 > "$FAKE/refused"
 # rc_run <name> <rc script> <probe>: run the one-shot, print its run directory
 rc_run() {
 	_n=$1; _rc=$2; _pr=$3
 	rm -rf "$FAKE/logs-$_n"; mkdir -p "$FAKE/logs-$_n"
+	printf '/usr/sbin/sshd\nsh %s onestart\n' "$_rc" > "$FAKE/ptable"
 	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
 	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
 	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
@@ -474,8 +511,11 @@ if [ "$rc" -eq 1 ] && grep -q 'stopped in step "import"' "$TMPD/sum-died.txt" &&
 else
 	bad "(f2) summarize.sh on a died run: rc=$rc $(cat "$TMPD/sum-died.txt")"
 fi
-printf '%s\n' '{"row":"import","result":"pass","detail":"x"}' '{"row":"wire-count-stable","result":"skip","detail":"x"}' '{"row":"done","result":"info","detail":"x"}' > "$TMPD/nowire.jsonl"
+printf '%s\n' '{"row":"import","result":"pass","detail":"x"}' '{"row":"wire-count-stable","result":"skip","detail":"x"}' '{"row":"guard-order","result":"pass","detail":"x"}' '{"row":"done","result":"info","detail":"x"}' > "$TMPD/nowire.jsonl"
 sh "$KIT/summarize.sh" "$TMPD/nowire.jsonl" > /dev/null 2>&1; [ $? -eq 3 ] && ok "(f2) summarize.sh: a run whose wire row was not a pass is incomplete (exit 3)" || bad "(f2) summarize.sh passes a run that did not measure the wiring"
+printf '%s\n' '{"row":"import","result":"pass","detail":"x"}' '{"row":"wire-count-stable","result":"pass","detail":"x"}' '{"row":"guard-order","result":"pass","detail":"x"}' '{"row":"deadman","result":"info","detail":"armed"}' '{"row":"deadman","result":"fail","detail":"not pending"}' '{"row":"deadman","result":"info","detail":"cancelled"}' '{"row":"done","result":"info","detail":"x"}' > "$TMPD/earlyfail.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/earlyfail.jsonl" > "$TMPD/sum-early.txt" 2>&1; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'failed earlier in the run' "$TMPD/sum-early.txt" && ok "(f2) summarize.sh: a row that failed and was followed by an info row is still a failure" || bad "(f2) summarize.sh passes a row that failed earlier (rc=$rc)"
 : > "$TMPD/empty.jsonl"
 sh "$KIT/summarize.sh" "$TMPD/empty.jsonl" > /dev/null 2>&1; [ $? -eq 1 ] && ok "(f2) summarize.sh: an empty run fails" || bad "(f2) summarize.sh accepts an empty run"
 sh "$KIT/summarize.sh" > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: no argument is a usage error" || bad "(f2) summarize.sh usage"
@@ -494,19 +534,61 @@ case $(rowres "$d/results.jsonl" deadman) in "info info ") ok "(f2) the arm and 
 rm -f "$FAKE/dead-man.log"
 d=$(RC_DEADMAN=0 rc_run nodead "$KIT/prime_import_testboot" "$FAKE/probe-good")
 [ ! -s "$FAKE/dead-man.log" ] && ok "(f2) with the dead-man set to 0 nothing is armed" || bad "(f2) a dead-man was armed with the variable at 0"
+# the unload order: the guard listed before nvidia_drm passes; after, absent or no driver does not
+d=$(rc_run orderok "$KIT/prime_import_testboot" "$FAKE/probe-good")
+[ "$(rowres "$d/results.jsonl" guard-order)" = "pass " ] && [ -s "$d/kldstat-v.txt" ] && ok "(f2) the guard listed before nvidia_drm passes the guard-order row, and kldstat -v is kept" || bad "(f2) guard-order with the good listing: '$(rowres "$d/results.jsonl" guard-order)'"
+sh "$KIT/summarize.sh" "$d" > /dev/null 2>&1; [ $? -eq 0 ] || bad "(f2) summarize.sh does not pass a run whose unload order is right"
+for v in bad:fail noguard:fail none:skip; do
+	cp "$FAKE/kldv-${v%%:*}" "$FAKE/kldv"
+	d=$(rc_run "order${v%%:*}" "$KIT/prime_import_testboot" "$FAKE/probe-good")
+	[ "$(rowres "$d/results.jsonl" guard-order)" = "${v##*:} " ] && ok "(f2) unload order '${v%%:*}': the row is ${v##*:}" || bad "(f2) unload order '${v%%:*}': rows '$(rowres "$d/results.jsonl" guard-order)'"
+	sh "$KIT/summarize.sh" "$d" > /dev/null 2>&1; [ $? -ne 0 ] && ok "(f2) summarize.sh does not pass a run with unload order '${v%%:*}'" || bad "(f2) summarize.sh passes a run with unload order '${v%%:*}'"
+done
+cp "$FAKE/kldv-good" "$FAKE/kldv"
+_f="$TMPD/ctl-rc-order"
+sed 's/elif \[ "\$gl" -lt "\$dl" \]; then/elif [ "$gl" -gt "$dl" ]; then/' "$KIT/prime_import_testboot" > "$_f"
+if cmp -s "$KIT/prime_import_testboot" "$_f"; then
+	bad "(f2) control reversed-order-check: the mutation changed nothing (stale test)"
+else
+	cp "$FAKE/kldv-bad" "$FAKE/kldv"
+	_d=$(rc_run morder "$_f" "$FAKE/probe-good")
+	[ "$(rowres "$_d/results.jsonl" guard-order)" = "pass " ] && ok "(f2) control: an order check that is reversed passes the bad listing, and is seen by the test above" || bad "(f2) control reversed-order-check: not seen"
+	cp "$FAKE/kldv-good" "$FAKE/kldv"
+fi
 # the dead-man must really be pending: a timer that was requested but is not there is a fail row
-touch "$FAKE/pgrep-miss"
+touch "$FAKE/shutdown-refuse"
 d=$(rc_run nopend "$KIT/prime_import_testboot" "$FAKE/probe-good")
-rm -f "$FAKE/pgrep-miss"
+rm -f "$FAKE/shutdown-refuse"
 [ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that is not pending is a fail row" || bad "(f2) not-pending dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
 touch "$FAKE/noshutdown"
 d=$(rc_run noshut "$KIT/prime_import_testboot" "$FAKE/probe-good")
 rm -f "$FAKE/noshutdown"
 [ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that shutdown refuses (noshutdown) is a fail row" || bad "(f2) noshutdown dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
-touch "$FAKE/pkill-fail"
+touch "$FAKE/shutdown-refuse"
 d=$(rc_run nocancel "$KIT/prime_import_testboot" "$FAKE/probe-good")
-rm -f "$FAKE/pkill-fail"
+rm -f "$FAKE/shutdown-refuse"
 grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | grep -q 'no dead-man timer was found to cancel' && ok "(f2) a cancel that finds no timer says so, it does not claim success" || bad "(f2) cancel without a timer: '$(grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | cut -c1-120)'"
+# a finished run leaves the rc script alone and the dead-man gone (the cancel pattern is this script's, not a substring of every line)
+d=$(rc_run ptfinal "$KIT/prime_import_testboot" "$FAKE/probe-good")
+if grep -q 'prime_import_testboot onestart' "$FAKE/ptable" && ! grep -q 'dead-man' "$FAKE/ptable" && grep -q sshd "$FAKE/ptable"; then
+	ok "(f2) the cancel removed the dead-man timer and nothing else (not the rc script itself, not other processes)"
+else
+	bad "(f2) the process table after the cancel: $(tr '\n' '|' < "$FAKE/ptable")"
+fi
+	mkdir -p "$TMPD/ctl-pg"; _f="$TMPD/ctl-pg/prime_import_testboot"
+	sed 's/pgrep -f "prime_import_testboot dead-man"/pgrep -f "prime_import_testboot"/' "$KIT/prime_import_testboot" > "$_f"
+	if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control pgrep-pattern: the mutation changed nothing (stale test)"; else
+		touch "$FAKE/shutdown-refuse"
+		_d=$(rc_run mpgrep "$_f" "$FAKE/probe-good")
+		rm -f "$FAKE/shutdown-refuse"
+		[ "$(rowres "$_d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && bad "(f2) control pgrep-pattern: a pending check that matches the rc script itself was not seen" || ok "(f2) control: a pending check whose pattern matches the rc script itself never fails, and the test above sees it"
+	fi
+mkdir -p "$TMPD/ctl-pk"; _f="$TMPD/ctl-pk/prime_import_testboot"
+sed 's/pkill -f "prime_import_testboot dead-man"/pkill -f "prime_import_testboot"/' "$KIT/prime_import_testboot" > "$_f"
+if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control pkill-pattern: the mutation changed nothing (stale test)"; else
+	_d=$(rc_run mpkill "$_f" "$FAKE/probe-good")
+	grep -q 'prime_import_testboot onestart' "$FAKE/ptable" && bad "(f2) control pkill-pattern: a cancel that kills the rc script itself was not seen" || ok "(f2) control: a cancel pattern that matches the rc script itself is seen (it removes the script from the table)"
+fi
 # the sync after a running row is real: the sync count at the first probe falls by one without it
 rm -f "$FAKE/sync.log" "$FAKE/sync-at-probe"; : > "$FAKE/sync.log"
 d=$(rc_run syncgood "$KIT/prime_import_testboot" "$FAKE/probe-good")

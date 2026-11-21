@@ -43,20 +43,22 @@ function field(line, name,   p, rest) {
 	n++
 	if (!(r in seen)) { seen[r] = 1; order[++k] = r }
 	last[r] = res
+	if (res == "fail") anyfail[r] = 1
 }
 END {
 	bad = 0
 	if (n == 0) { print "FAIL: no rows"; exit 1 }
 	for (i = 1; i <= k; i++) {
 		r = order[i]
-		printf "%-6s %s\n", last[r], r
-		if (last[r] == "fail") bad++
+		printf "%-6s %s\n", (r in anyfail) ? "fail" : last[r], r
+		if (last[r] == "fail" || (r in anyfail)) { bad++; if (last[r] != "fail") printf "FAIL: row \"%s\" failed earlier in the run, whatever its last result says\n", r }
 		if (last[r] == "running") { printf "FAIL: the run stopped in step \"%s\" (a panic or a kill)\n", r; bad++ }
 	}
 	if (!("done" in seen) || last["done"] != "info") { print "FAIL: no final \"done\" row: the run did not finish"; bad++ }
 	if (bad) { print "summary: FAIL"; exit 1 }
 	if (last["import"] != "pass") { print "summary: INCOMPLETE: the run finished but the import row is \"" (("import" in seen) ? last["import"] : "missing") "\", not pass: nothing was tested"; exit 3 }
 	if (last["wire-count-stable"] != "pass") { print "summary: INCOMPLETE: the run finished but the wire-count-stable row is \"" (("wire-count-stable" in seen) ? last["wire-count-stable"] : "missing") "\", not pass: the wiring was not measured"; exit 3 }
+	if (last["guard-order"] != "pass") { print "summary: INCOMPLETE: the run finished but the guard-order row is \"" (("guard-order" in seen) ? last["guard-order"] : "missing") "\", not pass: the place of the guard in the unload order was not shown"; exit 3 }
 	print "summary: PASS (skips and infos are listed above and are not passes)"
 	exit 0
 }' "$f"

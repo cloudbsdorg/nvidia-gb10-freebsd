@@ -48,6 +48,8 @@ static unsigned long gb10_pi_dirty_refused;
 static unsigned long gb10_pi_dirty_busy_fallback;
 static struct timeval gb10_pi_lasttime;
 static int gb10_pi_curpps;
+static struct timeval gb10_pi_closing_lasttime;
+static int gb10_pi_closing_curpps;
 SYSCTL_ULONG(_hw, OID_AUTO, nvidia_unlock_dirty_refused, CTLFLAG_RD,
     &gb10_pi_dirty_refused, 0,
     "Pages with a VM object that were not all valid when the RM unpinned them (not marked dirty); unexpected for an imported buffer, legitimate for pinned user memory after a truncate, see docs/PRIME-IMPORT.md 7.6");
@@ -244,7 +246,11 @@ gb10_pi_os_unregister(void *priv_data, void **import_sgt, void **import_priv)
 NV_STATUS NV_API_CALL
 gb10_pi_os_import(void *sgt)
 {
-	return (gb10_pi_import(sgt) == GB10_PI_OK ? NV_OK : NV_ERR_NOT_SUPPORTED);
+	int rc = gb10_pi_import(sgt);
+
+	if (rc == GB10_PI_CLOSING && ppsratecheck(&gb10_pi_closing_lasttime, &gb10_pi_closing_curpps, 1))
+		printf("nvidia: cross-GPU export refused: %s\n", gb10_pi_str(rc));
+	return (rc == GB10_PI_OK ? NV_OK : NV_ERR_NOT_SUPPORTED);
 }
 
 /* nv_dma_release_sgt(): last use of the descriptor, dropping the owner may free it. */

@@ -148,6 +148,7 @@ struct gb10_pi_ops {
 struct gb10_pi_gate {
 	int	holds;
 	int	closing;
+	int	kept;		/* the teardown kept the devices because an export was held: no unload, ever, until a reboot */
 };
 
 /* take a hold: 0, or -1 when the gate is closing (nothing is counted) */
@@ -164,10 +165,19 @@ gb10_pi_gate_hold(struct gb10_pi_gate *g)
 static inline int
 gb10_pi_gate_quiesce(struct gb10_pi_gate *g)
 {
-	if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0)
+	if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0 ||
+	    __atomic_load_n(&g->kept, __ATOMIC_SEQ_CST))
 		return (-1);
 	__atomic_store_n(&g->closing, 1, __ATOMIC_SEQ_CST);
 	return (0);
+}
+
+/* the teardown kept the devices (second line of defence): the module must never unload now */
+static inline void
+gb10_pi_gate_keep(struct gb10_pi_gate *g)
+{
+	__atomic_store_n(&g->kept, 1, __ATOMIC_SEQ_CST);
+	__atomic_store_n(&g->closing, 1, __ATOMIC_SEQ_CST);	/* and no new export on a driver whose devices are gone */
 }
 
 static inline int

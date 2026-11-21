@@ -317,6 +317,8 @@ static void g_release(void *ctx) { (void)ctx; if (--gem_refs == 0) src_freed = 1
 static struct gb10_pi_gate G;
 static int owner_refs, live_seen_in_release;
 static int gate_hold(void *ctx) { (void)ctx; if (gb10_pi_gate_hold(&G) != 0) return -1; owner_refs++; return 0; }
+/* a release that frees the descriptor, as the last GEM reference does (the descriptor is inside the object): poison it */
+static void poison_release(void *ctx) { memset(ctx, 0xa5, sizeof(struct gb10_pi_desc)); }
 static void gate_release(void *ctx) { (void)ctx; live_seen_in_release = gb10_pi_gate_live(&G); owner_refs--; }
 
 /* the exporter's dma-buf: when nobody holds it, its page pool may reuse the pages */
@@ -632,6 +634,20 @@ main(void)
 		check("a closed gate refuses a new export", gb10_pi_import(&d1), GB10_PI_CLOSING);
 		check("... without taking a reference on the owner", owner_refs, 0);
 		check("... and without counting a hold", gb10_pi_gate_live(&G), 0);
+		{
+			struct gb10_pi_desc dp;
+			struct gb10_pi_gate G2;
+
+			memset(&G2, 0, sizeof(G2));
+			memset(&dp, 0, sizeof(dp));
+			dp.magic = GB10_PI_DESC_MAGIC; dp.count = 1; dp.pages = pages; dp.hold = xd_hold; dp.release = poison_release; dp.gate = &G2;
+			dp.ctx = &dp;
+			gb10_pi_gate_hold(&G2);
+			check("the import of the poisoned descriptor succeeds", gb10_pi_import(&dp), GB10_PI_OK);
+			check("a release that frees the descriptor: the core never reads it afterwards (the gate was read first)", (gb10_pi_release(&dp), G2.holds), 0);
+		}
+		check("a gate whose teardown kept the devices refuses the quiesce for good", (memset(&G, 0, sizeof(G)), gb10_pi_gate_keep(&G), gb10_pi_gate_quiesce(&G)), -1);
+		check("... and a kept gate is closed: no new export on a driver whose devices are gone", G.closing, 1);
 		check("the closing result has a message", gb10_pi_str(GB10_PI_CLOSING) != NULL && strcmp(gb10_pi_str(GB10_PI_CLOSING), "unknown error") != 0, 1);
 		/* one GEM object exported twice: two holds on one descriptor, two releases, a third does nothing */
 		memset(&G, 0, sizeof(G));
@@ -1075,7 +1091,10 @@ mutate wire-unbusies-foreign-busy 's/^\t\tif (ops->try_busy(ctx, pages\[i\]) != 
 mutate messages-duplicated     's/"out of memory"/"empty buffer"/'
 mutate life-ignores-held       's/if (l == NULL || l->held || l->hold == NULL/if (l == NULL || l->hold == NULL/'
 mutate gate-drop-sets-one      's/__atomic_sub_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);/__atomic_store_n(\&g->holds, 1, __ATOMIC_SEQ_CST);/'
-mutate gate-quiesce-ignores-holds 's/if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0)/if (0)/'
+mutate gate-quiesce-ignores-holds 's/if (__atomic_load_n(&g->holds, __ATOMIC_SEQ_CST) > 0 ||/if (0 ||/'
+mutate release-reads-descriptor-after 's/^\tg = d->gate;.*$/\tg = NULL;/;s/^\td->release(d->ctx);$/\td->release(d->ctx); g = d->gate;/'
+mutate gate-keep-is-ignored    's/\t    __atomic_load_n(&g->kept, __ATOMIC_SEQ_CST))/\t    0)/'
+mutate gate-keep-sets-nothing  's/__atomic_store_n(&g->kept, 1, __ATOMIC_SEQ_CST);/;/'
 mutate gate-quiesce-never-closes 's/__atomic_store_n(&g->closing, 1, __ATOMIC_SEQ_CST);/;/'
 mutate gate-hold-ignores-closing 's/if (__atomic_load_n(&g->closing, __ATOMIC_SEQ_CST))/if (0)/'
 mutate gate-hold-not-counted   's/__atomic_add_fetch(&g->holds, 1, __ATOMIC_SEQ_CST);/;/'

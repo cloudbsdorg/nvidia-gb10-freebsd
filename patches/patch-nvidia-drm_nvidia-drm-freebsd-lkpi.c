@@ -1,12 +1,13 @@
 --- nvidia-drm/nvidia-drm-freebsd-lkpi.c.orig
 +++ nvidia-drm/nvidia-drm-freebsd-lkpi.c
-@@ -213,10 +213,26 @@
+@@ -213,10 +213,29 @@
      return 0;
  }
  
 +/* the gate of the exports of imported buffers, in nvidia-drm-gem-dma-buf.c */
 +extern int nv_drm_pi_live_holds(void);
 +extern int nv_drm_pi_quiesce(void);
++extern void nv_drm_pi_keep(void);
 +
  static void nv_bsd_drm_exit(void)
  {
@@ -19,15 +20,17 @@
 +         * for kldunload -f as well.  Kept as a second line of defence:
 +         * nv_drm_exit() has left the devices alone (see
 +         * nv_drm_remove_devices()), and the pdevs they use (the dma-buf
-+         * attachment keeps &pdev->dev) stay too.
++         * attachment keeps &pdev->dev) stay too, and the module must not
++         * unload later: the guard refuses for good.
 +         */
++        nv_drm_pi_keep();
 +        return;
 +    }
 +
      // After doing the common DRM teardown, free any linuxkpi devices we
      // allocated during init
      for (int i = 0; i < NV_MAX_DEVICES; i++) {
-@@ -237,5 +253,63 @@
+@@ -237,5 +256,75 @@
  MODULE_DEPEND(nvidia_drm, drmn, 2, 2, 2);
  MODULE_DEPEND(nvidia_drm, dmabuf, 1, 1, 1);
  MODULE_DEPEND(nvidia_drm, nvidia, 1, 1, 1);
@@ -45,8 +48,14 @@
 + * kernel has no call that undoes a quiesce, so after a quiesce that was
 + * followed by an aborted unload, exports of imported buffers are refused.
 + * MOD_UNLOAD is refused while a hold is live as well, for a forced unload
-+ * (kldunload -f skips a refused quiesce).  The guard is ordered first so its
-+ * quiesce runs before the driver's own teardown.
++ * (kldunload -f skips a refused quiesce).  The guard must be UNLOADED
++ * FIRST, before nvidia_drm's own teardown can run.  A file's modules are
++ * unloaded in the reverse of their load order (module_register_init() moves
++ * each loaded module to the head of the file's list, linker_file_unload()
++ * walks the list from the head), and the sysinits load in (subsystem, order)
++ * order, so the guard has to LOAD LAST: SI_ORDER_LAST, above the
++ * SI_ORDER_ANY of LKPI_DRIVER_MODULE in the same subsystem.  kldstat -v shows
++ * the unload order (first listed, first unloaded); the boot kit checks it.
 + */
 +static int
 +nv_drm_pi_guard_handler(module_t mod, int what, void *arg)
@@ -56,10 +65,16 @@
 +        return 0;
 +    case MOD_QUIESCE:
 +        if (nv_drm_pi_quiesce() != 0) {
-+            printf("nvidia_drm: unload refused: %d RM export(s) of imported "
-+                   "buffers are still open; close the processes that hold "
-+                   "them (fstat /dev/nvidiactl) and try again\n",
-+                   nv_drm_pi_live_holds());
++            if (nv_drm_pi_live_holds() > 0) {
++                printf("nvidia_drm: unload refused: %d RM export(s) of "
++                       "imported buffers are still open; close the processes "
++                       "that hold them (fstat /dev/nvidiactl) and try again\n",
++                       nv_drm_pi_live_holds());
++            } else {
++                printf("nvidia_drm: unload refused: an earlier unload attempt "
++                       "left the display devices in place; restart the "
++                       "machine before unloading this module\n");
++            }
 +            return EBUSY;
 +        }
 +        return 0;
@@ -70,9 +85,9 @@
 +         * when no export is held, and a hold cannot arrive between this
 +         * check and the teardown.  An EBUSY from here stops even a forced
 +         * unload (linker_file_unload() returns a module's unload error
-+         * whatever the flags), and this module is the first of the file, so
-+         * it answers before the driver's own teardown has run: see
-+         * docs/PRIME-IMPORT.md 7.7.
++         * whatever the flags), and this module is the first of the file to be
++         * unloaded (it loads last, SI_ORDER_LAST), so it answers before the
++         * driver's own teardown has run: see docs/PRIME-IMPORT.md 7.7.
 +         */
 +        if (nv_drm_pi_quiesce() != 0) {
 +            printf("nvidia_drm: unload refused, also for kldunload -f: %d RM "
@@ -90,5 +105,5 @@
 +static moduledata_t nv_drm_pi_guard_mod = {
 +    "nvidia_drm_pi_guard", nv_drm_pi_guard_handler, NULL
 +};
-+DECLARE_MODULE(nvidia_drm_pi_guard, nv_drm_pi_guard_mod, SI_SUB_DRIVERS, SI_ORDER_FIRST);
++DECLARE_MODULE(nvidia_drm_pi_guard, nv_drm_pi_guard_mod, SI_SUB_DRIVERS, SI_ORDER_LAST);
  #endif /* NV_DRM_AVAILABLE */

@@ -558,8 +558,14 @@ after the run.
 **Unload.** An export hands the RM a descriptor whose hold and release functions are in
 `nvidia-drm.ko`; the RM file descriptor that holds it can outlive the DRM file and be closed after
 the module is gone. `LKPI_DRIVER_MODULE` cannot refuse an unload, so a second module in
-`nvidia-drm-freebsd-lkpi.c`, `nvidia_drm_pi_guard`, is the gate, and it is ordered first
-(`SI_ORDER_FIRST`) so that its quiesce runs before the driver's own teardown:
+`nvidia-drm-freebsd-lkpi.c`, `nvidia_drm_pi_guard`, is the gate, and it must be unloaded first, so that its refusal comes before the driver's own
+teardown. A file's modules are unloaded in the reverse of their load order (`module_register_init()` in
+`sys/kern/kern_module.c` moves each loaded module to the head of the file's list, and `linker_file_unload()`
+in `sys/kern/kern_linker.c` walks the list from the head), and the sysinits load by subsystem and order, so
+the guard has to load last: `SI_SUB_DRIVERS` with `SI_ORDER_LAST`, above the `SI_ORDER_ANY` of
+`LKPI_DRIVER_MODULE`. `kldstat -v` lists a file's modules in unload order; the boot kit checks that the guard is
+listed before `nvidia_drm` (row `guard-order`) and `tests/prime_import_test.sh` runs a model of the two
+functions on the guard's real order:
 
 * `MOD_QUIESCE` returns `EBUSY` while any export is held (and says so in the log). When none is,
   it **closes the gate**: from then on a new export is refused (`nv_dma_import_sgt()` fails and the
@@ -570,12 +576,14 @@ the module is gone. `LKPI_DRIVER_MODULE` cannot refuse an unload, so a second mo
   unload that skipped the quiesce still closes it when none is held.
 * `kldunload -f` ignores a refused quiesce (`linker_file_unload()` in `sys/kern/kern_linker.c`), but not a
   module's refused unload: the loop that unloads the modules of the file returns the module's error
-  whatever the flags. The guard is the first module of the file (`SI_ORDER_FIRST`, registered first and
-  so unloaded first), so its `EBUSY` stops even a forced unload before the driver's own teardown has
-  run. A forced unload with no export held proceeds, the gate closed.
+  whatever the flags. The guard loads last and so is unloaded first (see above), so its `EBUSY` stops even a forced
+  unload before the driver's own teardown has run. A forced unload with no export held proceeds, the gate closed.
 * As a second line of defence, `nv_drm_exit()` (through `nv_drm_remove_devices()`) does not destroy the
   devices and `nv_bsd_drm_exit()` does not free the pdevs while an export is held (the dma-buf
-  attachment uses `&pdev->dev`); they are not reached by an unload the guard agreed to. On FreeBSD the
+  attachment uses `&pdev->dev`); they are not reached by an unload the guard agreed to. They are reached only if the guard was bypassed, since the guard has refused or closed the gate
+  before the driver's teardown. If they are reached, the module is marked kept and not unloadable (the gate
+  is closed and the guard refuses every later unload) and the operator must restart the machine: a later plain
+  unload would otherwise free the text the kept devices still call into. On FreeBSD the
   teardown path is `nv_bsd_drm_exit` -> `nv_drm_exit` -> `nv_drm_remove_devices`; the KAPI `.remove`
   callback that calls `nv_drm_remove()` is registered only by the Linux build of nvidia-modeset.
 * The count is taken in the hold, under a spin lock together with the closing test, and counted down by

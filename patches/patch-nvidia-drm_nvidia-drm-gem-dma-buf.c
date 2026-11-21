@@ -1,6 +1,6 @@
 --- nvidia-drm/nvidia-drm-gem-dma-buf.c.orig
 +++ nvidia-drm/nvidia-drm-gem-dma-buf.c
-@@ -37,6 +37,118 @@
+@@ -37,6 +37,130 @@
  
  #include "linux/dma-buf.h"
  
@@ -75,6 +75,18 @@
 +    return rc != 0 ? EBUSY : 0;
 +}
 +
++/*
++ * The teardown kept the devices because an export was held (its second
++ * line of defence): from now on the module must never unload, a later plain
++ * kldunload included, or the kept devices would call into freed text.
++ */
++void nv_drm_pi_keep(void)
++{
++    spin_lock(&__nv_drm_pi_gate_lock);
++    gb10_pi_gate_keep(&__nv_drm_pi_gate);
++    spin_unlock(&__nv_drm_pi_gate_lock);
++}
++
 +static int __nv_drm_gem_dma_buf_pi_hold(void *ctx)
 +{
 +    struct nv_drm_gem_object *nv_gem = ctx;
@@ -119,7 +131,7 @@
  static inline
  void __nv_drm_gem_dma_buf_free(struct nv_drm_gem_object *nv_gem)
  {
-@@ -50,6 +162,12 @@
+@@ -50,6 +174,12 @@
  
      drm_prime_gem_destroy(&nv_gem->base, nv_dma_buf->sgt);
  
@@ -132,7 +144,7 @@
      nv_drm_free(nv_dma_buf);
  }
  
-@@ -80,6 +198,16 @@
+@@ -80,6 +210,16 @@
       * through the same linuxkpi bits it seems (probably so it can be used
       * elsewhere), so dma_buf->file really is a native FreeBSD struct file...
       */
@@ -149,7 +161,7 @@
      if (!nv_gem->base.filp->f_op->mmap)
          return -EINVAL;
  
-@@ -126,6 +254,150 @@
+@@ -126,6 +266,150 @@
      return ret;
  }
  
@@ -300,7 +312,7 @@
  const struct nv_drm_gem_object_funcs __nv_gem_dma_buf_ops = {
      .free = __nv_drm_gem_dma_buf_free,
      .create_mmap_offset = __nv_drm_gem_dma_buf_create_mmap_offset,
-@@ -144,11 +416,24 @@
+@@ -144,11 +428,24 @@
  
      if ((nv_dma_buf =
              nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
@@ -328,7 +340,7 @@
  
      pMemory = NULL;
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
-@@ -157,6 +442,35 @@
+@@ -157,6 +454,35 @@
                                                    dma_buf->size - 1);
      }
  
@@ -364,7 +376,7 @@
      nv_drm_gem_object_init(nv_dev, &nv_dma_buf->base,
                             &__nv_gem_dma_buf_ops, dma_buf->size, pMemory);
  
-@@ -196,17 +510,46 @@
+@@ -196,17 +522,46 @@
      }
  
      if (drm_core_check_feature(dev, DRIVER_MODESET)) {
@@ -416,7 +428,7 @@
          }
      }
  
-@@ -220,8 +563,8 @@
+@@ -220,8 +575,8 @@
      }
  
      if (!nvKms->exportMemory(nv_dev->pDevice,
