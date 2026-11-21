@@ -1,0 +1,7 @@
+# name<TAB>qualType: the three gate functions of nvidia-drm (defined in nvidia-drm-gem-dma-buf.c) and the type clang
+# prints for their declaration.  tests/prime_import_test.sh (the text scan of the occurrences) and
+# tests/data/gate_ast_check.py (the AST check) both read this file, so the two halves cannot disagree.
+# The AST dump is filtered by the prefix nv_drm_pi_, which every name here starts with.
+nv_drm_pi_quiesce	int (int *, int *)
+nv_drm_pi_live_holds	int (void)
+nv_drm_pi_keep	void (void)

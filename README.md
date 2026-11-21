@@ -25,6 +25,9 @@ small source files of our own, and the tests.
 | Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
 | Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
 | Accelerated native rendering (Mesa NVK over a render interface in `nvidia-drm`) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | fix committed (3414fd7), waits for test boot 6 |
+| Cross-GPU buffer import (PRIME) of system-memory buffers | implemented (#2228), waits for a test boot; see [Cross-GPU buffers](#cross-gpu-buffers-prime-import) |
+| CUDA | does not work yet: needs `nvidia-uvm` (clean-room module in progress) |
 
 Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with a GeForce RTX
 5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs, amd64.
@@ -269,6 +272,53 @@ code that includes linuxkpi headers, test alignment with `addr & (PAGE_SIZE - 1)
 is native FreeBSD code, where `PAGE_MASK` means what FreeBSD says.
 `tests/drm_fault_index_test.sh` fails if the registration code tests `& PAGE_MASK` again.
 
+## Cross-GPU buffers (PRIME import)
+
+A buffer another GPU rendered into (the RX 7600 on amp001, through `amdgpu`) can be imported by
+`nvidia-drm` when it is **system memory**. NVIDIA's FreeBSD driver never had this: its OS layer
+answered every dma-buf import with "not supported" and then `nvidia-drm` handed the KAPI a NULL
+handle (the panic that [`18fa11d`](patches/patch-nvidia-drm_nvidia-drm-fb.c) turned into
+`EINVAL`). The design, the exact failure chain and every decision are in
+[`docs/PRIME-IMPORT.md`](docs/PRIME-IMPORT.md); the sources consulted are in
+[`PROVENANCE.md`](PROVENANCE.md).
+
+How it works, in one paragraph. `nvidia-drm` walks the buffer's scatter list and expands it to one
+`vm_page` pointer per page; anything that is not a whole number of managed RAM pages (a partial
+page, a buffer in the other card's video memory, an empty or over-4-GiB buffer, a list that
+disagrees with the size) is refused with `EINVAL` and a line in the log saying why, and the GEM
+object is created without an NVKMS handle, so it cannot become a framebuffer (the guard of #2228
+answers `ADDFB2` with `EINVAL`). Otherwise `nvidia.ko` wires the pages (`nv_import_pages()`) and
+the new KAPI entry `getSystemMemoryHandleFromPageArray()` gives them to the RM as a write-back
+page-array descriptor; the RM's own teardown unwires and frees them. The export ioctl always goes through the SGT entry points (`nv_register_sgt()` and friends, which
+used to be stubs that returned success and filled nothing) when the pages were imported, never
+straight from the page-array handle: that holds no reference, and the SGT path holds the GEM
+object for as long as the RM file descriptor maps the pages. The exporter's dma-buf is held for
+the whole life of the imported GEM object.
+
+A buffer the exporter has already CPU-mapped and touched when it is imported (a page the exporter
+faulted in has a VM object) is refused with a log line. One it maps later is fine: the page gets
+an object after the wiring and is dirtied correctly at the release.
+
+Two read-only sysctls report the release path: `hw.nvidia_unlock_dirty_refused` (pages with a VM
+object that were not all valid when the RM unpinned them; unexpected for an imported buffer) and
+`hw.nvidia_unlock_dirty_busy_fallback` (pages dirtied without their busy lock after a short spin);
+see section 7.6 of `docs/PRIME-IMPORT.md`. `kldunload nvidia_drm` is refused (`EBUSY`, with the reason in the log) while an RM file descriptor
+still holds an exported imported buffer, also for `kldunload -f`, and once the driver has agreed to an unload (a quiesce with no
+export open) new exports are refused until the next boot, even if the unload is then abandoned. The guard is a second module of `nvidia-drm.ko` that loads
+last (`SI_ORDER_LAST`) so that it is unloaded first; the boot kit checks that with `kldstat -v`
+(docs/PRIME-IMPORT.md 7.7).
+
+What does not work yet: a buffer in the other GPU's video memory (needs a copy), the dma-buf file
+descriptor interface the NVIDIA userspace driver uses (Track #2307), and scanning an imported
+system-memory buffer out directly (NVIDIA's own rule: a card with video memory does not; Track
+#2308).
+
+Tests. `tests/pageimport_test.sh` (the conversion, wiring and SGT logic against a fake VM, with
+mutants that must fail), `tests/kapi_table_test.sh` (both copies of the KAPI table header agree;
+a planted mismatch fails), `tests/prime_import_test.sh` (the patched sources are wired as the
+design says). Hardware: [`tests/prime-import-testboot/`](tests/prime-import-testboot/) holds the
+one-shot test-boot kit and `prime_import_probe(8)`; nothing here is loaded on a running system.
+
 ## Tunables and sysctls
 
 | Name | Kind | Values |
@@ -373,6 +423,9 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `man/` | `nvidia_drm_render(4)`, the manual page of that interface |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
+| `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
+| `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
+| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 
 ## Licence
 

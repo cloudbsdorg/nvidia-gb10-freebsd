@@ -1,7 +1,12 @@
 --- nvidia/Makefile.orig
 +++ nvidia/Makefile
-@@ -15,10 +15,27 @@
+@@ -13,12 +13,35 @@
+ include nvidia-sources.mk
+ 
  SRCS=		${NVIDIA_SOURCES}
++# Our own BSD-licensed FreeBSD side of the cross-GPU import (Track #2228),
++# copied here by scripts/prepare-tree.sh, kept out of NVIDIA's files.
++SRCS+=		gb10_pageimport_os.c
  SRCS+=		acpi_if.h bus_if.h device_if.h opt_acpi.h pci_if.h vnode_if.h
  CFLAGS+=	-I. -I../common/inc -DNV_VERSION_STRING=\"580.178.04\"
 -CFLAGS+=	-D__KERNEL__ -DNVRM -DFSP_DETACH_STRING_H  -Wno-unused-function -Wuninitialized -O2 -fno-strict-aliasing    -ffreestanding -mno-red-zone -mcmodel=kernel       -UDEBUG -U_DEBUG -DNDEBUG
@@ -12,7 +17,8 @@
  CFLAGS+=	-DNV_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
  CFLAGS+=	-DNV_KERNEL_INTERFACE_LAYER
  
-+# The symbols nvidia-modeset.ko and nvidia-drm.ko take from this module.
++# The symbols nvidia-modeset.ko and nvidia-drm.ko take from this module
++# (nv_import_pages and nv_unimport_pages: the cross-GPU import, Track #2228).
 +# bsd.kmod.mk exports nothing unless EXPORT_SYMS names it, and arm64 kernel
 +# modules are shared objects whose undefined symbols resolve only against
 +# exported ones.
@@ -23,7 +29,9 @@
 +		nv_kthread_q_item_init \
 +		nv_kthread_q_schedule_q_item \
 +		nv_kthread_q_flush \
-+		nv_kthread_q_stop
++		nv_kthread_q_stop \
++		nv_import_pages \
++		nv_unimport_pages
 +.endif
 +
  include ../common/optional-cflags.mk
