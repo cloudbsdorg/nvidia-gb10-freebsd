@@ -102,16 +102,26 @@ struct nvco_entry {
 	const void	*owner;
 	uint32_t	refs;	/* holds in flight (nvco_hold); a free of the client waits for zero */
 	uint32_t	freeing;	/* frees of the client in flight (a count; any file's): no new holds */
-	uint32_t	gen;	/* which client this entry is: a reused handle gets a new one */
+	uint64_t	gen;	/* which client this entry is (never 0): a reused handle gets a new one */
+	uint32_t	tomb;	/* not a client: a free of an unlisted handle is in flight (see nvco_begin_free) */
 	const void	*file;	/* the open file the holds in flight were taken on (struct file *), for the release */
 	uint32_t	revoked;	/* ownership withdrawn while holds were in flight: kept only until they end */
+};
+
+#define	NVCO_FREELOG	64
+
+struct nvco_free_record {		/* a free of an UNLISTED handle that the RM did free */
+	uint32_t	handle;
+	uint64_t	seq;
 };
 
 struct nvco_table {
 	struct nvco_entry	*e;
 	size_t			n;
 	size_t			cap;
-	uint32_t		next_gen;
+	uint64_t		next_gen;
+	uint64_t		seq;	/* successful frees of unlisted handles so far */
+	struct nvco_free_record	frees[NVCO_FREELOG];	/* the last NVCO_FREELOG of them */
 };
 
 static inline struct nvco_entry *
@@ -142,12 +152,52 @@ nvco_remove_handle(struct nvco_table *t, uint32_t handle)
 {
 	struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e == NULL)
-		return;
+	if (e == NULL || e->tomb)
+		return;		/* a tombstone is not a client: its free removes it */
 	if (e->refs != 0)
 		e->revoked = 1;
 	else
 		nvco_drop_entry(t, e);
+}
+
+/* a fresh generation: never 0 (0 means "not listed" in a token), 64 bits so that it does not wrap */
+static inline uint64_t
+nvco_new_gen(struct nvco_table *t)
+{
+	if (++t->next_gen == 0)
+		++t->next_gen;
+	return (t->next_gen);
+}
+
+/* a new entry for the handle (NULL when memory ran out); the caller sets what is not zero */
+static inline struct nvco_entry *
+nvco_new_entry(struct nvco_table *t, uint32_t handle, const void *owner)
+{
+	struct nvco_entry *grown, *e;
+	size_t i, cap;
+
+	if (t->n == t->cap) {
+		cap = t->cap == 0 ? 16 : t->cap * 2;
+		grown = NVCO_MALLOC(cap * sizeof(*grown));
+		if (grown == NULL)
+			return (NULL);
+		for (i = 0; i < t->n; i++)
+			grown[i] = t->e[i];
+		if (t->e != NULL)
+			NVCO_FREE(t->e);
+		t->e = grown;
+		t->cap = cap;
+	}
+	e = &t->e[t->n++];
+	e->handle = handle;
+	e->owner = owner;
+	e->refs = 0;
+	e->freeing = 0;
+	e->gen = nvco_new_gen(t);
+	e->tomb = 0;
+	e->file = NULL;
+	e->revoked = 0;
+	return (e);
 }
 
 /*
@@ -159,8 +209,7 @@ nvco_remove_handle(struct nvco_table *t, uint32_t handle)
 static inline int
 nvco_add(struct nvco_table *t, uint32_t handle, const void *owner)
 {
-	struct nvco_entry *grown, *old;
-	size_t i, cap;
+	struct nvco_entry *old;
 
 	old = nvco_find(t, handle);
 	if (old != NULL) {
@@ -179,26 +228,8 @@ nvco_add(struct nvco_table *t, uint32_t handle, const void *owner)
 		}
 		return (0);
 	}
-	if (t->n == t->cap) {
-		cap = t->cap == 0 ? 16 : t->cap * 2;
-		grown = NVCO_MALLOC(cap * sizeof(*grown));
-		if (grown == NULL)
-			return (-1);
-		for (i = 0; i < t->n; i++)
-			grown[i] = t->e[i];
-		if (t->e != NULL)
-			NVCO_FREE(t->e);
-		t->e = grown;
-		t->cap = cap;
-	}
-	t->e[t->n].handle = handle;
-	t->e[t->n].owner = owner;
-	t->e[t->n].refs = 0;
-	t->e[t->n].freeing = 0;
-	t->e[t->n].gen = ++t->next_gen;
-	t->e[t->n].file = NULL;
-	t->e[t->n].revoked = 0;
-	t->n++;
+	if (nvco_new_entry(t, handle, owner) == NULL)
+		return (-1);
 	return (0);
 }
 
@@ -287,36 +318,102 @@ nvco_busy(const struct nvco_table *t, uint32_t handle)
 }
 
 /*
- * A free of the client is starting, by whichever file: the holds in flight
- * drain and no new one is granted until the free ends, because the RM will
- * free the client in the window after the includer drops the table lock.  The
- * delay of the owner's holds is bounded by the holds in flight plus one RM
- * call.  Returns a token (nonzero) naming this client, or 0 when the handle
- * is not listed; pass the token to nvco_end_free.
+ * May this file free this handle?  A listed client can be
+ * freed only by the file that owns it: another file gets EPERM from the
+ * includer before the RM is called, so a stranger cannot raise the free count
+ * of a predictable handle or reach the RM in the lag window.  The refusal does
+ * not depend on whether the RM would refuse.  An unlisted handle (a client the
+ * table has not recorded yet, or none) may be freed by anyone: the RM decides,
+ * and the free is logged (nvco_begin_free) so that a record that lands late is refused.
  */
-static inline uint32_t
-nvco_begin_free(struct nvco_table *t, uint32_t handle)
+static inline int
+nvco_free_permitted(const struct nvco_table *t, const void *who, uint32_t handle)
 {
-	struct nvco_entry *e = nvco_find(t, handle);
+	const struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e == NULL)
-		return (0);
-	e->freeing++;
-	return (e->gen + 1);
+	return (e == NULL || e->owner == who);
 }
 
 /*
- * The free is over (done, interrupted or refused by the RM).  The count is
- * given back only to the client the token names: the handle may have been
- * freed and reused by another client while the free slept.
+ * A free of a handle is starting, by whichever file.  A listed client gets a
+ * count: the holds in flight drain and no new one is granted until the free
+ * ends, because the RM will free the client in the window after the includer
+ * drops the table lock.  A handle that is NOT listed gets a TOMBSTONE (owner
+ * NULL, never held or owned): the client of that handle may exist in the RM and
+ * not be recorded yet, and an allocation record that lands while the tombstone
+ * stands is a collision (neither party owned).  A tombstone lives only as long
+ * as its free, so junk frees cost nothing once the RM refuses them.  Returns a
+ * token (nonzero) naming the entry (0 only when memory ran out), and sets
+ * *unlisted; pass both to nvco_end_free.
  */
-static inline void
-nvco_end_free(struct nvco_table *t, uint32_t handle, uint32_t token)
+static inline uint64_t
+nvco_begin_free(struct nvco_table *t, uint32_t handle, int *unlisted)
 {
 	struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e != NULL && token != 0 && e->gen + 1 == token && e->freeing != 0)
-		e->freeing--;
+	*unlisted = (e == NULL);
+	if (e == NULL) {
+		e = nvco_new_entry(t, handle, NULL);
+		if (e == NULL)
+			return (0);
+		e->tomb = 1;
+	}
+	e->freeing++;
+	return (e->gen);
+}
+
+/*
+ * The free is over.  rm_freed: the RM really freed a client (the ioctl and the
+ * params status both succeeded).  A free of an unlisted handle that freed a
+ * client is logged with a sequence number: an allocation that took its mark
+ * before that, and records the same handle, is refused (nvco_alloc_stale).  The
+ * count is given back only to the entry the token names, and a tombstone goes
+ * with its last free.
+ */
+static inline void
+nvco_end_free(struct nvco_table *t, uint32_t handle, uint64_t token, int unlisted, int rm_freed)
+{
+	struct nvco_entry *e = nvco_find(t, handle);
+	uint64_t seq;
+
+	if (unlisted && rm_freed) {
+		seq = ++t->seq;
+		t->frees[seq % NVCO_FREELOG].handle = handle;
+		t->frees[seq % NVCO_FREELOG].seq = seq;
+	}
+	if (e == NULL || token == 0 || e->gen != token || e->freeing == 0)
+		return;
+	e->freeing--;
+	if (e->tomb && e->freeing == 0 && e->refs == 0)
+		nvco_drop_entry(t, e);
+}
+
+/* the mark an allocation takes before its RM call */
+static inline uint64_t
+nvco_alloc_mark(const struct nvco_table *t)
+{
+	return (t->seq);
+}
+
+/*
+ * 1 when a free of an unlisted handle that freed a client ended after the
+ * allocation took its mark and named this handle (the free may have taken the
+ * very client being recorded), or when so many such frees ended that the log
+ * can no longer say (fail closed).  A free that ended before the mark cannot
+ * have taken a client created after it, and one still in flight is a tombstone.
+ */
+static inline int
+nvco_alloc_stale(const struct nvco_table *t, uint32_t handle, uint64_t mark)
+{
+	size_t i;
+
+	if (t->seq - mark >= NVCO_FREELOG)
+		return (1);
+	for (i = 0; i < NVCO_FREELOG; i++) {
+		if (t->frees[i].seq > mark && t->frees[i].handle == handle)
+			return (1);
+	}
+	return (0);
 }
 
 static inline void
@@ -350,6 +447,16 @@ nvco_client_free_handle(unsigned nr, size_t size, const void *args, int *ok)
 
 	*ok = (nr == NVCO_ESC_RM_FREE && size == sizeof(*f) && f->hRoot == f->hObjectOld);
 	return (*ok ? f->hObjectOld : 0);
+}
+
+/* did the RM free a client: the ioctl and the params status both succeeded */
+static inline int
+nvco_free_succeeded(unsigned nr, size_t size, const void *args, int status)
+{
+	int ok;
+
+	(void)nvco_client_free_handle(nr, size, args, &ok);
+	return (ok && status == 0 && ((const struct nvco_free_params *)args)->status == 0);
 }
 
 /*
@@ -387,7 +494,8 @@ nvco_is_client_op(unsigned nr, size_t size, const void *args)
  * are ignored.  Returns -1 only when a new client could not be recorded.
  */
 static inline int
-nvco_after_ioctl(struct nvco_table *t, const void *owner, unsigned nr, size_t size, const void *args)
+nvco_after_ioctl_marked(struct nvco_table *t, const void *owner, unsigned nr, size_t size, const void *args,
+    uint64_t mark)
 {
 	const struct nvco_alloc_params *a;
 	const struct nvco_alloc64_params *a64;
@@ -431,6 +539,11 @@ nvco_after_ioctl(struct nvco_table *t, const void *owner, unsigned nr, size_t si
 	if (owner == NULL) {
 		nvco_remove_handle(t, h);
 		return (0);
+	}
+	if (nvco_alloc_stale(t, h, mark)) {
+		/* a free of this handle began while the allocation was in flight: unowned, fail closed */
+		nvco_remove_handle(t, h);
+		return (-1);
 	}
 	return (nvco_add(t, h, owner));
 }

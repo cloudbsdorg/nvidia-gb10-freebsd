@@ -81,8 +81,16 @@ plant freeing-ignored 's/ \&\& e->freeing == 0//'
 plant unhold-file-ignored 's/e->file != file || e->refs == 0/e->refs == 0/'
 plant evict-removes-held 's/if (e->refs != 0)$/if (0)/'
 plant begin-free-noop 's/e->freeing++;/e->freeing += 0;/'
-plant end-free-ignores-token 's/e->gen + 1 == token \&\& //'
-plant gen-never-new 's/t->e\[t->n\].gen = ++t->next_gen;/t->e[t->n].gen = 1;/'
+plant end-free-ignores-token 's/e->gen != token || //'
+plant gen-never-new 's/e->gen = nvco_new_gen(t);/e->gen = 1;/'
+plant gen-wrap-zero 's/if (++t->next_gen == 0)/if (0)/'
+plant free-not-logged 's/^		t->frees\[seq % NVCO_FREELOG\].handle = handle;/		(void)seq;/'
+plant tombstone-never 's/		e->tomb = 1;/		e->tomb = 0;/'
+plant junk-frees-logged 's/if (unlisted \&\& rm_freed) {/if (unlisted \&\& (rm_freed || unlisted)) {/'
+plant stale-ignores-overflow 's/if (t->seq - mark >= NVCO_FREELOG)/if (0)/'
+plant stale-ignores-handle 's/t->frees\[i\].seq > mark \&\& t->frees\[i\].handle == handle/t->frees[i].seq > mark \&\& t->frees[i].handle == handle + 1/'
+plant stranger-permitted 's/return (e == NULL || e->owner == who);/return (e == NULL || e->owner == who || e != NULL);/'
+plant marked-ignores-mark 's/nvco_alloc_stale(t, h, mark)/nvco_alloc_stale(t, h, mark | ~mark)/'
 plant remove-owner-keeps-held 's/\t\t\tif (t->e\[i\].owner == owner)$/\t\t\tif (0)/'
 plant second-file-shares-hold 's/if (e->refs != 0 \&\& e->file != file)/if (0)/'
 plant collision-moves-owner 's/if (old->owner != owner) {/if (0) {/'
@@ -108,6 +116,7 @@ if grep -q '^## .*Track #' "$REPO/README.md"; then bad "a tracker label in a REA
 need "$REPO/README.md" 'version mismatch' "the README quotes the version-mismatch failure"
 need "$REPO/README.md" 'keep the display' "the README warns that nvidia-modeset and nvidia-drm need the same build"
 need "$REPO/README.md" 'nvidia-uvm bug' "the README tells the reporter about the release diagnostic"
+need "$REPO/README.md" 'fails with `EPERM` at once' "the README says a stranger free is EPERM"
 need "$REPO/README.md" 'nvcobusy' "the README names the wait channel of a waiting free"
 
 # MODULE_VERSION 2 and every dependent's window: an old (vulnerable) nvidia-uvm.ko must refuse to load
@@ -135,7 +144,7 @@ if [ -f "$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04.tar.xz" ]; then
 	if GB10_WORK=$PW sh "$REPO/scripts/prepare-tree.sh" "$PW/build/tree" >"$T/prep.out" 2>&1; then
 		ok "prepare-tree applies the patches"
 		need "$PW/build/tree/nvidia/nvidia_subr.c" 'nvco_ioctl_end(&nvco_ctx, nvco_who, status, nr, size, args);' "prepared tree: ioctl hook (end)"
-		need "$PW/build/tree/nvidia/nvco_glue.h" 'nvco_after_ioctl(&nvco_table' "prepared tree: the glue is copied"
+		need "$PW/build/tree/nvidia/nvco_glue.h" 'nvco_after_ioctl_marked(&nvco_table' "prepared tree: the glue is copied"
 		need "$PW/build/tree/nvidia/nvidia_subr.c" 'nvco_forget_owner(nvffp);' "prepared tree: forget on close"
 		nvs=$PW/build/tree/nvidia/nvidia_subr.c
 		a=$(grep -n 'nr = xfer->cmd;' "$nvs" | head -1 | cut -d: -f1)

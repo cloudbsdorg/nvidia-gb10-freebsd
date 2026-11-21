@@ -140,7 +140,7 @@ rm_ioctl_alloc(const void *who, uint32_t h, uint32_t cls, int rm_status, uint32_
 	memset(&a, 0, sizeof(a));
 	a.hObjectNew = h;
 	a.hClass = cls;
-	e = nvco_ioctl_begin(&c, NVCO_ESC_RM_ALLOC, sizeof(a), &a);
+	e = nvco_ioctl_begin(&c, who, NVCO_ESC_RM_ALLOC, sizeof(a), &a);
 	if (e != 0)
 		return (e);
 	rm_calls++;
@@ -160,7 +160,7 @@ rm_ioctl_free(const void *who, uint32_t h, int rm_status, uint32_t params_status
 	struct nvco_ioctl_ctx c;
 	int e;
 
-	e = nvco_ioctl_begin(&c, NVCO_ESC_RM_FREE, sizeof(f), &f);
+	e = nvco_ioctl_begin(&c, who, NVCO_ESC_RM_FREE, sizeof(f), &f);
 	if (e != 0)
 		return (e);
 	rm_calls++;
@@ -295,17 +295,68 @@ scenario_stranger_free(void)
 {
 	setup_files();
 	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
-	/* the same process frees A's client through a device file (who == NULL) or a second control file: the RM frees
-	 * it in the window after the table lock dropped, and a hold must not be granted then */
+	/* a free of A's client through a device file (who == NULL) or a second control file is refused with EPERM
+	 * before the RM is called: a stranger neither reaches the RM nor raises the count */
+	rm_calls = 0;
 	hold_during_rm_granted = 0;
 	rm_step_hook = try_hold_in_rm;
-	CHECK(rm_ioctl_free(NULL, H1, 0, 0) == 0, "a free through another file completes");
+	CHECK(rm_ioctl_free(NULL, H1, 0, 0) == EPERM && rm_ioctl_free(&ffB, H1, 0, 0) == EPERM, "a stranger's free of a listed client is EPERM");
 	rm_step_hook = NULL;
-	CHECK(hold_during_rm_granted == 0, "no hold is granted on a handle the RM is freeing (any file's free counts)");
+	CHECK(rm_calls == 0, "the RM was not called for a stranger's free (%d calls)", rm_calls);
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) == NV_OK, "a stranger's frees leave the owner's holds possible");
+	nvUvmInterfaceClientRelease(&fa, H1);
+	/* the owner's own free: no hold is granted while the RM frees */
+	hold_during_rm_granted = 0;
+	rm_step_hook = try_hold_in_rm;
+	CHECK(rm_ioctl_free(&ffA, H1, 0, 0) == 0 && rm_calls == 1, "the owner's free completes");
+	rm_step_hook = NULL;
+	CHECK(hold_during_rm_granted == 0, "no hold is granted on a handle the RM is freeing");
 	/* if the RM refused that free, the client is usable again */
 	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
-	CHECK(rm_ioctl_free(NULL, H1, 0, 0x1B) == 0 && nvUvmInterfaceClientHold(&fa, H1) == NV_OK, "a refused free of the client leaves holds possible");
+	CHECK(rm_ioctl_free(&ffA, H1, 0, 0x1B) == 0 && nvUvmInterfaceClientHold(&fa, H1) == NV_OK, "a refused free of the client leaves holds possible");
 	nvUvmInterfaceClientRelease(&fa, H1);
+}
+
+static void free_unlisted_in_rm(void) { rm_step_hook = NULL; rm_ioctl_free(NULL, H1, 0, 0); }
+
+static void
+scenario_late_record(void)
+{
+	setup_files();
+	/* an allocation returns from the RM; before its record lands, a free of that (still unlisted) handle runs to the
+	 * RM and back: the late record must not give A a hold on a client the free may have taken */
+	rm_step_hook = free_unlisted_in_rm;
+	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	rm_step_hook = NULL;
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) != NV_OK, "a late allocation record after a free of the unlisted handle grants no hold");
+	
+	/* a refused free of an unlisted handle leaves nothing and the next allocation is owned */
+	rm_ioctl_free(NULL, H2, 0, 0x1B);
+	CHECK(nvco_find(&nvco_table, H2) == NULL, "a refused free of an unlisted handle leaves no entry");
+	rm_ioctl_alloc(&ffA, H2, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	CHECK(nvUvmInterfaceClientHold(&fa, H2) == NV_OK, "the allocation after it is owned");
+	nvUvmInterfaceClientRelease(&fa, H2);
+}
+
+static int junk_i;
+static void junk_frees_in_rm(void)
+{
+	rm_step_hook = NULL;
+	for (junk_i = 0; junk_i < 300; junk_i++)
+		rm_ioctl_free(NULL, 0x77000000u + (uint32_t)junk_i, 0, 0x1B);	/* the RM refuses every one */
+}
+
+static void
+scenario_junk_frees(void)
+{
+	setup_files();
+	/* a device file floods refused frees of junk handles while A's allocation is in the RM: the record is not lost */
+	rm_step_hook = junk_frees_in_rm;
+	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	rm_step_hook = NULL;
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) == NV_OK, "a flood of refused frees does not make A's allocation unrecordable");
+	nvUvmInterfaceClientRelease(&fa, H1);
+	CHECK(nvco_table.n == 1, "and leaves no tombstones (%zu entries)", nvco_table.n);
 }
 
 static void
@@ -362,6 +413,8 @@ main(void)
 	scenario_recording();
 	scenario_free_waits();
 	scenario_stranger_free();
+	scenario_late_record();
+	scenario_junk_frees();
 	scenario_leaf_and_diagnostics();
 	scenario_free_interrupted();
 	scenario_close();

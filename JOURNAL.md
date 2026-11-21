@@ -54,8 +54,18 @@ Next: write header.
 ## 2026-11-21T06:58:06Z
 - nv round 1 receipt 739a635617fd487f67670383df74191f6192b5769ee31b3192f0b345a88c8915 fixed (token counting of any free, end under fops_sx, goto label, separate limiters, real pins, harness scenarios). Gate ROUND 2 running (gate-n2-2.log). After it: commit with Review-open list, push; then phase0 merge branch.
 
+## 2026-11-21T07:02:26Z
+- COMMITTED 4a25b0f on agent/2373-nv-client-owner (round1 739a6356, round2 7267b0fc), pushed. Open findings in the Stewardship (late-record, stranger-starve, token-wrap...). Next: phase0 merge branch in ~/work/gb10/wt-nv-2373-p0 (agent/2373-nv-client-owner-phase0), Makefile hunk regen, gate 2 rounds; then uvm commit; Track comments; ask orchestrator for a 3rd nv round (fail-open late record).
+
 ## 2026-11-21T07:06:18Z (#2373 phase0 line)
 - agent/2373-nv-client-owner-phase0: uvm-phase0 + 2373 (be5f990, 4a25b0f) merged; README/prepare-tree conflicts resolved as union; zz Makefile hunk regenerated (applies with fuzz 0, all zz patches fuzz 0); nvidia.ko builds (LLD), 62 nvUvmInterface exports T incl. Hold/Release; uvm_glue_test 10/0, kmod_symbols_test PASS, prepare-tree_test 15/0, client_owner_test 51 ok. Gate round 1 running.
 
 ## 2026-11-21T07:09:39Z
 - p0 gate round 1 receipt 04f6a365de2dab67d93646351ff9fcc909dc00c1233ec7607af09e74b3facede: README doc findings; fixed the 2373 ones (one uvm pin, names, versions list, prepare-tree pins), rejected phase0-side README content. Round 2 running (gate-p0-2.log).
+
+## 2026-11-21T07:48:44Z (#2373 follow-up commit)
+- Orchestrator: no round 3 on old commits; this is a NEW commit with 2 rounds. Fixes: EPERM for a stranger's free of a listed client (before the RM), 64-bit nonzero generations, late record: every free is logged with a sequence number and an allocation takes a mark before its RM call, a record that lands after a free of its handle began is refused (the tombstone alone left the reviewer's counterexample open: my harness showed the free completing before the record). Model rows + 3 glue mutants + 7 header plants. Folds in the staged JOURNAL.
+- round 1 receipt bc7942bc: dropped the global free log (flood DoS) for tombstones + a log of SUCCESSFUL unlisted frees by end sequence; removed h.core; rows+mutants. Round 2 running.
+
+## 2026-11-21T12:10:00Z (#2373 phase0 re-merge after #2398 rewrite)
+- Merged agent/2373-nv-client-owner (925525d) into agent/2373-nv-client-owner-phase0. Only conflict: JOURNAL.md, resolved as union (both sides append-only). Next: boot-build proof on fresh archive, gate.

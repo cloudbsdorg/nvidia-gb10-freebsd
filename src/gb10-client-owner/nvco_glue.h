@@ -127,31 +127,48 @@ struct nvco_ioctl_ctx {
     int client_op;      /* a root-client allocation or free */
     int free_ok;        /* ... a free */
     NvHandle free_h;
-    uint32_t counted;   /* token of this free's count on the client (0: not listed) */
+    uint64_t counted;   /* token of this free's count (0: none) */
+    uint64_t mark;      /* an allocation: the log position taken before the RM call */
+    int unlisted;       /* a free of a handle the table did not list (a tombstone stands) */
 };
 
 /*
  * nvco_ioctl_begin - before the ioctl takes fops_sx and calls the RM.  A free
  * of a client waits (interruptibly) until no hold on it is in flight; the
- * sleep drops nvco_sx and no other lock is held.  Returns 0, or the sleep's
- * error (EINTR, ERESTART): nothing was freed and nothing is held.
+ * sleep drops nvco_sx and no other lock is held.  Returns 0, EPERM (a free of
+ * a listed client by a file that does not own it: the RM is not called), or the
+ * sleep's error (EINTR, ERESTART): nothing was freed and nothing is held.
  */
 static int
-nvco_ioctl_begin(struct nvco_ioctl_ctx *c, unsigned nr, size_t size, const void *args)
+nvco_ioctl_begin(struct nvco_ioctl_ctx *c, const void *who, unsigned nr, size_t size, const void *args)
 {
     int wait_error = 0;
 
     c->client_op = nvco_is_client_op(nr, size, args);
     c->counted = 0;
+    c->mark = 0;
+    c->unlisted = 0;
     c->free_h = nvco_client_free_handle(nr, size, args, &c->free_ok);
-    if (!c->free_ok)
+    if (!c->free_ok) {
+        if (c->client_op) {
+            sx_xlock(&nvco_sx);
+            c->mark = nvco_alloc_mark(&nvco_table);
+            sx_xunlock(&nvco_sx);
+        }
         return 0;
+    }
     sx_xlock(&nvco_sx);
-    c->counted = nvco_begin_free(&nvco_table, c->free_h);
+    if (!nvco_free_permitted(&nvco_table, who, c->free_h)) {
+        /* a file that does not own the listed client: refused here, the RM is never called */
+        sx_xunlock(&nvco_sx);
+        c->client_op = c->free_ok = 0;
+        return EPERM;
+    }
+    c->counted = nvco_begin_free(&nvco_table, c->free_h, &c->unlisted);
     while (wait_error == 0 && nvco_busy(&nvco_table, c->free_h))
         wait_error = sx_sleep(&nvco_table, &nvco_sx, PCATCH, "nvcobusy", 0);
     if (wait_error != 0)
-        nvco_end_free(&nvco_table, c->free_h, c->counted);
+        nvco_end_free(&nvco_table, c->free_h, c->counted, c->unlisted, 0);
     sx_xunlock(&nvco_sx);
     return wait_error;
 }
@@ -175,9 +192,10 @@ nvco_ioctl_end(struct nvco_ioctl_ctx *c, const void *who, int status, unsigned n
         return;
     sx_xlock(&nvco_sx);
     if (status == 0)
-        recorded = nvco_after_ioctl(&nvco_table, who, nr, size, args);
+        recorded = nvco_after_ioctl_marked(&nvco_table, who, nr, size, args, c->mark);
     if (c->free_ok)
-        nvco_end_free(&nvco_table, c->free_h, c->counted);
+        nvco_end_free(&nvco_table, c->free_h, c->counted, c->unlisted,
+            nvco_free_succeeded(nr, size, args, status));
     if (recorded != 0 && ppsratecheck(&nvco_rec_lasttime, &nvco_rec_curpps, 1))
         printf("NVRM: RM client 0x%x could not be recorded for nvidia-uvm (its handle is "
             "already listed for another file, or memory ran out): nvidia-uvm will refuse "
