@@ -18,19 +18,22 @@
 # at least once, so a macro that renames the real declarations is refused too.
 #
 # Prints one line per violation (file:line, kind, name, reason); nothing when the file is clean.  Exit 0 when it
-# ran, 2 when the input or the names file is unreadable.
+# ran, 2 when the input or the names file is unreadable (a name that is not an identifier is that).
 
 import json
+import re
 import sys
 
 
 def read_names(path):
     gates = {}
-    with open(path) as f:
+    with open(path, newline="\n") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
                 continue
             name, _, qual = line.rstrip("\n").partition("\t")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError("%r is not an identifier" % name)
             gates[name] = qual
     return gates
 
@@ -110,9 +113,13 @@ def main():
         return 2
     try:
         gates = read_names(sys.argv[1])
-        objs = list(stream(sys.stdin.read()))
     except (OSError, ValueError) as e:
-        print("unreadable input: %s" % e)
+        print("unreadable names file: %s" % e)
+        return 2
+    try:
+        objs = list(stream(sys.stdin.read()))
+    except ValueError as e:
+        print("unreadable AST dump: %s" % e)
         return 2
     if not gates:
         print("no gate names in %s" % sys.argv[1])

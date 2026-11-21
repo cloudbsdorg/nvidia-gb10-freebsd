@@ -205,21 +205,90 @@ GATE_NAMES=$repo/tests/data/gate_names.txt
 # the trigraphs phase 1 would map: ??= is #, ??/ a backslash, and ??' ??( ??) ??! ??< ??> ??-
 TRIGRAPH_RE="[?][?][=/'()!<>-]"
 
+# gate_alt: the gate names of the names file as one regular expression alternation (a|b|c).  Every name must be
+# an identifier (the same rule as tests/data/gate_ast_check.py), so a bar, a space, a carriage return or a leading
+# digit in a name is an error (status 1), never a pattern of its own.
+gate_alt() {
+	_gan=$(grep -v -e '^#' -e '^[[:space:]]*$' "$GATE_NAMES" 2> /dev/null | cut -f1)
+	[ -n "$_gan" ] || return 1
+	if printf '%s\n' "$_gan" | grep -qvxE '[A-Za-z_][A-Za-z0-9_]*'; then return 1; fi
+	printf '%s\n' "$_gan" | paste -s -d'|' -
+}
+
+# gate_pins: the pinned occurrences of the gate names (see check_tree), written to $TMPD
+gate_pins() {
+	cat > "$TMPD/gate-occ-lkpi.want" <<'GATE_OCC_END'
+1 extern int nv_drm_pi_live_holds(void)
+1 extern int nv_drm_pi_quiesce(int *held, int *kept)
+1 extern void nv_drm_pi_keep(void)
+1 if (nv_drm_pi_live_holds() > 0)
+1 nv_drm_pi_keep()
+1 case MOD_QUIESCE: if (nv_drm_pi_quiesce(&held, &kept) != 0)
+1 case MOD_UNLOAD: if (nv_drm_pi_quiesce(&held, &kept) != 0)
+GATE_OCC_END
+	cat > "$TMPD/gate-occ-drv.want" <<'GATE_OCC_END'
+1 if (nv_drm_pi_live_holds() > 0)
+1 NV_DRM_LOG_ERR("" "" "" "" "", nv_drm_pi_live_holds())
+1 nv_drm_pi_keep()
+GATE_OCC_END
+}
+
+# gate_wanted lkpi|drv: the gate names that file uses, taken from its pinned occurrences (so the object check asks
+# for an undefined reference to exactly the names the pin lists, whatever the names file holds)
+gate_wanted() {
+	gate_pins
+	_gw=$(gate_alt) || return 1
+	grep -oE "(^|[^A-Za-z0-9_])($_gw)([^A-Za-z0-9_]|$)" "$TMPD/gate-occ-$1.want" | grep -oE "$_gw" | sort -u | tr '\n' ' '
+}
+
+# gate_occ_bounded <names file> <source> <out>: gate_occurrences under another names file, killed after 20 seconds;
+# status 1 when it had to be killed
+gate_occ_bounded() {
+	( GATE_NAMES=$1; gate_occurrences "$2" > "$3" ) &
+	_bp=$!; _bi=0
+	while kill -0 "$_bp" 2> /dev/null && [ "$_bi" -lt 20 ]; do sleep 1; _bi=$((_bi + 1)); done
+	if kill -0 "$_bp" 2> /dev/null; then
+		pkill -P "$_bp"; kill "$_bp" 2> /dev/null
+		return 1
+	fi
+	wait "$_bp"
+}
+
 # gate_occurrences <file>: every statement (the text between two of ; { }) of the file, as the preprocessor sees it
 # (spliced, comments gone, string literals emptied, white space folded), that holds a whole-token use of one of the
 # gate names, with the number of uses in it.  Whole token: no identifier character on either side, so the guard's
 # own nv_drm_pi_guard_handler is not one.  The list is compared with a pinned one: a new use, a lost use and a
 # definition in any spelling all change it.
 gate_occurrences() {
-	_galt=$(grep -v '^#' "$GATE_NAMES" | cut -f1 | paste -s -d'|' -)
-	[ -n "$_galt" ] || return 1
-	pp_lines "$1" | tr '\n' ' ' | awk -v alt="$_galt" 'BEGIN { re = "(^|[^A-Za-z0-9_])(" alt ")([^A-Za-z0-9_]|$)" } {
-		gsub(/"([^"\\]|\\.)*"/, "\"\"")
+	_galt=$(gate_alt) || return 1
+	pp_lines "$1" | tr '\n' ' ' | awk -v alt="$_galt" -v sq="'" '
+	# empty the contents of every string and character literal, left to right, escapes honoured: a quote inside the
+	# other kind of literal does not start one
+	function blank(s,   out, p, q, re) {
+		out = ""
+		while (1) {
+			p = match(s, "[\"" sq "]")
+			if (p == 0) return out s
+			q = substr(s, p, 1)
+			out = out substr(s, 1, p)
+			s = substr(s, p + 1)
+			re = (q == "\"") ? "^([^\"\\\\]|\\\\.)*" : "^([^" sq "\\\\]|\\\\.)*"
+			match(s, re)
+			s = substr(s, RLENGTH + 1)
+			out = out substr(s, 1, 1)
+			s = substr(s, 2)
+		}
+	}
+	BEGIN { re = "(^|[^A-Za-z0-9_])(" alt ")([^A-Za-z0-9_]|$)" }
+	{
+		$0 = blank($0)
 		gsub(/[;{}]/, "\n"); n = split($0, seg, "\n")
 		for (i = 1; i <= n; i++) {
 			s = seg[i]; gsub(/[ \t]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s)
 			t = s; c = 0
-			while (match(t, re)) { c++; t = substr(t, RSTART + RLENGTH - 1) }
+			# the whole match is consumed and a space put back as the left boundary of the next one, so the loop
+			# always shortens t (a one-character name ending the segment would otherwise match itself forever)
+			while (match(t, re)) { c++; t = " " substr(t, RSTART + RLENGTH) }
 			if (c > 0) print c " " s
 		}
 	}'
@@ -288,6 +357,27 @@ gate_ast() {
 	[ "$_grc" -eq 0 ] || { echo "D6: clang does not parse $_gb with the module's flags (rc=$_grc): $(grep -m1 'error' "$TMPD/ast-$_gname.err")"; return; }
 	python3 -I -B "$repo/tests/data/gate_ast_check.py" "$GATE_NAMES" < "$TMPD/ast-$_gname.json" > "$TMPD/ast-$_gname.out" 2>&1 || { echo "D6: the AST check of $_gb did not run: $(head -1 "$TMPD/ast-$_gname.out")"; return; }
 	[ ! -s "$TMPD/ast-$_gname.out" ] || { echo "D6: $_gb: $(head -1 "$TMPD/ast-$_gname.out")"; return; }
+	# the symbols: the AST cannot see an assembler name (an __asm__ alias or label, which names the stub's symbol by
+	# a string).  In the object of the same source (same flags) every gate name the file calls must be an UNDEFINED
+	# symbol, and no gate name may be defined: a call bound to a stub shows as a missing undefined reference, a stub
+	# under the gate's own symbol as a defined one.  The names the files call are the pinned occurrences.
+	( cd "$_gd" && clang -I"$_gt/nvidia-drm" "$@" -c -o "$TMPD/gate-$_gname.o" "$_gt/nvidia-drm/$_gb" ) 2> "$TMPD/gate-$_gname-o.err"
+	_grc=$?
+	[ "$_grc" -eq 0 ] || { echo "D6: clang does not compile $_gb with the module's flags (rc=$_grc): $(grep -m1 'error' "$TMPD/gate-$_gname-o.err")"; return; }
+	case $_gb in
+	nvidia-drm-freebsd-lkpi.c) _gk=lkpi ;;
+	nvidia-drm-drv.c) _gk=drv ;;
+	*) echo "D6: no pinned occurrences for $_gb"; return ;;
+	esac
+	_gwant=$(gate_wanted "$_gk")
+	[ -n "$_gwant" ] || { echo "D6: no gate names in the pinned occurrences of $_gb"; return; }
+	nm "$TMPD/gate-$_gname.o" > "$TMPD/gate-$_gname.nm" 2> "$TMPD/gate-$_gname-nm.err" || { echo "D6: nm cannot read the object of $_gb: $(head -1 "$TMPD/gate-$_gname-nm.err")"; return; }
+	_galt=$(gate_alt) || { echo "D6: the gate names cannot be read from $GATE_NAMES"; return; }
+	awk -v alt="$_galt" -v want="$_gwant" '
+		$NF ~ ("^(" alt ")$") { if ($(NF - 1) == "U") seen[$NF] = 1; else print $NF " is defined in the object (symbol type " $(NF - 1) ")" }
+		END { n = split(want, w, " "); for (i = 1; i <= n; i++) if (!seen[w[i]]) print "the object has no undefined reference to " w[i] ", which the source calls (the calls are bound to something else)" }
+	' "$TMPD/gate-$_gname.nm" > "$TMPD/gate-$_gname.sym"
+	[ ! -s "$TMPD/gate-$_gname.sym" ] || { echo "D6: $_gb: $(head -1 "$TMPD/gate-$_gname.sym")"; return; }
 	echo AST-OK
 }
 
@@ -447,6 +537,15 @@ check_tree() {
 		diff "$TMPD/pp-a.c" "$TMPD/pp-b.c" > "$TMPD/pp-diff.txt"; [ $? -le 1 ] || { echo "D6: diff of $_f against the pristine source failed"; return; }
 		_pp=$(grep '^>' "$TMPD/pp-diff.txt" | grep -E '^>[[:space:]]*(#|%:)' | grep -vE '^>[[:space:]]*(#|%:)[[:space:]]*include')
 		[ -z "$_pp" ] || { echo "D6: the patches add a preprocessor line other than #include to $_f ($(echo "$_pp" | head -1)): a macro or an #if can change what the checked functions mean"; return; }
+		case $_f in
+		$LKPI|$DRV)
+			# an asm statement or label can name a symbol by a string.  This refusal reads the spliced text and is a
+			# first, best-effort layer (__weak_reference and __sym_compat expand to asm without the word); the object
+			# check of gate_ast reads the symbols and is the authority
+			_asm=$(grep '^>' "$TMPD/pp-diff.txt" | grep -E '(^|[^A-Za-z0-9_])(__)?asm(__)?([^A-Za-z0-9_]|$)' | head -1)
+			[ -z "$_asm" ] || { echo "D6: the patches add an asm statement or label to $_f ($_asm): it can name a gate function's symbol by a string"; return; }
+			;;
+		esac
 	done
 	# the core header is part of what the checks read: its preprocessor lines are pinned to the list below, so a
 	# #define of a gate function under an #ifdef _KERNEL (which no kernel-less test would see) is caught
@@ -503,20 +602,7 @@ $(cat "$@" | grep '^+')"
 	# drv.c, after splicing, comment removal, string emptying and flattening, must be one of the pinned ones below,
 	# with the pinned count.  A new call shape goes into the list on purpose.  What this cannot see (a name made by
 	# token pasting) gate_ast() reads in the AST.
-	cat > "$TMPD/gate-occ-lkpi.want" <<'GATE_OCC_END'
-1 extern int nv_drm_pi_live_holds(void)
-1 extern int nv_drm_pi_quiesce(int *held, int *kept)
-1 extern void nv_drm_pi_keep(void)
-1 if (nv_drm_pi_live_holds() > 0)
-1 nv_drm_pi_keep()
-1 case MOD_QUIESCE: if (nv_drm_pi_quiesce(&held, &kept) != 0)
-1 case MOD_UNLOAD: if (nv_drm_pi_quiesce(&held, &kept) != 0)
-GATE_OCC_END
-	cat > "$TMPD/gate-occ-drv.want" <<'GATE_OCC_END'
-1 if (nv_drm_pi_live_holds() > 0)
-1 NV_DRM_LOG_ERR("" "" "" "" "", nv_drm_pi_live_holds())
-1 nv_drm_pi_keep()
-GATE_OCC_END
+	gate_pins
 	gate_occurrences "$_t/$LKPI" > "$TMPD/gate-occ-lkpi.txt" || { echo "D6: the gate names cannot be read from $GATE_NAMES"; return; }
 	gate_occurrences "$_t/$DRV" > "$TMPD/gate-occ-drv.txt" || { echo "D6: the gate names cannot be read from $GATE_NAMES"; return; }
 	cmp -s "$TMPD/gate-occ-lkpi.txt" "$TMPD/gate-occ-lkpi.want" || { echo "D6: the uses of the gate names in $LKPI are not the pinned list: $(diff "$TMPD/gate-occ-lkpi.want" "$TMPD/gate-occ-lkpi.txt" | head -3 | tr '\n' ' ')"; return; }
@@ -841,6 +927,50 @@ static int (*const nv_drm_pi_quiesce)(int *, int *) = gate_s;/' 'is not a functi
 	ast_mutant extern-with-body $LKPI '/^extern void nv_drm_pi_keep(void);/s/.*/extern void nv_drm_pi_keep(void) { }/' 'has a body or an attribute'
 	ast_mutant renamed-by-macro $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/#define nv_drm_pi_keep nv_drm_pi_keep_x\
 &/' 'no external declaration of nv_drm_pi_keep'
+	# an assembler name for a gate function: the stub is defined under the gate's symbol, or the symbol is made an
+	# alias of it, by a string no C scan reads.  The patches may not add asm to these files (first layer, on the
+	# spliced text); the object of each (second layer, run alone below) has no undefined reference to the gate
+	# name, or defines it.  Each script is written once and used by both.
+	M_ASM_NS='/^extern int nv_drm_pi_live_holds(void);/s/.*/int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+__asm__(".set nv_drm_pi_quiesce, gate_s");\
+&/'
+	M_ASM_USED='/^extern int nv_drm_pi_live_holds(void);/s/.*/static int __attribute__((__used__)) gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+__asm__(".set nv_drm_pi_quiesce, gate_s");\
+&/'
+	M_ASM_STATIC='/^extern int nv_drm_pi_live_holds(void);/s/.*/static int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+__asm__(".set nv_drm_pi_quiesce, gate_s");\
+&/'
+	M_ASM_LABEL='/^extern int nv_drm_pi_live_holds(void);/s/.*/static int gate_q(int *h, int *k) __asm__("nv_drm_pi_quiesce");\
+static int gate_q(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+&/'
+	M_ASM_SPLICED='/^extern int nv_drm_pi_live_holds(void);/s/.*/int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+__as\\\
+m__(".set nv_drm_pi_quiesce, gate_s");\
+&/'
+	M_WEAK_REF='/^extern int nv_drm_pi_live_holds(void);/s/.*/int gate_s(int *h, int *k) { *h = 0; *k = 0; return 0; }\
+__weak_reference(gate_s, nv_drm_pi_quiesce);\
+&/'
+	M_ASM_LABEL_DRV='/^void nv_drm_remove_devices/s/.*/static int gate_dq(void) __asm__("nv_drm_pi_live_holds");\
+static int gate_dq(void) { return 0; }\
+&/'
+	mutant gate-asm-alias-nonstatic $LKPI "$M_ASM_NS" 'add an asm'
+	mutant gate-asm-alias-used $LKPI "$M_ASM_USED" 'add an asm'
+	mutant gate-asm-alias-static $LKPI "$M_ASM_STATIC" 'add an asm'
+	mutant gate-asm-label $LKPI "$M_ASM_LABEL" 'add an asm'
+	mutant gate-asm-spliced $LKPI "$M_ASM_SPLICED" 'add an asm'
+	mutant gate-asm-label-drv $DRV "$M_ASM_LABEL_DRV" 'add an asm'
+	mutant gate-weak-reference $LKPI "$M_WEAK_REF" 'are not the pinned list'
+	SQ="'"
+	mutant gate-charlit-quote $LKPI "/^extern int nv_drm_pi_live_holds(void);/s/.*/static const char gq1 __unused = ${SQ}\"${SQ}; static int nv_drm_pi_quiesce(int *h, int *k) { *h = 0; *k = 0; return 0; } static const char gq2 __unused = ${SQ}\"${SQ};\\
+&/" 'are not the pinned list'
+	ast_mutant asm-alias-nonstatic $LKPI "$M_ASM_NS" 'nv_drm_pi_quiesce is defined in the object'
+	ast_mutant asm-alias-used $LKPI "$M_ASM_USED" 'nv_drm_pi_quiesce is defined in the object'
+	ast_mutant asm-alias-static $LKPI "$M_ASM_STATIC" 'has no undefined reference to nv_drm_pi_quiesce'
+	ast_mutant asm-label $LKPI "$M_ASM_LABEL" 'has no undefined reference to nv_drm_pi_quiesce'
+	ast_mutant asm-spliced $LKPI "$M_ASM_SPLICED" 'nv_drm_pi_quiesce is defined in the object'
+	ast_mutant asm-label-drv $DRV "$M_ASM_LABEL_DRV" 'has no undefined reference to nv_drm_pi_keep'
+	ast_mutant weak-reference $LKPI "$M_WEAK_REF" 'nv_drm_pi_quiesce is defined in the object (symbol type W)'
+
 	mutant pp-splice-digraph-ws $LKPI '/^extern int nv_drm_pi_live_holds(void);/s/.*/%\\ \
 :define SI_ORDER_LAST SI_ORDER_FIRST\
 &/'
@@ -903,6 +1033,32 @@ if ! cmp -s "$TMPD/reworded-drv.c" "$TMPD/good/$DRV" && cmp -s "$TMPD/reworded-o
 # a bad name in the names file is refused, not read as no names
 r=$(GATE_NAMES=/nonexistent/names gate_occurrences "$TMPD/good/$LKPI") && bad "gate_occurrences accepted a missing names file" || ok "a missing gate names file is an error, not an empty list"
 
+
+# the names file: a blank line, a bad name, and a one-character name must neither hang the text scan (each run is
+# bounded to 20 seconds) nor change what it reports
+cp "$GATE_NAMES" "$TMPD/names-blank.txt"; printf '\n  \n' >> "$TMPD/names-blank.txt"
+gate_occurrences "$TMPD/good/$LKPI" > "$TMPD/good-lkpi-occ.txt"
+if gate_occ_bounded "$TMPD/names-blank.txt" "$TMPD/good/$LKPI" "$TMPD/blank-occ.txt"; then
+	cmp -s "$TMPD/blank-occ.txt" "$TMPD/good-lkpi-occ.txt" && [ -s "$TMPD/blank-occ.txt" ] && ok "a blank line in the gate names file changes nothing" || bad "a blank line in the gate names file changes the occurrences"
+else
+	bad "a blank line in the gate names file hangs the text scan"
+fi
+cp "$GATE_NAMES" "$TMPD/names-x.txt"; printf 'x\tint (void)\n' >> "$TMPD/names-x.txt"
+printf 'int f(void) { return x; }\n' > "$TMPD/x-src.c"
+if gate_occ_bounded "$TMPD/names-x.txt" "$TMPD/x-src.c" "$TMPD/x-occ.txt"; then
+	[ "$(cat "$TMPD/x-occ.txt")" = "1 return x" ] && ok "a one-character gate name that ends a statement is found once and does not loop" || bad "a one-character gate name: $(cat "$TMPD/x-occ.txt")"
+else
+	bad "a one-character gate name hangs the text scan"
+fi
+for _bn in 'a|b' '9abc' 'nv drm'; do
+	cp "$GATE_NAMES" "$TMPD/names-bad.txt"; printf '%s\tint (void)\n' "$_bn" >> "$TMPD/names-bad.txt"
+	r=$(GATE_NAMES=$TMPD/names-bad.txt gate_occurrences "$TMPD/good/$LKPI") && bad "the gate name '$_bn' was accepted" || ok "the gate name '$_bn' is refused (not an identifier)"
+done
+cp "$GATE_NAMES" "$TMPD/names-bad.txt"; printf 'foo\rbar\tint (void)\n' >> "$TMPD/names-bad.txt"
+r=$(GATE_NAMES=$TMPD/names-bad.txt gate_occurrences "$TMPD/good/$LKPI") && bad "a gate name with a carriage return was accepted" || ok "a gate name with a carriage return is refused"
+python3 -I -B "$repo/tests/data/gate_ast_check.py" "$TMPD/names-bad.txt" < /dev/null > "$TMPD/py-bad.out" 2>&1; _prc=$?
+[ "$_prc" -eq 2 ] && grep -q 'is not an identifier' "$TMPD/py-bad.out" && ok "the AST checker refuses a bad name with exit 2 and the name in its message" || bad "the AST checker on a bad name: rc=$_prc $(head -1 "$TMPD/py-bad.out")"
+[ "$(gate_wanted lkpi)" = "nv_drm_pi_keep nv_drm_pi_live_holds nv_drm_pi_quiesce " ] && [ "$(gate_wanted drv)" = "nv_drm_pi_keep nv_drm_pi_live_holds " ] && ok "the object check asks for the names the pinned occurrences list (lkpi 3, drv 2)" || bad "the names the object check asks for: $(gate_wanted lkpi) / $(gate_wanted drv)"
 
 echo "passed: $passed failed: $failed"
 [ "$failed" -eq 0 ]
