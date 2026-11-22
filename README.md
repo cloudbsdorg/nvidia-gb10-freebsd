@@ -11,34 +11,96 @@ for open-gpu-kernel-modules). This repository holds the build scripts, our patch
 code (`patches/`, unified diffs, so they carry the changed lines and their context), a few
 small source files of our own, and the tests.
 
-## Installation
+## Install
 
-### On a stock FreeBSD install (any user, the supported way)
-
-This is meant for a fresh FreeBSD arm64 install from the FreeBSD project (a 16.0-CURRENT
-snapshot, or 15.1-RELEASE and later): nothing is assumed beyond the base system.
-`make test-install` checks it in a fresh VM (see `tests/install-e2e/README.md`; the first VM
-run is still to come). Every command below is run as a normal user who can become root with
-`doas` or `sudo` (or `su`, as a member of `wheel`, on a terminal). On a fresh install, once,
-as root, with your own user name in place of `alice`:
+Use this path on a stock **FreeBSD arm64** installation: 16.0-CURRENT or 15.1-RELEASE or
+later. On a fresh system, run this one-time setup as root:
 
 ```sh
 pkg install -y doas git
-echo 'permit alice' > /usr/local/etc/doas.conf
+grep -qx "permit $(logname)" /usr/local/etc/doas.conf 2>/dev/null || echo "permit $(logname)" >> /usr/local/etc/doas.conf
 ```
+
+`logname` is the user who opened the root shell with `su`, and that user gets the `permit`
+line. If root logged in directly, replace `$(logname)` with the user name that will run the
+build. The line is added only when it is missing, so an existing `/usr/local/etc/doas.conf`
+keeps its other rules. (`sudo`, if you set it up yourself, works as well.)
 
 Then, as that user:
 
 ```sh
 git clone https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git
 cd nvidia-gb10-freebsd
-make preflight                # what is missing; it exits 1 until install-prereqs has run
-make install-prereqs YES=1 ACCEPT_NVIDIA_LICENSE=1   # see below (the licence)
-make install YES=1            # builds (about 15 minutes), then installs as root
-make configure YES=1          # optional: load the driver at boot (see below)
+make install ACCEPT_NVIDIA_LICENSE=1
 ```
 
-What `make install-prereqs` does, so nothing is a manual step:
+That one command runs the preflight, installs the prerequisites, fetches and verifies the
+sources, builds what is needed, and installs the result. It asks once before doing anything as
+root; add `YES=1` to answer that confirmation non-interactively. A signal interrupts the
+install, and a failed install rolls back the files it changed.
+
+NVIDIA's terms require the person installing the driver to accept its licence first.
+`ACCEPT_NVIDIA_LICENSE=1` records acceptance of that licence; `ACCEPT_ALL_LICENSES=1` accepts
+every licence encountered by the install. `YES=1` alone never accepts a licence. Without an
+accept setting, a terminal shows the licence and asks; acceptance is tied to the licence's
+sha256, so a changed licence must be accepted again.
+
+### Installed
+
+A successful install exits 0. Example output (from `scripts/make.sh`; the `kldload` line
+names the root tool you have, so yours may start with `sudo`, with `su root -c`, or have no
+tool):
+
+```text
+install: install: done
+next: doas kldload nvidia-drm
+next: kldstat
+next: nvrm-info --json
+install: installed
+```
+
+The summary lists every installed file and mode. Kernel modules go into `/boot/modules`;
+the devd and rc.d configuration, `nvrm-info`, libnvrm, headers, schema, manual pages and
+licences go under `/usr/local`. Load the driver now: first set the firmware setting as root
+(with doas or sudo, whichever you have), `kenv hw.nvidia.registry.EnableGpuFirmware=1`, then
+run the `kldload` line exactly as `install` printed it. The root tool in that line is the one
+you have, so copy that line. Or configure loading at boot with `make configure`, described
+below, which sets the same firmware value in `/boot/loader.conf`. Then check it without
+assuming a device number:
+
+```sh
+kldstat
+dmesg | grep -i nvidia
+nvrm-info --json
+```
+
+### Blocked
+
+A blocked install exits 1 and prints every blocker with its fix. It writes nothing to
+`/boot/modules` or the install prefix. Sources already fetched stay in `./work`, and packages
+the prerequisite step already installed stay installed. For example, withholding licence
+acceptance produces this example output (from `scripts/make.sh`; BSD make's own failure
+lines follow it):
+
+```text
+blocked licence: NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it
+fix: make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer
+install: blocked
+```
+
+Follow the `fix:` line for each blocker. The licence setting in it also works on the command
+you ran, as in `make install ACCEPT_NVIDIA_LICENSE=1`. For a missing kernel change, see
+[`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
+without installing.
+
+For machines, `JSON=1` makes preflight or install print one JSON object on stdout; `JSONL=1`
+streams install progress objects followed by the summary and wins when both are set. When a
+run fails, BSD make's own error lines are mixed in, so a machine should call the
+driver directly: `sh scripts/make.sh preflight --json`, or `sh scripts/make.sh install` with
+the environment variable `MK_JSON` set to 1 (the driver reads its settings from `MK_*`
+variables, listed in the header of `scripts/make.sh`), and read the object only.
+
+The prerequisite phase does all of this without separate manual steps:
 
 - installs the packages the build needs with `pkg` (`git` and `gmake`; on a system
   where pkg is not set up yet it bootstraps pkg first). The compiler and linker are the base
@@ -47,16 +109,8 @@ What `make install-prereqs` does, so nothing is a manual step:
 - fetches NVIDIA's FreeBSD driver tarball and `open-gpu-kernel-modules` 580.178.04, checked
   against the pins in `SOURCES`. The GSP firmware comes from that tarball; it is not shipped
   in this repository (its licence limits it to NVIDIA hardware), it is fetched on your machine.
-- asks you to accept NVIDIA's driver licence (the tarball's `doc/license.txt`). NVIDIA's terms
-  ask everyone who installs the driver to read and agree to them first, so we cannot accept
-  them for you, and `YES=1` alone does not: it stops and says which setting to add. Accept
-  with `ACCEPT_NVIDIA_LICENSE=1` (this licence), or `ACCEPT_ALL_LICENSES=1` (every licence the
-  install meets; today this is the only one), or run `make install-prereqs` on a terminal
-  without `YES=1`, read the licence and type `yes`. The acceptance is recorded with the
-  licence's sha256 in `work/sources/nvidia-licence.accepted`; a changed licence asks again.
-  `make preflight` reports it as the `licence` item.
-- fetches the FreeBSD source of the kernel you are running into `./work/src`: for a RELEASE,
-  that release's `src.txz`, checked against its `MANIFEST`; for a CURRENT, STABLE, BETA or RC
+- fetches the FreeBSD source of the kernel you are running into `./work/src` (16.0-CURRENT
+  and 15.1-RELEASE or later): for a RELEASE, that release's `src.txz`, checked against its `MANIFEST`; for a CURRENT, STABLE, BETA or RC
   kernel, the exact git commit `uname -v` names (`main-n291235-611046b15dbb`), from
   git.freebsd.org. A stock install usually has no `/usr/src`; a matching `/usr/src` is used
   when there is one. A kernel you built from your own tree names no commit: then set
@@ -81,7 +135,13 @@ or one that changed since it wrote it):
   `share/licenses/nvidia-gb10-freebsd`.
 
 `make configure` shows the change, backs up each file next to itself (`.bak-<UTC time>`), and
-asks (`YES=1` does not ask):
+asks (`YES=1` does not ask). To apply the boot-loading configuration:
+
+```sh
+make configure YES=1
+```
+
+It changes:
 
 - `/boot/loader.conf`: `hw.nvidia.registry.EnableGpuFirmware="1"` (the open RM core runs the
   GPU through its GSP firmware);
@@ -89,8 +149,8 @@ asks (`YES=1` does not ask):
   `kldload nvidia-drm` when vgapci(4) attaches to an NVIDIA display device; nvidia-drm pulls in
   nvidia-modeset, nvidia, drm and dmabuf, and nvidia loads its firmware module.
 
-Without `make configure`, load by hand: `doas kenv hw.nvidia.registry.EnableGpuFirmware=1`,
-then `doas kldload nvidia-drm`.
+Without `make configure`, load by hand as root (doas or sudo): `kenv
+hw.nvidia.registry.EnableGpuFirmware=1`, then `kldload nvidia-drm`.
 
 `make deinstall YES=1` removes every file `make install` wrote and the directories it created,
 and takes out what `make configure` set (restoring the earlier values and removing the
@@ -105,216 +165,45 @@ on an Ampere Altra only (found by its ACPI MCFG table), the PCIe ECAM quirk and 
 fixup (`machdep.kern_align_fixup`). They are reported as `warn`: the build and install work
 without them.
 
-For machines, call the driver directly: `sh scripts/make.sh preflight --json`, or
-`MK_JSON=1 sh scripts/make.sh install` (`MK_JSONL=1` for JSON Lines). These print the same
-objects as the corresponding `make` targets without the `*** Error code 1` lines BSD make adds
-to stdout after a failing recipe; the driver still exits 1. Without a GPU, preflight reports
-`"device": "no NVIDIA device"`. `WORK=`,
-`PREFIX=`, `DESTDIR=`, `SYSDIR=`, `BSDSRCTOP=` and `DRMKMODDIR=` override the defaults; `make`
-alone lists the targets. The numbered steps below are what `make build` runs, one by one.
+The default work root is the `work/` directory of the checkout; `WORK=` (or `GB10_WORK` for
+the individual scripts) overrides it. `WORK=`, `PREFIX=`, `DESTDIR=`, `SYSDIR=`, `BSDSRCTOP=` and `DRMKMODDIR=` override the
+defaults. `make help` lists every target and switch.
 
-### 1. What you need
+Developers who need the individual build and test-load commands should use
+[`docs/MANUAL-BUILD.md`](docs/MANUAL-BUILD.md); they are not a second installation path.
 
-- FreeBSD 16.0-CURRENT on arm64, and the source for the kernel you are running
-  (`/usr/src/sys` by default; `SYSDIR=` to override).
-- An RTX 30-series or newer GPU (Ampere generation or later). Turing (RTX 20) is not supported
-  yet.
-- `pkg install git gmake zstd`. Use the base system's `clang` and `ld.lld`. The scripts here
-  set their own `PATH` with `/usr/bin` ahead of `/usr/local/bin`. When you build a module by
-  hand, keep `/usr/bin` first too: with binutils' GNU `ld` from `/usr/local/bin` the module
-  builds but will not load.
-- For `nvidia-drm`: the drm-kmod source tree the installed `drm.ko` was built from
-  (`DRMKMODDIR=`, an absolute path), and the FreeBSD source headers (`BSDSRCTOP=`, the parent
-  of `SYSDIR` by default).
-- A host with an Ampere Altra CPU (not to be confused with the GPU generation) needs PCIe
-  workarounds in the kernel, and `nvidia-drm` (like every drm-kmod driver) needs a LinuxKPI fix
-  on any arm64 machine. Both are FreeBSD kernel patches in
-  [`kernel-patches/`](kernel-patches/README.md), with a step-by-step guide to apply them, build
-  the kernel and boot it next to the stock one. `nvidia.ko` alone on an arm64 machine that is
-  not an Altra needs none of them.
-
-### 2. Get the code and sources
-
-As a normal user. Work files go under `~/work/gb10`, or under `GB10_WORK=` (an absolute path).
-
-```sh
-git clone -b agent/2088-build-host https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git
-cd nvidia-gb10-freebsd
-sh scripts/fetch-sources.sh      # NVIDIA FreeBSD tarball + open-gpu-kernel-modules, checked against SOURCES
-sh scripts/prepare-tree.sh       # prints "prepare-tree: .../build/tree ready"
-```
-
-### 3. Build, in this order
-
-Run the commands one at a time and check each one's result before the next.
-
-```sh
-sh scripts/build-rmcore.sh
-sh scripts/build-shim.sh; echo $?    # pass 1: expected to fail and print 3, see below
-sh scripts/build-stubs.sh        # prints "still undefined vs OS layer: 0"
-sh scripts/build-shim.sh         # pass 2: prints "build: OK"
-sh scripts/build-firmware.sh
-sh scripts/build-rmcore.sh --core=nvidia-modeset
-sh scripts/build-shim.sh --module=nvidia-modeset
-DRMKMODDIR=/path/to/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm
-sh tests/kmod_symbols_test.sh
-```
-
-Pass 1 has no arm64 RM core to link yet, so it must fail exactly like this, and the script
-must exit 3 (the `rc 1` in its last line is make's status, not the script's):
-
-```
-errors: 1
-ld: error: nv-kernel.o is incompatible with aarch64elf
-build: FAILED (make rc 1)
-```
-
-Any other error, or any other failing step, means stop and report it (see the end of this
-section). The modules land under `$GB10_WORK/build/tree/`: `nvidia/nvidia.ko`,
-`nvidia-modeset/nvidia-modeset.ko`, `nvidia-drm/nvidia-drm.ko` and
-`firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko`. The [Build](#build) section explains each step.
-
-### 4. Test-load safely (root)
-
-Work over SSH or a serial console: once the driver loads, a monitor on the NVIDIA card goes
-dark until a program (Xorg, or another KMS client) sets a mode on it. A console on another GPU
-is not affected.
-
-Use a one-shot boot environment, so that a panic reboots into your normal one. The second
-setting keeps a GENERIC kernel from stopping in the debugger instead of rebooting. A hang that
-does not panic still needs a power cycle; the one-shot boot environment then still brings back
-your normal one.
-
-```sh
-bectl create nvidia-test
-bectl mount nvidia-test /mnt
-printf '%s\n' 'kern.panic_reboot_wait_time="5"' 'debug.debugger_on_panic="0"' >> /mnt/boot/loader.conf
-bectl umount nvidia-test
-bectl activate -t nvidia-test
-shutdown -r now
-```
-
-In that boot environment, as root. `T` is the `GB10_WORK` of the user who built the modules
-(`~/work/gb10` by default); replace `YOUR_USER`. These commands load files that user owns, so
-that user must be trusted with root:
-
-```sh
-T=/home/YOUR_USER/work/gb10
-kenv hw.nvidia.registry.EnableGpuFirmware=1
-kldload $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $T/build/tree/nvidia/nvidia.ko            # the Linux providers below are optional
-kldload $T/build/tree/nvidia-modeset/nvidia-modeset.ko
-kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last of the native modules; the providers come after
-```
-
-`nvidia-smi` and Linux CUDA and Vulkan need the two Linux provider modules as well (see
-[Linux bridges](#linux-bridges-nvidia_linuxko)). Loading them also loads the Linuxulator
-(`linux64`, `linux_common`). Skip this on a host that runs no Linux binaries:
-
-```sh
-kldload $T/build/tree/nvidia-linux/nvidia_linux.ko
-kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
-```
-
-### 5. Check it worked
-
-```sh
-kldstat                  # the four modules, drm and its linuxkpi modules; with the providers also
-                         # nvidia_linux, nvidia_modeset_linux, linux64 and linux_common
-dmesg | tail             # nvidiaN: <NVIDIA ...> on vgapciM
-ls /dev/nvidia*          # one /dev/nvidiaN per GPU, plus /dev/nvidiactl
-# Which node is which card: never assume the first number; a second NVIDIA GPU or the
-# attach order moves it (a BMC moves the vgapci and dri/card numbers).
-# Each nvidiaN's newbus parent is its vgapci device; pciconf names the vendor and bus.
-unset NV
-units=$(sysctl -N dev.nvidia 2>/dev/null | sed -n 's/^dev\.nvidia\.\([0-9]*\)\.%parent$/\1/p')
-for u in $units; do echo "/dev/nvidia$u $(pciconf -l "$(sysctl -n dev.nvidia.$u.%parent)")"; done
-set -- $units
-case $# in
-0) echo "no nvidiaN attached: see dmesg | grep -i nvidia" >&2 ;;
-1) NV=/dev/nvidia$1 ;;
-*) echo "several NVIDIA GPUs: set NV to the node on the bus you want, from the list" >&2 ;;
-esac
-sleep 30 < "${NV:?no NVIDIA node chosen}" &   # GPU and GSP start on the first open
-sysctl hw.nvidia.gpus    # firmware and VBIOS versions, while the device is held open
-```
-
-### 6. Load at boot
-
-First reboot back into your normal boot environment (the one-shot one is gone after a reboot;
-`bectl list` shows `NR` on the active one). Keep a copy of it to boot back into if the
-boot-time load fails, then install the modules as root-owned files:
-
-```sh
-bectl create pre-nvidia
-T=/home/YOUR_USER/work/gb10
-install -o root -g wheel -m 555 \
-    $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko \
-    $T/build/tree/nvidia/nvidia.ko \
-    $T/build/tree/nvidia-modeset/nvidia-modeset.ko \
-    $T/build/tree/nvidia-drm/nvidia-drm.ko \
-    $T/build/tree/nvidia-linux/nvidia_linux.ko \
-    $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko /boot/modules/
-install -o root -g wheel -m 555 $T/rc.d/nvidia_linux /usr/local/etc/rc.d/nvidia_linux
-kldxref /boot/modules
-sysrc kld_list+="nvidia_gsp_ga10x_fw nvidia nvidia-modeset nvidia-drm"   # once: += appends
-sysrc linux_enable=YES         # only for nvidia-smi, Linux CUDA and Vulkan: starts the Linuxulator
-sysrc nvidia_linux_mode=AUTO   # the default; YES or NO overrides it
-grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
-    echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
-```
-
-`kld_list` loads in the order given. `nvidia.ko` reads `hw.nvidia.registry.*` from the kernel
-environment when it loads, so the `loader.conf` line takes effect for a `kld_list` load.
-
-The providers are not in `kld_list`: `rc.d/nvidia_linux` loads them after the Linuxulator is up.
-`nvidia_linux_mode` needs setting only to override its default. `AUTO` loads `nvidia_linux.ko`
-when `linux_enable` is on and `nvidia.ko` is loaded, and `nvidia_modeset_linux.ko` when
-`linux_enable` is on and `nvidia-modeset.ko` is loaded; `YES` loads them whenever the script runs;
-`NO` never. Without `linux_enable=YES` (set above) `AUTO` loads nothing. See `nvidia_linux(4)`.
-
-### What works and what does not
-
-In short (details in the [status table](#what-works-status-2026-11-20) below):
+### What works today and what does not
 
 - KMS and Xorg modesetting work, with software rendering only.
-- Native NVIDIA user space on FreeBSD arm64 today: only `nvrm-info` (device enumeration, from
-  [libnvrm](#libnvrm-and-nvrm-info); not yet run on hardware: it passes against libnvrm's
-  simulated device, and the first run on a real GPU is pending). NVIDIA ships no FreeBSD arm64 Vulkan or CUDA, and the native NVK and CUDA work
-  (Track [#2379](https://track.cloudbsd.org/work_packages/2379), [#2362](https://track.cloudbsd.org/work_packages/2362)) has not reached a workload.
-- Linux-only, last resort: CUDA, Vulkan and `nvidia-smi` monitoring run only through NVIDIA's
-  Linux libraries under the Linuxulator. They are kept only because no native path exists
-  ([Linux dependencies](docs/LINUX-DEPENDENCY-AUDIT.md)); a native path replaces each of them as
-  soon as it exists. They need the provider modules `nvidia_linux.ko` and
-  `nvidia_modeset_linux.ko` (step 6). `nvidia-smi`: `sh scripts/fetch-nvidia-smi.sh`, plus
-  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi). CUDA also needs `nvidia-uvm.ko` from
-  [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (private; ask for access when
-  you report), built per its README, and Linuxulator additions that are in the cloudbsd-src
-  kernel, not in a stock one.
-- There are no published packages yet.
-- To report a problem, open an issue at
-  <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the failing step's output,
-  `dmesg` and `uname -a`.
+- Native NVIDIA user space is limited to `nvrm-info` device enumeration through
+  [libnvrm](#libnvrm-and-nvrm-info). It passes against a simulated device but is untested on
+  hardware. Native NVK and CUDA have not reached a workload.
+- CUDA, Vulkan and `nvidia-smi` monitoring are Linux-only fallbacks through NVIDIA's Linux
+  libraries and the Linuxulator. They need `nvidia_linux.ko` and `nvidia_modeset_linux.ko`;
+  CUDA additionally needs `nvidia-uvm.ko` and Linuxulator changes that are not in a stock
+  FreeBSD kernel. See [Linux dependencies](docs/LINUX-DEPENDENCY-AUDIT.md) and
+  [Linux bridges](#linux-bridges-nvidia_linuxko).
+- Wayfire cannot yet use the NVIDIA output, cross-GPU PRIME import is not merged, and no
+  packages are published.
+- Report problems at <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the
+  failing step's output, `dmesg` and `uname -a`.
 
-## What works (status 2026-11-20)
+## What works
 
 | | Status |
 |---|---|
 | `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
-| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node (`card1` on the test host, found by PCI bus); Xorg modesetting at 2560x1440 on HDMI, software rendering only |
+| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node, found by PCI bus; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort; the latest fix (3414fd7) is committed and waits for test boot 6 |
 | CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
 | CUDA, native | in progress: full compile and link work with stubs; every launch returns `cudaErrorNotSupported` (801); no GPU execution yet (Track #2362) |
-| Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
-| Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
+| Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. A framebuffer without NVIDIA memory is refused with `EINVAL` |
+| Cross-GPU buffer import (PRIME) of system-memory buffers | implemented (#2228), waits for a test boot; not merged; see [Cross-GPU buffers](#cross-gpu-buffers-prime-import) and Track #2228 |
 | Accelerated native rendering and native Vulkan (Mesa NVK; on libnvrm for compute, Track #2379) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | fix committed (3414fd7), waits for test boot 6 |
-| Cross-GPU buffer import (PRIME) of system-memory buffers | implemented (#2228), waits for a test boot; see [Cross-GPU buffers](#cross-gpu-buffers-prime-import) |
-| CUDA | does not work yet: needs `nvidia-uvm` (clean-room module in progress) |
 
 Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with a GeForce RTX
 5060 Ti (GB206). Not tested yet: DGX Spark (GB10), other arm64 machines, other GPUs, amd64.
@@ -349,9 +238,9 @@ and Zink), with Linux binaries running on top of the same drivers. NVK already b
 arm64 and finds the GB206 through a test shim. It cannot drive the card until the render
 interface exists in the kernel.
 
-The earlier fixes (the arm64 BAR mapping and the `SIGBUS` on the first Vulkan register read)
-are under [Memory attributes on arm64](#memory-attributes-on-arm64). The CUDA start-up fix is
-in uvm-bsd's README, under "Status".
+The arm64 BAR mapping and the `SIGBUS` on the first Vulkan register read are described under
+[Memory attributes on arm64](#memory-attributes-on-arm64). See uvm-bsd's README, under
+"Status", for CUDA start-up.
 
 Example, on that machine:
 
@@ -361,7 +250,7 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
  47%   30C    P0             13W /  180W |       0MiB /  16311MiB |      3%      Default
 ```
 
-### Kernel
+## Kernel
 
 `nvidia.ko` needs no kernel change: its symbols resolve against a stock 16.0-CURRENT kernel alone.
 It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
@@ -388,128 +277,13 @@ from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_
   the parent of `SYSDIR` by default).
 - `git`, `gmake`, `zstd`; the base system's `clang` and `ld.lld`.
 - For `nvidia-smi` (and any Linux binary): the Linuxulator (`linux64.ko`), `nvidia_linux.ko` and
-  `linux_base-rl9`. `nvidia.ko` no longer loads the Linuxulator; load `nvidia_linux.ko` for Linux
+  `linux_base-rl9`. `nvidia.ko` does not load the Linuxulator; load `nvidia_linux.ko` for Linux
   programs, or install `rc.d/nvidia_linux` in `/usr/local/etc/rc.d`, put `nvidia` (and `nvidia_modeset` if you use it) in `kld_list`, set
   `linux_enable=YES` and let it do it at boot (`nvidia_linux_mode=AUTO` loads a provider only for a
   driver that is already loaded).
 - An Ampere-generation or newer GPU (RTX 30 series and later, and data-centre parts of the
   same generations). Those run the `gsp_ga10x` firmware this repository builds; Turing needs
   `gsp_tu10x`, which is not built yet.
-
-## Build
-
-As an ordinary user, from the repository root. Work files go under `GB10_WORK` (default
-`~/work/gb10`); nothing is written to `/tmp`.
-
-```sh
-sh scripts/fetch-sources.sh      # NVIDIA FreeBSD tarball + open-gpu-kernel-modules, checked against SOURCES
-sh scripts/prepare-tree.sh       # NVIDIA's FreeBSD OS layer with patches/ applied
-sh scripts/build-rmcore.sh       # NVIDIA's open RM core, compiled for aarch64
-sh scripts/build-shim.sh         # first pass: compiles the OS layer; the link fails here, expected (see below)
-sh scripts/build-stubs.sh        # links the fail-closed stubs onto the core; "still undefined vs OS layer: 0"
-sh scripts/build-shim.sh         # second pass: nvidia.ko; prints "build: OK" and its sha256
-sh scripts/build-firmware.sh     # nvidia_gsp_ga10x_fw.ko, the GSP firmware module
-sh scripts/build-rmcore.sh --core=nvidia-modeset   # NVIDIA's open modeset core, compiled for aarch64
-sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "build: OK" and its sha256
-DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
-sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
-sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
-sh tests/pd_split_test.sh        # the prefill/decode split client, against two stub servers
-sh tests/bench_compare_test.sh   # the llama-bench comparison tables
-sh tests/run-nv-vulkan_test.sh   # the Vulkan launcher, without a GPU and without a Linux root
-sh tests/manpages_test.sh        # the man pages of the commands pass "mandoc -T lint -W warning"
-```
-
-`build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
-layer: on the first pass there is no arm64 core yet, so it links NVIDIA's x86-64 `nv-kernel.o`
-and fails. The first pass is right only if it exits 3 and its summary is exactly
-
-```
-errors: 1
-ld: error: nv-kernel.o is incompatible with aarch64elf
-build: FAILED (make rc 1)
-```
-
-Any other error, or more than one, is a real failure: stop there. (One script for the whole build is on the to-do list.) This order was checked from a
-clean checkout against a stock `/usr/src`.
-
-The two `nvidia-modeset` steps build NVIDIA's open modeset core (the same MIT sources as the
-RM core, `src/nvidia-modeset` instead of `src/nvidia`) and link it into `nvidia-modeset.ko`.
-`nvidia-modeset.ko` calls six symbols in `nvidia.ko`, and a kernel module exports nothing
-unless its Makefile names the symbol in `EXPORT_SYMS`; `patches/patch-nvidia_Makefile` does
-that for arm64. `tests/kmod_symbols_test.sh` checks that `nvidia.ko` really exports them.
-
-The `nvidia-drm` step builds NVIDIA's own DRM/KMS module (the `nvidia-drm` directory of
-NVIDIA's FreeBSD package) against drm-kmod. It needs two extra variables:
-
-- `DRMKMODDIR`: the drm-kmod **source tree** the running `drm.ko` was built from. There is no
-  default: the script refuses to build without it, and refuses one that is not an absolute
-  path, is not a directory, or holds no `linuxkpi_version.mk`. The headers it generates
-  must match the `drm.ko` that is loaded, or the module is built against the wrong LinuxKPI.
-- `BSDSRCTOP`: the top of the FreeBSD source tree the module takes its headers from. It
-  defaults to the parent of `SYSDIR`.
-
-`nvidia-drm.ko` calls `nvidia_devclass` in `nvidia.ko` and eight `nvKmsKapi*` symbols in
-`nvidia-modeset.ko`; those are exported by name on arm64
-(`patches/patch-nvidia_Makefile` and `patches/patch-nvidia-modeset_Makefile`), and
-`tests/kmod_symbols_test.sh` checks the whole chain: the declared dependency set is exactly
-`dmabuf`, `drmn`, `linuxkpi`, `nvidia` and `nvidia-modeset`, and every undefined symbol
-resolves against the kernel or against those modules' exported symbols - the way the kernel
-linker resolves them.
-
-The modules end up in `$GB10_WORK/build/tree/nvidia/nvidia.ko`,
-`$GB10_WORK/build/tree/nvidia-modeset/nvidia-modeset.ko`,
-`$GB10_WORK/build/tree/nvidia-drm/nvidia-drm.ko` and
-`$GB10_WORK/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko`.
-
-If you point `SYSDIR` at a different kernel source, `build-shim.sh` notices: it records the
-SYSDIR and its `__FreeBSD_version` in `TREE/<module>/.gb10-sysdir` and runs `make clean`
-before the build when they changed. For `nvidia-drm` the stamp records `BSDSRCTOP` and
-`DRMKMODDIR` as well: the module's objects are built against those two trees' headers, so a
-changed one cleans them too.
-
-## Load
-
-As root. Try it first from a one-time boot environment (`bectl activate -t <BE>`) whose
-`loader.conf` has `kern.panic_reboot_wait_time="5"`, so a panic reboots into your normal boot
-environment.
-
-```sh
-kenv hw.nvidia.registry.EnableGpuFirmware=1
-kldload $GB10_WORK/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $GB10_WORK/build/tree/nvidia/nvidia.ko    # no Linux layer is loaded
-kldload $GB10_WORK/build/tree/nvidia-modeset/nvidia-modeset.ko
-kldload $GB10_WORK/build/tree/nvidia-drm/nvidia-drm.ko
-dmesg | tail                                      # nvidiaN: <NVIDIA ...> on vgapciM
-ls /dev/nvidia*                                   # /dev/nvidiaN per GPU, /dev/nvidiactl
-```
-
-`nvidia.ko` depends on the GSP firmware module for its architecture: `nvidia_gsp_ga10x_fw`
-(Ampere other than GA100, Ada, Hopper, Blackwell; every architecture) and, on amd64 only,
-`nvidia_gsp_tu10x_fw` (Turing and GA100). Once they are installed next to it and `kldxref` has
-indexed the directory (step 6), `kldload nvidia` loads them first, as root, so the first open of
-the GPU by an unprivileged process finds the firmware already registered. The kernel names the
-module after the file with `_fw` appended (`nvidia_gsp_ga10x_fw_fw` in `kldstat -v`); a
-firmware module cannot be unloaded while `nvidia` is loaded. Loading from the build tree by
-path, as above, works because a dependency that is already loaded is accepted; keep the firmware
-`kldload` line first. If `kldload` says `depends on nvidia_gsp_ga10x_fw_fw - not available`, the
-module is not installed or `kldxref` was not run. See `man/nvidia.4`.
-
-The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN` (find N by
-PCI bus as in [Check it worked](#5-check-it-worked), never by assuming 0); it is shut down
-again when the last open closes. `sysctl hw.nvidia.gpus` shows the firmware and VBIOS
-versions while something holds the device open.
-
-If that first open fails (`nvidiaN: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
-program gets `EIO`), the driver frees what the open took and the open can be tried again. See
-`man/nvidia.4`.
-
-`nvidia-drm.ko` goes last: it drives the DRM/KMS side of the card and needs the modeset
-module loaded before it.
-
-Loading the driver takes the display hardware over from the UEFI framebuffer, so a monitor on the
-NVIDIA card goes dark until `nvidia-modeset` and `nvidia-drm` are loaded and a program sets a
-mode on the card's DRM device. A console or desktop on another GPU is not affected.
 
 ## Memory attributes on arm64
 
@@ -544,7 +318,7 @@ A BAR is never mapped cacheable, even when the driver asks for `CACHED`. The ope
 ask for it: it maps the 64 KiB USERMODE register window in BAR0, the first thing every Vulkan
 and CUDA process maps, as `NV_MEMORY_CACHED`. On x86 the MTRR makes that harmless. On the Altra
 a cacheable load from a register page is a synchronous external abort, which the process sees as
-`SIGBUS` (`BUS_OBJERR`). That was the Vulkan crash, fixed in 3414fd7.
+`SIGBUS` (`BUS_OBJERR`). The mapping rule above prevents that Vulkan crash.
 
 On the Altra, Normal memory accesses to PCIe BARs are not safe (the root complex mishandles
 some of them), so write-combining requests fall back to Device-nGnRE there as well. The
@@ -558,8 +332,8 @@ mappings it makes itself, the kernel ones and the user ones alike.
 A program draws into a dumb buffer by `mmap`ing it from the DRM device. For a buffer in video
 memory the mapping points into BAR1. `nvidia-drm` is built against linuxkpi, and linuxkpi maps
 a page frame through its `struct vm_page`. A PCIe BAR has no `vm_page`s unless someone
-registers a fictitious range for it; ttm does that for its VRAM aperture, NVIDIA's FreeBSD
-code never did. Without one, `vmf_insert_pfn` fails, linuxkpi's pager returns `VM_PAGER_BAD`,
+registers a fictitious range for it; ttm does that for its VRAM aperture, but NVIDIA's
+upstream FreeBSD code does not. Without one, `vmf_insert_pfn` fails, linuxkpi's pager returns `VM_PAGER_BAD`,
 and the VM system falls back to an ordinary fault: the user page becomes a zero-filled RAM
 page. Nothing reports an error. The program writes into RAM, video memory never changes, and
 the monitor stays black.
@@ -586,21 +360,21 @@ not write-back. On arm64 that is Normal non-cacheable.
 Code compiled against linuxkpi (here `nvidia-drm`) gets Linux's `PAGE_MASK`: linuxkpi's
 `linux/page.h` redefines it as `~(PAGE_SIZE - 1)`, the page address, where FreeBSD's
 `PAGE_MASK` is `PAGE_SIZE - 1`, the offset within the page. So `addr & PAGE_MASK` is the
-opposite test in the two worlds. A FreeBSD-style alignment check in `nvidia-drm` rejected every
-video-memory window as "not page aligned", and no dumb buffer could be created. In FreeBSD-only
+opposite test in the two worlds. A FreeBSD-style alignment check in `nvidia-drm` rejects every
+video-memory window as "not page aligned", so no dumb buffer can be created. In FreeBSD-only
 code that includes linuxkpi headers, test alignment with `addr & (PAGE_SIZE - 1)`. `nvidia.ko`
 is native FreeBSD code, where `PAGE_MASK` means what FreeBSD says.
-`tests/drm_fault_index_test.sh` fails if the registration code tests `& PAGE_MASK` again.
+`tests/drm_fault_index_test.sh` fails if the registration code tests `& PAGE_MASK`.
 
 ## Cross-GPU buffers (PRIME import)
 
 A buffer another GPU rendered into (the RX 7600 on amp001, through `amdgpu`) can be imported by
-`nvidia-drm` when it is **system memory**. NVIDIA's FreeBSD driver never had this: its OS layer
-answered every dma-buf import with "not supported" and then `nvidia-drm` handed the KAPI a NULL
-handle (the panic that [`18fa11d`](patches/patch-nvidia-drm_nvidia-drm-fb.c) turned into
-`EINVAL`). The design, the exact failure chain and every decision are in
-[`docs/PRIME-IMPORT.md`](docs/PRIME-IMPORT.md); the sources consulted are in
-[`PROVENANCE.md`](PROVENANCE.md).
+`nvidia-drm` when it is **system memory**. NVIDIA's unpatched FreeBSD OS layer answers every
+dma-buf import with "not supported" and then `nvidia-drm` hands the KAPI a NULL handle.
+[`patches/patch-nvidia-drm_nvidia-drm-fb.c`](patches/patch-nvidia-drm_nvidia-drm-fb.c) rejects
+that NULL handle with `EINVAL` instead of panicking. The design, the exact failure chain and
+every decision are in [`docs/PRIME-IMPORT.md`](docs/PRIME-IMPORT.md); the sources consulted are
+in [`PROVENANCE.md`](PROVENANCE.md).
 
 How it works, in one paragraph. `nvidia-drm` walks the buffer's scatter list and expands it to one
 `vm_page` pointer per page; anything that is not a whole number of managed RAM pages (a partial
@@ -608,10 +382,10 @@ page, a buffer in the other card's video memory, an empty or over-4-GiB buffer, 
 disagrees with the size) is refused with `EINVAL` and a line in the log saying why, and the GEM
 object is created without an NVKMS handle, so it cannot become a framebuffer (the guard of #2228
 answers `ADDFB2` with `EINVAL`). Otherwise `nvidia.ko` wires the pages (`nv_import_pages()`) and
-the new KAPI entry `getSystemMemoryHandleFromPageArray()` gives them to the RM as a write-back
-page-array descriptor; the RM's own teardown unwires and frees them. The export ioctl always goes through the SGT entry points (`nv_register_sgt()` and friends, which
-used to be stubs that returned success and filled nothing) when the pages were imported, never
-straight from the page-array handle: that holds no reference, and the SGT path holds the GEM
+the KAPI entry `getSystemMemoryHandleFromPageArray()` gives them to the RM as a write-back
+page-array descriptor; the RM's own teardown unwires and frees them. The export ioctl always goes through the SGT entry points (`nv_register_sgt()` and friends)
+when the pages were imported, never straight from the page-array handle: that holds no
+reference, and the SGT path holds the GEM
 object for as long as the RM file descriptor maps the pages. The exporter's dma-buf is held for
 the whole life of the imported GEM object.
 
@@ -749,10 +523,9 @@ $R/noble/lib/ld-linux-aarch64.so.1 --library-path "$R/noble/lib/aarch64-linux-gn
     <program> ...
 ```
 
-`vulkaninfo --summary` should list "NVIDIA GeForce RTX 5060 Ti". It has not done so yet: with
-`nvidia.ko` older than 3414fd7 every Vulkan program dies with `SIGBUS` on its first read of the
-USERMODE register window (see [Memory attributes on arm64](#memory-attributes-on-arm64)). The
-ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
+`vulkaninfo --summary` lists "NVIDIA GeForce RTX 5060 Ti" on the tested machine. The USERMODE
+register window uses the mapping rule in [Memory attributes on arm64](#memory-attributes-on-arm64).
+The ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
 
 [`scripts/run-nv-vulkan.sh`](scripts/run-nv-vulkan.sh) wraps all of this: it sets the two
 variables, runs the programs from the llama directory (so they find their backends, also under
@@ -787,7 +560,7 @@ comparison tables): [`docs/llm.md`](docs/llm.md).
 | `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
-| `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
+| `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator-linux-only-last-resort)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
 
 ## RM client ownership for nvidia-uvm
 
@@ -827,9 +600,9 @@ The free counts use 64-bit generation numbers that are never 0.
 
 **Versions.** `nvidia.ko` is module version 2. `nvidia-modeset.ko`, `nvidia-drm.ko` and
 `nvidia-uvm.ko` depend on exactly that. `nvidia-uvm.ko` has to come from the uvm-bsd branch
-`agent/2373-uvm-client-ownership` or later (its `MODULE_DEPEND` is in that repository; the
-"CUDA prerequisites" commit above predates it). So updating `nvidia.ko` alone does not fix the
-cross-user hole or keep the display: the four modules go together.
+`agent/2373-uvm-client-ownership` or later (its `MODULE_DEPEND` is in that repository).
+Updating `nvidia.ko` alone does not fix the cross-user hole or keep the display: the four
+modules go together.
 
 - Symptom: `kldload` fails ("an error occurred while loading module"), and `dmesg` shows a
   version mismatch or `symbol nvUvmInterfaceClientHold undefined` (or `...ClientRelease`).
@@ -872,9 +645,8 @@ patch hooks, and runs deliberately broken copies of the header and the patch tha
 ## Linux bridges (`nvidia_linux.ko`)
 
 `nvidia.ko` and `nvidia-modeset.ko` load and work with no `linux64`, no `linux_common` and no
-`/compat/linux`. (uvm-bsd, `nvidia-uvm.ko`, still depends on the Linuxulator until its own provider
-is split out; that is a follow-up in its repository.) What Linux binaries need lives in two modules
-that belong to the Linuxulator:
+`/compat/linux`. The `nvidia-uvm.ko` module from uvm-bsd currently depends on the Linuxulator.
+What Linux binaries need lives in two modules that belong to the Linuxulator:
 
 | Module | Serves | Depends on |
 |---|---|---|
@@ -895,11 +667,11 @@ kldunload nvidia_linux            # unload the bridge first
 ```
 
 `rc.d/nvidia_linux` loads them at boot when `linux_enable=YES` and the native module is already
-loaded (`nvidia_linux_mode=AUTO`, `YES` or `NO`). The old behaviour, in which `nvidia.ko` itself
-pulls in the Linuxulator, is still reachable: set `NV_CORE_LINUX_COMPAT=yes` in the environment of
-`scripts/build-shim.sh` for `nvidia.ko` and `NVKMS_CORE_LINUX_COMPAT=yes` for `nvidia-modeset.ko`
-(for example `NV_CORE_LINUX_COMPAT=yes sh scripts/build-shim.sh --module=nvidia`; the switches are
-in the build stamp, so changing one cleans the objects first). `tests/linux_bridge_test.sh` checks the
+loaded (`nvidia_linux_mode=AUTO`, `YES` or `NO`). To make `nvidia.ko` itself pull in the
+Linuxulator, set `NV_CORE_LINUX_COMPAT=yes` in the environment of `scripts/build-shim.sh` for
+`nvidia.ko` and `NVKMS_CORE_LINUX_COMPAT=yes` for `nvidia-modeset.ko` (for example
+`NV_CORE_LINUX_COMPAT=yes sh scripts/build-shim.sh --module=nvidia`; the switches are in the
+build stamp, so changing one cleans the objects first). `tests/linux_bridge_test.sh` checks the
 module metadata, the imports and the fuzz 0 patch apply; see `nvidia_linux(4)` and `nvidia(4)`.
 
 ## Licence
