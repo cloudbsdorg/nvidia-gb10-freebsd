@@ -1289,30 +1289,39 @@ test_registry_threads(void)
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
-int
-main(int argc, char **argv)
+static void
+test_boot_select(void)
 {
-	const char *skip = getenv("NVRM_TEST_SKIP");	/* the gate's plant */
-
-	test_registry_threads();
 	reset_env();
 	/* the first selection registers the built-in providers by itself */
 	CHECK(nvrm_backend_select("fake") == &nvrm_backend_fake_ops);
 	CHECK(nvrm_backend_select("rm") == &nvrm_backend_rm_ops);
-	test_registry();
-	test_enumerate();
-	test_model_discrete();
-	test_model_unified();
-	test_model_unknown_and_sparse();
-	test_model_injections();
-	test_family_match();
-	if (skip == NULL || strcmp(skip, "decorators") != 0)
-		test_decorators();
-	test_names_and_fields();
-	test_accessors_refresh_json_table();
-	test_field_reason_and_masks();
-	test_cap_helper();
-	test_fake_direct();
-	test_json();
+}
+
+static const struct t_entry tests[] = {
+	T_NEEDED("threads", test_registry_threads,
+	    "it needs a registry no other test has touched")
+	T_NEEDED("boot", test_boot_select,
+	    "the registry is lazy: it fills on the first selection")
+	T_TEST("registry", test_registry)
+	T_TEST("enumerate", test_enumerate)
+	T_TEST("model", test_model_discrete)
+	T_TEST("model", test_model_unified)
+	T_TEST("model", test_model_unknown_and_sparse)
+	T_TEST("model", test_model_injections)
+	T_TEST("model", test_family_match)
+	T_TEST("decorators", test_decorators)
+	T_TEST("names", test_names_and_fields)
+	T_TEST("names", test_accessors_refresh_json_table)
+	T_TEST("names", test_field_reason_and_masks)
+	T_TEST("cap", test_cap_helper)
+	T_TEST("fake", test_fake_direct)
+	T_TEST("json", test_json)
+};
+
+int
+main(int argc, char **argv)
+{
+	t_run(tests, sizeof(tests) / sizeof(tests[0]));
 	return (t_done("core_test"));
 }
