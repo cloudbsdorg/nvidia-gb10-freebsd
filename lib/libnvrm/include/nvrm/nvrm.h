@@ -2,8 +2,9 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * <nvrm/nvrm.h> - libnvrm: device discovery over the NVIDIA Resource Manager
- * (Track #2378).  See nvrm(3) and nvrm(7).
+ * <nvrm/nvrm.h> - libnvrm: device discovery, GPU memory and virtual address
+ * space over the NVIDIA Resource Manager.  See nvrm(3), nvrm_mem(3) and
+ * nvrm(7).
  *
  * The library never names a chip: values come from the RM, and the chip
  * specific numbers (class ids, page sizes) from a generation table keyed by
@@ -35,11 +36,12 @@
 
 /* The RM version this library is built against (open-gpu-kernel-modules). */
 #define NVRM_RM_VERSION		"580.178.04"
-/* Library API version (shared object nvrm.so.1, symbol version NVRM_1.0).
+/* Library API version (shared object nvrm.so.1; symbol versions NVRM_1.0 for
+ * discovery, NVRM_1.1 for memory and VA).
  * PROVISIONAL: the interface and the structures below are frozen at the first
  * package release and not before; a future version may still reshape them. */
 #define NVRM_API_MAJOR		1
-#define NVRM_API_MINOR		0
+#define NVRM_API_MINOR		1
 
 #define NVRM_MAX_GPUS		32
 #define NVRM_MAX_CLASSES	200
@@ -59,9 +61,11 @@ enum nvrm_error {
 	NVRM_E_INVAL,
 	NVRM_E_NODEV,		/* no longer returned: no GPU is a success with 0 devices */
 	NVRM_E_CAPSICUM,	/* the descriptors could not be limited */
-	/* Appended by S2 (memory and VA). */
+	/* Appended, never reordered (the numbers are stable identifiers). */
 	NVRM_E_RM,		/* the RM refused a call (the status is in the message) */
-	NVRM_E_DENIED,		/* the client was not opened with the right for it */
+	NVRM_E_DENIED,		/* not allowed: the client lacks the open flag, the
+				   mapping lacks the access, or this process did
+				   not open the client (a fork child) */
 	NVRM_E_NOSLOT,		/* no pre-opened spare descriptor is left */
 	NVRM_E_RANGE,		/* out of VA space, overlap, or outside the object */
 	NVRM_E_NOTSUP,		/* the backend does not provide the operation */
@@ -187,14 +191,17 @@ typedef struct nvrm_enum_opts {
 	unsigned	flags;
 	/* Room for later options.  Must be zero: a nonzero value is refused
 	 * with NVRM_E_INVAL, so a caller built for a later meaning of these
-	 * members cannot silently get this version's behaviour. */
+	 * members cannot silently get this version's behaviour.  Part of the
+	 * NVRM_1.0 layout, which is provisional until the first package
+	 * release (see above): nothing built against another layout was ever
+	 * released. */
 	uint32_t	reserved[4];
 } nvrm_enum_opts;
 
 /*
- * ---- Memory and virtual address space (S2, Track #2419) -------------------
+ * ---- Memory and virtual address space (nvrm_mem(3)) -----------------------
  *
- * nvrm_device_open() makes one RM client for one GPU: its own descriptors, its
+ * nvrm_client_open() makes one RM client for one GPU: its own descriptors, its
  * own VA space (the library hands out the addresses; the RM maps at exactly
  * the ones asked for) and every memory object made through it.  The client is
  * independent of the nvrm_ctx it was opened from and may outlive it.  Closing
@@ -205,12 +212,22 @@ typedef struct nvrm_enum_opts {
  * nvrm_mem_map_cpu() is refused with NVRM_E_DENIED, and no descriptor that
  * could be mapped exists.
  *
- * CPU access follows the memory attribute rule (nvrm_mem(7)): the attribute a
- * mapping gets is nvrm_mem_info.cpu_attr.  Through NVRM_ATTR_DEVICE only
+ * CPU access follows the memory attribute rule (nvrm(7), Memory attributes):
+ * the attribute a mapping gets is nvrm_mem_info.cpu_attr.  Through NVRM_ATTR_DEVICE only
  * aligned accesses of 1, 2, 4 or 8 bytes are safe; use nvrm_mem_read() and
  * nvrm_mem_write(), which obey the rule, or follow it in your own code.
  *
  * A client is not safe for concurrent use; use one thread per client or a lock.
+ * After fork() the RM client still belongs to the parent.  In the child, a
+ * call that would create or act on RM objects is refused with NVRM_E_DENIED;
+ * a release (unmap, free, VA release, close) succeeds and drops only the
+ * child's records; the getters and nvrm_mem_read()/nvrm_mem_write() are not
+ * checked, and CPU mappings the child inherited still reach the memory: a
+ * caller that wants the child kept out unmaps them before fork(), or marks
+ * them with minherit(2) INHERIT_NONE.
+ *
+ * Structures with a size member: set it to sizeof the structure, or to 0,
+ * which means the same; any other value is refused with NVRM_E_INVAL.
  */
 typedef struct nvrm_client nvrm_client;
 typedef struct nvrm_mem nvrm_mem;
@@ -221,8 +238,11 @@ typedef struct nvrm_mem nvrm_mem;
 typedef struct nvrm_open_opts {
 	uint32_t	size;		/* sizeof(nvrm_open_opts); 0 means that */
 	uint32_t	flags;		/* NVRM_OPEN_* */
-	uint32_t	map_slots;	/* with ALLOW_MAP: spare mapping descriptors (0: 16) */
-	uint32_t	export_slots;	/* spare export descriptors (0: 4) */
+	/* Spare descriptors opened at once, for use after cap_enter(): each CPU
+	 * mapping or export consumes one for good (the count is a budget over
+	 * the client's life in capability mode, not a pool that refills). */
+	uint32_t	map_slots;	/* with ALLOW_MAP: mapping descriptors (0 means 16) */
+	uint32_t	export_slots;	/* export descriptors (0 means 4) */
 } nvrm_open_opts;
 
 #define NVRM_MAP_SLOTS_DEFAULT		16
@@ -264,8 +284,9 @@ typedef struct nvrm_va_params {
 	uint32_t	size;		/* sizeof(nvrm_va_params); 0 means that */
 	uint32_t	flags;		/* NVRM_VA_* */
 	uint64_t	bytes;
-	uint64_t	alignment;	/* 0: 4 KiB; a power of two */
-	uint64_t	fixed;		/* 0: the library picks; else the address */
+	uint64_t	alignment;	/* a power of two (0 means 4 KiB); at least
+					   the page size of what is mapped there */
+	uint64_t	fixed;		/* 0 means the library picks; else the address */
 } nvrm_va_params;
 
 typedef struct nvrm_mem_params {
@@ -274,8 +295,14 @@ typedef struct nvrm_mem_params {
 	uint32_t	flags;		/* none yet: must be 0 */
 	uint32_t	reserved;	/* must be 0 */
 	uint64_t	bytes;		/* rounded up to the page size */
-	uint64_t	alignment;	/* 0: the page size; a power of two */
-	uint64_t	page_size;	/* 0: the backend's default; else 4 KiB, 64 KiB, 2 MiB, 512 MiB */
+	uint64_t	alignment;	/* a power of two (0 means the page size) */
+	/* One of 4 KiB, 64 KiB, 2 MiB or 512 MiB that the GPU lists; or 0,
+	 * for which the library picks 64 KiB when the object is video memory
+	 * of at least 64 KiB and the GPU lists 64 KiB, and 4 KiB otherwise.
+	 * nvrm_mem_info.page_size is the page size mappings are checked
+	 * against: what the object got, or for an import the smallest page
+	 * the RM's answer allows (nvrm_mem(3)). */
+	uint64_t	page_size;
 } nvrm_mem_params;
 
 #define NVRM_MAP_READ_ONLY	0x1	/* the GPU may only read through this mapping */
@@ -286,7 +313,7 @@ typedef struct nvrm_gpu_map_params {
 	uint32_t	flags;		/* NVRM_MAP_* */
 	uint64_t	va;		/* the address, inside a reservation */
 	uint64_t	offset;		/* into the object; a multiple of its page size */
-	uint64_t	length;		/* 0: to the end of the object */
+	uint64_t	length;		/* 0 means to the end of the object */
 } nvrm_gpu_map_params;
 
 typedef struct nvrm_mem_info {
@@ -308,6 +335,10 @@ typedef struct nvrm_client_stats {
 	uint64_t	live_mem, live_bytes;
 	uint64_t	live_reservations, live_gpu_maps, live_cpu_maps;
 	uint64_t	spare_descriptors;	/* pre-opened and unused */
+	/* Releases the RM refused (an unmap or a free): what they held stays
+	 * with the RM client until it closes, and its VA is never handed out
+	 * again. */
+	uint64_t	failed_releases;
 } nvrm_client_stats;
 
 __BEGIN_DECLS
@@ -330,16 +361,16 @@ const nvrm_device_info *nvrm_device_info_get(const nvrm_device *dev);
 int		nvrm_device_refresh(nvrm_device *dev);
 
 
-/* ---- S2: see the comment above nvrm_client ---- */
-int		nvrm_device_open(const nvrm_device *dev,
+/* ---- Memory and virtual address space: nvrm_mem(3) ---- */
+int		nvrm_client_open(const nvrm_device *dev,
 		    const nvrm_open_opts *opts, nvrm_client **clp, char *err,
 		    size_t errlen);
-void		nvrm_device_close(nvrm_client *cl);
-/* One line about the last call of the client that failed; "" if none did. */
+void		nvrm_client_close(nvrm_client *cl);
+/* One line about the most recent call on the client: "" when it succeeded. */
 const char	*nvrm_client_errmsg(const nvrm_client *cl);
-int		nvrm_client_stats_get(const nvrm_client *cl,
+int		nvrm_client_stats_get(nvrm_client *cl,
 		    nvrm_client_stats *st);
-int		nvrm_vaspace_info_get(const nvrm_client *cl,
+int		nvrm_vaspace_info_get(nvrm_client *cl,
 		    nvrm_vaspace_info *info);
 int		nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p,
 		    uint64_t *va);

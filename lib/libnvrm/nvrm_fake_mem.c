@@ -19,9 +19,16 @@
  *     attribute is Device must be aligned and 1, 2, 4 or 8 bytes wide, like
  *     the hardware (NVRM_FAKE_HOST=arm64 or amd64 sets the host the rule sees).
  *   - A sharing descriptor is a small anonymous object holding a record that
- *     names the memory object; an import finds the object by it.  The export
- *     keeps its object alive until the exporting client closes (the fake does
- *     not see a descriptor being closed).
+ *     names the memory object; an import finds the object by it, and only an
+ *     object that was exported.  The export keeps its object alive until the
+ *     exporting client closes (the fake does not see a descriptor being
+ *     closed).  An export spare is limited when it is opened, to what the
+ *     fake needs of it (read, pread, pwrite, fstat; never a mapping right),
+ *     and narrowed to read, pread and fstat once the record is written.
+ *     The RM backend's spare is read-only from the start: the kernel writes
+ *     its record, where the fake must write its own.
+ *   - A release can be made to fail (nvrm_fake_mem_fail): like the RM, the
+ *     fake then keeps what it held until the client closes.
  *
  * Process-wide state: use one thread.  After fork() the child shares the
  * aperture and has its own copy of the tables.
@@ -51,6 +58,7 @@ typedef struct fake_obj {
 	struct fake_dev	*dev;
 	uint64_t	serial, off, bytes, page_size;
 	int		place;
+	int		exported;
 	unsigned	refs;
 } fake_obj;
 
@@ -75,6 +83,7 @@ struct nvrm_bmem {
 	fake_obj	*o;		/* NULL for registered user pages */
 	void		*user;
 	uint64_t	bytes;
+	struct nvrm_bmem *held_next;	/* next in nvrm_bclient.held, while on it */
 };
 
 typedef struct fake_map {
@@ -85,8 +94,8 @@ typedef struct fake_map {
 } fake_map;
 
 struct nvrm_bres {
+	fake_res	r;		/* first: the list holds &r */
 	nvrm_bclient	*c;
-	fake_res	r;
 };
 
 struct nvrm_bclient {
@@ -95,18 +104,33 @@ struct nvrm_bclient {
 	fake_map	*maps;
 	fake_obj	**exports;	/* references held for exports */
 	unsigned	nexports;
+	nvrm_bmem	*held;		/* objects whose free was refused */
 };
 
 static fake_dev *devs;
 static unsigned fail_nth[NVRM_FAKE_OP__COUNT];
 static uint64_t n_traps, n_checked;
 static uint64_t next_serial = 1;
+static uint64_t host_page;	/* 0: sysconf(_SC_PAGESIZE) */
 static unsigned live_objects, live_res, live_maps, live_clients;
 
 void
 nvrm_fake_mem_fail(int op, unsigned nth)
 {
-	fail_nth[op] = nth;
+	if (op > 0 && op < NVRM_FAKE_OP__COUNT)
+		fail_nth[op] = nth;
+}
+
+void
+nvrm_fake_mem_fail_clear(void)
+{
+	memset(fail_nth, 0, sizeof(fail_nth));
+}
+
+void
+nvrm_fake_mem_host_page(uint64_t bytes)
+{
+	host_page = bytes;
 }
 
 /* 1 when this call of the operation is to fail. */
@@ -128,8 +152,9 @@ injected(int op)
 
 /* ---- devices ------------------------------------------------------------- */
 
+/* The GPU's aperture, made on first use; *rc says why when NULL. */
 static fake_dev *
-dev_get(const nvrm_gpu *g, char *err, size_t errlen)
+dev_get(const nvrm_gpu *g, int *rc_out, char *err, size_t errlen)
 {
 	fake_dev *d;
 	uint64_t vram;
@@ -141,6 +166,7 @@ dev_get(const nvrm_gpu *g, char *err, size_t errlen)
 			d->nclients++;
 			return (d);
 		}
+	*rc_out = NVRM_E_NOMEM;
 	d = NVRM_CALLOC(1, sizeof(*d));
 	if (d == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -153,16 +179,18 @@ dev_get(const nvrm_gpu *g, char *err, size_t errlen)
 		snprintf(err, errlen, "fake backend: cannot make the "
 		    "aperture: %s", strerror(errno));
 		free(d);
+		*rc_out = NVRM_E_IO;
 		return (NULL);
 	}
 	rc = ftruncate(d->fd, d->vram_bytes + FAKE_SYS_BYTES);
-	if (injected(NVRM_FAKE_OP_SIZE))
+	if (injected(NVRM_FAKE_OP_APERTURE_SIZE))
 		rc = -1;
 	if (rc != 0) {
 		snprintf(err, errlen, "fake backend: cannot size the "
 		    "aperture: %s", strerror(errno));
 		close(d->fd);
 		free(d);
+		*rc_out = NVRM_E_IO;
 		return (NULL);
 	}
 	d->id = id;
@@ -226,11 +254,15 @@ obj_new(fake_dev *d, int place, uint64_t bytes, uint64_t align,
 {
 	fake_obj *o;
 	nvrm_va *region = d->region[place == NVRM_PLACE_VIDMEM ? 0 : 1];
-	uint64_t off, host = (uint64_t)sysconf(_SC_PAGESIZE);
+	uint64_t off, host = host_page;
 
 	if (region == NULL)
 		return (NULL);
-	align += (host > align) * (host - align);	/* branch-free max */
+	if (host == 0)
+		host = (uint64_t)sysconf(_SC_PAGESIZE);
+	/* A CPU mapping is an mmap at the object's offset: host aligned. */
+	if (align < host)
+		align = host;
 	o = NVRM_CALLOC(1, sizeof(*o));
 	if (o == NULL)
 		return (NULL);
@@ -258,6 +290,7 @@ fk_client_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
     nvrm_bclient **bcp, nvrm_vainfo *va, char *err, size_t errlen)
 {
 	nvrm_bclient *c;
+	int rc;
 
 	INJECT(NVRM_FAKE_OP_CLIENT_OPEN, err, errlen);
 	c = NVRM_CALLOC(1, sizeof(*c));
@@ -265,10 +298,10 @@ fk_client_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
-	c->dev = dev_get(g, err, errlen);
+	c->dev = dev_get(g, &rc, err, errlen);
 	if (c->dev == NULL) {
 		free(c);
-		return (NVRM_E_NOMEM);
+		return (rc);
 	}
 	live_clients++;
 	va->base = FAKE_VA_BASE;
@@ -280,14 +313,47 @@ fk_client_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
 static void
 fk_client_close(nvrm_bclient *c)
 {
+	nvrm_bmem *m;
+	fake_map *g;
+	fake_res *r;
 	unsigned i;
 
+	/* What refused releases left behind goes with the client, as with the
+	 * RM, where freeing the client frees everything in it. */
+	while ((g = c->maps) != NULL) {
+		c->maps = g->next;
+		live_maps--;
+		free(g);
+	}
+	while ((r = c->res) != NULL) {
+		c->res = r->next;
+		live_res--;
+		free((nvrm_bres *)r);
+	}
+	while ((m = c->held) != NULL) {
+		c->held = m->held_next;
+		if (m->o != NULL)
+			obj_unref(m->o);
+		free(m);
+	}
 	for (i = 0; i < c->nexports; i++)
 		obj_unref(c->exports[i]);
 	free(c->exports);
 	live_clients--;
 	dev_put(c->dev);
 	free(c);
+}
+
+/* An export spare before its record is written: no mapping right.  Returns
+ * 0, or nonzero on failure (the caller treats any nonzero as the limit
+ * failing). */
+static int
+export_spare_limit(int fd)
+{
+	cap_rights_t rights;
+
+	cap_rights_init(&rights, CAP_READ, CAP_PREAD, CAP_PWRITE, CAP_FSTAT);
+	return (cap_rights_limit(fd, &rights));
 }
 
 static int
@@ -306,7 +372,7 @@ fk_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 		return (NVRM_E_IO);
 	}
 	rc = kind == NVRM_DESC_EXPORT ? ftruncate(*fd, 64) : 0;
-	if (injected(NVRM_FAKE_OP_SIZE))
+	if (injected(NVRM_FAKE_OP_DESC_SIZE))
 		rc = -1;
 	if (rc != 0) {
 		snprintf(err, errlen, "fake backend: cannot size a spare "
@@ -314,7 +380,8 @@ fk_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 		close(*fd);
 		return (NVRM_E_IO);
 	}
-	rc = kind == NVRM_DESC_MAP ? nvrm_cap_limit_desc(*fd, kind) : NVRM_OK;
+	rc = kind == NVRM_DESC_MAP ? nvrm_cap_limit_desc(*fd, kind) :
+	    export_spare_limit(*fd);
 	if (injected(NVRM_FAKE_OP_LIMIT))
 		rc = NVRM_E_CAPSICUM;
 	if (rc != NVRM_OK) {
@@ -351,16 +418,18 @@ fk_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 	return (NVRM_OK);
 }
 
-static void
-fk_va_release(nvrm_bres *r)
+static int
+fk_va_release(nvrm_bres *r, char *err, size_t errlen)
 {
 	fake_res **pp;
 
+	INJECT(NVRM_FAKE_OP_VA_RELEASE, err, errlen);
 	for (pp = &r->c->res; *pp != &r->r; pp = &(*pp)->next)
 		;
 	*pp = r->r.next;
 	live_res--;
 	free(r);
+	return (NVRM_OK);
 }
 
 /* ---- memory -------------------------------------------------------------- */
@@ -371,7 +440,7 @@ fk_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 {
 	nvrm_bmem *m;
 	fake_obj *o;
-	uint64_t ps = a->page_size != 0 ? a->page_size : 4096;
+	uint64_t ps = a->page_size;	/* the core always names one */
 
 	INJECT(NVRM_FAKE_OP_ALLOC, err, errlen);
 	m = NVRM_CALLOC(1, sizeof(*m));
@@ -419,12 +488,38 @@ fk_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	return (NVRM_OK);
 }
 
-static void
-fk_mem_free(nvrm_bmem *m)
+static int
+mapped_somewhere(const nvrm_bmem *m)
 {
+	const fake_map *g;
+
+	for (g = m->c->maps; g != NULL; g = g->next)
+		if (g->m == m)
+			return (1);
+	return (0);
+}
+
+static int
+fk_mem_free(nvrm_bmem *m, char *err, size_t errlen)
+{
+	/* Still mapped (an unmap was refused): like the RM, the mapping keeps
+	 * the memory alive, until the client closes. */
+	if (mapped_somewhere(m)) {
+		m->held_next = m->c->held;
+		m->c->held = m;
+		return (NVRM_OK);
+	}
+	if (injected(NVRM_FAKE_OP_FREE)) {
+		m->held_next = m->c->held;
+		m->c->held = m;
+		snprintf(err, errlen, "fake backend: operation %d failed "
+		    "(injected)", NVRM_FAKE_OP_FREE);
+		return (NVRM_E_RM);
+	}
 	if (m->o != NULL)
 		obj_unref(m->o);
 	free(m);
+	return (NVRM_OK);
 }
 
 static int
@@ -450,12 +545,14 @@ fk_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 	return (NVRM_OK);
 }
 
-static void
-fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length)
+static int
+fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
+    char *err, size_t errlen)
 {
-	(void)length;
 	fake_map **pp, *g;
 
+	(void)length;
+	INJECT(NVRM_FAKE_OP_UNMAP_GPU, err, errlen);
 	for (pp = &r->c->maps; (*pp)->m != m || (*pp)->va != va;
 	    pp = &(*pp)->next)
 		;
@@ -463,6 +560,7 @@ fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length)
 	*pp = g->next;
 	live_maps--;
 	free(g);
+	return (NVRM_OK);
 }
 
 static int
@@ -484,10 +582,12 @@ fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 	return (NVRM_OK);
 }
 
-static void
-fk_unmap_cpu(nvrm_bmem *m, void *addr)
+static int
+fk_unmap_cpu(nvrm_bmem *m, void *addr, char *err, size_t errlen)
 {
 	munmap(addr, m->o->bytes);
+	INJECT(NVRM_FAKE_OP_UNMAP_CPU, err, errlen);
+	return (NVRM_OK);
 }
 
 /* ---- sharing ------------------------------------------------------------- */
@@ -537,6 +637,7 @@ fk_export_fd(nvrm_bmem *m, int fd, char *err, size_t errlen)
 	c->exports = n;
 	c->exports[c->nexports++] = m->o;
 	m->o->refs++;
+	m->o->exported = 1;
 	return (NVRM_OK);
 }
 
@@ -557,9 +658,9 @@ fk_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	for (o = c->dev->objs; o != NULL && o->serial != rec.serial;
 	    o = o->next)
 		;
-	if (rec.dev != c->dev->id || o == NULL) {
+	if (rec.dev != c->dev->id || o == NULL || !o->exported) {
 		snprintf(err, errlen, "fake backend: the exported object is "
-		    "not on this GPU, or is gone");
+		    "not on this GPU, is gone, or was never exported");
 		return (NVRM_E_RM);
 	}
 	m = NVRM_CALLOC(1, sizeof(*m));

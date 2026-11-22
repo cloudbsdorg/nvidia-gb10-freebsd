@@ -32,8 +32,15 @@ NVRM_1.0 {
 		nvrm_json_end;
 		nvrm_json_error;
 		nvrm_json_schema;
-		nvrm_device_open;
-		nvrm_device_close;
+	local:
+		*;
+};
+
+/* API minor 1: memory and virtual address space (nvrm_mem(3)). */
+NVRM_1.1 {
+	global:
+		nvrm_client_open;
+		nvrm_client_close;
 		nvrm_client_errmsg;
 		nvrm_client_stats_get;
 		nvrm_vaspace_info_get;
@@ -51,6 +58,4 @@ NVRM_1.0 {
 		nvrm_mem_write;
 		nvrm_mem_export_fd;
 		nvrm_mem_import_fd;
-	local:
-		*;
-};
+} NVRM_1.0;

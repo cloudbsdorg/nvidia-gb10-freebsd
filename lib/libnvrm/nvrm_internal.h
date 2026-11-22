@@ -155,14 +155,14 @@ struct nvrm_ctx {
 };
 
 
-/* ---- S2: memory and VA ------------------------------------------------ */
+/* ---- memory and VA (nvrm_mem.c, nvrm_va.c) ------------------------------ */
 
 typedef struct nvrm_bclient nvrm_bclient;	/* backend: one client on one GPU */
 typedef struct nvrm_bmem nvrm_bmem;		/* backend: one memory object */
 typedef struct nvrm_bres nvrm_bres;		/* backend: one VA reservation */
 
 /* The kinds of spare descriptor a client pre-opens. */
-enum { NVRM_DESC_MAP = 1, NVRM_DESC_EXPORT };
+enum { NVRM_DESC_MAP = 1, NVRM_DESC_EXPORT, NVRM_DESC__COUNT };
 
 typedef struct nvrm_open_cfg {
 	int		allow_map;
@@ -180,16 +180,24 @@ typedef struct nvrm_balloc {
 	uint64_t	bytes, alignment, page_size;
 } nvrm_balloc;
 
+/* How the CPU side of system memory is mapped, as the backend learned it
+ * (the allocation asked for it, or the RM reports it for an import). */
+enum { NVRM_COH_CACHED = 0, NVRM_COH_WC, NVRM_COH_UNCACHED };
+
 /* What the backend reports back about an object. */
 typedef struct nvrm_bmem_info {
 	uint64_t	bytes, page_size;
 	int		place;
+	int		coherency;	/* NVRM_COH_*; system memory only */
 } nvrm_bmem_info;
 
 /*
  * Every call that can fail returns an enum nvrm_error and, with a message of
  * its own, says why in err.  The core owns the bookkeeping (VA allocator,
- * lists, argument rules); a backend only talks to the GPU.
+ * lists, argument rules); a backend only talks to the GPU.  A release (unmap,
+ * free) that the GPU side refuses returns an error too, so the core can keep
+ * what is still held out of reuse; a release a backend skips on purpose (a
+ * fork child, which does not own the RM client) is a success.
  */
 typedef struct nvrm_mem_ops {
 	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
@@ -200,24 +208,25 @@ typedef struct nvrm_mem_ops {
 		    size_t errlen);
 	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
 		    int sparse, nvrm_bres **r, char *err, size_t errlen);
-	void	(*va_release)(nvrm_bres *r);
+	int	(*va_release)(nvrm_bres *r, char *err, size_t errlen);
 	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
 	int	(*mem_register)(nvrm_bclient *bc, void *addr, uint64_t bytes,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
-	void	(*mem_free)(nvrm_bmem *m);
+	int	(*mem_free)(nvrm_bmem *m, char *err, size_t errlen);
 	int	(*map_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
 		    uint64_t offset, uint64_t length, int read_only, char *err,
 		    size_t errlen);
-	void	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
-		    uint64_t length);
+	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
+		    uint64_t length, char *err, size_t errlen);
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
 	 * descriptor carry one mapping); the core closes it on unmap. */
 	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
 		    char *err, size_t errlen);
-	void	(*unmap_cpu)(nvrm_bmem *m, void *addr);
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, char *err,
+		    size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
 		    nvrm_bmem_info *out, char *err, size_t errlen);
@@ -242,8 +251,9 @@ uint64_t nvrm_va_free_bytes(const nvrm_va *va);
 unsigned nvrm_va_extents(const nvrm_va *va);
 
 /* The CPU memory attribute rule (nvrm_mem.c).  wc is the capability flag
- * os_device_wc_active as the device reports it. */
-int	nvrm_cpu_attr_rule(int place, int host_arm64, const nvrm_u64 *wc);
+ * os_device_wc_active as the device reports it; coherency is NVRM_COH_*. */
+int	nvrm_cpu_attr_rule(int place, int coherency, int host_arm64,
+	    const nvrm_u64 *wc);
 
 typedef struct nvrm_reserve {
 	struct nvrm_reserve *next;
@@ -292,7 +302,7 @@ struct nvrm_client {
 	nvrm_u64	max_page_size;
 	int		host_arm64;
 	int		allow_map;
-	nvrm_pool	pool[3];	/* indexed by NVRM_DESC_* */
+	nvrm_pool	pool[NVRM_DESC__COUNT];	/* indexed by NVRM_DESC_* */
 	nvrm_client_stats st;
 	char		errmsg[160];
 };

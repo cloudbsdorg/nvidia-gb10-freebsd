@@ -1,7 +1,444 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
 .Dd November 22, 2026
 .Dt NVRM_MEM 3
 .Os
 .Sh NAME
-.Nm nvrm_mem
+.Nm nvrm_client_open ,
+.Nm nvrm_client_close ,
+.Nm nvrm_client_errmsg ,
+.Nm nvrm_client_stats_get ,
+.Nm nvrm_vaspace_info_get ,
+.Nm nvrm_va_reserve ,
+.Nm nvrm_va_release ,
+.Nm nvrm_mem_alloc ,
+.Nm nvrm_mem_register_user ,
+.Nm nvrm_mem_free ,
+.Nm nvrm_mem_info_get ,
+.Nm nvrm_mem_map_gpu ,
+.Nm nvrm_mem_unmap_gpu ,
+.Nm nvrm_mem_map_cpu ,
+.Nm nvrm_mem_unmap_cpu ,
+.Nm nvrm_mem_read ,
+.Nm nvrm_mem_write ,
+.Nm nvrm_mem_export_fd ,
+.Nm nvrm_mem_import_fd
+.Nd GPU memory and virtual address space over the NVIDIA Resource Manager
+.Sh LIBRARY
+libnvrm
+.Sh SYNOPSIS
+.In nvrm/nvrm.h
+.Ft int
+.Fn nvrm_client_open "const nvrm_device *dev" "const nvrm_open_opts *opts" "nvrm_client **clp" "char *err" "size_t errlen"
+.Ft void
+.Fn nvrm_client_close "nvrm_client *cl"
+.Ft const char *
+.Fn nvrm_client_errmsg "const nvrm_client *cl"
+.Ft int
+.Fn nvrm_client_stats_get "nvrm_client *cl" "nvrm_client_stats *st"
+.Ft int
+.Fn nvrm_vaspace_info_get "nvrm_client *cl" "nvrm_vaspace_info *info"
+.Ft int
+.Fn nvrm_va_reserve "nvrm_client *cl" "const nvrm_va_params *p" "uint64_t *va"
+.Ft int
+.Fn nvrm_va_release "nvrm_client *cl" "uint64_t va"
+.Ft int
+.Fn nvrm_mem_alloc "nvrm_client *cl" "const nvrm_mem_params *p" "nvrm_mem **memp"
+.Ft int
+.Fn nvrm_mem_register_user "nvrm_client *cl" "void *addr" "uint64_t bytes" "nvrm_mem **memp"
+.Ft void
+.Fn nvrm_mem_free "nvrm_mem *mem"
+.Ft int
+.Fn nvrm_mem_info_get "const nvrm_mem *mem" "nvrm_mem_info *info"
+.Ft int
+.Fn nvrm_mem_map_gpu "nvrm_mem *mem" "const nvrm_gpu_map_params *p"
+.Ft int
+.Fn nvrm_mem_unmap_gpu "nvrm_mem *mem" "uint64_t va"
+.Ft int
+.Fn nvrm_mem_map_cpu "nvrm_mem *mem" "unsigned prot" "void **addr"
+.Ft int
+.Fn nvrm_mem_unmap_cpu "nvrm_mem *mem"
+.Ft int
+.Fn nvrm_mem_read "nvrm_mem *mem" "uint64_t offset" "void *buf" "size_t len"
+.Ft int
+.Fn nvrm_mem_write "nvrm_mem *mem" "uint64_t offset" "const void *buf" "size_t len"
+.Ft int
+.Fn nvrm_mem_export_fd "nvrm_mem *mem" "int *fd"
+.Ft int
+.Fn nvrm_mem_import_fd "nvrm_client *cl" "int fd" "nvrm_mem **memp"
 .Sh DESCRIPTION
-placeholder
+These calls allocate GPU memory, give it GPU virtual addresses, map it for the
+CPU and share it between processes, on a GPU found by
+.Xr nvrm 3 .
+They are the base the user-space graphics and compute drivers build on: a
+Vulkan driver or a CUDA runtime gets its buffers and its GPU address space
+here and submits work against them.
+Every call works the same on the
+.Dq rm
+backend (the NVIDIA kernel module) and the
+.Dq fake
+backend (a software GPU for tests).
+.Ss The client
+.Fn nvrm_client_open
+makes one client for one device
+.Fa dev
+from
+.Fn nvrm_device_get :
+a session of its own with the RM (its own control descriptor and RM client),
+one GPU virtual address space, and every object made through it.
+The client is independent of the context it was opened from and may outlive
+it.
+.Fn nvrm_client_close
+frees every object, mapping and reservation still in the client.
+On failure
+.Pf * Fa clp
+is
+.Dv NULL
+and
+.Fa err ,
+if not
+.Dv NULL ,
+holds one line saying why.
+.Pp
+.Fa opts
+may be
+.Dv NULL
+for the defaults.
+Its
+.Va size
+member is
+.Li sizeof(nvrm_open_opts)
+or 0;
+.Va flags
+is
+.Dv NVRM_OPEN_ALLOW_MAP
+or 0.
+Without
+.Dv NVRM_OPEN_ALLOW_MAP
+the client can never map memory for the CPU and holds no descriptor that
+could be mapped.
+With it, the client opens
+.Va map_slots
+(0 means 16) spare mapping descriptors of this GPU's own device node
+.Pf ( Pa /dev/nvidia Ns Ar N ,
+with
+.Ar N
+reported by the driver) at once.
+Every client opens
+.Va export_slots
+(0 means 4) spare export descriptors.
+At most
+.Dv NVRM_SLOTS_MAX
+of each.
+.Pp
+Every structure with a
+.Va size
+member takes the size of the structure, or 0, which means the same; any other
+value is refused with
+.Dv NVRM_E_INVAL .
+.Pp
+.Fn nvrm_client_errmsg
+returns one line about the most recent call on the client: the empty string
+when it succeeded.
+.Fn nvrm_client_stats_get
+reports what the client holds and has done (objects, bytes, reservations, GPU
+and CPU mappings, unused spare descriptors, and
+.Va failed_releases ,
+see
+.Sx Releases the RM refuses ) .
+.Ss Virtual address space
+The library hands out the GPU virtual addresses; the RM maps at exactly the
+addresses it is given.
+.Fn nvrm_vaspace_info_get
+reports the usable range (from
+.Va base
+to one below
+.Va end )
+and the bytes not reserved.
+.Fn nvrm_va_reserve
+reserves
+.Va bytes
+(a multiple of 4 KiB) aligned to
+.Va alignment
+(0 means 4 KiB; at least the page size of what will be mapped there), at
+.Va fixed
+when it is not 0, and returns the start in
+.Pf * Fa va .
+With
+.Dv NVRM_VA_SPARSE
+the addresses of the reservation that nothing is mapped at read as zero and
+ignore writes instead of faulting.
+.Fn nvrm_va_release
+releases the reservation that starts at
+.Fa va ;
+it is refused with
+.Dv NVRM_E_BUSY
+while anything is mapped in it.
+.Ss Memory objects
+.Fn nvrm_mem_alloc
+allocates
+.Va bytes ,
+rounded up to the page size, of
+.Dv NVRM_MEM_VRAM
+(the GPU's own memory; system memory on a GPU that has none) or
+.Dv NVRM_MEM_SYSMEM
+(system memory the GPU reaches, coherent with the CPU).
+.Va page_size
+is 4 KiB, 64 KiB, 2 MiB or 512 MiB, one the device lists in
+.Va page_sizes ,
+or 0, for which the library picks 64 KiB for video memory of at least 64 KiB
+where the device lists it, and 4 KiB otherwise.
+.Va alignment
+is 0 or a power of two.
+.Va flags
+and
+.Va reserved
+must be 0.
+.Fn nvrm_mem_register_user
+makes an object of whole host pages of the caller's own address space; they
+must stay mapped until the object is freed.
+.Fn nvrm_mem_free
+unmaps the object everywhere and frees it.
+.Fn nvrm_mem_info_get
+reports its kind, place
+.Pq Dv NVRM_PLACE_VIDMEM or Dv NVRM_PLACE_SYSMEM ,
+CPU attribute, size, page size and mappings.
+.Ss GPU mappings
+.Fn nvrm_mem_map_gpu
+maps
+.Va length
+bytes (0 means to the end) of the object from
+.Va offset
+at the GPU address
+.Va va .
+The range must lie inside one reservation and overlap no other mapping;
+.Va va ,
+.Va offset
+and
+.Va length
+are multiples of the object's page size, so reserve with an
+.Va alignment
+of at least that page size (64 KiB for the default video memory page).
+.Dv NVRM_MAP_READ_ONLY
+lets the GPU only read.
+.Fn nvrm_mem_unmap_gpu
+removes the object's mapping that starts at
+.Fa va .
+.Ss CPU mappings
+.Fn nvrm_mem_map_cpu
+maps the whole object for the CPU, with
+.Fa prot
+.Dv NVRM_CPU_READ ,
+.Dv NVRM_CPU_WRITE
+or both, and returns the address.
+It needs a client opened with
+.Dv NVRM_OPEN_ALLOW_MAP ,
+and refuses registered user pages, which are mapped already.
+The kernel module keeps one mapping per descriptor, so each CPU mapping holds
+one mapping descriptor until it is unmapped.
+.Fn nvrm_mem_unmap_cpu
+removes it.
+.Pp
+The memory attribute of the mapping is
+.Va cpu_attr
+in
+.Vt nvrm_mem_info ,
+chosen by the rule of
+.Xr nvrm 7 ,
+.Sx Memory attributes :
+.Dv NVRM_ATTR_CACHED
+(any access),
+.Dv NVRM_ATTR_WC
+(write-combining) or
+.Dv NVRM_ATTR_DEVICE
+(Device memory, the arm64 Device-nGnRE type),
+through which only aligned accesses of 1, 2, 4 or 8 bytes are safe: an
+unaligned access, or a
+.Xr memcpy 3
+that makes one, can fault.
+.Fn nvrm_mem_read
+and
+.Fn nvrm_mem_write
+copy between the mapping and a buffer and obey the rule; code that reads or
+writes the mapping itself must follow it.
+.Ss Sharing
+.Fn nvrm_mem_export_fd
+returns a descriptor that names the object; it consumes one export
+descriptor.
+Pass it to another process
+.Pq Xr unix 4 , Dv SCM_RIGHTS
+or keep it, and close it when done.
+.Fn nvrm_mem_import_fd
+makes an object of the client from such a descriptor, on the same GPU; its
+size, place and, for system memory, its CPU attribute are those the RM
+reports for it.
+Its page size is the smallest one the RM's answer allows: the RM reports a
+huge page without saying 2 MiB or 512 MiB, so such an import has 2 MiB, and a
+mapping that does not fit a 512 MiB page is then refused by the RM
+.Pq Dv NVRM_E_RM .
+An import whose page size the RM does not report at all is refused.
+Registered user pages cannot be exported.
+.Ss Capability mode
+.Fn nvrm_client_open
+opens and limits every descriptor the client needs: its session descriptor
+keeps only the RM escapes it uses (and the CPU mapping ones only with
+.Dv NVRM_OPEN_ALLOW_MAP ) ,
+a mapping spare only the right to be mapped, an export spare only the right
+to be read.
+After
+.Xr cap_enter 2
+the client keeps working, with the spares as the budget: each CPU mapping or
+export uses one for good, and when they are gone the call fails with
+.Dv NVRM_E_NOSLOT
+because nothing can be opened in capability mode.
+Outside capability mode a missing spare is simply opened.
+.Ss Releases the RM refuses
+An unmap or a free the RM refuses counts in
+.Va failed_releases
+and leaves its reason in
+.Fn nvrm_client_errmsg .
+.Fn nvrm_mem_unmap_gpu ,
+.Fn nvrm_mem_unmap_cpu
+and
+.Fn nvrm_va_release
+also return
+.Dv NVRM_E_RM
+(or
+.Dv NVRM_E_IO
+when the system call itself failed);
+.Fn nvrm_mem_free
+returns nothing, and a refusal inside
+.Fn nvrm_client_close
+cannot be seen, because the client is gone after it.
+What it held stays with the RM client until the client closes, and its
+addresses are never handed out again:
+a refused
+.Fn nvrm_mem_unmap_gpu
+or
+.Fn nvrm_va_release
+leaves the mapping or the reservation in place, and the call can be repeated;
+a mapping whose unmap is refused while its object is freed keeps its
+addresses and its reservation busy;
+a refused
+.Fn nvrm_mem_unmap_cpu
+still removes the CPU side.
+.Sh RETURN VALUES
+The calls that return
+.Vt int
+return 0 on success, or one of the codes below;
+.Fn nvrm_strerror
+and
+.Fn nvrm_error_id
+of
+.Xr nvrm 3
+turn a code into text and a stable identifier, and
+.Fn nvrm_client_errmsg
+says more.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev NVRM_FAKE_HOST"
+.It Ev NVRM_FAKE_HOST
+For the fake backend:
+.Dq arm64
+or
+.Dq amd64 ,
+the host the memory attribute rule is applied for (default: the real one).
+.El
+.Sh EXAMPLES
+Allocate 1 MiB of video memory, give it a GPU address, and write it from the
+CPU:
+.Bd -literal -offset indent
+nvrm_open_opts o = { 0, NVRM_OPEN_ALLOW_MAP, 0, 0 };
+nvrm_va_params vp = { 0, 0, 1 << 20, 1 << 16, 0 };	/* 64 KiB aligned */
+nvrm_mem_params mp = { 0, NVRM_MEM_VRAM, 0, 0, 1 << 20, 0, 0 };
+nvrm_gpu_map_params gp = { 0 };
+nvrm_client *cl;
+nvrm_mem *m;
+uint64_t va;
+uint32_t v = 1;
+void *p;
+char err[160];
+
+if (nvrm_client_open(nvrm_device_get(ctx, 0), &o, &cl, err,
+    sizeof(err)) != 0)
+	errx(1, "%s", err);
+if (nvrm_va_reserve(cl, &vp, &va) != 0 ||
+    nvrm_mem_alloc(cl, &mp, &m) != 0)
+	errx(1, "%s", nvrm_client_errmsg(cl));
+gp.va = va;
+if (nvrm_mem_map_gpu(m, &gp) != 0 ||
+    nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p) != 0 ||
+    nvrm_mem_write(m, 0, &v, sizeof(v)) != 0)
+	errx(1, "%s", nvrm_client_errmsg(cl));
+nvrm_client_close(cl);
+.Ed
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er NVRM_E_INVAL
+An argument breaks a rule above: a wrong
+.Va size ,
+an unknown flag, a size or address not a multiple of the page size, no
+reservation or mapping at the address given, a registered object where it is
+not allowed.
+.It Bq Er NVRM_E_RANGE
+No free VA range of that size or at that address; a GPU mapping outside one
+reservation or over another mapping; an offset or access outside the object.
+.It Bq Er NVRM_E_BUSY
+The reservation still has mappings, or the object is mapped already.
+.It Bq Er NVRM_E_DENIED
+The client was not opened with
+.Dv NVRM_OPEN_ALLOW_MAP ,
+the CPU mapping does not allow the access, or this process did not open the
+client: in a
+.Xr fork 2
+child a call that would create or act on RM objects is refused, while
+releases succeed and drop only the child's records.
+The getters,
+.Fn nvrm_mem_read
+and
+.Fn nvrm_mem_write
+are not checked, and CPU mappings the child inherited still reach the
+memory: unmap them before
+.Xr fork 2 ,
+or mark them with
+.Xr minherit 2 ,
+to keep a child out.
+.It Bq Er NVRM_E_NOSLOT
+No spare descriptor is left in capability mode.
+.It Bq Er NVRM_E_NOTSUP
+The backend has no memory support; or the GPU has no device node, so
+.Dv NVRM_OPEN_ALLOW_MAP
+cannot be honoured (open without it to use GPU mappings only); or the RM
+cannot express what was asked, or allocated with a page size the library
+does not know.
+.It Bq Er NVRM_E_RM
+The RM refused a call; the message names the call and the RM status.
+.It Bq Er NVRM_E_IO
+A system call to the driver failed.
+.It Bq Er NVRM_E_OPEN
+A device node could not be opened.
+.It Bq Er NVRM_E_CAPSICUM
+A descriptor could not be limited.
+.It Bq Er NVRM_E_NOMEM
+Out of memory.
+From
+.Fn nvrm_va_release
+it means the reservation is released, but its addresses are kept out of use
+for the life of the client: do not retry.
+.El
+.Sh SEE ALSO
+.Xr cap_enter 2 ,
+.Xr nvrm 3 ,
+.Xr capsicum 4 ,
+.Xr nvrm 7
+.Sh STABILITY
+This interface is provisional.
+The symbol version
+.Li NVRM_1.1
+and the structures behind it are frozen at the first package release and not
+before.
+.Sh HISTORY
+These calls first appeared with API minor 1 of the library.
+.Sh CAVEATS
+A client is not safe for concurrent use: use one thread per client, or a lock
+of your own.
+The fake backend keeps process-wide test state: use it from one thread.

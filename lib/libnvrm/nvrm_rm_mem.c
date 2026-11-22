@@ -2,8 +2,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * nvrm_rm_mem.c - the RM backend's memory and VA calls (libnvrm S2, Track
- * #2419).  Like nvrm_rm.c it speaks only the RM escape ioctls of the
+ * nvrm_rm_mem.c - the RM backend's memory and VA calls (Track #2419).  Like nvrm_rm.c it speaks only the RM escape ioctls of the
  * NVIDIA kernel module, with structures and constants from NVIDIA's
  * open-gpu-kernel-modules 580.178.04 (MIT).  No foreign-OS layer is involved.
  *
@@ -30,6 +29,10 @@
  * The CPU attribute of a mapping is the OS layer's decision (the README, "Memory
  * attributes on arm64"); this file asks for write-combined video memory and
  * cached system memory and the core applies the rule to what it reports.
+ *
+ * Fork: the RM client belongs to the process that opened it (nvrm_rm_owner).
+ * In a child every call that would act on it is refused with NVRM_E_DENIED,
+ * and every release is skipped (a success: the parent still owns it).
  */
 #include <sys/param.h>
 #include <sys/ioctl.h>
@@ -76,11 +79,13 @@ struct nvrm_bclient {
 	NvHandle	device, vaspace;
 	unsigned	minor;
 	int		have_minor;
+	struct nvrm_bres *res;		/* every reservation not yet released */
 };
 
 struct nvrm_bres {
 	nvrm_bclient	*c;
 	NvHandle	h;
+	struct nvrm_bres *next;		/* in nvrm_bclient.res */
 };
 
 struct nvrm_bmem {
@@ -105,6 +110,17 @@ status_fail(char *err, size_t errlen, const char *what, NvU32 st)
 	snprintf(err, errlen, "%s failed (RM status 0x%x)", what,
 	    (unsigned)st);
 	return (NVRM_E_RM);
+}
+
+/* The calling process owns the session; else say why nothing is done. */
+static int
+own(const nvrm_backend *s, char *err, size_t errlen)
+{
+	if (nvrm_rm_owner(s))
+		return (NVRM_OK);
+	snprintf(err, errlen, "this process did not open the client (it is a "
+	    "fork() child): it may only close it");
+	return (NVRM_E_DENIED);
 }
 
 /* ---- client -------------------------------------------------------------- */
@@ -167,6 +183,9 @@ alloc_device_and_vaspace(nvrm_bclient *c, uint32_t id, nvrm_vainfo *va,
 	if (st != NV_OK)
 		return (status_fail(err, errlen, "FERMI_VASPACE_A allocation",
 		    st));
+	/* On output vaSize is the VA limit plus one, not a length: nvos.h,
+	 * NV_VASPACE_ALLOCATION_PARAMETERS, "This corresponds to the
+	 * VA_LIMIT + 1, so the usable size is (vaSize - vaBase)". */
 	if (vp.vaSize == 0 || vp.vaBase >= vp.vaSize) {
 		snprintf(err, errlen, "the RM reported an empty VA space");
 		return (NVRM_E_RM);
@@ -176,17 +195,21 @@ alloc_device_and_vaspace(nvrm_bclient *c, uint32_t id, nvrm_vainfo *va,
 	return (NVRM_OK);
 }
 
-/* The calls a client needs after the limit; the mapping ones only with the
- * opt-in. */
+/* The calls a client needs after the limit: one list, the CPU mapping
+ * escapes last (SESSION_CPU_MAP of them), kept only with the opt-in.  A new
+ * escape goes above them, and both kinds of client get it. */
+#define SESSION_CPU_MAP	2
+static const unsigned long session_ioctls[] = {
+	IOC_RM_ALLOC, IOC_RM_CONTROL, IOC_RM_FREE, IOC_MAP_DMA, IOC_UNMAP_DMA,
+	/* CPU mapping: */
+	IOC_MAP_MEMORY, IOC_UNMAP_MEMORY
+};
+
 static int
 limit_session(nvrm_backend *s, int allow_map)
 {
-	static const unsigned long base[] = {
-		IOC_RM_ALLOC, IOC_RM_CONTROL, IOC_RM_FREE, IOC_MAP_DMA,
-		IOC_UNMAP_DMA, IOC_MAP_MEMORY, IOC_UNMAP_MEMORY
-	};
-
-	return (nvrm_cap_limit_fd(s->fd, base, allow_map ? 7 : 5));
+	return (nvrm_cap_limit_fd(s->fd, session_ioctls,
+	    nitems(session_ioctls) - (allow_map ? 0 : SESSION_CPU_MAP)));
 }
 
 static int
@@ -199,7 +222,9 @@ rmm_client_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
 	(void)be;
 	if (cfg->allow_map && !g->have_card) {
 		snprintf(err, errlen, "the OS layer did not report the "
-		    "device node of this GPU, so nothing can be mapped");
+		    "device node of this GPU, so nothing can be mapped by the "
+		    "CPU; open without NVRM_OPEN_ALLOW_MAP to use GPU mappings "
+		    "only");
 		return (NVRM_E_NOTSUP);
 	}
 	c = NVRM_CALLOC(1, sizeof(*c));
@@ -234,6 +259,14 @@ rmm_client_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
 static void
 rmm_client_close(nvrm_bclient *c)
 {
+	nvrm_bres *r;
+
+	/* Reservations whose release the RM refused: the client's free below
+	 * takes them in the RM; here only the records go. */
+	while ((r = c->res) != NULL) {
+		c->res = r->next;
+		free(r);
+	}
 	nvrm_rm_close(c->s);
 	free(c);
 }
@@ -245,7 +278,10 @@ rmm_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 {
 	char path[32];
 	const char *p = NVRM_CTL_PATH;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	if (kind == NVRM_DESC_MAP) {
 		snprintf(path, sizeof(path), DEVICE_PATH_FMT, c->minor);
 		p = path;
@@ -281,7 +317,10 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 	NV_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bres *r;
 	NvU32 st;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	r = NVRM_CALLOC(1, sizeof(*r));
 	if (r == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -302,41 +341,93 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 		return (status_fail(err, errlen, "NV50_MEMORY_VIRTUAL "
 		    "allocation", st));
 	}
+	r->next = c->res;
+	c->res = r;
 	*rp = r;
 	return (NVRM_OK);
 }
 
-static void
-rmm_va_release(nvrm_bres *r)
+/* Free an RM object; a fork child skips it (success). */
+static int
+free_object(nvrm_bclient *c, NvHandle h, const char *what, char *err,
+    size_t errlen)
 {
-	if (nvrm_rm_owner(r->c->s))
-		nvrm_rm_free(r->c->s, r->c->device, r->h);
+	NvU32 st;
+
+	if (!nvrm_rm_owner(c->s))
+		return (NVRM_OK);
+	st = nvrm_rm_free(c->s, c->device, h);
+	return (st == NV_OK ? NVRM_OK : status_fail(err, errlen, what, st));
+}
+
+/* On a refusal the reservation is kept, so the core can retry it. */
+static int
+rmm_va_release(nvrm_bres *r, char *err, size_t errlen)
+{
+	nvrm_bres **pp;
+	int rc;
+
+	rc = free_object(r->c, r->h, "freeing the VA reservation", err,
+	    errlen);
+	if (rc != NVRM_OK)
+		return (rc);
+	for (pp = &r->c->res; *pp != r; pp = &(*pp)->next)
+		;
+	*pp = r->next;
 	free(r);
+	return (NVRM_OK);
 }
 
 /* ---- memory -------------------------------------------------------------- */
 
-static void
+/*
+ * Page sizes and the RM's attribute fields: one table, used both ways.  The
+ * big page is 64 KiB on every GPU generation that has huge pages (nvos.h,
+ * NVOS32_ATTR_PAGE_SIZE), which the generation table's page sizes imply; the
+ * huge page is chosen by ATTR2.
+ */
+static const struct page_attr {
+	uint64_t	bytes;
+	NvU32		size, huge;	/* NVOS32_ATTR_PAGE_SIZE_*, ATTR2 _HUGE_* */
+} page_attrs[] = {
+	{ 4096, NVOS32_ATTR_PAGE_SIZE_4KB, 0 },
+	{ 65536, NVOS32_ATTR_PAGE_SIZE_BIG, 0 },
+	{ 2097152, NVOS32_ATTR_PAGE_SIZE_HUGE, NVOS32_ATTR2_PAGE_SIZE_HUGE_2MB },
+	{ 536870912, NVOS32_ATTR_PAGE_SIZE_HUGE,
+	    NVOS32_ATTR2_PAGE_SIZE_HUGE_512MB },
+};
+
+static int
 page_size_attrs(uint64_t ps, NvU32 *attr, NvU32 *attr2)
 {
-	switch (ps) {
-	case 4096:
-		*attr |= DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB);
-		break;
-	case 65536:
-		*attr |= DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _BIG);
-		break;
-	case 2097152:
-		*attr |= DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _HUGE);
-		*attr2 |= DRF_DEF(OS32, _ATTR2, _PAGE_SIZE_HUGE, _2MB);
-		break;
-	case 536870912:
-		*attr |= DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _HUGE);
-		*attr2 |= DRF_DEF(OS32, _ATTR2, _PAGE_SIZE_HUGE, _512MB);
-		break;
-	default:
-		break;		/* 0: the RM's default */
-	}
+	unsigned i;
+
+	for (i = 0; i < nitems(page_attrs); i++)
+		if (page_attrs[i].bytes == ps) {
+			*attr = FLD_SET_DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+			    page_attrs[i].size, *attr);
+			*attr2 = FLD_SET_DRF_NUM(OS32, _ATTR2,
+			    _PAGE_SIZE_HUGE, page_attrs[i].huge, *attr2);
+			return (NVRM_OK);
+		}
+	return (NVRM_E_NOTSUP);
+}
+
+/* The page size the attribute fields name; 0 when they do not name one
+ * (DEFAULT, or a huge size the table does not have). */
+static uint64_t
+page_size_of(NvU32 attr, NvU32 attr2)
+{
+	NvU32 size = DRF_VAL(OS32, _ATTR, _PAGE_SIZE, attr);
+	NvU32 huge = DRF_VAL(OS32, _ATTR2, _PAGE_SIZE_HUGE, attr2);
+	unsigned i;
+
+	for (i = 0; i < nitems(page_attrs); i++)
+		if (page_attrs[i].size == size &&
+		    (size != NVOS32_ATTR_PAGE_SIZE_HUGE ||
+		    page_attrs[i].huge == huge))
+			return (page_attrs[i].bytes);
+	return (0);
 }
 
 static int
@@ -346,8 +437,12 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	NV_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bmem *m;
 	NvU32 st, cls;
+	uint64_t got;
 	int vid = a->place == NVRM_PLACE_VIDMEM;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	m = NVRM_CALLOC(1, sizeof(*m));
 	if (m == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -359,7 +454,12 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 		DRF_DEF(OS32, _ATTR, _COHERENCY, _WRITE_COMBINE) :
 		DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
 		DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED));
-	page_size_attrs(a->page_size, &p.attr, &p.attr2);
+	if (page_size_attrs(a->page_size, &p.attr, &p.attr2) != NVRM_OK) {
+		free(m);
+		snprintf(err, errlen, "a page size of %ju bytes cannot be "
+		    "asked of the RM", (uintmax_t)a->page_size);
+		return (NVRM_E_NOTSUP);
+	}
 	if (a->alignment != 0) {
 		p.flags |= NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE;
 		p.alignment = a->alignment;
@@ -373,11 +473,25 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 		return (status_fail(err, errlen, vid ? "video memory "
 		    "allocation" : "system memory allocation", st));
 	}
+	/* attr and attr2 are IN/OUT: the RM writes back what it allocated.
+	 * DEFAULT means the field was left as is; a size the table does not
+	 * have means the RM used a page this library cannot check mappings
+	 * against, so the object is given back. */
+	got = page_size_of(p.attr, p.attr2);
+	if (got == 0 && DRF_VAL(OS32, _ATTR, _PAGE_SIZE, p.attr) !=
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
+		(void)nvrm_rm_free(c->s, c->device, m->h);
+		free(m);
+		snprintf(err, errlen, "the RM allocated with a page size this "
+		    "library does not know");
+		return (NVRM_E_NOTSUP);
+	}
 	m->bytes = p.size;
 	m->place = a->place;
 	out->bytes = p.size;
-	out->page_size = a->page_size != 0 ? a->page_size : 4096;
+	out->page_size = got != 0 ? got : a->page_size;
 	out->place = a->place;
+	out->coherency = NVRM_COH_CACHED;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -389,7 +503,10 @@ rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	NV_OS_DESC_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bmem *m;
 	NvU32 st;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	m = NVRM_CALLOC(1, sizeof(*m));
 	if (m == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -417,16 +534,21 @@ rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	out->bytes = bytes;
 	out->page_size = 4096;
 	out->place = NVRM_PLACE_SYSMEM;
+	out->coherency = NVRM_COH_CACHED;
 	*mp = m;
 	return (NVRM_OK);
 }
 
-static void
-rmm_mem_free(nvrm_bmem *m)
+/* The core has no handle left after this, so the record goes either way; a
+ * refused free leaves the object with the RM client until it closes. */
+static int
+rmm_mem_free(nvrm_bmem *m, char *err, size_t errlen)
 {
-	if (nvrm_rm_owner(m->c->s))
-		nvrm_rm_free(m->c->s, m->c->device, m->h);
+	int rc;
+
+	rc = free_object(m->c, m->h, "freeing the memory object", err, errlen);
 	free(m);
+	return (rc);
 }
 
 /* ---- GPU mappings -------------------------------------------------------- */
@@ -437,7 +559,10 @@ rmm_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 {
 	NVOS46_PARAMETERS p;
 	nvrm_bclient *c = m->c;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	memset(&p, 0, sizeof(p));
 	p.hClient = c->s->client;
 	p.hDevice = c->device;
@@ -458,14 +583,15 @@ rmm_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 	    "NV_ESC_RM_MAP_MEMORY_DMA", p.status));
 }
 
-static void
-rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length)
+static int
+rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
+    char *err, size_t errlen)
 {
 	NVOS47_PARAMETERS p;
 	nvrm_bclient *c = m->c;
 
 	if (!nvrm_rm_owner(c->s))
-		return;
+		return (NVRM_OK);
 	memset(&p, 0, sizeof(p));
 	p.hClient = c->s->client;
 	p.hDevice = c->device;
@@ -473,25 +599,33 @@ rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length)
 	p.hMemory = m->h;
 	p.dmaOffset = va;
 	p.size = length;
-	SYS->ioctl(c->s->fd, IOC_UNMAP_DMA, &p);
+	if (SYS->ioctl(c->s->fd, IOC_UNMAP_DMA, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY_DMA",
+		    IOCTL_FAILED));
+	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV_ESC_RM_UNMAP_MEMORY_DMA", p.status));
 }
 
 /* ---- CPU mappings -------------------------------------------------------- */
 
-static void
-rm_unmap_memory(nvrm_bmem *m)
+static int
+rm_unmap_memory(nvrm_bmem *m, char *err, size_t errlen)
 {
 	NVOS34_PARAMETERS p;
 	nvrm_bclient *c = m->c;
 
 	if (!nvrm_rm_owner(c->s))
-		return;
+		return (NVRM_OK);
 	memset(&p, 0, sizeof(p));
 	p.hClient = c->s->client;
 	p.hDevice = c->device;
 	p.hMemory = m->h;
 	p.pLinearAddress = m->cookie;
-	SYS->ioctl(c->s->fd, IOC_UNMAP_MEMORY, &p);
+	if (SYS->ioctl(c->s->fd, IOC_UNMAP_MEMORY, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY",
+		    IOCTL_FAILED));
+	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV_ESC_RM_UNMAP_MEMORY", p.status));
 }
 
 static int
@@ -500,8 +634,12 @@ rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 {
 	nv_ioctl_nvos33_parameters_with_fd p;
 	nvrm_bclient *c = m->c;
+	char scratch[8];
 	void *a;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	memset(&p, 0, sizeof(p));
 	p.params.hClient = c->s->client;
 	p.params.hDevice = c->device;
@@ -523,18 +661,19 @@ rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 	if (a == MAP_FAILED) {
 		snprintf(err, errlen, "mmap of the device failed: %s",
 		    strerror(errno));
-		rm_unmap_memory(m);
+		/* The mmap error is the one to report. */
+		(void)rm_unmap_memory(m, scratch, sizeof(scratch));
 		return (NVRM_E_IO);
 	}
 	*addr = a;
 	return (NVRM_OK);
 }
 
-static void
-rmm_unmap_cpu(nvrm_bmem *m, void *addr)
+static int
+rmm_unmap_cpu(nvrm_bmem *m, void *addr, char *err, size_t errlen)
 {
 	munmap(addr, m->bytes);
-	rm_unmap_memory(m);
+	return (rm_unmap_memory(m, err, errlen));
 }
 
 /* ---- sharing ------------------------------------------------------------- */
@@ -545,7 +684,10 @@ rmm_export_fd(nvrm_bmem *m, int fd, char *err, size_t errlen)
 	NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS p;
 	nvrm_bclient *c = m->c;
 	NvU32 st;
+	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	memset(&p, 0, sizeof(p));
 	p.object.type = NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TYPE_RM;
 	p.object.data.rmObject.hDevice = c->device;
@@ -558,20 +700,47 @@ rmm_export_fd(nvrm_bmem *m, int fd, char *err, size_t errlen)
 	    "NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD", st));
 }
 
-static uint64_t
-page_size_of(NvU32 attr)
+/*
+ * The page size of an imported object.  Surface info reports the ATTR word
+ * only, not ATTR2, so a huge page is 2 MiB or 512 MiB: 2 MiB is reported,
+ * the granularity every huge-page object has.  A mapping that fits 2 MiB but
+ * not a 512 MiB object's pages is refused by the RM (NVRM_E_RM), never made
+ * wrong.  DEFAULT names no size at all; the import is refused, not guessed.
+ */
+static int
+import_page_size(NvU32 attr, uint64_t *ps)
 {
 	switch (DRF_VAL(OS32, _ATTR, _PAGE_SIZE, attr)) {
+	case NVOS32_ATTR_PAGE_SIZE_4KB:
+		*ps = 4096;
+		return (NVRM_OK);
 	case NVOS32_ATTR_PAGE_SIZE_BIG:
-		return (65536);
+		*ps = 65536;
+		return (NVRM_OK);
 	case NVOS32_ATTR_PAGE_SIZE_HUGE:
-		return (2097152);
+		*ps = 2097152;
+		return (NVRM_OK);
 	default:
-		return (4096);
+		return (NVRM_E_NOTSUP);
 	}
 }
 
-/* Size, page size and place of an imported object. */
+/* The CPU side of imported system memory, from the coherency the RM keeps. */
+static int
+import_coherency(NvU32 attr)
+{
+	switch (DRF_VAL(OS32, _ATTR, _COHERENCY, attr)) {
+	case NVOS32_ATTR_COHERENCY_CACHED:
+	case NVOS32_ATTR_COHERENCY_WRITE_BACK:
+		return (NVRM_COH_CACHED);
+	case NVOS32_ATTR_COHERENCY_WRITE_COMBINE:
+		return (NVRM_COH_WC);
+	default:		/* uncached, write-through, write-protect */
+		return (NVRM_COH_UNCACHED);
+	}
+}
+
+/* Size, page size, place and CPU coherency of an imported object. */
 static int
 surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
     size_t errlen)
@@ -594,7 +763,15 @@ surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
 		return (status_fail(err, errlen,
 		    "NV0041_CTRL_CMD_GET_SURFACE_INFO", st));
 	out->bytes = (uint64_t)list[1].data << 32 | list[0].data;
-	out->page_size = page_size_of(list[2].data);
+	if (import_page_size(list[2].data, &out->page_size) !=
+	    NVRM_OK) {
+		snprintf(err, errlen, "the imported object does not say its "
+		    "page size, so its mappings cannot be checked");
+		return (NVRM_E_NOTSUP);
+	}
+	out->coherency = import_coherency(list[2].data);
+	/* ctrl0041.h, NV0041_CTRL_SURFACE_INFO_INDEX_ADDR_SPACE_TYPE: "Returned
+	 * values are described by NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE". */
 	if (list[3].data == NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_VIDMEM)
 		out->place = NVRM_PLACE_VIDMEM;
 	else if (list[3].data ==
@@ -614,9 +791,12 @@ rmm_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 {
 	NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS p;
 	nvrm_bmem *m;
+	char scratch[8];
 	NvU32 st;
 	int rc;
 
+	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
+		return (rc);
 	m = NVRM_CALLOC(1, sizeof(*m));
 	if (m == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -639,7 +819,9 @@ rmm_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	m->h = p.object.data.rmObject.hObject;
 	rc = surface_info(c, m->h, out, err, errlen);
 	if (rc != NVRM_OK) {
-		nvrm_rm_free(c->s, c->device, m->h);
+		/* The surface-info error is the one to report. */
+		(void)free_object(c, m->h, "freeing the import", scratch,
+		    sizeof(scratch));
 		free(m);
 		return (rc);
 	}

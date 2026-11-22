@@ -33,24 +33,13 @@ SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fake_mem.c nvrm_fields.c \
 INCSDIR=	${INCLUDEDIR}/nvrm
 INCS=		include/nvrm/nvrm.h
 MAN=		man/nvrm.3 man/nvrm_mem.3 man/nvrm.7
-NVRM_FUNCS=	nvrm_enumerate nvrm_close nvrm_backend_name \
-		nvrm_rm_running_version nvrm_device_count nvrm_device_get \
-		nvrm_device_info_get nvrm_device_refresh nvrm_strerror \
-		nvrm_error_id nvrm_reason_id nvrm_reason_text \
-		nvrm_source_name nvrm_cap_name nvrm_info_nfields \
-		nvrm_info_field nvrm_json_document nvrm_json_header \
-		nvrm_json_device nvrm_json_end nvrm_json_error \
-		nvrm_json_schema
+# The man links come from Version.map, the one list of the exported calls:
+# NVRM_1.0 (discovery) links to nvrm.3, NVRM_1.1 (memory and VA) to nvrm_mem.3.
+NVRM_FUNCS!=	awk '/^NVRM_1\.0 /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
+NVRM_MEM_FUNCS!=	awk '/^NVRM_1\.1 /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
 .for f in ${NVRM_FUNCS}
 MLINKS+=	nvrm.3 ${f}.3
 .endfor
-NVRM_MEM_FUNCS=	nvrm_device_open nvrm_device_close nvrm_client_errmsg \
-		nvrm_client_stats_get nvrm_vaspace_info_get nvrm_va_reserve \
-		nvrm_va_release nvrm_mem_alloc nvrm_mem_register_user \
-		nvrm_mem_free nvrm_mem_info_get nvrm_mem_map_gpu \
-		nvrm_mem_unmap_gpu nvrm_mem_map_cpu nvrm_mem_unmap_cpu \
-		nvrm_mem_read nvrm_mem_write nvrm_mem_export_fd \
-		nvrm_mem_import_fd
 .for f in ${NVRM_MEM_FUNCS}
 MLINKS+=	nvrm_mem.3 ${f}.3
 .endfor

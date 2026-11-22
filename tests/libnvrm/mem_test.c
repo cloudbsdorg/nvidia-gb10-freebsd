@@ -253,18 +253,26 @@ test_attr_rule(void)
 	nvrm_u64 on = { 1, NVRM_R_NONE, NVRM_S_OS };
 	nvrm_u64 off = { 0, NVRM_R_NONE, NVRM_S_OS };
 
-	/* system memory is write-back everywhere, whatever the flag says */
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, 1, &on), NVRM_ATTR_CACHED);
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, 1, &unk), NVRM_ATTR_CACHED);
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, 0, &off), NVRM_ATTR_CACHED);
+	const int C = NVRM_COH_CACHED;
+
+	/* cached system memory is write-back everywhere, whatever the flag says */
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, C, 1, &on), NVRM_ATTR_CACHED);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, C, 1, &unk), NVRM_ATTR_CACHED);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, C, 0, &off), NVRM_ATTR_CACHED);
+	/* system memory its owner made write-combined, or uncached (an import):
+	 * write-combining, and the Device rule on every host */
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, NVRM_COH_WC, 1, &off), NVRM_ATTR_WC);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, NVRM_COH_WC, 0, &off), NVRM_ATTR_WC);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, NVRM_COH_UNCACHED, 1, &off), NVRM_ATTR_DEVICE);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_SYSMEM, NVRM_COH_UNCACHED, 0, &off), NVRM_ATTR_DEVICE);
 	/* video memory off arm64: write-combined, whatever the flag says */
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, 0, &on), NVRM_ATTR_WC);
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, 0, &unk), NVRM_ATTR_WC);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, C, 0, &on), NVRM_ATTR_WC);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, C, 0, &unk), NVRM_ATTR_WC);
 	/* arm64: Device where the OS layer falls back, or does not say */
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, 1, &on), NVRM_ATTR_DEVICE);
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, 1, &unk), NVRM_ATTR_DEVICE);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, C, 1, &on), NVRM_ATTR_DEVICE);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, C, 1, &unk), NVRM_ATTR_DEVICE);
 	/* arm64 where write-combining is Normal non-cacheable */
-	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, 1, &off), NVRM_ATTR_WC);
+	CHECK_EQ(nvrm_cpu_attr_rule(NVRM_PLACE_VIDMEM, C, 1, &off), NVRM_ATTR_WC);
 }
 
 /* ---- helpers for the memory core --------------------------------------- */
@@ -290,7 +298,7 @@ teardown(void)
 {
 	nvrm_close(ctx);
 	ctx = NULL;
-	nvrm_fake_mem_fail(0, 0);
+	nvrm_fake_mem_fail_clear();
 }
 
 static nvrm_client *
@@ -300,7 +308,7 @@ open_client(unsigned flags, unsigned map_slots, unsigned export_slots)
 	nvrm_client *cl = NULL;
 	char err[200];
 
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &cl, err,
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &cl, err,
 	    sizeof(err)), NVRM_OK);
 	return (cl);
 }
@@ -347,7 +355,11 @@ expect_clean(const char *what)
 {
 	nvrm_fake_mem_stats st = bstats();
 
-	(void)what;
+	if (st.clients != 0 || st.objects != 0 || st.reservations != 0 ||
+	    st.gpu_maps != 0)
+		printf("FAIL leak after %s: %u clients, %u objects, %u "
+		    "reservations, %u GPU mappings\n", what, st.clients,
+		    st.objects, st.reservations, st.gpu_maps);
 	CHECK_EQ(st.clients, 0);
 	CHECK_EQ(st.objects, 0);
 	CHECK_EQ(st.reservations, 0);
@@ -370,61 +382,75 @@ test_client_open(void)
 	setup("discrete", NULL);
 	d = nvrm_device_get(ctx, 0);
 	/* defaults: no mapping descriptors, the default export ones */
-	CHECK_EQ(nvrm_device_open(d, NULL, &cl, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(d, NULL, &cl, err, sizeof(err)), NVRM_OK);
 	st.size = sizeof(st);
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
 	CHECK_EQ(st.spare_descriptors, NVRM_EXPORT_SLOTS_DEFAULT);
+	/* an output structure takes 0 or its size, like the input ones; a
+	 * wrong size says so in the message, and the next good call clears it */
 	st.size = 3;
 	CHECK_EQ(stats_get(cl, &st), NVRM_E_INVAL);
-	st.size = sizeof(st);
-	vi.size = sizeof(vi);
+	CHECK(strstr(nvrm_client_errmsg(cl), "nvrm_client_stats.size") != NULL);
+	st.size = 0;
+	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
+	CHECK_EQ(st.size, sizeof(st));
+	CHECK_STR(nvrm_client_errmsg(cl), "");
+	vi.size = 0;
 	CHECK_EQ(nvrm_vaspace_info_get(cl, &vi), NVRM_OK);
+	CHECK_EQ(vi.size, sizeof(vi));
 	CHECK(vi.base > 0 && vi.end > vi.base);
 	CHECK_EQ(vi.free_bytes, vi.end - vi.base);
 	vi.size = 1;
 	CHECK_EQ(nvrm_vaspace_info_get(cl, &vi), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "nvrm_vaspace_info.size") != NULL);
+	vi.size = sizeof(vi);
+	CHECK_EQ(nvrm_vaspace_info_get(cl, &vi), NVRM_OK);
 	CHECK_STR(nvrm_client_errmsg(cl), "");
-	nvrm_device_close(cl);
-	nvrm_device_close(NULL);
+	nvrm_client_close(cl);
+	nvrm_client_close(NULL);
 	/* the opt-in brings the mapping descriptors */
 	o = (nvrm_open_opts){ sizeof(o), NVRM_OPEN_ALLOW_MAP, 0, 2 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
 	CHECK_EQ(st.spare_descriptors, NVRM_MAP_SLOTS_DEFAULT + 2);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	st.size = sizeof(st);
 	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 3, 0 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
 	CHECK_EQ(st.spare_descriptors, 3 + NVRM_EXPORT_SLOTS_DEFAULT);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	/* a pool bigger than one growth step (8 descriptors) */
 	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 20, 0 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
-	nvrm_device_close(cl);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
+	nvrm_client_close(cl);
 	expect_clean("open");
 
 	/* refusals, each with a message and no client */
 	cl = (nvrm_client *)1;
 	o = (nvrm_open_opts){ 12345, 0, 0, 0 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
 	CHECK(cl == NULL && strstr(err, "another version") != NULL);
 	o = (nvrm_open_opts){ 0, 0x80, 0, 0 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
 	CHECK(strstr(err, "unknown open flags") != NULL);
 	o = (nvrm_open_opts){ 0, 0, NVRM_SLOTS_MAX + 1, 0 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK(strstr(err, "map_slots is 1025, above the limit of 1024") != NULL);
 	o = (nvrm_open_opts){ 0, 0, 0, NVRM_SLOTS_MAX + 1 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
-	CHECK_EQ(nvrm_device_open(d, NULL, &cl, NULL, 0), NVRM_OK);
-	nvrm_device_close(cl);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_INVAL);
+	CHECK(strstr(err, "export_slots is 1025") != NULL);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, NULL, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, NULL, &cl, NULL, 0), NVRM_OK);
+	nvrm_client_close(cl);
 
 	/* each injected failure of the open leaves nothing behind */
 	for (n = NVRM_FAKE_OP_CLIENT_OPEN; n <= NVRM_FAKE_OP_DESC; n++) {
 		nvrm_fake_mem_fail(n, 1);
 		cl = NULL;
 		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
-		CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
+		CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
 		CHECK(cl == NULL);
 		CHECK(strstr(err, "injected") != NULL);
 		expect_clean("injected open");
@@ -432,21 +458,21 @@ test_client_open(void)
 	/* the export descriptors fail after the mapping ones: both pools unwind */
 	nvrm_fake_mem_fail(NVRM_FAKE_OP_DESC, 3);
 	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
 	expect_clean("late injected");
 	nvrm_fake_mem_fail(NVRM_FAKE_OP_LIMIT, 1);
-	CHECK_EQ(nvrm_device_open(d, &o, &cl, err, sizeof(err)), NVRM_E_CAPSICUM);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_CAPSICUM);
 	expect_clean("limit failed");
-	nvrm_fake_mem_fail(0, 0);
+	nvrm_fake_mem_fail_clear();
 
 	/* allocation failures: every nth allocation in turn */
 	for (n = 1; n < 60; n++) {
 		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 9, 1 };
 		cl = NULL;
 		fail_calloc_at(n);
-		if (nvrm_device_open(d, &o, &cl, err, sizeof(err)) == NVRM_OK) {
+		if (nvrm_client_open(d, &o, &cl, err, sizeof(err)) == NVRM_OK) {
 			fail_calloc_at(0);
-			nvrm_device_close(cl);
+			nvrm_client_close(cl);
 			break;
 		}
 		fail_calloc_at(0);
@@ -457,8 +483,19 @@ test_client_open(void)
 	teardown();
 }
 
-/* the same client after the context that listed it is closed, and a backend
- * with no memory support */
+/* A backend whose VA space comes back empty. */
+static int
+emptyva_open(nvrm_backend *be, nvrm_gpu *g, const nvrm_open_cfg *cfg,
+    nvrm_bclient **bc, nvrm_vainfo *va, char *err, size_t errlen)
+{
+	int rc = nvrm_fake_mem_ops.client_open(be, g, cfg, bc, va, err, errlen);
+
+	va->end = va->base;
+	return (rc);
+}
+
+/* the same client after the context that listed it is closed, a backend
+ * whose VA space is empty, and a backend with no memory support */
 static void
 test_client_independent(void)
 {
@@ -466,6 +503,8 @@ test_client_independent(void)
 	nvrm_mem *m;
 	char err[200];
 	static const nvrm_backend_ops nomem = { .name = "nomem", .score = -1 };
+	static nvrm_mem_ops emptyva_mem;
+	static nvrm_backend_ops emptyva;
 	nvrm_ctx fake_ctx;
 	nvrm_device dev;
 
@@ -473,18 +512,39 @@ test_client_independent(void)
 	cl = open_client(0, 0, 0);
 	nvrm_close(ctx);
 	ctx = NULL;
+	/* the page sizes the client checks against are its own copy */
+	m = alloc_mem(cl, NVRM_MEM_VRAM, 128 * KiB, 64 * KiB);
+	CHECK(m != NULL);
+	nvrm_mem_free(m);
 	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
 	CHECK(m != NULL);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	expect_clean("independent");
+
+	/* an empty VA space is a range error, not out of memory */
+	setup("discrete", NULL);
+	emptyva = *nvrm_device_get(ctx, 0)->ctx->ops;
+	emptyva_mem = *emptyva.mem;
+	emptyva_mem.client_open = emptyva_open;
+	emptyva.mem = &emptyva_mem;
+	memset(&fake_ctx, 0, sizeof(fake_ctx));
+	memset(&dev, 0, sizeof(dev));
+	fake_ctx.ops = &emptyva;
+	fake_ctx.be = nvrm_device_get(ctx, 0)->ctx->be;
+	dev = *nvrm_device_get(ctx, 0);
+	dev.ctx = &fake_ctx;
+	CHECK_EQ(nvrm_client_open(&dev, NULL, &cl, err, sizeof(err)), NVRM_E_RANGE);
+	CHECK(cl == NULL && strstr(err, "empty VA space") != NULL);
+	teardown();
+	expect_clean("empty VA");
 
 	memset(&fake_ctx, 0, sizeof(fake_ctx));
 	memset(&dev, 0, sizeof(dev));
 	fake_ctx.ops = &nomem;
 	dev.ctx = &fake_ctx;
 	cl = (nvrm_client *)1;
-	CHECK_EQ(nvrm_device_open(&dev, NULL, &cl, err, sizeof(err)), NVRM_E_NOTSUP);
+	CHECK_EQ(nvrm_client_open(&dev, NULL, &cl, err, sizeof(err)), NVRM_E_NOTSUP);
 	CHECK(cl == NULL);
 }
 
@@ -516,10 +576,11 @@ test_reserve(void)
 	CHECK_EQ(va, va2 + 4 * MiB);
 	/* the same fixed range again */
 	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_RANGE);
-	CHECK(strstr(nvrm_client_errmsg(cl), "no such free range") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "no free range of 0x10000 bytes at the fixed address") != NULL);
 	/* argument errors, each with its message */
 	p = (nvrm_va_params){ 7, 0, 4096, 0, 0 };
 	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "nvrm_va_params.size must be 0 or sizeof(nvrm_va_params)") != NULL);
 	p = (nvrm_va_params){ 0, 0x8, 4096, 0, 0 };
 	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_INVAL);
 	p = (nvrm_va_params){ 0, 0, 4096, 3, 0 };
@@ -569,7 +630,9 @@ test_reserve(void)
 	fail_calloc_at(1);
 	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_NOMEM);
 	fail_calloc_at(0);
-	/* a release that cannot get a node for the free list changes nothing */
+	/* a release whose free-list node cannot be had: the RM side is
+	 * released, and the addresses are lost to the allocator for good (never
+	 * handed out twice), which the message says */
 	{
 		uint64_t ra, rb, rc2;
 		nvrm_va_params q;
@@ -583,11 +646,15 @@ test_reserve(void)
 		fail_calloc_at(1);
 		CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_NOMEM);
 		fail_calloc_at(0);
-		CHECK_EQ(nvrm_va_release(cl, rb), NVRM_OK);
+		CHECK(strstr(nvrm_client_errmsg(cl), "lost to the allocator") != NULL);
+		CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_INVAL);
+		CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);	/* q.fixed: rc2 */
+		q.fixed = rb;
+		CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);
 		CHECK_EQ(nvrm_va_release(cl, ra), NVRM_OK);
 		CHECK_EQ(nvrm_va_release(cl, rc2), NVRM_OK);
 	}
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	expect_clean("reserve");
 	teardown();
 }
@@ -689,7 +756,7 @@ test_alloc(void)
 		CHECK_EQ(bstats().objects, 0);
 	}
 	CHECK(n > 2 && n < 10);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 
 	/* a card with no video memory (unified): VRAM is system memory */
@@ -701,7 +768,7 @@ test_alloc(void)
 	CHECK_EQ(mi.place, NVRM_PLACE_SYSMEM);
 	CHECK_EQ(mi.cpu_attr, NVRM_ATTR_CACHED);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 
 	/* a GPU the generation table does not know: only 4 KiB pages */
@@ -712,7 +779,7 @@ test_alloc(void)
 	p.page_size = 4096;
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 
 	/* a GPU whose video memory size is not reported: VRAM is tried as video memory,
@@ -721,7 +788,7 @@ test_alloc(void)
 	cl = open_client(0, 0, 0);
 	p = (nvrm_mem_params){ 0, NVRM_MEM_VRAM, 0, 0, 4096, 0, 0 };
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_E_NOMEM);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 	expect_clean("alloc");
 }
@@ -779,7 +846,7 @@ test_register_user(void)
 		CHECK_EQ(bstats().objects, 0);
 	}
 	CHECK(n > 1 && n < 10);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	munmap(buf, 4 * pg);
 	teardown();
 	expect_clean("register");
@@ -816,7 +883,8 @@ test_map_gpu(void)
 	CHECK_EQ(map_gpu(m2, va + 256 * KiB, 0, 0, 0), NVRM_OK);
 	/* outside every reservation, and straddling the end of one */
 	CHECK_EQ(map_gpu(m2, va + 1 * MiB, 0, 0, 0), NVRM_E_RANGE);
-	CHECK_EQ(map_gpu(m2, va + 1 * MiB - 64 * KiB + 64 * KiB, 0, 0, 0), NVRM_E_RANGE);
+	CHECK(strstr(nvrm_client_errmsg(cl), "inside one reservation") != NULL);
+	CHECK_EQ(map_gpu(m, va + 1 * MiB - 64 * KiB, 0, 0, 0), NVRM_E_RANGE);	/* starts inside, ends past */
 	CHECK(strstr(nvrm_client_errmsg(cl), "inside one reservation") != NULL);
 	CHECK_EQ(map_gpu(m2, UINT64_MAX - 0xfff, 0, 0, 0), NVRM_E_INVAL);	/* not aligned to the object's pages */
 	CHECK_EQ(map_gpu(m2, 0xffffffffffff0000ULL, 0, 0, 0), NVRM_E_RANGE);	/* wraps */
@@ -867,7 +935,7 @@ test_map_gpu(void)
 	}
 	CHECK(n > 1 && n < 10);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 	expect_clean("map gpu");
 }
@@ -912,7 +980,7 @@ test_gpu_model(void)
 	CHECK_EQ(rc, NVRM_FAKE_FAULT_READONLY);
 	CHECK_EQ(nvrm_fake_gpu_access(cl, va, buf, 4, 0), 0);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 }
 
@@ -979,7 +1047,7 @@ test_sparse(void)
 	/* sparse stops at the end of the reservation */
 	CHECK_EQ(nvrm_fake_gpu_access(cl, va + (1ULL << 30) - 8, back, 64, 0), NVRM_FAKE_FAULT_UNMAPPED);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 	expect_clean("sparse");
 }
@@ -1015,7 +1083,7 @@ test_cpu_map(void)
 	CHECK(strstr(nvrm_client_errmsg(cl), "NVRM_OPEN_ALLOW_MAP") != NULL);
 	CHECK_EQ(nvrm_mem_read(m, 0, buf, 4), NVRM_E_INVAL);	/* not mapped */
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
 	cl = open_client(NVRM_OPEN_ALLOW_MAP, 2, 1);
 	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 8192, 0);
@@ -1075,6 +1143,7 @@ test_cpu_map(void)
 	capmode = 1;
 	nvrm_capmode_hook = hook_capmode;
 	CHECK_EQ(nvrm_mem_map_cpu(m3, NVRM_CPU_READ, &addr), NVRM_E_NOSLOT);
+	CHECK(strstr(nvrm_client_errmsg(cl), "raise nvrm_open_opts.map_slots") != NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), "capability mode") != NULL);
 	capmode = 0;
 	nvrm_capmode_hook = NULL;
@@ -1088,10 +1157,10 @@ test_cpu_map(void)
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_E_RM);
 	nvrm_mem_info_get(m, &mi);
 	CHECK_EQ(mi.cpu_mapped, 0);
-	/* the same with an on-demand descriptor that cannot be opened */
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
+	/* the same with an on-demand descriptor that cannot be opened */
 	cl = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
 	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_OK);
@@ -1099,7 +1168,7 @@ test_cpu_map(void)
 	nvrm_fake_mem_fail(NVRM_FAKE_OP_DESC, 1);
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_E_RM);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
 	/* the fake's own mmap can fail: with the address space limited */
 	cl = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
@@ -1121,14 +1190,14 @@ test_cpu_map(void)
 		CHECK(strstr(nvrm_client_errmsg(cl), "mmap failed") != NULL);
 		nvrm_mem_free(m);
 	}
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	/* a descriptor the fake cannot limit */
 	nvrm_fake_mem_fail(NVRM_FAKE_OP_LIMIT, 1);
 	{
 		nvrm_open_opts o = { 0, NVRM_OPEN_ALLOW_MAP, 1, 1 };
 		char err[100];
 
-		CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &cl, err,
+		CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &cl, err,
 		    sizeof(err)), NVRM_E_CAPSICUM);
 	}
 	teardown();
@@ -1160,8 +1229,9 @@ test_device_attr(void)
 	unsigned off, len;
 	int bad = 0;
 
-	/* the unified profile reports os_device_wc_active 1; the discrete one does not
-	 * report it: on arm64 both are Device */
+	/* on arm64: the unified GPU's VRAM is system memory, so cached, whatever
+	 * os_device_wc_active says; the discrete GPU's VRAM is a BAR, and its
+	 * profile does not report the flag, so Device */
 	setup("unified", "arm64");
 	cl = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
 	m = alloc_mem(cl, NVRM_MEM_VRAM, 4096, 0);
@@ -1169,7 +1239,7 @@ test_device_attr(void)
 	/* the unified GPU has no video memory: its VRAM is system memory, cached */
 	CHECK_EQ(mi.cpu_attr, NVRM_ATTR_CACHED);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 
 	setup("discrete", "arm64");
@@ -1219,7 +1289,7 @@ test_device_attr(void)
 		cl->mops = &nvrm_fake_mem_ops;
 	}
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 
 	/* amd64 host, and arm64 where write-combining is Normal memory: unaligned is fine */
@@ -1229,7 +1299,7 @@ test_device_attr(void)
 	nvrm_mem_info_get(m, &mi);
 	CHECK_EQ(mi.cpu_attr, NVRM_ATTR_WC);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 	/* the compiled-in default of the host when nothing says otherwise */
 	setup("discrete", NULL);
@@ -1242,7 +1312,7 @@ test_device_attr(void)
 	CHECK_EQ(mi.cpu_attr, NVRM_ATTR_WC);
 #endif
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 }
 
@@ -1291,7 +1361,7 @@ test_readback(void)
 			CHECK_EQ(nvrm_mem_read(m, 0, got, 1 * MiB), NVRM_OK);
 			CHECK(memcmp(want, got, 1 * MiB) == 0);
 			nvrm_mem_free(m);
-			nvrm_device_close(cl);
+			nvrm_client_close(cl);
 			teardown();
 		}
 	CHECK_EQ(bstats().traps, traps0);
@@ -1344,7 +1414,7 @@ test_loop(void)
 	CHECK_EQ(b1.sys_free, b0.sys_free);
 	CHECK_EQ(b1.vram_extents, 1);
 	CHECK_EQ(b1.sys_extents, 1);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	teardown();
 	expect_clean("loop");
 }
@@ -1366,8 +1436,8 @@ test_share(void)
 	int fd, p[2], n;
 
 	setup("discrete", "amd64");
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &a, err, sizeof(err)), NVRM_OK);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &b, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &a, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &b, err, sizeof(err)), NVRM_OK);
 	m = alloc_mem(a, NVRM_MEM_VRAM, 64 * KiB, 64 * KiB);
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &addr), NVRM_OK);
 	fill(buf, sizeof(buf), 5);
@@ -1414,7 +1484,7 @@ test_share(void)
 		m2 = alloc_mem(a, NVRM_MEM_SYSMEM, 4096, 0);
 		CHECK_EQ(nvrm_mem_export_fd(m2, &fd2), NVRM_OK);
 		nvrm_mem_free(m2);
-		nvrm_device_close(a);	/* drops the export's hold */
+		nvrm_client_close(a);	/* drops the export's hold */
 		a = NULL;
 		CHECK_EQ(nvrm_mem_import_fd(b, fd2, &im), NVRM_E_RM);
 		CHECK(strstr(nvrm_client_errmsg(b), "gone") != NULL);
@@ -1422,7 +1492,7 @@ test_share(void)
 	}
 	close(p[0]);
 	close(p[1]);
-	nvrm_device_close(b);
+	nvrm_client_close(b);
 	teardown();
 	expect_clean("share");
 
@@ -1433,16 +1503,16 @@ test_share(void)
 		nvrm_mem *m1;
 		int f;
 
-		CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
-		CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 1), NULL, &c2, err, sizeof(err)), NVRM_OK);
+		CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
+		CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 1), NULL, &c2, err, sizeof(err)), NVRM_OK);
 		m1 = alloc_mem(c1, NVRM_MEM_SYSMEM, 4096, 0);
 		CHECK_EQ(nvrm_mem_export_fd(m1, &f), NVRM_OK);
 		CHECK_EQ(nvrm_mem_import_fd(c2, f, &im), NVRM_E_RM);
 		CHECK(strstr(nvrm_client_errmsg(c2), "not on this GPU") != NULL);
 		close(f);
 		nvrm_mem_free(m1);
-		nvrm_device_close(c1);
-		nvrm_device_close(c2);
+		nvrm_client_close(c1);
+		nvrm_client_close(c2);
 	}
 	teardown();
 
@@ -1481,7 +1551,7 @@ test_share(void)
 		CHECK_EQ(st.spare_descriptors, 0);
 	}
 	nvrm_mem_free(m);
-	nvrm_device_close(b);
+	nvrm_client_close(b);
 	teardown();
 	expect_clean("share failures");
 }
@@ -1499,42 +1569,41 @@ test_fake_device(void)
 
 	setup("discrete,discrete", NULL);
 	/* two clients on one GPU share the aperture; a client on another GPU does not */
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c2, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c2, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(bstats().clients, 2);
-	nvrm_device_close(c1);
-	nvrm_device_close(c2);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 1), NULL, &c2, err, sizeof(err)), NVRM_OK);
-	nvrm_device_close(c1);
-	nvrm_device_close(c2);
+	nvrm_client_close(c1);
+	nvrm_client_close(c2);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 1), NULL, &c2, err, sizeof(err)), NVRM_OK);
+	nvrm_client_close(c1);
+	nvrm_client_close(c2);
 	/* the aperture cannot be made when the process has no descriptor to spare */
 	probe = open("/dev/null", O_RDONLY);
 	getrlimit(RLIMIT_NOFILE, &old);
 	lim = old;
 	lim.rlim_cur = probe;
 	CHECK_EQ(setrlimit(RLIMIT_NOFILE, &lim), 0);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_E_NOMEM);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_E_IO);
 	CHECK(strstr(err, "cannot make the aperture") != NULL);
 	setrlimit(RLIMIT_NOFILE, &old);
 	close(probe);
 	/* ... or sized */
-	nvrm_fake_mem_fail(NVRM_FAKE_OP_SIZE, 1);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_E_NOMEM);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_APERTURE_SIZE, 1);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_E_IO);
 	CHECK(strstr(err, "cannot size the aperture") != NULL);
 	expect_clean("aperture size");
 	/* an export descriptor that cannot be sized, with the aperture in place */
-	nvrm_fake_mem_fail(NVRM_FAKE_OP_SIZE, 2);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &c1, err, sizeof(err)), NVRM_E_IO);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_DESC_SIZE, 1);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &c1, err, sizeof(err)), NVRM_E_IO);
 	CHECK(strstr(err, "cannot size a spare") != NULL);
 	expect_clean("descriptor size");
-	nvrm_fake_mem_fail(0, 0);
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), &o, &c1, err, sizeof(err)), NVRM_OK);
-	nvrm_device_close(c1);
+	nvrm_fake_mem_fail_clear();
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &c1, err, sizeof(err)), NVRM_OK);
+	nvrm_client_close(c1);
 	/* an export descriptor made when descriptors run out */
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &c1, err, sizeof(err)), NVRM_OK);
 	probe = open("/dev/null", O_RDONLY);
-	lim = old;
 	getrlimit(RLIMIT_NOFILE, &old);
 	lim = old;
 	lim.rlim_cur = probe;
@@ -1557,7 +1626,7 @@ test_fake_device(void)
 	}
 	setrlimit(RLIMIT_NOFILE, &old);
 	close(probe);
-	nvrm_device_close(c1);
+	nvrm_client_close(c1);
 	teardown();
 	expect_clean("fake device");
 }
@@ -1599,13 +1668,13 @@ test_gaps(void)
 	uint64_t va, va2, vb;
 	uint8_t buf[64];
 	char err[100];
-	int fd, zfd, n;
+	int fd, zfd;
 
 	setup("discrete,unified", "amd64");
 	d = nvrm_device_get(ctx, 0);
 	/* an error buffer of no length is accepted */
 	cl = NULL;
-	CHECK_EQ(nvrm_device_open(d, &oo, &cl, err, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_client_open(d, &oo, &cl, err, 0), NVRM_E_INVAL);
 	cl = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
 	/* parameter structures that carry their own size */
 	vp = (nvrm_va_params){ sizeof(vp), 0, 1 * MiB, 0, 0 };
@@ -1622,7 +1691,7 @@ test_gaps(void)
 	CHECK_EQ(map_gpu(m2, va2 + 1 * MiB, 0, 0, 0), NVRM_E_RANGE);
 	/* a client closed with objects, mappings, reservations and a CPU map in it */
 	CHECK_EQ(nvrm_mem_map_cpu(m2, NVRM_CPU_READ, (void *[]){ NULL }), NVRM_OK);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	expect_clean("close with live objects");
 
 	/* the export pool, in capability mode, with none left */
@@ -1633,11 +1702,12 @@ test_gaps(void)
 	capmode = 1;
 	nvrm_capmode_hook = hook_capmode;
 	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_E_NOSLOT);
+	CHECK(strstr(nvrm_client_errmsg(cl), "raise nvrm_open_opts.export_slots") != NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), "export") != NULL);
 	nvrm_capmode_hook = NULL;
 	capmode = 0;
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
 	/* a descriptor that is not an export record: right size, wrong content */
 	cl = open_client(0, 0, 0);
@@ -1668,7 +1738,7 @@ test_gaps(void)
 	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_E_CAPSICUM);
 	nvrm_mem_free(m);
 	nvrm_mem_free(m2);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
 	/* a hole of a sparse reservation next to a mapping of another one */
 	cl = open_client(0, 0, 0);
@@ -1680,17 +1750,17 @@ test_gaps(void)
 	CHECK_EQ(nvrm_fake_gpu_access(cl, va, buf, sizeof(buf), 0), 0);
 	CHECK_EQ(buf[0], 0);
 	nvrm_mem_free(m);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 
 	/* the backend's counters with a GPU that has no video memory in it */
-	CHECK_EQ(nvrm_device_open(nvrm_device_get(ctx, 1), NULL, &cl2, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 1), NULL, &cl2, err, sizeof(err)), NVRM_OK);
 	nvrm_fake_mem_stats_get(&st);
 	CHECK_EQ(st.vram_extents, 0);
-	nvrm_device_close(cl2);
+	nvrm_client_close(cl2);
 	/* an unknown host name falls back to the compiled-in one */
 	setenv("NVRM_FAKE_HOST", "riscv", 1);
 	cl = open_client(0, 0, 0);
-	nvrm_device_close(cl);
+	nvrm_client_close(cl);
 	/* the descriptor limit helper on a descriptor that cannot widen */
 	{
 		cap_rights_t r;
@@ -1704,12 +1774,317 @@ test_gaps(void)
 		close(p2[0]);
 		close(p2[1]);
 	}
-	(void)n;
 	teardown();
 	expect_clean("gaps");
 }
 
 /* ---- the main program -------------------------------------------------------- */
+
+/* ---- releases the RM refuses ---------------------------------------------- */
+
+static uint64_t
+failed_releases(nvrm_client *cl)
+{
+	nvrm_client_stats st = { 0 };
+
+	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
+	return (st.failed_releases);
+}
+
+/* #lizard forgives -- one scripted scenario, steps share state; split tracked as DEBT on #2419 */
+static void
+test_release_failures(void)
+{
+	nvrm_client *cl;
+	nvrm_client_stats st = { 0 };
+	nvrm_mem_info mi = { 0 };
+	nvrm_va_params p;
+	nvrm_mem *m, *m2, *m3;
+	uint64_t va, va2, got;
+	void *cpu;
+
+	setup("discrete", NULL);
+	cl = open_client(NVRM_OPEN_ALLOW_MAP, 2, 0);
+	va = reserve(cl, 1 * MiB, 0, 0);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 64 * KiB, 64 * KiB);
+	CHECK_EQ(map_gpu(m, va, 0, 0, 0), NVRM_OK);
+	/* an unmap the RM refuses: the mapping stays, and a retry works */
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_UNMAP_GPU, 1);
+	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_E_RM);
+	CHECK(strstr(nvrm_client_errmsg(cl), "injected") != NULL);
+	CHECK_EQ(failed_releases(cl), 1);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 1);
+	CHECK_EQ(map_gpu(m, va, 0, 0, 0), NVRM_E_RANGE);
+	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 0);
+	/* a reservation release the RM refuses: it stays, its addresses are
+	 * not handed out again, and a retry works */
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_VA_RELEASE, 1);
+	CHECK_EQ(nvrm_va_release(cl, va), NVRM_E_RM);
+	CHECK_EQ(failed_releases(cl), 2);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_reservations, 1);
+	p = (nvrm_va_params){ 0, 0, 64 * KiB, 0, va };
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &got), NVRM_E_RANGE);
+	CHECK_EQ(nvrm_va_release(cl, va), NVRM_OK);
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &got), NVRM_OK);
+	CHECK_EQ(nvrm_va_release(cl, got), NVRM_OK);
+	/* an unmap refused while the object is freed: the mapping is kept as
+	 * an orphan, so its addresses stay out of use and the reservation busy */
+	va2 = reserve(cl, 1 * MiB, 0, 0);
+	CHECK_EQ(map_gpu(m, va2, 0, 0, 0), NVRM_OK);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_UNMAP_GPU, 1);
+	nvrm_mem_free(m);
+	CHECK_EQ(failed_releases(cl), 3);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 0);
+	CHECK_EQ(st.live_mem, 0);
+	m2 = alloc_mem(cl, NVRM_MEM_SYSMEM, 64 * KiB, 64 * KiB);
+	CHECK_EQ(map_gpu(m2, va2, 0, 0, 0), NVRM_E_RANGE);
+	CHECK_EQ(map_gpu(m2, va2 + 64 * KiB, 0, 0, 0), NVRM_OK);
+	CHECK_EQ(nvrm_mem_unmap_gpu(m2, va2 + 64 * KiB), NVRM_OK);
+	CHECK_EQ(nvrm_va_release(cl, va2), NVRM_E_BUSY);
+	CHECK(strstr(nvrm_client_errmsg(cl), "failed_releases") != NULL);
+	/* a free the RM refuses: counted, the object stays with the client */
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_FREE, 1);
+	nvrm_mem_free(m2);
+	CHECK(strstr(nvrm_client_errmsg(cl), "injected") != NULL);
+	CHECK_EQ(failed_releases(cl), 4);
+	CHECK(bstats().objects >= 2);
+	/* ... registered user pages too */
+	{
+		static char pages[2 * 65536] __attribute__((aligned(65536)));
+		nvrm_mem *u = NULL;
+
+		CHECK_EQ(nvrm_mem_register_user(cl, pages, 65536, &u), NVRM_OK);
+		nvrm_fake_mem_fail(NVRM_FAKE_OP_FREE, 1);
+		nvrm_mem_free(u);
+		CHECK_EQ(failed_releases(cl), 5);
+	}
+	/* a CPU unmap the RM refuses: the CPU side is gone either way */
+	m3 = alloc_mem(cl, NVRM_MEM_SYSMEM, 64 * KiB, 0);
+	CHECK_EQ(nvrm_mem_map_cpu(m3, NVRM_CPU_READ | NVRM_CPU_WRITE, &cpu), NVRM_OK);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_UNMAP_CPU, 1);
+	CHECK_EQ(nvrm_mem_unmap_cpu(m3), NVRM_E_RM);
+	CHECK_EQ(failed_releases(cl), 6);
+	CHECK_EQ(nvrm_mem_info_get(m3, &mi), NVRM_OK);
+	CHECK_EQ(mi.cpu_mapped, 0);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_cpu_maps, 0);
+	/* ... and inside a free */
+	CHECK_EQ(nvrm_mem_map_cpu(m3, NVRM_CPU_READ, &cpu), NVRM_OK);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_UNMAP_CPU, 1);
+	nvrm_mem_free(m3);
+	CHECK_EQ(failed_releases(cl), 7);
+	/* an object the core cannot record, whose free is refused as well */
+	{
+		nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 4096, 0, 0 };
+		nvrm_mem *x = NULL;
+		int n;
+
+		for (n = 1; n < 10; n++) {
+			fail_calloc_at(n);
+			nvrm_fake_mem_fail(NVRM_FAKE_OP_FREE, 1);
+			if (nvrm_mem_alloc(cl, &mp, &x) == NVRM_OK) {
+				fail_calloc_at(0);
+				nvrm_fake_mem_fail(NVRM_FAKE_OP_FREE, 0);
+				nvrm_mem_free(x);
+				break;
+			}
+			fail_calloc_at(0);
+			CHECK(strstr(nvrm_client_errmsg(cl), "out of") != NULL);
+		}
+		CHECK(n > 2 && n < 10);
+		CHECK(failed_releases(cl) >= 8);
+	}
+	/* the close releases what is left, a refusal among it: the fake, like
+	 * the RM, frees the client with everything still in it */
+	(void)reserve(cl, 64 * KiB, 0, 0);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_VA_RELEASE, 1);
+	nvrm_client_close(cl);
+	expect_clean("release failures");
+	teardown();
+}
+
+/* ---- page sizes the library picks ------------------------------------------ */
+
+static void
+test_default_page(void)
+{
+	nvrm_client *cl;
+	nvrm_mem_info mi = { 0 };
+	nvrm_mem *m;
+	nvrm_fake_mem_stats b0, b1;
+	nvrm_mem *a, *b;
+
+	setup("discrete", NULL);
+	cl = open_client(0, 0, 0);
+	/* video memory of at least 64 KiB: 64 KiB pages; smaller: 4 KiB */
+	m = alloc_mem(cl, NVRM_MEM_VRAM, 100 * KiB, 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.page_size, 64 * KiB);
+	CHECK_EQ(mi.bytes, 128 * KiB);
+	nvrm_mem_free(m);
+	m = alloc_mem(cl, NVRM_MEM_VRAM, 60 * KiB, 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.page_size, 4 * KiB);
+	nvrm_mem_free(m);
+	/* the default video memory page needs a reservation aligned to it: a
+	 * 4 KiB aligned one may start off a 64 KiB boundary, a 64 KiB aligned
+	 * one (the nvrm_mem(3) example) never does */
+	{
+		nvrm_va_params small = { 0, 0, 4 * KiB, 0, 0 };
+		nvrm_va_params vp4 = { 0, 0, 1 * MiB, 0, 0 };
+		nvrm_va_params vp64 = { 0, 0, 1 * MiB, 64 * KiB, 0 };
+		uint64_t a0, a4, a64;
+
+		CHECK_EQ(nvrm_va_reserve(cl, &small, &a0), NVRM_OK);
+		CHECK_EQ(nvrm_va_reserve(cl, &vp4, &a4), NVRM_OK);
+		CHECK_EQ(nvrm_va_reserve(cl, &vp64, &a64), NVRM_OK);
+		m = alloc_mem(cl, NVRM_MEM_VRAM, 1 * MiB, 0);
+		CHECK((a4 & (64 * KiB - 1)) != 0);
+		CHECK_EQ(map_gpu(m, a4, 0, 0, 0), NVRM_E_INVAL);
+		CHECK_EQ(map_gpu(m, a64, 0, 0, 0), NVRM_OK);
+		nvrm_mem_free(m);
+		nvrm_va_release(cl, a0);
+		nvrm_va_release(cl, a4);
+		nvrm_va_release(cl, a64);
+	}
+	/* system memory: 4 KiB, whatever the size */
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 1 * MiB, 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.page_size, 4 * KiB);
+	nvrm_mem_free(m);
+	/* a host with 16 KiB pages: objects are placed host page aligned, so
+	 * that a CPU mapping of each is an mmap at an aligned offset */
+	b0 = bstats();
+	nvrm_fake_mem_host_page(16 * KiB);
+	a = alloc_mem(cl, NVRM_MEM_SYSMEM, 4 * KiB, 4 * KiB);
+	b = alloc_mem(cl, NVRM_MEM_SYSMEM, 4 * KiB, 4 * KiB);
+	b1 = bstats();
+	CHECK_EQ(b1.sys_extents, b0.sys_extents + 1);	/* a 12 KiB hole */
+	nvrm_mem_free(a);
+	nvrm_mem_free(b);
+	nvrm_fake_mem_host_page(0);
+	a = alloc_mem(cl, NVRM_MEM_SYSMEM, 4 * KiB, 4 * KiB);
+	b = alloc_mem(cl, NVRM_MEM_SYSMEM, 4 * KiB, 4 * KiB);
+	b1 = bstats();
+	CHECK_EQ(b1.sys_extents, b0.sys_extents);
+	nvrm_mem_free(a);
+	nvrm_mem_free(b);
+	nvrm_client_close(cl);
+	expect_clean("default page");
+	teardown();
+	/* a GPU with no video memory of its own: VRAM is system memory, 4 KiB */
+	setup("unified", NULL);
+	cl = open_client(0, 0, 0);
+	m = alloc_mem(cl, NVRM_MEM_VRAM, 1 * MiB, 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.place, NVRM_PLACE_SYSMEM);
+	CHECK_EQ(mi.page_size, 4 * KiB);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	teardown();
+	/* a GPU whose page sizes are not known: 4 KiB, the one size always valid */
+	setup("unknown", NULL);
+	cl = open_client(0, 0, 0);
+	m = alloc_mem(cl, NVRM_MEM_VRAM, 128 * KiB, 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.place, NVRM_PLACE_VIDMEM);
+	CHECK_EQ(mi.page_size, 4 * KiB);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	teardown();
+}
+
+/* ---- an import names only an exported object ------------------------------ */
+
+static void
+test_import_unexported(void)
+{
+	struct { uint64_t magic, dev, serial; } rec;
+	nvrm_client *cl;
+	nvrm_mem *m1, *m2, *im = NULL;
+	int fd, forged;
+
+	setup("discrete", NULL);
+	cl = open_client(0, 0, 2);
+	m1 = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
+	m2 = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);	/* the next serial */
+	CHECK_EQ(nvrm_mem_export_fd(m1, &fd), NVRM_OK);
+	CHECK_EQ(pread(fd, &rec, sizeof(rec), 0), (ssize_t)sizeof(rec));
+	close(fd);
+	/* the record of m1, pointed at m2, which was never exported */
+	rec.serial++;
+	forged = shm_open(SHM_ANON, O_RDWR, 0600);
+	CHECK_EQ(ftruncate(forged, 64), 0);
+	CHECK_EQ(pwrite(forged, &rec, sizeof(rec), 0), (ssize_t)sizeof(rec));
+	CHECK_EQ(nvrm_mem_import_fd(cl, forged, &im), NVRM_E_RM);
+	CHECK(strstr(nvrm_client_errmsg(cl), "never exported") != NULL);
+	/* the true record still imports */
+	rec.serial--;
+	CHECK_EQ(pwrite(forged, &rec, sizeof(rec), 0), (ssize_t)sizeof(rec));
+	CHECK_EQ(nvrm_mem_import_fd(cl, forged, &im), NVRM_OK);
+	close(forged);
+	nvrm_mem_free(im);
+	nvrm_mem_free(m1);
+	nvrm_mem_free(m2);
+	nvrm_client_close(cl);
+	expect_clean("import unexported");
+	teardown();
+}
+
+/* ---- the spares a client holds, and the fault switches -------------------- */
+
+static void
+test_spare_rights(void)
+{
+	nvrm_client *cl;
+	nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 4096, 0, 0 };
+	nvrm_mem *m;
+	cap_rights_t r;
+	unsigned i;
+	int fd;
+
+	setup("discrete", NULL);
+	/* no ALLOW_MAP: no mapping spare, and the export spares carry no
+	 * mapping right and cannot be mapped */
+	cl = open_client(0, 0, 0);
+	CHECK_EQ(cl->pool[NVRM_DESC_MAP].n, 0);
+	CHECK_EQ(cl->pool[NVRM_DESC_EXPORT].n, NVRM_EXPORT_SLOTS_DEFAULT);
+	for (i = 0; i < cl->pool[NVRM_DESC_EXPORT].n; i++) {
+		fd = cl->pool[NVRM_DESC_EXPORT].fd[i];
+		CHECK_EQ(cap_rights_get(fd, &r), 0);
+		CHECK(!cap_rights_is_set(&r, CAP_MMAP_R));
+		CHECK(!cap_rights_is_set(&r, CAP_MMAP_W));
+		CHECK(!cap_rights_is_set(&r, CAP_IOCTL));
+		CHECK(mmap(NULL, 64, PROT_READ, MAP_SHARED, fd, 0) == MAP_FAILED);
+	}
+	/* an export narrows its spare to read only */
+	CHECK_EQ(nvrm_mem_alloc(cl, &mp, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_OK);
+	CHECK_EQ(cap_rights_get(fd, &r), 0);
+	CHECK(!cap_rights_is_set(&r, CAP_PWRITE));
+	CHECK(cap_rights_is_set(&r, CAP_PREAD));
+	close(fd);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	/* an armed fault that was never reached is disarmed by the clear, and
+	 * an operation out of range is ignored */
+	cl = open_client(0, 0, 0);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_ALLOC, 1);
+	nvrm_fake_mem_fail(0, 1);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP__COUNT, 1);
+	nvrm_fake_mem_fail(-1, 1);
+	nvrm_fake_mem_fail_clear();
+	CHECK_EQ(nvrm_mem_alloc(cl, &mp, &m), NVRM_OK);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	expect_clean("spare rights");
+	teardown();
+}
 
 #define RUN(group, fn) do { \
 	const char *skip = getenv("NVRM_TEST_SKIP"); \
@@ -1744,5 +2119,9 @@ main(void)
 	RUN("share", test_fake_device);
 	RUN("va", test_va_gaps);
 	RUN("gaps", test_gaps);
+	RUN("release", test_release_failures);
+	RUN("alloc", test_default_page);
+	RUN("share", test_import_unexported);
+	RUN("client", test_spare_rights);
 	return (t_done("mem_test"));
 }
