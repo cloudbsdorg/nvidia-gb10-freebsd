@@ -27,33 +27,109 @@ The GPU is initialised, and its GSP (GPU System Processor) firmware is
 started, on the first open of
 .Pa /dev/nvidia Ns Ar N ,
 and it is shut down again when the last open closes.
+.Sh FIRMWARE
+The GPU runs on GSP firmware, which the driver gets from
+.Xr firmware 9 .
+The images live in firmware modules.
+.Nm nvidia_gsp_ga10x_fw
+serves Ampere (other than GA100), Ada, Hopper and Blackwell GPUs on every
+architecture.
+.Nm nvidia_gsp_tu10x_fw
+serves Turing and GA100 GPUs and exists on amd64 only; the arm64 build does not
+support those GPUs.
+.Pp
+.Nm
+depends on the modules built for its architecture, so
+.Xr kldload 8
+and the loader load them with the driver, before the driver's own load
+handler runs, provided
+.Xr kldxref 8
+has indexed the directory they are installed in.
+The image is then already registered with
+.Xr firmware 9
+when the GPU is first opened, which lets an unprivileged process make that
+first open: loading a firmware module needs the privilege
+.Dv PRIV_FIRMWARE_LOAD ,
+which an opening process need not have.
+.Pp
+The kernel names each module after its file with
+.Dq _fw
+appended, for example
+.Dq nvidia_gsp_ga10x_fw_fw
+in
+.Xr kldstat 8 .
+A firmware module cannot be unloaded while
+.Nm
+is loaded.
+When the driver is loaded from a build directory by path, load the firmware
+module by path first: a dependency that is already loaded is satisfied.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia.registry.EnableGpuFirmware
-Set to 1 to run the GPU on the GSP firmware, which every supported GPU needs.
+0 turns the GSP firmware off, 1 turns it on, 2 (the default) applies the
+driver's own policy.
+These GPUs run only on the firmware, so 0 is not a useful setting, and the
+installation instructions set 1.
 The driver reads the
 .Va hw.nvidia.registry.*
-variables from the kernel environment when the module loads.
+variables from the kernel environment when the module loads, so a change takes
+effect after a reboot, or after
+.Xr kldunload 8
+and
+.Xr kldload 8
+of the driver.
+.El
+.Sh FILES
+.Bl -tag -width indent -compact
+.It Pa /boot/modules/nvidia_gsp_ga10x_fw.ko
+.It Pa /boot/modules/nvidia_gsp_tu10x_fw.ko
+(amd64 only)
 .El
 .Sh DIAGNOSTICS
 .Bl -tag -width indent
+.It Dq KLD nvidia.ko: depends on nvidia_gsp_ga10x_fw_fw - not available or version mismatch
+.Xr kldload 8
+of the driver found no firmware module of that name, and the driver is not
+loaded.
+The name is the module name: install the file
+.Pa nvidia_gsp_ga10x_fw.ko
+(or
+.Pa nvidia_gsp_tu10x_fw.ko ,
+for the module named
+.Dq nvidia_gsp_tu10x_fw_fw )
+in the module directory, run
+.Xr kldxref 8
+on it, and load the driver again.
 .It Dq nvidia0: NVRM: rm_init_adapter() failed!
 The first open of the GPU failed in the resource manager, and the open returns
 .Er EIO .
 The
 .Dq RmInitAdapter failed!
 message just before it gives the status.
-A common cause is that the GSP firmware image is not available to the opener:
-load the firmware module
-.Pa nvidia_gsp_ga10x_fw
-(as root, before
-.Nm )
-or open the GPU once as root.
-The driver frees the per-device stacks and releases its lock, so no module
-reload is needed before the next open.
+Check with
+.Xr kldstat 8
+that the firmware modules are loaded, and that
+.Va hw.nvidia.registry.EnableGpuFirmware
+is not 0: if it is, correct
+.Xr loader.conf 5
+and reboot, or unload and load the driver, before opening again.
+For any other cause the driver has freed the per-device stacks and released
+its lock, so the open can simply be repeated.
+.It Dq insufficient privileges to load firmware image
+The opener could not load a firmware module, and the GPU needs one that is not
+loaded: the driver was built without the module for that GPU, or it was not
+installed with the driver.
+Load
+.Pa nvidia_gsp_ga10x_fw.ko
+(Turing and GA100: nvidia_gsp_tu10x_fw.ko) with
+.Xr kldload 8
+as root before the first open.
 .El
 .Sh SEE ALSO
+.Xr loader.conf 5 ,
 .Xr kldload 8 ,
+.Xr kldstat 8 ,
+.Xr kldxref 8 ,
 .Xr firmware 9
 .Sh HISTORY
 This is the CloudBSD port of NVIDIA's open

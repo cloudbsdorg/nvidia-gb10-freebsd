@@ -325,6 +325,17 @@ dmesg | tail                                      # nvidia0: <NVIDIA ...> on vga
 ls /dev/nvidia*                                   # /dev/nvidia0 /dev/nvidiactl
 ```
 
+`nvidia.ko` depends on the GSP firmware module for its architecture: `nvidia_gsp_ga10x_fw`
+(Ampere other than GA100, Ada, Hopper, Blackwell; every architecture) and, on amd64 only,
+`nvidia_gsp_tu10x_fw` (Turing and GA100). Once they are installed next to it and `kldxref` has
+indexed the directory (step 6), `kldload nvidia` loads them first, as root, so the first open of
+the GPU by an unprivileged process finds the firmware already registered. The kernel names the
+module after the file with `_fw` appended (`nvidia_gsp_ga10x_fw_fw` in `kldstat -v`); a
+firmware module cannot be unloaded while `nvidia` is loaded. Loading from the build tree by
+path, as above, works because a dependency that is already loaded is accepted; keep the firmware
+`kldload` line first. If `kldload` says `depends on nvidia_gsp_ga10x_fw_fw - not available`, the
+module is not installed or `kldxref` was not run. See `man/nvidia.4`.
+
 The GPU is initialised, and GSP booted, on the first open of `/dev/nvidia0`; it is shut down
 again when the last open closes. `sysctl hw.nvidia.gpus.0` shows the firmware and VBIOS
 versions while something holds the device open.
