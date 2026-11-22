@@ -13,7 +13,26 @@ small source files of our own, and the tests.
 
 ## Installation
 
-Use the `agent/2088-build-host` branch; `main` is behind.
+### With make (root Makefile)
+
+As a normal user, from the top of the checkout (BSD make or GNU make):
+
+```sh
+make                       # help: purpose, targets and switches
+make preflight             # what is missing; JSON=1 for JSON
+make install-prereqs YES=1 # packages (doas or sudo for root) and the NVIDIA sources, into ./work
+make install               # builds when needed, asks, installs as root; YES=1 does not ask
+make deinstall             # removes exactly the files make install wrote
+```
+
+`sh scripts/make.sh preflight --json` prints the same JSON as `make preflight JSON=1`
+without the `*** Error code 1` lines BSD make adds to its output when something is missing.
+`make install` puts the modules in `/boot/modules` (then runs `kldxref`), and the rc.d
+script, the manual pages, libnvrm and nvrm-info under `PREFIX` (`/usr/local`). It records each
+file (path, mode, owner, sha256) in `PREFIX/share/nvidia-gb10-freebsd/installed.manifest`,
+and refuses to replace a file it did not write. `WORK=`, `PREFIX=`, `DESTDIR=`, `SYSDIR=`,
+`BSDSRCTOP=` and `DRMKMODDIR=` override the defaults. The steps below are what `make build`
+runs, one by one.
 
 ### 1. What you need
 
