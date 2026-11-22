@@ -403,7 +403,12 @@ the free ends, then work again. If the RM carried it out, the record is dropped 
 RM is called, so a stranger can neither reach the RM in that window nor raise the count of a
 predictable handle. The owner's free first waits for the holds on the client, before the ioctl
 takes any other lock. A client freed leaves the table, a closing file forgets its clients, and only
-a control file can own one. The free counts use 64-bit generation numbers that are never 0.
+a control file can own one.
+If a client's free is still running when the file that owns that client closes, the entry goes back to a
+marker instead of being dropped, so a later record of the same handle is held back until the free ends.
+Default client-handle validation does not prevent this: a control file linked by `NV_ESC_REGISTER_FD` to
+another file of the same user is enough, so it does not need validation to be off.
+The free counts use 64-bit generation numbers that are never 0.
 
 **Versions.** `nvidia.ko` is module version 2, and `nvidia-modeset.ko` and `nvidia-drm.ko` depend on
 exactly that, as does `nvidia-uvm.ko` from uvm-bsd branch `agent/2373-uvm-client-ownership` or

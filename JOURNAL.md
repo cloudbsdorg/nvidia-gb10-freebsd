@@ -61,3 +61,8 @@ Next: write header.
 - Orchestrator: no round 3 on old commits; this is a NEW commit with 2 rounds. Fixes: EPERM for a stranger's free of a listed client (before the RM), 64-bit nonzero generations, late record: every free is logged with a sequence number and an allocation takes a mark before its RM call, a record that lands after a free of its handle began is refused (the tombstone alone left the reviewer's counterexample open: my harness showed the free completing before the record). Model rows + 3 glue mutants + 7 header plants. Folds in the staged JOURNAL.
 
 - round 1 receipt bc7942bc: dropped the global free log (flood DoS) for tombstones + a log of SUCCESSFUL unlisted frees by end sequence; removed h.core; rows+mutants. Round 2 running.
+
+## 2026-11-22 (#2373 close-path commit, new commit on ea27f0c, own 2-round budget)
+- Orchestrator brief: route the nvco_remove_owner loop through nvco_remove_handle (the merge reviewer's proposed patch), model row (close-path 7-step), glue scenario scenario_close_path, plants close-ignored/remove-owner-keeps-held re-anchored plus new close-drops-marker (model and glue), README wording. Red on ea27f0c: model row 3 FAILs, glue scenario FAIL, close_path.c rc=1; green after: rc=0, client_owner_test.sh 81 ok rc=0, glue 44 ok rc=0, close_path.c rc=0.
+- Gate round 1 running. Next: answers file, round 2, commit, push, Track #2373 and WP #2406.
+- Round 1 receipt fba825ec5facfc74517f8f2e7c694f07b0ec483283c3e8aab87c673729e958a2 (5 voices FINDINGS). Answers in .round/tmp/answers.txt. Fixed: nvco_remove_entry (acts on the entry, no second lookup), held/many model rows, step labels, scenario ran-flag, README wrapped, pins on flattened text.

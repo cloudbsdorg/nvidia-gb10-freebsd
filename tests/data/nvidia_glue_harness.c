@@ -484,6 +484,45 @@ scenario_close(void)
 	CHECK(nvUvmInterfaceClientHold(&fa, H1) != NV_OK, "the closed file's client is gone");
 }
 
+/*
+ * close-path: L (NULL here: a control file the RM treats as A1) frees the unlisted handle H1 and its RM call is pending;
+ * A2 (ffB) allocates H1 and closes; A1 (ffA) allocates H1; the pending RM free then takes A1's client, and A1 asks for a
+ * hold (nvidia-uvm) before the free's end ran.  No hold may be granted, and nothing may be left for H1.
+ */
+static int close_path_ran, close_path_marker_seen;
+static void close_path_hook(void)
+{
+	struct nvco_entry *e;
+
+	close_path_ran++;
+	rm_step_hook = NULL;
+	rm_ioctl_alloc(&ffB, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	nvco_forget_owner(&ffB);
+	e = nvco_find(&nvco_table, H1);
+	if (e != NULL && e->tomb && e->freeing != 0)
+		close_path_marker_seen++;	/* the close left the marker of the free in flight */
+	rm_ioctl_alloc(&ffA, H1, NVCO_CLASS_ROOT_CLIENT, 0, 0);
+	try_hold_in_rm();
+}
+
+static void
+scenario_close_path(void)
+{
+	int rc;
+
+	setup_files();
+	hold_during_rm_granted = 0;
+	close_path_ran = close_path_marker_seen = 0;
+	rm_step_hook = close_path_hook;
+	rc = rm_ioctl_free(NULL, H1, 0, 0);
+	rm_step_hook = NULL;
+	CHECK(rc == 0 && close_path_ran == 1, "close-path: the scenario ran (the free reached the RM and the pending step ran once: rc %d, ran %d)", rc, close_path_ran);
+	CHECK(close_path_marker_seen == 1, "close-path: the owner's close left the marker of the free in flight");
+	CHECK(hold_during_rm_granted == 0, "close-path: no hold on a client the pending free is about to take");
+	CHECK(nvco_find(&nvco_table, H1) == NULL, "close-path: the free's end takes the record");
+	CHECK(nvUvmInterfaceClientHold(&fa, H1) != NV_OK && nvUvmInterfaceClientHold(&fb, H1) != NV_OK, "close-path: nothing is grantable afterwards");
+}
+
 int
 main(void)
 {
@@ -511,6 +550,8 @@ main(void)
 	scenario_end("free_interrupted");
 	scenario_close();
 	scenario_end("close");
+	scenario_close_path();
+	scenario_end("close_path");
 	CHECK(sx_trouble == 0, "no lock trouble overall (%d)", sx_trouble);
 	CHECK(runaway == 0, "no wait ran away (%d)", runaway);
 	if (fails != 0)
