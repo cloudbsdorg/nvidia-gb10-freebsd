@@ -70,6 +70,8 @@ enum nvrm_error {
 	NVRM_E_RANGE,		/* out of VA space, overlap, or outside the object */
 	NVRM_E_NOTSUP,		/* the backend does not provide the operation */
 	NVRM_E_BUSY,		/* still in use: unmap or free what depends on it */
+	NVRM_E_TIMEOUT,		/* the operation reached its deadline */
+	NVRM_E_LOST,		/* the channel is dead */
 	NVRM_E__COUNT
 };
 
@@ -327,7 +329,9 @@ typedef struct nvrm_mem_info {
 	uint32_t	gpu_maps;
 } nvrm_mem_info;
 
-/* What a client holds now and what it has done: leak checks read this. */
+/* What a client holds now and what it has done: leak checks read this.
+ * size is 0, sizeof(nvrm_client_stats), or offsetof(nvrm_client_stats,
+ * live_channels) for a caller built against NVRM_1.1 (that much is filled). */
 typedef struct nvrm_client_stats {
 	uint32_t	size;
 	uint32_t	reserved;
@@ -339,6 +343,7 @@ typedef struct nvrm_client_stats {
 	 * with the RM client until it closes, and its VA is never handed out
 	 * again. */
 	uint64_t	failed_releases;
+	uint64_t	live_channels, channels_created;
 } nvrm_client_stats;
 
 __BEGIN_DECLS

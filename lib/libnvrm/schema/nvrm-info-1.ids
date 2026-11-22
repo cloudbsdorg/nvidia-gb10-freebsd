@@ -45,6 +45,8 @@ error 11 no_spare_descriptor 1
 error 12 range_unavailable 1
 error 13 not_supported 1
 error 14 busy 1
+error 15 timeout 2
+error 16 channel_lost 2
 capability 0 dmabuf_export 0
 capability 1 ats 0
 capability 2 self_hosted 0

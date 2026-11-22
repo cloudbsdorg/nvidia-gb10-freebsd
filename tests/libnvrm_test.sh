@@ -101,7 +101,7 @@ expect_rc "drift mutant: the build fails with 'schema drift'" $rc 0
 
 # ---- unit tests with coverage ---------------------------------------------
 CINC="-pthread -I$L -I$L/include -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
-LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c"
+LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
 mkdir -p "$W/cov"
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/core_test" "$T/core_test.c" $LIBSRC >"$W/cc1.log" 2>&1
 rc=$?
@@ -128,6 +128,9 @@ expect_rc "mem_test compiles" $rc 0
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/rm_mem_test" "$T/rm_mem_test.c" $LIBSRC >"$W/cc5.log" 2>&1
 rc=$?
 expect_rc "rm_mem_test compiles" $rc 0
+cc $CINC -Werror -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/chan_test" "$T/chan_test.c" $LIBSRC >"$W/cc6.log" 2>&1
+rc=$?
+expect_rc "chan_test compiles" $rc 0
 (cd "$W/cov" && HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=mem.%p.profraw ./mem_test >"$W/mem_test.out" 2>&1)
 rc=$?
 expect_rc "mem_test (VA allocator, memory core, fake software GPU)" $rc 0
@@ -136,6 +139,25 @@ expect_rc "mem_test (VA allocator, memory core, fake software GPU)" $rc 0
 rc=$?
 expect_rc "rm_mem_test (RM memory backend against the scripted kernel)" $rc 0
 [ $rc -eq 0 ] || grep '^FAIL' "$W/rm_mem_test.out" | head -20
+(cd "$W/cov" && HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=chan.%m.profraw ./chan_test >"$W/chan_test.out" 2>&1)
+rc=$?
+expect_rc "chan_test (GPFIFO core, tickets, fake semaphores, copies and faults)" $rc 0
+[ $rc -eq 0 ] || grep '^FAIL' "$W/chan_test.out" | head -20
+# The client's message lock: two threads make failing waits and status queries
+# on one client; ThreadSanitizer must report no race.
+if echo 'int main(void) { return 0; }' | cc -fsanitize=thread -x c - -o "$W/tsan_probe" >/dev/null 2>&1; then
+	cc $CINC -Werror -fsanitize=thread -g -o "$W/cov/chan_tsan" "$T/chan_test.c" $LIBSRC >"$W/cc7.log" 2>&1
+	rc=$?
+	expect_rc "chan_test compiles with ThreadSanitizer" $rc 0
+	(cd "$W/cov" && NVRM_TEST_ONLY=errmsg_race HOME=$W TMPDIR=$W ./chan_tsan >"$W/tsan.out" 2>&1)
+	rc=$?
+	expect_rc "errmsg_race under ThreadSanitizer: the test passes" $rc 0
+	! grep -q 'ThreadSanitizer' "$W/tsan.out"
+	rc=$?
+	expect_rc "errmsg_race under ThreadSanitizer: no data race is reported" $rc 0
+else
+	ok "ThreadSanitizer is not available with this compiler: the errmsg_race run is skipped"
+fi
 
 # The discovery files carry a few helpers of the memory calls (the Capsicum
 # limit of a spare, the fake GPU's identity, the RM system call table), so
@@ -148,6 +170,7 @@ expect_rc "core + fake backend: 100% line and branch coverage" $rc 0
 (cd "$W/cov" && llvm-cov export ./rm_test -object ./rm_mem_test -instr-profile=rm.profdata --summary-only $L/nvrm_rm.c | python3 -I "$T/coverage_gate.py" nvrm_rm.c)
 rc=$?
 expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc 0
+# the memory gate counts mem_test alone: channel tests must not hide a gap
 (cd "$W/cov" && llvm-profdata merge -o mem.profdata mem.*.profraw && llvm-profdata merge -o rmmem.profdata rmmem.*.profraw)
 (cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_owner.c nvrm_fake_mem.c)
 rc=$?
@@ -155,6 +178,9 @@ expect_rc "memory core, VA allocator and fake memory model: 100% line and branch
 (cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c)
 rc=$?
 expect_rc "RM memory backend: 100% line and branch coverage by the scripted kernel" $rc 0
+(cd "$W/cov" && llvm-profdata merge -o chan.profdata chan.*.profraw && llvm-cov export ./chan_test -instr-profile=chan.profdata --summary-only $L/nvrm_chan.c $L/nvrm_fake_chan.c | python3 -I "$T/coverage_gate.py" nvrm_chan.c nvrm_fake_chan.c)
+rc=$?
+expect_rc "channel core and fake GPFIFO: 100% line and branch coverage" $rc 0
 # gate plant: skipping the release tests must drop the memory core below 100%
 (cd "$W/cov" && NVRM_TEST_SKIP=release HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=mskip.profraw ./mem_test >/dev/null 2>&1; llvm-profdata merge -o mskip.profdata mskip.profraw && llvm-cov export ./mem_test -instr-profile=mskip.profdata --summary-only $L/nvrm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_mem.c >"$W/mplant.out" 2>&1)
 rc=$?
@@ -171,7 +197,7 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test)
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" "$MD"/nvrm.c "$MD"/nvrm_cap.c "$MD"/nvrm_fake.c "$MD"/nvrm_fields.c "$MD"/nvrm_json.c "$MD"/nvrm_names.c "$MD"/nvrm_table.c "$MD"/nvrm_rm.c "$MD"/nvrm_va.c "$MD"/nvrm_mem.c "$MD"/nvrm_owner.c "$MD"/nvrm_fake_mem.c "$MD"/nvrm_rm_mem.c >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
+	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" "$MD"/nvrm.c "$MD"/nvrm_cap.c "$MD"/nvrm_fake.c "$MD"/nvrm_fields.c "$MD"/nvrm_json.c "$MD"/nvrm_names.c "$MD"/nvrm_table.c "$MD"/nvrm_rm.c "$MD"/nvrm_va.c "$MD"/nvrm_mem.c "$MD"/nvrm_owner.c "$MD"/nvrm_fake_mem.c "$MD"/nvrm_rm_mem.c "$MD"/nvrm_chan.c "$MD"/nvrm_fake_chan.c >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
 	if [ $? -ne 0 ]; then ok "mutant killed: $1"; else bad "mutant SURVIVED: $1"; fi
 }
@@ -279,6 +305,30 @@ mutant fd-leak-version nvrm_rm.c '/NVRM_RM_VERSION, NVRM_RM_VERSION);/,/NVRM_E_V
 mutant fork-guard-gpu nvrm_rm.c 's/	if (nvrm_rm_owner(g->be)) {/	if (1) {/' rm_test
 mutant fork-guard-pid nvrm_owner.c 's/o->pid = my_pid();/o->pid = 0;/' rm_test
 mutant nogpu-error nvrm.c 's|/\* No GPU is a result, not an error: the context holds zero devices. \*/|if (rc == NVRM_OK \&\& n == 0) rc = NVRM_E_NODEV;|' core_test
+# channels: every rule has a focused mutant
+mutant chan-capacity nvrm_chan.c 's/return (ch->entries - 2 - pending);/return (ch->entries - 1 - pending);/' chan_test
+mutant chan-incomplete-split nvrm_chan.c 's/unit = unit_len(e, n, pos + len);/unit = 1;/' chan_test
+mutant chan-ticket-order nvrm_chan.c 's/if (ch->q_head != \&sc->w) {/if (0) {/' chan_test
+mutant chan-queued-deadline nvrm_chan.c '/^wait_turn/,/^}/s/if (deadline_reached(deadline))/if (0)/' chan_test
+mutant chan-turn-broadcast nvrm_chan.c 's/(void)pthread_cond_broadcast(\&ch->turn);//' chan_test
+mutant chan-flush-order nvrm_chan.c 's/nvrm_barrier_normal();/ch->cl->ops->chan->gp_put(ch->b, put);/' chan_test
+mutant chan-release-wfi nvrm_methods.h 's/NVRM_SEM_RELEASE | NVRM_SEM_WFI | NVRM_SEM_PAYLOAD_64/NVRM_SEM_RELEASE | NVRM_SEM_PAYLOAD_64/' chan_test
+mutant chan-payload-64 nvrm_methods.h 's/NVRM_SEM_RELEASE | NVRM_SEM_WFI | NVRM_SEM_PAYLOAD_64/NVRM_SEM_RELEASE | NVRM_SEM_WFI/' chan_test
+mutant chan-dead-only-own nvrm_fake_chan.c 's/if (b->error == 0) {/for (b = channels; b != NULL; b = b->next) if (b->error == 0) {/' chan_test
+mutant chan-acq-geq nvrm_fake_chan.c 's/(int64_t)(value - payload) < 0/(int64_t)(value - payload) <= 0/' chan_test
+mutant chan-copy-on-graphics nvrm_chan.c 's/if (ch->runlist == NVRM_RUNLIST_GRAPHICS \&\&/if (0 \&\&/' chan_test
+# review round 1: the wire encoding, the kick before a space wait, fork children,
+# the semaphore sanity check, a refused destroy, wakeups, deadlines and grants
+mutant chan-addr-lo-encoding nvrm_methods.h 's/seg\[1\] = (uint32_t)sem_va \& 0xfffffffcU;/seg[1] = (uint32_t)((sem_va >> 2) \& 0x3fffffffU);/' chan_test
+mutant chan-no-kick-before-wait nvrm_chan.c '/^submit_step/,/^}/s/if (ch->kick_pending) {/if (0) {/' chan_test
+mutant chan-fork-refresh nvrm_chan.c '/^refresh_all/,/^}/s/if (!nvrm_owner_is_me(\&ch->cl->owner))/if (0)/' chan_test
+mutant chan-no-sem-check nvrm_chan.c '/^sem_update/,/^}/s/if (value > ch->submitted || value < ch->completed)/if (0)/' chan_test
+mutant chan-free-on-destroy-failure nvrm_chan.c '/^nvrm_chan_destroy/,/^}/s/if (!held)/if (1)/' chan_test
+mutant chan-lost-wakeup nvrm_fake_chan.c 's/if (progress_count == gen)/if (1)/' chan_test
+mutant chan-sleep-past-deadline nvrm_chan.c 's/return (left < nvrm_chan_slice_ns ? left : nvrm_chan_slice_ns);/return (nvrm_chan_slice_ns);/' chan_test
+mutant chan-set-object-any nvrm_fake_chan.c 's/if (data != 0 \&\& data != b->granted\[subch\]) {/if (0) {/' chan_test
+mutant chan-ring-writable nvrm_chan.c 's/	    .flags = NVRM_MAP_READ_ONLY };/	    .flags = 0 };/' chan_test
+mutant chan-stats-v11 nvrm_mem.c 's/if (want != sizeof(full) \&\& want != v11)/if (want != sizeof(full))/' mem_test
 
 # ---- JSON modes against the schema --------------------------------------
 export NVRM_BACKEND=fake
@@ -1160,28 +1210,29 @@ expect_rc "NVRM_RM_VERSION equals SOURCES ogkm_tag ($want)" $rc 0
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T"{sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported.txt"
 # declarations only: a comment line (one that starts with "/*" or " *") may
 # name a manual page, nvrm_mem(3), which is not a function
-grep -vE '^[[:space:]]*/?\*' "$L/include/nvrm/nvrm.h" | grep -oE '\bnvrm_[a-z_0-9]+\(' | tr -d '(' | sort -u >"$W/declared.txt"
+grep -vE '^[[:space:]]*/?\*' "$L/include/nvrm/nvrm.h" "$L/include/nvrm/nvrm_chan.h" | grep -oE '\bnvrm_[a-z_0-9]+\(' | tr -d '(' | sort -u >"$W/declared.txt"
 cmp -s "$W/exported.txt" "$W/declared.txt"; rc=$?
-expect_rc "the library exports exactly the functions nvrm.h declares" $rc 0
+expect_rc "the library exports exactly the functions its public headers declare" $rc 0
 [ $rc -eq 0 ] || diff "$W/exported.txt" "$W/declared.txt"
-# symbol versions: discovery is NVRM_1.0, memory and VA NVRM_1.1, and each
-# version's calls are the ones its man page documents
+# Symbol versions: discovery is NVRM_1.0, memory and VA NVRM_1.1, channels
+# NVRM_1.2, and each version's calls are the ones its man page documents.
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.0$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported10.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.1$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported11.txt"
-[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
-expect_rc "every export is in NVRM_1.0 or NVRM_1.1, and both are used" $rc 0
-readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0'; rc=$?
-expect_rc "readelf: nvrm_client_open@@NVRM_1.1 and nvrm_enumerate@@NVRM_1.0" $rc 0
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.2$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported12.txt"
+[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
+expect_rc "every export is in NVRM_1.0, NVRM_1.1 or NVRM_1.2, and all are used" $rc 0
+readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_chan_create@@NVRM_1\.2'; rc=$?
+expect_rc "readelf: discovery, memory and channel symbol versions" $rc 0
 # (LLD does not write the parent of a version node into the object, so the
 # inheritance is checked where it is declared)
-grep -q '^} NVRM_1\.0;$' "$L/Version.map"; rc=$?
-expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0" $rc 0
+grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map"; rc=$?
+expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0 and NVRM_1.2 inherits NVRM_1.1" $rc 0
 objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q 'NVRM_1.0' || readelf -V "$O/lib/libnvrm.so.1" | grep -q NVRM_1.0
 rc=$?
 expect_rc "symbols carry the version NVRM_1.0" $rc 0
 
 # ---- man pages ---------------------------------------------------------------
-for m in "$L/man/nvrm.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
+for m in "$L/man/nvrm.3" "$L/man/nvrm_chan.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
 	mandoc -T lint -W warning "$m" >"$W/mandoc.out" 2>&1; rc=$?
 	expect_rc "mandoc -T lint: $(basename "$m")" $rc 0
 done
@@ -1189,8 +1240,8 @@ printf '.Dd November 21, 2026\n.Dt BAD 3\n.Os\n.Sh NAME\n.Nm bad\n.Xx nonsense\n
 mandoc -T lint -W warning "$W/bad.3" >/dev/null 2>&1; rc=$?
 if [ $rc -ne 0 ]; then ok "man lint plant: a broken page fails mandoc"; else bad "man lint plant: broken page passed"; fi
 for code in $(grep -oE 'NVRM_E_[A-Z]+' "$L/include/nvrm/nvrm.h" | sort -u | grep -v -e NVRM_E__COUNT); do
-	grep -q "$code" "$L/man/nvrm.3"; rc=$?
-	expect_rc "nvrm(3) documents $code" $rc 0
+	grep -q "$code" "$L/man/nvrm.3" "$L/man/nvrm_chan.3"; rc=$?
+	expect_rc "nvrm(3) or nvrm_chan(3) documents $code" $rc 0
 done
 for r in not_queried rm_control_failed rm_not_supported os_not_reported family_unknown family_has_no_class input_unavailable no_numa_node backend_does_not_provide class_absent os_call_failed value_unusable; do
 	grep -q "$r" "$L/man/nvrm.7"; rc=$?
@@ -1206,7 +1257,7 @@ for f in NVRM_ENUM_ALLOW_ALLOC; do
 done
 grep -qi "zero-initialize" "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) tells callers to zero-initialize the options" $rc 0
-for pg in nvrm:10:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS; do
+for pg in nvrm:10:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS nvrm_chan:12:NVRM_CHAN_FUNCS; do
 	_page=${pg%%:*}; _rest=${pg#*:}; _v=${_rest%%:*}; _var=${_rest#*:}
 	sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$L/man/$_page.3" | grep -oE '^\.Fn nvrm_[a-z_0-9]+' | awk '{print $2}' | sort -u >"$W/man-fn-$_page.txt"
 	grep -oE '^\.Nm nvrm_[a-z_0-9]+' "$L/man/$_page.3" | awk '{print $2}' | sort -u >"$W/man-nm-$_page.txt"

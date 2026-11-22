@@ -162,10 +162,14 @@ Through Device memory only aligned accesses of 1, 2, 4 or 8 bytes are safe;
 an unaligned access, or a copy routine that makes one, can fault.
 A GPU with no video memory of its own (VRAM size 0) places video memory
 allocations in system memory.
+.Ss Channels
+.Xr nvrm_chan 3
+submits ordered GPFIFO work, reports progress through a semaphore, and isolates
+a dead channel from the other channels of its client.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 1;
+minor 2;
 documents name it in the
 .Li schema
 member.
@@ -176,11 +180,13 @@ index and name pairs) are frozen in
 .Pa lib/libnvrm/schema/nvrm-info-1.ids ;
 the test suite compares the schema with that baseline and refuses one that
 removes, renames or renumbers an identifier.
-Minor 1 added the error codes of the memory calls.
+Minor 1 added the error codes of the memory calls; minor 2 added the channel
+error codes.
 Until the first package release the interface is provisional (see
 .Xr nvrm 3 ) .
 .Sh SEE ALSO
 .Xr cap_enter 2 ,
 .Xr nvrm 3 ,
+.Xr nvrm_chan 3 ,
 .Xr nvrm_mem 3 ,
 .Xr nvrm-info 8

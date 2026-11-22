@@ -608,3 +608,9 @@ STATUS, hand back.
 - Resume: check round A (tmp/libnvrm-s3/rounds/A-s2defects), review, suite, gate 2 rounds, commit, push; then run round B.
 - 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
 - Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
+
+## 2026-11-22T21:30Z libnvrm S3 slice 1 (Track 2437, branch agent/2437-libnvrm-s3-chan, on main 44617da)
+- nvrm_chan API (nvrm_chan.h), core ring rules (nvrm_chan.c: E-2 per batch, splitting, INCOMPLETE runs, a FIFO of submit waiters with a turn condvar, flush order with two barriers), fake GPFIFO (nvrm_fake_chan.c: NOP, semaphore release and acquire 32/64-bit, ACQ_CIRC_GEQ, copy class), encoders in nvrm_methods.h, barriers in nvrm_barrier.h, nvrm_chan(3).
+- Written by opencode Kimi k3.1-pro (round B), finished by Sonnet (B2, B3: queued submit timeout and handoff, ring-wrap space fix; lint exemption for the fake channel data) after the Kimi quota ran out.
+- tests/libnvrm_test.sh 505 ok, 0 failed. chan_test about 200961 checks; nvrm_chan.c and nvrm_fake_chan.c at 100 percent lines and branches; 11 chan mutants killed.
+- Next: gate rounds 1 and 2, commit, push, PR.
