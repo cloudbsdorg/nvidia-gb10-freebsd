@@ -344,7 +344,7 @@ here; where the two disagree, this section is right.
 | RM core: a kernel client may create a page-array descriptor | `patches/ogkm/patch-src_nvidia_arch_nvalloc_unix_src_osmemdesc.c` | `tests/prime_import_test.sh` (R1) |
 | nvidia-drm: scatter list to page array, import, export from the retained pages | `patches/patch-nvidia-drm_nvidia-drm-gem-dma-buf.c`, `.h` | `tests/prime_import_test.sh` (D1 to D3) |
 | nvidia.ko, our own BSD-licensed file: `nv_import_pages()`, `nv_unimport_pages()`, the SGT register/unregister helpers, the guarded dirty step; the two import symbols exported (prototypes in the shared core header) | `src/gb10-pageimport/gb10_pageimport_os.c` (copied to `nvidia/` by `scripts/prepare-tree.sh`, added to `SRCS` by `patches/patch-nvidia_Makefile`); NVIDIA's proprietary `nvidia_subr.c` and `nvidia_os.c` only call into it (`patches/patch-nvidia_nvidia_subr_prime.c`, `patches/patch-nvidia_nvidia_os.c`) | `tests/prime_import_test.sh` (O1 to O4); `tests/kmod_symbols_test.sh` (every symbol nvidia-drm.ko takes resolves) |
-| The pairing handshake: kld version 2 of `nvidia_modeset` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 2, 2, 2)`, and the layout tag `NVKMS_KAPI_CBSD_LAYOUT` ("+cbsd-kapi.2") in the table's version string, in both header copies | `patches/patch-nvidia-modeset_nvidia-modeset-freebsd.c`, `patches/patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c`, `patches/patch-nvidia-drm_nvidia-drm.c`, both KAPI header patches, `patches/ogkm/...nvkms-kapi.c` | `tests/kapi_table_test.sh` (both directions, planted mismatches) |
+| The pairing handshake: kld version 3 of `nvidia_modeset` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 3, 3, 3)`, and the layout tag `NVKMS_KAPI_CBSD_LAYOUT` ("+cbsd-kapi.3") in the table's version string, in both header copies (version 2 added the page-array import; version 3, Track #2448, appends `setConsoleOwner` for console sharing, see `docs/CONSOLE-SHARING.md` section 6) | `patches/patch-nvidia-modeset_nvidia-modeset-freebsd.c`, `patches/patch-zz-2448-console-owner_nvidia-modeset-freebsd.c`, `patches/patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c`, `patches/patch-zz-2448-console-owner_nvidia-drm-freebsd-lkpi.c`, `patches/patch-nvidia-drm_nvidia-drm.c`, both KAPI header patches, `patches/ogkm/...nvkms-kapi.c` | `tests/kapi_table_test.sh` (both directions, planted mismatches) |
 
 ### 7.2 Where the sketches were wrong or incomplete
 
@@ -407,7 +407,8 @@ here; where the two disagree, this section is right.
    for qualify; a buffer made of object pages (a shared-memory object) is refused with the same
    log line. "Managed RAM" in the older text means exactly this.
 8. **A mismatched `nvidia-modeset.ko`** is refused twice over. kldload refuses it first
-   (`MODULE_VERSION(nvidia_modeset, 2)` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 2, 2, 2)`).
+   (`MODULE_VERSION(nvidia_modeset, 3)` against `MODULE_DEPEND(nvidia_drm, nvidia_modeset, 3, 3, 3)`;
+   version 3 since Track #2448).
    Then the table's version string carries `NVKMS_KAPI_CBSD_LAYOUT` on both sides, and
    `nvKmsKapiGetFunctionsTableInternal()` compares it before it writes any member, so a new
    nvidia-modeset never writes past an old nvidia-drm's table. Bump the tag and both versions

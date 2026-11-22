@@ -1,8 +1,6 @@
 --- nvidia-drm/nvidia-drm-freebsd-lkpi.c.orig
 +++ nvidia-drm/nvidia-drm-freebsd-lkpi.c
-@@ -213,10 +213,33 @@
-     return 0;
- }
+@@ -215,2 +215,7 @@
  
 +/* the gate of the exports of imported buffers, in nvidia-drm-gem-dma-buf.c */
 +extern int nv_drm_pi_live_holds(void);
@@ -10,8 +8,7 @@
 +extern void nv_drm_pi_keep(void);
 +
  static void nv_bsd_drm_exit(void)
- {
-     nv_drm_exit();
+@@ -219,2 +224,20 @@
  
 +    if (nv_drm_pi_live_holds() > 0) {
 +        /*
@@ -32,15 +29,11 @@
 +    }
 +
      // After doing the common DRM teardown, free any linuxkpi devices we
-     // allocated during init
-     for (int i = 0; i < NV_MAX_DEVICES; i++) {
-@@ -237,5 +260,85 @@
- MODULE_DEPEND(nvidia_drm, drmn, 2, 2, 2);
- MODULE_DEPEND(nvidia_drm, dmabuf, 1, 1, 1);
+@@ -239,3 +262,83 @@
  MODULE_DEPEND(nvidia_drm, nvidia, 1, 1, 1);
 -MODULE_DEPEND(nvidia_drm, nvidia_modeset, 1, 1, 1);
-+/* version 2: the KAPI table has the page-array member (NVKMS_KAPI_CBSD_LAYOUT) */
-+MODULE_DEPEND(nvidia_drm, nvidia_modeset, 2, 2, 2);
++/* 2: getSystemMemoryHandleFromPageArray; 3: setConsoleOwner */
++MODULE_DEPEND(nvidia_drm, nvidia_modeset, 3, 3, 3);
 +
 +/*
 + * LKPI_DRIVER_MODULE cannot refuse an unload.  An RM file descriptor that

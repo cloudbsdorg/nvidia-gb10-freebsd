@@ -18,14 +18,14 @@
 #   (a) the two patched copies are byte-identical;
 #   (b) a probe compiled against each copy prints the same sizeof of the
 #       table and the same offsetof of every member;
-#   (c) the new member getSystemMemoryHandleFromPageArray is there, is the
-#       last member (every existing offset is unchanged) and the table is
-#       filled with it (nvKmsKapiGetFunctionsTableInternal).  Mixing an old
+#   (c) getSystemMemoryHandleFromPageArray retains its offset and the new
+#       member setConsoleOwner follows it as the last member; the table is
+#       filled with both (nvKmsKapiGetFunctionsTableInternal).  Mixing an old
 #       module with a new one is still unsafe: a new nvidia-modeset.ko fills
-#       one pointer beyond the table of an old nvidia-drm.ko, an old
-#       nvidia-modeset.ko leaves the member NULL (nvidia-drm checks that).
+#       pointers beyond the table of an old nvidia-drm.ko, an old
+#       nvidia-modeset.ko leaves the members NULL (nvidia-drm checks that).
 #       Both modules ship together;
-#   (d) controls: the pristine copies lack the member; a planted layout
+#   (d) controls: the pristine copies lack the members; a planted layout
 #       mismatch (a member inserted before the others in one copy) makes
 #       (a) and (b) fail;
 #   (e) the pairing handshake, in both directions (docs/PRIME-IMPORT.md, the
@@ -54,8 +54,8 @@ ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOUR
 OGKMSRC=$WORK/sources/open-gpu-kernel-modules-$ver
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src
 
-mkdir -p "$WORK/tmp"
-TMPD=$(mktemp -d "$WORK/tmp/kapi-table-test.XXXXXXXX") || exit 1
+mkdir -p "$repo/tmp"
+TMPD=$(mktemp -d "$repo/tmp/kapi-table-test.XXXXXXXX") || exit 1
 trap 'rm -rf -- "$TMPD"' EXIT INT TERM
 
 passed=0
@@ -137,20 +137,28 @@ if [ "$patched" -eq 1 ]; then
 			bad "the copies disagree on the table layout"
 		fi
 		last=$(members "$TMPD/ogkm/$OGKM_H" | tail -1)
-		if [ "$last" = getSystemMemoryHandleFromPageArray ]; then
-			ok "getSystemMemoryHandleFromPageArray is the last member of the table"
+		previous=$(members "$TMPD/ogkm/$OGKM_H" | tail -2 | head -1)
+		if [ "$previous" = getSystemMemoryHandleFromPageArray ] && [ "$last" = setConsoleOwner ]; then
+			ok "setConsoleOwner is last, immediately after getSystemMemoryHandleFromPageArray"
 		else
-			bad "the last member of the table is '$last', not getSystemMemoryHandleFromPageArray"
+			bad "the last two members are '$previous' and '$last', not getSystemMemoryHandleFromPageArray and setConsoleOwner"
 		fi
 		want=$(members "$TMPD/ogkm/$OGKM_H" | grep -c '^getSystemMemoryHandleFromPageArray$')
-		[ "$want" -eq 1 ] && ok "the member is declared exactly once" || bad "the member is declared $want times"
+		[ "$want" -eq 1 ] && ok "getSystemMemoryHandleFromPageArray is declared exactly once" || bad "getSystemMemoryHandleFromPageArray is declared $want times"
+		want=$(members "$TMPD/ogkm/$OGKM_H" | grep -c '^setConsoleOwner$')
+		[ "$want" -eq 1 ] && ok "setConsoleOwner is declared exactly once" || bad "setConsoleOwner is declared $want times"
 	else
 		bad "the layout probe does not compile: $(head -3 "$TMPD/pa.err" "$TMPD/pb.err" 2>/dev/null | tr '\n' ' ')"
 	fi
 	if tr '\n' ' ' < "$TMPD/ogkm/$OGKM_C" | grep -Eq 'funcsTable->getSystemMemoryHandleFromPageArray[[:space:]]*=[[:space:]]*GetSystemMemoryHandleFromPageArray;'; then
-		ok "nvKmsKapiGetFunctionsTableInternal() fills the member"
+		ok "nvKmsKapiGetFunctionsTableInternal() fills getSystemMemoryHandleFromPageArray"
 	else
 		bad "nvKmsKapiGetFunctionsTableInternal() does not fill getSystemMemoryHandleFromPageArray"
+	fi
+	if tr '\n' ' ' < "$TMPD/ogkm/$OGKM_C" | grep -Eq 'funcsTable->setConsoleOwner[[:space:]]*=[[:space:]]*SetConsoleOwner;'; then
+		ok "nvKmsKapiGetFunctionsTableInternal() fills setConsoleOwner"
+	else
+		bad "nvKmsKapiGetFunctionsTableInternal() does not fill setConsoleOwner"
 	fi
 fi
 
@@ -158,6 +166,26 @@ fi
 DRM_C=nvidia-drm/nvidia-drm.c
 LKPI_C=nvidia-drm/nvidia-drm-freebsd-lkpi.c
 MS_C=nvidia-modeset/nvidia-modeset-freebsd.c
+HS_PATCHES='patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c
+patch-nvidia-drm_nvidia-drm.c
+patch-nvidia-modeset_nvidia-modeset-freebsd.c
+patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c
+patch-zz-nvidia_client_owner_version_drm.c
+patch-zz-nvidia_client_owner_version_modeset.c'
+
+# Time: O(p), where p is the mandatory patch count.
+# Space: O(1), besides the caller's patch path.
+require_hs_patches() {
+	_missing=0
+	for _p in $HS_PATCHES; do
+		if [ ! -f "$1/$_p" ]; then
+			echo "FAIL: missing $_p"
+			_missing=1
+		fi
+	done
+	return "$_missing"
+}
+
 for f in "$PRISTINE/$DRM_C" "$PRISTINE/$LKPI_C" "$PRISTINE/$MS_C"; do
 	[ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
@@ -166,8 +194,24 @@ for f in $DRM_C $LKPI_C $MS_C; do
 	cp "$PRISTINE/$f" "$TMPD/hs/new/$f"
 	cp "$PRISTINE/$f" "$TMPD/hs/old/$f"
 done
-for _p in patch-nvidia-drm_nvidia-drm.c patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c patch-nvidia-modeset_nvidia-modeset-freebsd.c; do
-	apply_one "$repo/patches/$_p" "$TMPD/hs/new" "$_p" || patched=0
+require_hs_patches "$repo/patches" || {
+	patched=0
+	bad "the mandatory handshake patch set is incomplete"
+}
+for _p in "$repo"/patches/patch-*; do
+	case ${_p##*/} in
+	patch-nvidia-drm_nvidia-drm.c|\
+	patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c|\
+	patch-nvidia-modeset_nvidia-modeset-freebsd.c|\
+	patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c|\
+	patch-zz-nvidia_client_owner_version_drm.c|\
+	patch-zz-nvidia_client_owner_version_modeset.c)
+		apply_one "$_p" "$TMPD/hs/new" "${_p##*/}" || {
+			patched=0
+			bad "the mandatory patch ${_p##*/} does not apply"
+		}
+		;;
+	esac
 done
 cp "$TMPD/ogkm/$OGKM_C" "$TMPD/hs/new/ms-kapi.c"
 cp "$OGKMSRC/$OGKM_C" "$TMPD/hs/old/ms-kapi.c"
@@ -232,6 +276,29 @@ if [ "$patched" -eq 1 ]; then
 	_tagn=$(grep -o 'NVKMS_KAPI_CBSD_LAYOUT "+cbsd-kapi\.[0-9]*"' "$NEWH" | grep -o '[0-9]*"$' | tr -d '"')
 	[ -n "$_tagn" ] && [ "$_tagn" = "$(mod_version "$TMPD/hs/new")" ] && ok "the layout tag number ($_tagn) is the nvidia_modeset kld version" || bad "the layout tag number '$_tagn' and the nvidia_modeset kld version '$(mod_version "$TMPD/hs/new")' do not move together"
 	dep_exact "$TMPD/hs/new" && ok "kld versions: nvidia-drm asks for exactly one nvidia-modeset version" || bad "kld versions: nvidia-drm accepts a range of nvidia-modeset versions ($(mod_dep "$TMPD/hs/new"))"
+	[ "$(mod_version "$TMPD/hs/new")" = 3 ] && [ "$(mod_dep "$TMPD/hs/new")" = "3 3 3 " ] \
+	    && ok "the console-owner layout uses nvidia_modeset version 3 and dependency 3, 3, 3" \
+	    || bad "the console-owner layout does not use version 3 throughout (found MODULE_VERSION $(mod_version "$TMPD/hs/new"), MODULE_DEPEND $(mod_dep "$TMPD/hs/new"))"
+	mkdir -p "$TMPD/hs/reverse/nvidia-drm" "$TMPD/hs/reverse/nvidia-modeset"
+	for f in $DRM_C $LKPI_C $MS_C; do
+		cp "$PRISTINE/$f" "$TMPD/hs/reverse/$f"
+	done
+	_reverse_ok=1
+	for _p in \
+	    patch-zz-nvidia_client_owner_version_modeset.c \
+	    patch-zz-nvidia_client_owner_version_drm.c \
+	    patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c \
+	    patch-nvidia-modeset_nvidia-modeset-freebsd.c \
+	    patch-nvidia-drm_nvidia-drm.c \
+	    patch-nvidia-drm_nvidia-drm-freebsd-lkpi.c; do
+		apply_one "$repo/patches/$_p" "$TMPD/hs/reverse" "$_p (reverse)" || _reverse_ok=0
+	done
+	if [ "$_reverse_ok" -eq 1 ] && [ "$(mod_version "$TMPD/hs/reverse")" = 3 ] \
+	    && [ "$(mod_dep "$TMPD/hs/reverse")" = "3 3 3 " ]; then
+		ok "reverse lexical patch application still produces nvidia_modeset version 3"
+	else
+		bad "reverse lexical patch application does not produce version 3 throughout"
+	fi
 	tr '\n' ' ' < "$TMPD/hs/new/$DRM_C" | grep -Eq 'Version mismatch.*cbsd-kapi.*same build' \
 	    && ok "the version-mismatch message explains the layout suffix and the fix" \
 	    || bad "the version-mismatch message of nvidia-drm does not explain the +cbsd-kapi suffix and say to install the three modules from one build"
@@ -246,22 +313,27 @@ if [ "$patched" -eq 1 ]; then
 		case $4 in
 		table) table_accepts "$_t" "$_t/ms-kapi.c" "$NEWH"; _r=$? ;;
 		kld) if kld_loads "$_t" "$_t" && dep_exact "$_t"; then _r=0; else _r=1; fi ;;
+		fill) if tr '\n' ' ' < "$_t/ms-kapi.c" | grep -Eq 'funcsTable->setConsoleOwner[[:space:]]*=[[:space:]]*SetConsoleOwner;'; then _r=0; else _r=1; fi ;;
 		esac
 		[ "$_r" -ne 0 ] && ok "control: planted mismatch $1 breaks the pairing" || bad "control: planted mismatch $1 passed"
 	}
 	planted drm-without-tag nvidia-drm/nvidia-drm.c 's/NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT,/NV_VERSION_STRING,/' table
 	planted modeset-without-tag ms-kapi.c 's/NV_VERSION_STRING NVKMS_KAPI_CBSD_LAYOUT) != 0/NV_VERSION_STRING) != 0/' table
-	planted modeset-version-1 nvidia-modeset/nvidia-modeset-freebsd.c 's/MODULE_VERSION(nvidia_modeset, 2)/MODULE_VERSION(nvidia_modeset, 1)/' kld
-	planted drm-depends-on-1 nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 2, 2, 2/nvidia_modeset, 1, 1, 1/' kld
-	planted drm-depends-on-range nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 2, 2, 2/nvidia_modeset, 1, 2, 2/' kld
+	planted modeset-version-1 nvidia-modeset/nvidia-modeset-freebsd.c 's/MODULE_VERSION(nvidia_modeset, 3)/MODULE_VERSION(nvidia_modeset, 1)/' kld
+	planted modeset-version-2 nvidia-modeset/nvidia-modeset-freebsd.c 's/MODULE_VERSION(nvidia_modeset, 3)/MODULE_VERSION(nvidia_modeset, 2)/' kld
+	planted drm-depends-on-1 nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 3, 3, 3/nvidia_modeset, 1, 1, 1/' kld
+	planted drm-depends-on-range nvidia-drm/nvidia-drm-freebsd-lkpi.c 's/nvidia_modeset, 3, 3, 3/nvidia_modeset, 1, 3, 3/' kld
+	planted modeset-without-console-owner-fill ms-kapi.c '/funcsTable->setConsoleOwner = SetConsoleOwner;/d' fill
 fi
 
 # --- controls ------------------------------------------------------------
 if [ "$(members "$TMPD/pristine/ogkm.h" | grep -c '^getSystemMemoryHandleFromPageArray$')" -eq 0 ] \
-    && [ "$(members "$TMPD/pristine/tree.h" | grep -c '^getSystemMemoryHandleFromPageArray$')" -eq 0 ]; then
-	ok "control: the pristine copies lack the member (the test can see the defect)"
+    && [ "$(members "$TMPD/pristine/tree.h" | grep -c '^getSystemMemoryHandleFromPageArray$')" -eq 0 ] \
+    && [ "$(members "$TMPD/pristine/ogkm.h" | grep -c '^setConsoleOwner$')" -eq 0 ] \
+    && [ "$(members "$TMPD/pristine/tree.h" | grep -c '^setConsoleOwner$')" -eq 0 ]; then
+	ok "control: the pristine copies lack both added members (the test can see the defects)"
 else
-	bad "control: a pristine copy already has the member"
+	bad "control: a pristine copy already has an added member"
 fi
 
 # planted mismatch: a member inserted at the start of one copy.
@@ -279,6 +351,14 @@ if [ "$patched" -eq 1 ]; then
 	else
 		bad "control: a planted layout mismatch passed the probe"
 	fi
+fi
+
+cp -R "$repo/patches" "$TMPD/patches-missing-control"
+rm "$TMPD/patches-missing-control/patch-nvidia-drm_nvidia-drm.c"
+if require_hs_patches "$TMPD/patches-missing-control"; then
+	bad "control: removing patch-nvidia-drm_nvidia-drm.c was not detected"
+else
+	ok "control: removing patch-nvidia-drm_nvidia-drm.c fails the mandatory-patch check"
 fi
 
 echo "passed: $passed failed: $failed"

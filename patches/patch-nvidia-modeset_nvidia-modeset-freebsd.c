@@ -1,7 +1,6 @@
 --- nvidia-modeset/nvidia-modeset-freebsd.c.orig
 +++ nvidia-modeset/nvidia-modeset-freebsd.c
-@@ -54,6 +54,13 @@
-   #elif defined(NVCPU_X86_64)
+@@ -55,4 +55,11 @@
      #include "machine/../linux32/linux.h"
      #include "machine/../linux32/linux32_proto.h"
 +  #elif defined(NVCPU_AARCH64)
@@ -13,18 +12,15 @@
 +    #include <arm64/linux/linux_proto.h>
    #endif
    #include <compat/linux/linux_ioctl.h>
-   #include <compat/linux/linux_util.h>
-@@ -1456,17 +1463,25 @@
-                SI_SUB_DRIVERS,              /* subsystem */
+@@ -1457,5 +1464,6 @@
                 SI_ORDER_ANY);               /* initialization order */
  
 -MODULE_VERSION(nvidia_modeset, 1);
-+/* 2: the KAPI table has getSystemMemoryHandleFromPageArray (NVKMS_KAPI_CBSD_LAYOUT) */
-+MODULE_VERSION(nvidia_modeset, 2);
++/* 2: getSystemMemoryHandleFromPageArray; 3: setConsoleOwner */
++MODULE_VERSION(nvidia_modeset, 3);
  
  MODULE_DEPEND(nvidia_modeset,               /* module name */
-               nvidia,                       /* prerequisite module */
-               1, 1, 1);                     /* vmin, vpref, vmax */
+@@ -1464,8 +1472,15 @@
  
  #if defined(NVKMS_SUPPORT_LINUX_COMPAT)
 +#if defined(NVCPU_AARCH64)
@@ -41,4 +37,3 @@
 +#if defined(NVCPU_X86_64) || defined(NVCPU_AARCH64)
  MODULE_DEPEND(nvidia_modeset,               /* module name */
                linux_common,                 /* prerequisite module */
-               1, 1, 1);                     /* vmin, vpref, vmax */
