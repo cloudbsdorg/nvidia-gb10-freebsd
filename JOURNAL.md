@@ -76,3 +76,12 @@ Next: write header.
 
 ## 2026-11-22 (#2373 phase0 merge of the close-path commit 3d6bc31)
 - Merged agent/2373-nv-client-owner (3d6bc31) into the phase0 line for the v5 boot build. Only conflict: JOURNAL.md, resolved as union (both sides append-only).
+
+## 2026-11-22 Track #2417 (agent/2417-init-failure-safe, from a2e0546)
+- Commit 1 (init-failure path): red first (tests/open_dev_failure_test.sh on the old code: 5 FAIL, .round/red-commit1.txt), then patches/patch-zz-nvidia_init_failure_subr.c, patches/ogkm/patch-zz-2417 osinit patch, man/nvidia.4, README. Green 12/12; nvidia.ko builds (LLD) from the patched tree. Other suites on a fresh archive: same as the a2e0546 baseline (kmod_symbols stale default tree, prime_import_test D6 gb10_pageimport.h, render_uapi_layout 2 SKIP).
+- Next: review-and-record round 1, commit, push, Track comment, SHA to the orchestrator; then commit 2.
+- Round 1 receipt 6fa9774e (5 voices FINDINGS): tagged DEFECT quality.1-7 security.1-3 correctness.1-5 falsification.1-4 interface.1-6 (all ACCEPTED and fixed: any-pGpu use check, RmShutdownAdapter check, case 5 retry, poison sp, plants confined, tree under mktemp, man page remedy), NIT security.4, falsification.5 REJECTED with evidence (RmInitAdapter failure exits). Answers: scratchpad answers-2417-c1.txt. build-rmcore.sh run on patched sources compiled osinit.c.
+
+## 2026-11-22 (#2373 phase0: the #2417 init-failure fix, cherry-picked)
+- Orchestrator: the v6 boot build must carry the #2417 driver fix. Cherry-picked 525f43b (agent/2417-init-failure-safe, based on a2e0546 of build-host) onto the phase0 line, not merged: its patch-zz-nvidia_init_failure_subr.c, patches/ogkm/patch-zz-2417-...osinit.c, man/nvidia.4, tests/open_dev_failure_test.sh and tests/data/open_dev_harness.c, README and JOURNAL hunks. Only conflict: JOURNAL.md (union).
+- tests/open_dev_failure_test.sh on the result: 23 passed, 0 failed. Fresh archive build (work-2373-v6, base LLD 21.1.8): prepare-tree applies all patches, nvidia.ko 977051971cf2ad8e5ad844035a05565d8aed2d5d086916286c55e16ecd1d3ece, no rm_disable_adapter in the failed: path, osinit guard compiled in.

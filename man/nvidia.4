@@ -1,0 +1,61 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 22, 2026
+.Dt NVIDIA 4
+.Os
+.Sh NAME
+.Nm nvidia
+.Nd NVIDIA GPU driver (kernel module nvidia.ko)
+.Sh SYNOPSIS
+To load the driver as a module at boot time, place the following lines in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+nvidia_load="YES"
+hw.nvidia.registry.EnableGpuFirmware="1"
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+driver attaches to NVIDIA GPUs and creates
+.Pa /dev/nvidiactl
+and one
+.Pa /dev/nvidia Ns Ar N
+per GPU.
+The attach, which happens when the module loads, only claims the device.
+The GPU is initialised, and its GSP (GPU System Processor) firmware is
+started, on the first open of
+.Pa /dev/nvidia Ns Ar N ,
+and it is shut down again when the last open closes.
+.Sh LOADER TUNABLES
+.Bl -tag -width indent
+.It Va hw.nvidia.registry.EnableGpuFirmware
+Set to 1 to run the GPU on the GSP firmware, which every supported GPU needs.
+The driver reads the
+.Va hw.nvidia.registry.*
+variables from the kernel environment when the module loads.
+.El
+.Sh DIAGNOSTICS
+.Bl -tag -width indent
+.It Dq nvidia0: NVRM: rm_init_adapter() failed!
+The first open of the GPU failed in the resource manager, and the open returns
+.Er EIO .
+The
+.Dq RmInitAdapter failed!
+message just before it gives the status.
+A common cause is that the GSP firmware image is not available to the opener:
+load the firmware module
+.Pa nvidia_gsp_ga10x_fw
+(as root, before
+.Nm )
+or open the GPU once as root.
+The driver frees the per-device stacks and releases its lock, so no module
+reload is needed before the next open.
+.El
+.Sh SEE ALSO
+.Xr kldload 8 ,
+.Xr firmware 9
+.Sh HISTORY
+This is the CloudBSD port of NVIDIA's open
+.Fx
+driver for arm64.
