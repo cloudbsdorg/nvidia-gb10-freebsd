@@ -113,6 +113,7 @@ hmutant n1-fail-open 's/\*unlisted = (e == NULL || e->tomb);/*unlisted = (e == N
 hmutant tomb-eperm 's/return (e == NULL || e->tomb || e->owner == who);/return (e == NULL || e->owner == who);/'
 hmutant tombstone-never 's/^		e->tomb = 1;$/		e->tomb = 0;/'
 hmutant tombstone-collides 's/		if (old->tomb) {/		if (0 \&\& old->tomb) {/'
+hmutant close-drops-marker 's/ \&\& nvco_remove_entry(t, \&t->e\[i\]))$/ \&\& (nvco_drop_entry(t, \&t->e[i]), 1))/'
 hmutant grants-ignore-freeing 's/ \&\& e->freeing == 0);/);/'
 
 # pins on the call sites in the handler and the close path: comment-stripped, no disabled forms,

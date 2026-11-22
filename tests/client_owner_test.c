@@ -717,6 +717,103 @@ test_close_and_growth(void)
 	}
 }
 
+/*
+ * close-path: the owner of a converted record closes while the free that left the marker is still in flight.
+ * Names: H is the handle CA + 0x90.  L is a control file the RM treats as A1 (linked to it by NV_ESC_REGISTER_FD, so
+ * its clientOSInfo is A1's); A1 = A_FILE, A2 = B_FILE, X = C_FILE (the victim).
+ *   1 L frees the unlisted H: a marker; its RM call is still pending
+ *   2 A2 allocates H: the record converts the marker
+ *   3 A2 closes: the marker must stay (dropping it is the defect)
+ *   4 A1 allocates H: its record converts the marker again
+ *   5 A1 asks for a hold on H: refused while L's free runs
+ *   6 L's RM call took A1's client and returned: still a marker until the free ends
+ *   7 the free's end takes the record
+ *   8 X (handed H by the RM) records late: refused; no file owns H
+ * A closing owner with several entries (an ordinary one, a held one, a converted one with a free in flight) leaves
+ * none attributed to it, in any order.
+ */
+static void
+test_close_of_converted_owner(void)
+{
+	struct nvco_alloc64_params a64;
+	struct nvco_free_params f = { CA + 0x90, CA + 0x90, CA + 0x90, 0 };
+	struct nvco_entry *e;
+	uint64_t tk, k2, m, mx;
+	int ul, u2;
+	size_t i;
+	const void *L = (const void *)0x4000;
+
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CA + 0x90;
+	a64.hClass = NVCO_CLASS_ROOT;
+	fresh();
+	CHECK(nvco_free_permitted(&t, L, CA + 0x90), "close-path 1: L's free of the unlisted handle is permitted");
+	tk = nvco_begin_free(&t, CA + 0x90, &ul);
+	m = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m) == 0, "close-path 2: A2's record converts the marker");
+	nvco_remove_owner(&t, B_FILE);
+	e = nvco_find(&t, CA + 0x90);
+	CHECK(e != NULL && e->tomb && e->owner == NULL && e->freeing == 1, "close-path 3: the owner's close leaves the marker of the free in flight");
+	m = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m) == 0, "close-path 4: A1's record converts the marker again");
+	mx = nvco_alloc_mark(&t);
+	CHECK(!nvco_hold(&t, A_FILE, A_FP, CA + 0x90), "close-path 5: no hold on H while L's free runs");
+	CHECK(nvco_after_ioctl_marked(&t, L, NVCO_ESC_RM_FREE, sizeof(f), &f, 0) == 0, "close-path 6: L's RM free is recorded");
+	e = nvco_find(&t, CA + 0x90);
+	CHECK(e != NULL && e->freeing == 1 && !nvco_owns(&t, A_FILE, CA + 0x90), "close-path 6: and the entry is still covered by the free");
+	nvco_end_free(&t, CA + 0x90, tk, ul, 1);
+	CHECK(nvco_find(&t, CA + 0x90) == NULL, "close-path 7: the free's end takes the record");
+	CHECK(nvco_after_ioctl_marked(&t, C_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mx) == -1, "close-path 8: X's late record is refused");
+	CHECK(!nvco_owns(&t, A_FILE, CA + 0x90) && !nvco_owns(&t, B_FILE, CA + 0x90) && !nvco_owns(&t, C_FILE, CA + 0x90)
+	    && !nvco_owns(&t, L, CA + 0x90), "close-path 8: no file owns H afterwards");
+
+	/* no free in flight any more: the converted record became ordinary and a close drops it */
+	fresh();
+	tk = nvco_begin_free(&t, CA + 0x91, &ul);
+	a64.hObjectNew = CA + 0x91;
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, nvco_alloc_mark(&t)) == 0, "close-path, no free in flight: B's record converts the marker");
+	nvco_end_free(&t, CA + 0x91, tk, ul, 0);
+	CHECK(nvco_find(&t, CA + 0x91) != NULL && nvco_find(&t, CA + 0x91)->conv == 0, "close-path, no free in flight: the refused free made the record ordinary");
+	nvco_remove_owner(&t, B_FILE);
+	CHECK(nvco_find(&t, CA + 0x91) == NULL, "close-path, no free in flight: an ordinary record of a closing owner is dropped");
+
+	/* a held entry of a closing owner is revoked, never dropped and never left attributed (the close path itself) */
+	fresh();
+	a64.hObjectNew = CA + 0x92;
+	CHECK(nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64) == 0 && nvco_hold(&t, B_FILE, B_FP, CA + 0x92),
+	    "close-path, held: B owns a client and holds it");
+	nvco_remove_owner(&t, B_FILE);
+	e = nvco_find(&t, CA + 0x92);
+	CHECK(e != NULL && e->revoked && e->refs == 1 && !nvco_owns(&t, B_FILE, CA + 0x92), "close-path, held: the close revokes the held entry");
+	CHECK(nvco_unhold(&t, B_FP, CA + 0x92), "close-path, held: the holder still finds its entry");
+	CHECK(nvco_find(&t, CA + 0x92) == NULL, "close-path, held: the last release drops the revoked entry");
+
+	/* a held converted record whose free is in flight: grants are refused while it runs, so a hold cannot exist
+	 * there; the close leaves a marker, and the entries before and after it are all dealt with (the swap-in path) */
+	fresh();
+	tk = nvco_begin_free(&t, CA + 0x93, &ul);
+	k2 = nvco_begin_free(&t, CA + 0x93, &u2);
+	for (i = 0; i < 3; i++) {
+		a64.hObjectNew = CA + 0xA0 + (uint32_t)i;
+		nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64);
+	}
+	a64.hObjectNew = CA + 0x93;
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, nvco_alloc_mark(&t)) == 0, "close-path, many: B's record converts a marker of two frees");
+	for (i = 0; i < 3; i++) {
+		a64.hObjectNew = CA + 0xB0 + (uint32_t)i;
+		nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64);
+	}
+	nvco_remove_owner(&t, B_FILE);
+	for (i = 0; i < t.n; i++)
+		CHECK(t.e[i].owner != B_FILE, "close-path, many: entry %zu (handle 0x%x) is still attributed to the closed file", i, t.e[i].handle);
+	e = nvco_find(&t, CA + 0x93);
+	CHECK(e != NULL && e->tomb && e->freeing == 2, "close-path, many: the converted record in the middle is a marker of both frees");
+	CHECK(nvco_find(&t, CA + 0xA1) == NULL && nvco_find(&t, CA + 0xB2) == NULL, "close-path, many: the ordinary records around it are dropped");
+	nvco_end_free(&t, CA + 0x93, tk, ul, 1);
+	nvco_end_free(&t, CA + 0x93, k2, u2, 0);
+	CHECK(nvco_find(&t, CA + 0x93) == NULL, "close-path, many: the marker goes with the last free");
+}
+
 int
 main(void)
 {
@@ -730,6 +827,7 @@ main(void)
 	test_second_free_and_eviction();
 	test_conversion_races();
 	test_close_and_growth();
+	test_close_of_converted_owner();
 	nvco_destroy(&t);
 
 	if (fails != 0)

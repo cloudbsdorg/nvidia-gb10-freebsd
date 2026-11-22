@@ -69,3 +69,10 @@ Next: write header.
 
 ## 2026-11-21T12:10:00Z (#2373 phase0 re-merge after #2398 rewrite)
 - Merged agent/2373-nv-client-owner (925525d) into agent/2373-nv-client-owner-phase0. Only conflict: JOURNAL.md, resolved as union (both sides append-only). Next: boot-build proof on fresh archive, gate.
+## 2026-11-22 (#2373 close-path commit, new commit on ea27f0c, own 2-round budget)
+- Orchestrator brief: route the nvco_remove_owner loop through nvco_remove_handle (the merge reviewer's proposed patch), model row (close-path 7-step), glue scenario scenario_close_path, plants close-ignored/remove-owner-keeps-held re-anchored plus new close-drops-marker (model and glue), README wording. Red on ea27f0c: model row 3 FAILs, glue scenario FAIL, close_path.c rc=1; green after: rc=0, client_owner_test.sh 81 ok rc=0, glue 44 ok rc=0, close_path.c rc=0.
+- Gate round 1 running. Next: answers file, round 2, commit, push, Track #2373 and WP #2406.
+- Round 1 receipt fba825ec5facfc74517f8f2e7c694f07b0ec483283c3e8aab87c673729e958a2 (5 voices FINDINGS). Answers in .round/tmp/answers.txt. Fixed: nvco_remove_entry (acts on the entry, no second lookup), held/many model rows, step labels, scenario ran-flag, README wrapped, pins on flattened text.
+
+## 2026-11-22 (#2373 phase0 merge of the close-path commit 3d6bc31)
+- Merged agent/2373-nv-client-owner (3d6bc31) into the phase0 line for the v5 boot build. Only conflict: JOURNAL.md, resolved as union (both sides append-only).

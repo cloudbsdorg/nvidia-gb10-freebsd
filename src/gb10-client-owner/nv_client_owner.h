@@ -159,23 +159,38 @@ nvco_revert_to_tomb(struct nvco_entry *e)
 }
 
 /*
- * Take the handle out of the table.  An entry with holds in flight stays,
+ * Take a client entry out of the table.  An entry with holds in flight stays,
  * revoked (nobody owns it any more), until the last hold ends: the holders
- * must still find their entry to release it.
+ * must still find their entry to release it.  Returns 1 only when the slot
+ * was vacated (the entry was dropped and the last entry now sits in its
+ * place); 0 when the entry stays where it is (a marker, revoked, or turned
+ * back into a marker).
  */
+static inline int
+nvco_remove_entry(struct nvco_table *t, struct nvco_entry *e)
+{
+	if (e->tomb)
+		return (0);	/* a tombstone is not a client: its free removes it */
+	if (e->refs != 0) {
+		e->revoked = 1;
+		return (0);
+	}
+	if (e->conv && e->freeing != 0) {
+		nvco_revert_to_tomb(e);		/* frees on it are still in flight: the marker stays until the last ends */
+		return (0);
+	}
+	nvco_drop_entry(t, e);
+	return (1);
+}
+
+/* Take the handle out of the table (see nvco_remove_entry). */
 static inline void
 nvco_remove_handle(struct nvco_table *t, uint32_t handle)
 {
 	struct nvco_entry *e = nvco_find(t, handle);
 
-	if (e == NULL || e->tomb)
-		return;		/* a tombstone is not a client: its free removes it */
-	if (e->refs != 0)
-		e->revoked = 1;
-	else if (e->conv && e->freeing != 0)
-		nvco_revert_to_tomb(e);		/* frees on it are still in flight: the marker stays until the last ends */
-	else
-		nvco_drop_entry(t, e);
+	if (e != NULL)
+		(void)nvco_remove_entry(t, e);
 }
 
 /* a fresh generation: never 0 (0 means "not listed" in a token), 64 bits so that it does not wrap */
@@ -274,7 +289,11 @@ nvco_add(struct nvco_table *t, uint32_t handle, const void *owner)
 /*
  * forget every handle a closing file owns.  A held entry should not be here
  * (the hold keeps the file open); if one is, it is revoked, never left
- * attributed to a file that is going away.
+ * attributed to a file that is going away.  Every entry goes through
+ * nvco_remove_entry: a converted record whose free is still in flight is
+ * turned back into its marker, never dropped (dropping it would let the next
+ * record of the handle land as an ordinary entry while that free can still
+ * take the RM's new client).
  */
 static inline void
 nvco_remove_owner(struct nvco_table *t, const void *owner)
@@ -282,13 +301,10 @@ nvco_remove_owner(struct nvco_table *t, const void *owner)
 	size_t i = 0;
 
 	while (i < t->n) {
-		if (t->e[i].owner == owner && t->e[i].refs == 0) {
-			nvco_drop_entry(t, &t->e[i]);
-		} else {
-			if (t->e[i].owner == owner)
-				t->e[i].revoked = 1;
-			i++;
-		}
+		/* one decision per entry, on the entry itself: a dropped entry is replaced by the last one, which is examined next */
+		if (t->e[i].owner == owner && !t->e[i].tomb && nvco_remove_entry(t, &t->e[i]))
+			continue;
+		i++;
 	}
 }
 

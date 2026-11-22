@@ -71,7 +71,7 @@ plant() {	# plant <name> <sed expression>
 }
 plant owner-ignored 's/e->owner == owner \&\& !e->revoked/1 \&\& !e->revoked/'
 plant free-ignored 's/nvco_remove_handle(t, f->hObjectOld);/(void)0;/'
-plant close-ignored 's/if (t->e\[i\].owner == owner \&\& t->e\[i\].refs == 0)/if (t->e[i].owner == owner \&\& t->e[i].refs == 0 \&\& owner == NULL)/'
+plant close-ignored 's/if (t->e\[i\].owner == owner \&\& !t->e\[i\].tomb \&\& nvco_remove_entry/if (t->e[i].owner == owner \&\& !t->e[i].tomb \&\& owner == NULL \&\& nvco_remove_entry/'
 plant any-class 's/return (hClass == NVCO_CLASS_ROOT || hClass == NVCO_CLASS_ROOT_NON_PRIV ||/return ((hClass | 1u) != 0 || hClass == NVCO_CLASS_ROOT_NON_PRIV ||/'
 plant client-op-any-free 's/^\t\treturn (ok);/\t\treturn (1);/'
 plant alloc-object-undecoded 's/nvco_is_root_class(((const struct nvco_alloc_object_params \*)args)->hClass));/0);/'
@@ -79,7 +79,7 @@ plant hold-ignores-owner 's/if (!nvco_grants(e, owner) || file == NULL)/if (e ==
 plant revoked-ignored 's/ \&\& !e->revoked//'
 plant freeing-ignored 's/ \&\& e->freeing == 0//'
 plant unhold-file-ignored 's/e->file != file || e->refs == 0/e->refs == 0/'
-plant evict-removes-held 's/if (e->refs != 0)$/if (0)/'
+plant evict-removes-held 's/^\tif (e->refs != 0) {$/\tif (0) {/'
 plant begin-free-noop 's/e->freeing++;/e->freeing += 0;/'
 plant end-free-ignores-token 's/e->fgen != token || //'
 plant gen-never-new 's/e->gen = nvco_new_gen(t);/e->gen = 1;/'
@@ -88,14 +88,17 @@ plant free-not-logged 's/^		t->frees\[seq % NVCO_FREELOG\].handle = handle;/		(v
 plant tombstone-never 's/^		e->tomb = 1;$/		e->tomb = 0;/'
 plant turnback-not-tomb 's/^	e->tomb = 1;$/	e->tomb = 0;/'
 plant fgen-narrowed 's/^\tuint64_t\tfgen;/\tuint32_t\tfgen;/'
-plant revert-drops-marker 's/else if (e->conv \&\& e->freeing != 0)/else if (0)/'
+plant revert-drops-marker 's/if (e->conv \&\& e->freeing != 0) {/if (0) {/'
 plant log-ignores-entry-state 's/(unlisted || (e != NULL \&\& token != 0 \&\& e->fgen == token \&\& e->tomb))/unlisted/'
 plant junk-frees-logged 's/if (rm_freed \&\& (unlisted ||/if ((rm_freed || unlisted) \&\& (unlisted ||/'
 plant stale-ignores-overflow 's/if (t->seq - mark >= NVCO_FREELOG)/if (0)/'
 plant stale-ignores-handle 's/t->frees\[i\].seq > mark \&\& t->frees\[i\].handle == handle/t->frees[i].seq > mark \&\& t->frees[i].handle == handle + 1/'
 plant stranger-permitted 's/return (e == NULL || e->tomb || e->owner == who);/return (e == NULL || e->tomb || e->owner == who || e != NULL);/'
 plant marked-ignores-mark 's/nvco_alloc_stale(t, h, mark)/nvco_alloc_stale(t, h, mark | ~mark)/'
-plant remove-owner-keeps-held 's/\t\t\tif (t->e\[i\].owner == owner)$/\t\t\tif (0)/'
+plant remove-owner-keeps-held '/^nvco_remove_entry/,/^}/s/^\t\te->revoked = 1;$/\t\t(void)0;/'
+plant close-drops-marker 's/ \&\& nvco_remove_entry(t, \&t->e\[i\]))$/ \&\& (nvco_drop_entry(t, \&t->e[i]), 1))/'
+plant close-skips-held 's/if (t->e\[i\].owner == owner \&\& !t->e\[i\].tomb \&\& nvco_remove_entry/if (t->e[i].owner == owner \&\& !t->e[i].tomb \&\& t->e[i].refs == 0 \&\& nvco_remove_entry/'
+plant close-skips-after-drop 's/^\t\t\tcontinue;$/\t\t\t(void)0;/'
 plant second-file-shares-hold 's/if (e->refs != 0 \&\& e->file != file)/if (0)/'
 plant collision-moves-owner 's/if (old->owner != owner) {/if (0) {/'
 plant end-free-resets 's/e->freeing--;/e->freeing = 0;/'
@@ -139,6 +142,9 @@ if [ -n "$freelog" ] && grep -qF "the last $freelog, \`NVCO_FREELOG\`" "$REPO/RE
 else
 	bad "the README log size does not match NVCO_FREELOG ($freelog)"
 fi
+tr '\n' ' ' < "$REPO/README.md" | tr -s ' ' > "$T/readme.flat"	# the pins below survive a reflow
+need "$T/readme.flat" 'the entry goes back to a marker instead of being dropped' "the README says a closing owner's entry goes back to a marker"
+need "$T/readme.flat" 'Default client-handle validation does not prevent this' "the README says close-path is reachable with the default validation"
 need "$REPO/README.md" 'nvcobusy' "the README names the wait channel of a waiting free"
 need "$REPO/README.md" 'fail until' "the README says what nvidia-uvm sees while a free covers the record"
 need "$REPO/README.md" 'began before such a free ended' "the README says which records the free log refuses"
