@@ -62,12 +62,16 @@ struct t_entry {
 	int required;
 };
 
-/* The table lines, one per test.  A macro rather than a braced initializer:
- * PMD CPD (ignoring identifiers and literals) reads the braced lines as the
- * same tokens as the other { "name", value } tables in core_test.c. */
-#define T_TEST(group, fn)	{ group, fn, 0 },
-/* why says what depends on the entry; it is documentation only. */
-#define T_NEEDED(group, fn, why) { group, fn, 1 },
+/*
+ * A test list is an X-macro: LIST(X, N) names every entry as X(group, fn),
+ * or N(group, fn, why) for a required one (why says what depends on the
+ * entry; it is documentation only).  T_TABLE builds the one table t_run
+ * reads from such a list, so no test file spells table rows itself.
+ */
+#define T_ROW(group, fn)	{ group, fn, 0 },
+#define T_ROW_REQUIRED(group, fn, why) { group, fn, 1 },
+#define T_TABLE(name, LIST)						\
+	static const struct t_entry name[] = { LIST(T_ROW, T_ROW_REQUIRED) }
 
 static inline int
 t_has_group(const struct t_entry *tab, size_t n, const char *name)

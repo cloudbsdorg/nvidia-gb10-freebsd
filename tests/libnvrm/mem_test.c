@@ -2394,41 +2394,42 @@ test_fork_generation(void)
 	expect_clean("fork generation");
 }
 
-static const struct t_entry tests[] = {
-	T_TEST("va", test_va_basic)
-	T_TEST("va", test_va_fixed_and_free)
-	T_TEST("va", test_va_edges)
-	T_TEST("va", test_va_oom)
-	T_TEST("va", test_va_shadow)
-	T_TEST("attr", test_attr_rule)
-	T_TEST("client", test_client_open)
-	T_TEST("client", test_client_independent)
-	T_TEST("reserve", test_reserve)
-	T_TEST("alloc", test_alloc)
-	T_TEST("alloc", test_register_user)
-	T_TEST("gpu", test_map_gpu)
-	T_TEST("gpu", test_gpu_model)
-	T_TEST("sparse", test_sparse)
-	T_TEST("cpu", test_cpu_map)
-	T_TEST("cpu", test_device_attr)
-	T_TEST("readback", test_readback)
-	T_TEST("loop", test_loop)
-	T_TEST("share", test_share)
-	T_TEST("share", test_fake_device)
-	T_TEST("va", test_va_gaps)
-	T_TEST("gaps", test_gaps)
-	T_TEST("release", test_release_failures)
-	T_TEST("alloc", test_default_page)
-	T_TEST("share", test_import_unexported)
-	T_TEST("client", test_spare_rights)
-	T_TEST("close-sweep", test_close_frees_mem)
-	T_TEST("fork", test_fork_child)
-	T_TEST("fork", test_fork_user_pages)
-	T_TEST("fork", test_orphan_count)
-	T_TEST("share", test_same_client_import)
-	T_TEST("share", test_user_pages_twice)
-	T_TEST("fork", test_fork_generation)
-};
+#define MEM_TESTS(X, N)						\
+	X("va", test_va_basic) \
+	X("va", test_va_fixed_and_free) \
+	X("va", test_va_edges) \
+	X("va", test_va_oom) \
+	X("va", test_va_shadow) \
+	X("attr", test_attr_rule) \
+	X("client", test_client_open) \
+	X("client", test_client_independent) \
+	X("reserve", test_reserve) \
+	X("alloc", test_alloc) \
+	X("alloc", test_register_user) \
+	X("gpu", test_map_gpu) \
+	X("gpu", test_gpu_model) \
+	X("sparse", test_sparse) \
+	X("cpu", test_cpu_map) \
+	X("cpu", test_device_attr) \
+	X("readback", test_readback) \
+	X("loop", test_loop) \
+	X("share", test_share) \
+	X("share", test_fake_device) \
+	X("va", test_va_gaps) \
+	X("gaps", test_gaps) \
+	X("release", test_release_failures) \
+	X("alloc", test_default_page) \
+	X("share", test_import_unexported) \
+	X("client", test_spare_rights) \
+	X("close-sweep", test_close_frees_mem) \
+	X("fork", test_fork_child) \
+	X("fork", test_fork_user_pages) \
+	X("fork", test_orphan_count) \
+	X("share", test_same_client_import) \
+	X("share", test_user_pages_twice) \
+	X("fork", test_fork_generation)
+
+T_TABLE(tests, MEM_TESTS);
 
 int
 main(void)

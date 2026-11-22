@@ -272,6 +272,12 @@ client allowed to open `/dev/nvidia-modeset` may grab it; with one, the same cli
 it, and the console yields. Who may open the node at all is #2375's seat-daemon rule, which
 this change neither needs nor alters.
 
+A `setConsoleOwner` call that fails logs the reason at warning level in every build, as
+`[kapi][GPU Id 0x<id>] NVKMS SetConsoleOwner: ...`. It goes through the `nvKmsKapiLogDevice`
+macro that the patch adds to `nvkms-kapi-internal.h`; the pinned NVIDIA macro
+`nvKmsKapiLogDeviceDebug` prints only in DEBUG builds, so it would hide the reason in a
+release build.
+
 ### 6.2 vt(4) switches
 
 X and Wayland compositors already release NVKMS ownership when their VT is switched away

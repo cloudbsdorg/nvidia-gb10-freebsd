@@ -52,10 +52,12 @@
 #include <ctrl/ctrl0000/ctrl0000unix.h>
 #include <ctrl/ctrl0041.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
+#include <ctrl/ctrl2080/ctrl2080bios.h>
 #include <ctrl/ctrl2080/ctrl2080bus.h>
 #include <ctrl/ctrl2080/ctrl2080fb.h>
 #include <ctrl/ctrl2080/ctrl2080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080gr.h>
+#include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_rm_priv.h"	/* struct nvrm_gpu: the card-list test below */
@@ -535,6 +537,15 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 		if (mine) {
 			nv_ioctl_rm_api_version_t *v = arg;
 
+			if (v->cmd == NV_RM_API_VERSION_CMD_QUERY) {
+				/* the RM API version query of the session
+				 * (nvrm_rm_api_version(3)): not the check */
+				v->reply = NV_RM_API_VERSION_REPLY_RECOGNIZED;
+				snprintf(v->versionString,
+				    sizeof(v->versionString), "%s",
+				    NVRM_RM_VERSION);
+				return (0);
+			}
 			if (v->cmd != NV_RM_API_VERSION_CMD_STRICT ||
 			    strcmp(v->versionString, NVRM_RM_VERSION) != 0)
 				bad("session version check");

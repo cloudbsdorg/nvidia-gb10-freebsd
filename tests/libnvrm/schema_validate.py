@@ -5,7 +5,7 @@
 # schema_validate.py - validate JSON against the subset of JSON Schema that
 # the libnvrm schema uses (draft 2020-12 keywords: $ref into #/$defs, oneOf,
 # type, const, enum, required, properties, additionalProperties: false, items,
-# prefixItems, minimum, minItems, maxItems; a $ref may carry sibling keywords,
+# prefixItems, minimum, maximum, minItems, maxItems; a $ref may carry sibling keywords,
 # which apply as well, as in draft 2020-12).  An unknown keyword is an error, so the
 # schema cannot start using something this validator silently ignores.
 #
@@ -16,8 +16,8 @@ import sys
 
 KNOWN = {"$schema", "$id", "title", "description", "$ref", "$defs", "oneOf",
          "type", "const", "enum", "required", "properties",
-         "additionalProperties", "items", "prefixItems", "minimum", "minItems",
-         "maxItems"}
+         "additionalProperties", "items", "prefixItems", "minimum", "maximum",
+         "minItems", "maxItems"}
 
 
 def is_type(v, t):
@@ -56,6 +56,8 @@ def check_scalar(schema, v, path):
         errs.append("%s: %r not in the enum" % (path, v))
     if "minimum" in schema and isinstance(v, int) and v < schema["minimum"]:
         errs.append("%s: below the minimum" % path)
+    if "maximum" in schema and isinstance(v, int) and v > schema["maximum"]:
+        errs.append("%s: above the maximum" % path)
     return errs
 
 

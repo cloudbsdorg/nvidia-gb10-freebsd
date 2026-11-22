@@ -29,6 +29,7 @@
 #include "nvrm_fake.h"
 #include "nvrm_rm_sys.h"
 #include "t.h"
+#include "t_version.h"
 
 #include "fault_calloc.h"
 
@@ -276,89 +277,159 @@ test_enumerate(void)
 /* ---- the device model -------------------------------------------------- */
 
 /* Every source label is pinned: which layer supplied each value.  A new field
- * needs a row here, so its label is a decision, not a default. */
+ * needs a name in one group, so its label is a decision, not a default. */
+typedef struct source_group {
+	int source;
+	const char *const *names;
+	size_t count;
+} source_group;
+
+#define SOURCE_COUNT(a)	(sizeof(a) / sizeof((a)[0]))
+#define SOURCE_GROUP(s, n)	{ (s), (n), SOURCE_COUNT(n) }
+
+static const char *const field_os[] = {
+	"pci_domain", "pci_bus", "pci_slot", "pci_function",
+	"pci_vendor", "pci_device",
+};
+static const char *const field_rm[] = {
+	"pci_subsystem_vendor", "pci_subsystem_device", "pci_revision",
+	"rm_gpu_id", "uuid", "architecture", "implementation",
+	"sm_version_major", "sm_version_minor", "rm_sm_version",
+	"gpc_count", "tpc_count", "classes", "vram_size", "bar1_size",
+	"max_page_size", "numa_node", "vbios", "gsp_firmware",
+};
+static const char *const field_derived[] = {
+	"chip_id", "compute_capability_major", "compute_capability_minor",
+	"sm_count",
+};
+static const char *const field_family[] = {
+	"cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "family",
+	"page_sizes",
+};
+static const source_group field_sources[] = {
+	SOURCE_GROUP(NVRM_S_OS, field_os),
+	SOURCE_GROUP(NVRM_S_RM, field_rm),
+	SOURCE_GROUP(NVRM_S_DERIVED, field_derived),
+	SOURCE_GROUP(NVRM_S_FAMILY, field_family),
+};
+static const char *const cap_rm[] = {
+	"dmabuf_export", "ats", "self_hosted", "display_enabled", "soc",
+	"coherent_gpu_memory",
+};
+static const char *const cap_os[] = { "os_device_wc_active" };
+static const source_group cap_sources[] = {
+	SOURCE_GROUP(NVRM_S_RM, cap_rm),
+	SOURCE_GROUP(NVRM_S_OS, cap_os),
+};
+
+static unsigned
+check_source_label(const char *name, int source, const source_group *groups,
+    size_t ngroups)
+{
+	unsigned hits = 0;
+	size_t g, n;
+
+	for (g = 0; g < ngroups; g++) {
+		for (n = 0; n < groups[g].count; n++) {
+			if (strcmp(groups[g].names[n], name) != 0)
+				continue;
+			hits++;
+			if (groups[g].source != source)
+				printf("  %s: source %s, want %s\n", name,
+				    nvrm_source_name(source),
+				    nvrm_source_name(groups[g].source));
+			CHECK_EQ(source, groups[g].source);
+		}
+	}
+	CHECK_EQ(hits, 1);	/* a value with no pinned label */
+	return (hits);
+}
+
 static void
 check_source_labels(const nvrm_device_info *i)
 {
-	static const struct { const char *name; int src; } want[] = {
-		{ "pci_domain", NVRM_S_OS }, { "pci_bus", NVRM_S_OS },
-		{ "pci_slot", NVRM_S_OS }, { "pci_function", NVRM_S_OS },
-		{ "pci_vendor", NVRM_S_OS }, { "pci_device", NVRM_S_OS },
-		{ "pci_subsystem_vendor", NVRM_S_RM },
-		{ "pci_subsystem_device", NVRM_S_RM },
-		{ "pci_revision", NVRM_S_RM },
-		{ "rm_gpu_id", NVRM_S_RM }, { "uuid", NVRM_S_RM },
-		{ "architecture", NVRM_S_RM },
-		{ "implementation", NVRM_S_RM },
-		{ "chip_id", NVRM_S_DERIVED },
-		{ "sm_version_major", NVRM_S_RM },
-		{ "sm_version_minor", NVRM_S_RM },
-		{ "gpc_count", NVRM_S_RM }, { "tpc_count", NVRM_S_RM },
-		{ "sm_count", NVRM_S_DERIVED },
-		{ "cls_gpfifo", NVRM_S_FAMILY },
-		{ "cls_compute", NVRM_S_FAMILY },
-		{ "cls_eng3d", NVRM_S_FAMILY },
-		{ "cls_copy", NVRM_S_FAMILY },
-		{ "classes", NVRM_S_RM }, { "family", NVRM_S_FAMILY },
-		{ "vram_size", NVRM_S_RM }, { "bar1_size", NVRM_S_RM },
-		{ "max_page_size", NVRM_S_RM },
-		{ "numa_node", NVRM_S_RM },
-		{ "page_sizes", NVRM_S_FAMILY },
-	};
-	unsigned f, w, hit, matched = 0;
-	int src = -1;
+	unsigned f, c, matched = 0, rows = 0;
 
 	for (f = 0; f < nvrm_nfields; f++) {
 		const char *b = (const char *)i + nvrm_fields[f].offset;
-
-		src = nvrm_fields[f].kind == NVRM_K_U64 ?
+		int src = nvrm_fields[f].kind == NVRM_K_U64 ?
 		    ((const nvrm_u64 *)b)->source :
 		    nvrm_fields[f].kind == NVRM_K_STR ?
 		    ((const nvrm_str *)b)->source :
-		    ((const nvrm_list *)b)->source;
-		for (hit = 0, w = 0; w < sizeof(want) / sizeof(want[0]);
-		    w++) {
-			if (strcmp(want[w].name, nvrm_fields[f].name))
-				continue;
-			hit++;
-			if (want[w].src != src)
-				printf("  %s: source %s, want %s\n",
-				    nvrm_fields[f].name,
-				    nvrm_source_name(src),
-				    nvrm_source_name(want[w].src));
-			CHECK_EQ(src, want[w].src);
-		}
-		CHECK_EQ(hit, 1);	/* a field with no pinned label */
-		matched += hit;
+		    nvrm_fields[f].kind == NVRM_K_LIST ?
+		    ((const nvrm_list *)b)->source :
+		    ((const nvrm_version_field *)b)->source;
+
+		matched += check_source_label(nvrm_fields[f].name, src,
+		    field_sources, SOURCE_COUNT(field_sources));
 	}
 	CHECK_EQ(matched, nvrm_nfields);
-	CHECK_EQ(sizeof(want) / sizeof(want[0]), nvrm_nfields);
-	/* the capability labels, keyed by name too: one row per flag, so an
-	 * appended flag needs a row (and cannot shift the others' labels) */
-	{
-		static const struct { const char *name; int src; } capw[] = {
-			{ "dmabuf_export", NVRM_S_RM }, { "ats", NVRM_S_RM },
-			{ "self_hosted", NVRM_S_RM },
-			{ "display_enabled", NVRM_S_RM }, { "soc", NVRM_S_RM },
-			{ "coherent_gpu_memory", NVRM_S_RM },
-			{ "os_device_wc_active", NVRM_S_OS },
-		};
-		unsigned c, k, found, rows = 0;
+	CHECK_EQ(SOURCE_COUNT(field_os) + SOURCE_COUNT(field_rm) +
+	    SOURCE_COUNT(field_derived) + SOURCE_COUNT(field_family),
+	    nvrm_nfields);
+	/* Capability names, not positions, pin the labels of appended flags. */
+	for (c = 0; c < NVRM_NCAPS; c++)
+		rows += check_source_label(nvrm_cap_name(c), i->caps[c].source,
+		    cap_sources, SOURCE_COUNT(cap_sources));
+	CHECK_EQ(rows, NVRM_NCAPS);
+	CHECK_EQ(SOURCE_COUNT(cap_rm) + SOURCE_COUNT(cap_os), NVRM_NCAPS);
+}
 
-		for (c = 0; c < NVRM_NCAPS; c++) {
-			for (found = 0, k = 0; k < sizeof(capw) / sizeof(capw[0]);
-			    k++) {
-				if (strcmp(capw[k].name, nvrm_cap_name(c)))
-					continue;
-				found++;
-				CHECK_EQ(i->caps[c].source, capw[k].src);
-			}
-			CHECK_EQ(found, 1);	/* a flag with no pinned label */
-			rows += found;
-		}
-		CHECK_EQ(rows, NVRM_NCAPS);
-		CHECK_EQ(sizeof(capw) / sizeof(capw[0]), NVRM_NCAPS);
-	}
+static void
+test_device_versions(void)
+{
+	static const uint32_t vbios[] = { 0x96, 0x06, 0x1e, 0x00, 0x4a };
+	static const uint32_t vbios_unified[] = { 0x97, 0x06, 0x1e, 0x00, 0x4a };
+	static const uint32_t gsp[] = { 580, 178, 4 };
+	nvrm_ctx *ctx;
+	const nvrm_device_info *info;
+	char *buf = NULL;
+	size_t len = 0;
+	FILE *fp;
+
+	reset_env();
+	ctx = must_enum("discrete");
+	info = info_of(ctx, 0);
+	t_check_version_field(info, "vbios", "96.06.1e.00.4a", vbios, 5);
+	t_check_version_field(info, "gsp_firmware", "580.178.04", gsp, 3);
+	fp = open_memstream(&buf, &len);
+	CHECK_EQ(nvrm_json_device(nvrm_device_get(ctx, 0), fp), 0);
+	fflush(fp);
+	CHECK(strstr(buf, "\"versions\":{\"vbios\":{\"available\":true,"
+	    "\"string\":\"96.06.1e.00.4a\",\"major\":150,\"minor\":6,"
+	    "\"patch\":30,\"parts\":[150,6,30,0,74],\"source\":\"rm\"},"
+	    "\"gsp_firmware\":{\"available\":true,"
+	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
+	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"rm\"}}") != NULL);
+	fclose(fp);
+	free(buf);
+	nvrm_close(ctx);
+
+	ctx = must_enum("unified");
+	t_check_version_field(info_of(ctx, 0), "vbios", "97.06.1e.00.4a",
+	    vbios_unified, 5);
+	t_check_version_field(info_of(ctx, 0), "gsp_firmware", "580.178.04",
+	    gsp, 3);
+	nvrm_close(ctx);
+
+	ctx = must_enum("sparse");
+	info = info_of(ctx, 0);
+	t_check_unavailable_version_field(info, "vbios", "",
+	    "rm_control_failed");
+	t_check_unavailable_version_field(info, "gsp_firmware", "",
+	    "rm_not_supported");
+	buf = NULL;
+	len = 0;
+	fp = open_memstream(&buf, &len);
+	CHECK_EQ(nvrm_json_device(nvrm_device_get(ctx, 0), fp), 0);
+	fflush(fp);
+	CHECK(strstr(buf, "\"vbios\":{\"available\":false,\"string\":\"\","
+	    "\"reason_id\":\"rm_control_failed\"") != NULL);
+	CHECK(strstr(buf, "\"gsp_firmware\":{\"available\":false,"
+	    "\"string\":\"\",\"reason_id\":\"rm_not_supported\"") != NULL);
+	fclose(fp);
+	free(buf);
+	nvrm_close(ctx);
 }
 
 static void
@@ -370,23 +441,17 @@ test_model_discrete(void)
 	reset_env();
 	ctx = must_enum("discrete");
 	i = info_of(ctx, 0);
-	CHECK_EQ(i->pci_vendor.value, 0x10de);
-	CHECK_EQ(i->pci_device.value, 0x2d04);
-	CHECK_EQ(i->pci_subsystem_vendor.value, 0x1462);
-	CHECK_EQ(i->pci_subsystem_device.value, 0x5351);
+	t_check_common_device(i);
 	CHECK_EQ(i->architecture.value, 0x1b0);
 	CHECK_EQ(i->implementation.value, 6);
-	CHECK_EQ(i->chip_id.value, 0x1b6);
 	CHECK(i->chip_id.source == NVRM_S_DERIVED);
-	CHECK_EQ(i->sm_version_major.value, 12);
-	CHECK_EQ(i->sm_version_minor.value, 0);
-	CHECK_EQ(i->gpc_count.value, 3);
-	CHECK_EQ(i->tpc_count.value, 18);
-	CHECK_EQ(i->sm_count.value, 36);
-	CHECK_EQ(i->vram_size.value, 16ULL << 30);
+	CHECK_EQ(i->sm_version_major.value, 10);
+	CHECK_EQ(i->sm_version_minor.value, 4);
+	CHECK_EQ(i->rm_sm_version.value, 0x0a04);
+	CHECK_EQ(i->compute_capability_major.value, 12);
+	CHECK_EQ(i->compute_capability_minor.value, 0);
 	CHECK_EQ(i->bar1_size.value, 16ULL << 30);
 	CHECK_STR(i->uuid.value, "GPU-00000000-0000-4000-8000-0000000000a1");
-	CHECK_STR(i->family.value, "blackwell-b");
 	CHECK(i->family.source == NVRM_S_FAMILY);
 	CHECK_EQ(i->cls_gpfifo.value, 0xCA6F);
 	CHECK_EQ(i->cls_compute.value, 0xCEC0);
@@ -425,6 +490,9 @@ test_model_unified(void)
 	CHECK_EQ(i->chip_id.value, 0x1bb);
 	CHECK_EQ(i->sm_version_major.value, 12);
 	CHECK_EQ(i->sm_version_minor.value, 1);
+	CHECK_EQ(i->rm_sm_version.value, 0x0c01);
+	CHECK_EQ(i->compute_capability_major.value, 12);
+	CHECK_EQ(i->compute_capability_minor.value, 1);
 	/* VRAM is available and zero on a unified-memory part */
 	CHECK(NVRM_HAVE(i->vram_size));
 	CHECK_EQ(i->vram_size.value, 0);
@@ -466,11 +534,45 @@ test_model_unknown_and_sparse(void)
 	CHECK_EQ(i->page_sizes.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK_STR(nvrm_reason_id(i->cls_gpfifo.reason), "family_unknown");
 	CHECK_STR(nvrm_reason_id(i->cls_copy.reason), "family_unknown");
-	/* the RM says SM version 0: the GPU does not support the query */
+	/* With no architecture/implementation row, raw RM bytes are not CUDA. */
+	CHECK_EQ(i->sm_version_major.value, 13);
+	CHECK_EQ(i->sm_version_minor.value, 2);
+	CHECK_EQ(i->rm_sm_version.value, 0x0d02);
+	CHECK(!NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(!NVRM_HAVE(i->compute_capability_minor));
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(NVRM_HAVE(i->classes));
+	nvrm_close(ctx);
+
+	/* GB20C has no row either: the 0x0a04 alias cannot invent CC 12.0. */
+	ctx = must_enum("alias");
+	i = info_of(ctx, 0);
+	CHECK_EQ(i->architecture.value, 0x1b0);
+	CHECK_EQ(i->implementation.value, 0x0c);
+	CHECK_EQ(i->sm_version_major.value, 10);
+	CHECK_EQ(i->sm_version_minor.value, 4);
+	CHECK_EQ(i->rm_sm_version.value, 0x0a04);
+	CHECK(!NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(!NVRM_HAVE(i->compute_capability_minor));
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
+	nvrm_close(ctx);
+
+	/* With no table row, raw zero leaves compute capability unavailable. */
+	reset_env();
+	nvrm_fake_inject_value(NVRM_P_SM_VERSION, 0);
+	ctx = must_enum("unknown");
+	i = info_of(ctx, 0);
 	CHECK(!NVRM_HAVE(i->sm_version_major));
 	CHECK_EQ(i->sm_version_major.reason, NVRM_R_RM_UNSUPPORTED);
 	CHECK(!NVRM_HAVE(i->sm_version_minor));
-	CHECK(NVRM_HAVE(i->classes));
+	CHECK(!NVRM_HAVE(i->rm_sm_version));
+	CHECK_EQ(i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED);
+	CHECK(!NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_INPUT_MISSING);
+	CHECK(!NVRM_HAVE(i->compute_capability_minor));
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_INPUT_MISSING);
 	nvrm_close(ctx);
 
 	/* everything missing: every value says why, nothing is a fake zero */
@@ -488,6 +590,10 @@ test_model_unknown_and_sparse(void)
 	CHECK(!NVRM_HAVE(i->uuid));
 	CHECK(!NVRM_HAVE(i->family));
 	CHECK_EQ(i->family.reason, NVRM_R_INPUT_MISSING);
+	CHECK(!NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_INPUT_MISSING);
+	CHECK(!NVRM_HAVE(i->compute_capability_minor));
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_INPUT_MISSING);
 	CHECK_EQ(i->page_sizes.reason, NVRM_R_INPUT_MISSING);
 	CHECK(!NVRM_HAVE(i->vram_size));
 	for (c = 0; c < NVRM_NCAPS; c++) {
@@ -548,6 +654,15 @@ test_model_ada(void)
 	}
 }
 
+static const nvrm_device_info *
+must_injected_discrete(nvrm_ctx **ctx, int prop, int reason)
+{
+	reset_env();
+	nvrm_fake_inject(prop, reason);
+	*ctx = must_enum("discrete");
+	return (info_of(*ctx, 0));
+}
+
 static void
 test_model_injections(void)
 {
@@ -580,33 +695,48 @@ test_model_injections(void)
 	ctx = must_enum("discrete");
 	CHECK_EQ(info_of(ctx, 0)->sm_version_minor.value, 0xc5);
 	CHECK_EQ(info_of(ctx, 0)->sm_version_major.value, 12);
+	/* The architecture table determines compute capability, not raw SM. */
+	CHECK_EQ(info_of(ctx, 0)->compute_capability_major.value, 12);
+	CHECK_EQ(info_of(ctx, 0)->compute_capability_minor.value, 0);
+	nvrm_close(ctx);
+
+	/* A table row needs no raw SM value; its architecture is authoritative. */
+	i = must_injected_discrete(&ctx, NVRM_P_SM_VERSION,
+	    NVRM_R_RM_UNSUPPORTED);
+	CHECK(!NVRM_HAVE(i->rm_sm_version));
+	CHECK_EQ(i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED);
+	CHECK(NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.value, 12);
+	CHECK_EQ(i->compute_capability_minor.value, 0);
+	nvrm_close(ctx);
+
+	/* A raw SM value cannot replace a missing architecture table key. */
+	i = must_injected_discrete(&ctx, NVRM_P_ARCHITECTURE, NVRM_R_RM_FAILED);
+	CHECK(!NVRM_HAVE(i->architecture));
+	CHECK(NVRM_HAVE(i->rm_sm_version));
+	CHECK(!NVRM_HAVE(i->compute_capability_major));
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_INPUT_MISSING);
+	CHECK(!NVRM_HAVE(i->compute_capability_minor));
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_INPUT_MISSING);
 	nvrm_close(ctx);
 
 	/* implementation unknown: the chip id cannot be derived */
-	reset_env();
-	nvrm_fake_inject(NVRM_P_IMPLEMENTATION, NVRM_R_RM_FAILED);
-	ctx = must_enum("discrete");
-	i = info_of(ctx, 0);
+	i = must_injected_discrete(&ctx, NVRM_P_IMPLEMENTATION, NVRM_R_RM_FAILED);
 	CHECK(NVRM_HAVE(i->architecture));
 	CHECK(!NVRM_HAVE(i->chip_id));
 	CHECK_EQ(i->chip_id.reason, NVRM_R_INPUT_MISSING);
 	nvrm_close(ctx);
 
 	/* SM per TPC fails: TPCs known, SMs not */
-	reset_env();
-	nvrm_fake_inject(NVRM_P_SM_PER_TPC, NVRM_R_RM_FAILED);
-	ctx = must_enum("discrete");
-	i = info_of(ctx, 0);
+	i = must_injected_discrete(&ctx, NVRM_P_SM_PER_TPC, NVRM_R_RM_FAILED);
 	CHECK(NVRM_HAVE(i->tpc_count));
 	CHECK(!NVRM_HAVE(i->sm_count));
 	CHECK_EQ(i->sm_count.reason, NVRM_R_RM_FAILED);
 	nvrm_close(ctx);
 
 	/* the RM cannot say the largest page size: no page size list */
-	reset_env();
-	nvrm_fake_inject(NVRM_P_MAX_PAGE_SIZE, NVRM_R_RM_UNSUPPORTED);
-	ctx = must_enum("discrete");
-	i = info_of(ctx, 0);
+	i = must_injected_discrete(&ctx, NVRM_P_MAX_PAGE_SIZE,
+	    NVRM_R_RM_UNSUPPORTED);
 	CHECK(NVRM_HAVE(i->family));
 	CHECK(!NVRM_HAVE(i->page_sizes));
 	CHECK_EQ(i->page_sizes.reason, NVRM_R_INPUT_MISSING);
@@ -632,6 +762,47 @@ test_model_injections(void)
 
 	test_model_ada();
 	reset_env();
+}
+
+static void
+check_compute_capability(uint64_t architecture, uint64_t implementation,
+    uint32_t major, uint32_t minor)
+{
+	uint32_t got_major = 99, got_minor = 99;
+
+	CHECK_EQ(nvrm_compute_capability_for(architecture, implementation,
+	    &got_major, &got_minor), 1);
+	CHECK_EQ(got_major, major);
+	CHECK_EQ(got_minor, minor);
+}
+
+static void
+test_compute_capability_table(void)
+{
+	static const uint64_t ga86[] = { 2, 3, 4, 6, 7 };
+	static const uint64_t gb120[] = { 2, 3, 5, 6, 7 };
+	uint32_t major = 88, minor = 77;
+	unsigned i;
+
+	check_compute_capability(0x160, 0, 7, 5);
+	check_compute_capability(0x160, 0xff, 7, 5);
+	check_compute_capability(0x170, 0, 8, 0);
+	for (i = 0; i < sizeof(ga86) / sizeof(ga86[0]); i++)
+		check_compute_capability(0x170, ga86[i], 8, 6);
+	check_compute_capability(0x170, 0x0b, 8, 7);
+	check_compute_capability(0x190, 0, 8, 9);
+	check_compute_capability(0x190, 0xff, 8, 9);
+	check_compute_capability(0x180, 0, 9, 0);
+	check_compute_capability(0x180, 1, 9, 0);
+	check_compute_capability(0x1a0, 0, 10, 0);
+	check_compute_capability(0x1a0, 2, 10, 0);
+	for (i = 0; i < sizeof(gb120) / sizeof(gb120[0]); i++)
+		check_compute_capability(0x1b0, gb120[i], 12, 0);
+	check_compute_capability(0x1b0, 0x0b, 12, 1);
+	CHECK_EQ(nvrm_compute_capability_for(0x1b0, 0x0c, &major, &minor), 0);
+	CHECK_EQ(major, 88);
+	CHECK_EQ(minor, 77);
+	CHECK_EQ(nvrm_compute_capability_for(0xfff0, 1, &major, &minor), 0);
 }
 
 static void
@@ -772,6 +943,75 @@ test_decorators(void)
 /* ---- init, names, fields ------------------------------------------------ */
 
 static void
+test_abi_1_0_layout(void)
+{
+	/* Offsets measured from tmp/round-a/nvrm-1.0.h (8702134). */
+	/* CPD-OFF -- ABI offset expectations are tabular data. */
+	static const struct {
+		const char *name;
+		size_t got, want;
+	} offsets[] = {
+		{ "pci_domain", offsetof(nvrm_device_info, pci_domain), 0 },
+		{ "pci_bus", offsetof(nvrm_device_info, pci_bus), 16 },
+		{ "pci_slot", offsetof(nvrm_device_info, pci_slot), 32 },
+		{ "pci_function", offsetof(nvrm_device_info, pci_function), 48 },
+		{ "pci_vendor", offsetof(nvrm_device_info, pci_vendor), 64 },
+		{ "pci_device", offsetof(nvrm_device_info, pci_device), 80 },
+		{ "pci_subsystem_vendor",
+		    offsetof(nvrm_device_info, pci_subsystem_vendor), 96 },
+		{ "pci_subsystem_device",
+		    offsetof(nvrm_device_info, pci_subsystem_device), 112 },
+		{ "pci_revision", offsetof(nvrm_device_info, pci_revision), 128 },
+		{ "rm_gpu_id", offsetof(nvrm_device_info, rm_gpu_id), 144 },
+		{ "uuid", offsetof(nvrm_device_info, uuid), 160 },
+		{ "architecture", offsetof(nvrm_device_info, architecture), 264 },
+		{ "implementation",
+		    offsetof(nvrm_device_info, implementation), 280 },
+		{ "chip_id", offsetof(nvrm_device_info, chip_id), 296 },
+		{ "sm_version_major",
+		    offsetof(nvrm_device_info, sm_version_major), 312 },
+		{ "sm_version_minor",
+		    offsetof(nvrm_device_info, sm_version_minor), 328 },
+		{ "gpc_count", offsetof(nvrm_device_info, gpc_count), 344 },
+		{ "tpc_count", offsetof(nvrm_device_info, tpc_count), 360 },
+		{ "sm_count", offsetof(nvrm_device_info, sm_count), 376 },
+		{ "cls_gpfifo", offsetof(nvrm_device_info, cls_gpfifo), 392 },
+		{ "cls_compute", offsetof(nvrm_device_info, cls_compute), 408 },
+		{ "cls_eng3d", offsetof(nvrm_device_info, cls_eng3d), 424 },
+		{ "cls_copy", offsetof(nvrm_device_info, cls_copy), 440 },
+		{ "classes", offsetof(nvrm_device_info, classes), 456 },
+		{ "family", offsetof(nvrm_device_info, family), 2072 },
+		{ "vram_size", offsetof(nvrm_device_info, vram_size), 2176 },
+		{ "bar1_size", offsetof(nvrm_device_info, bar1_size), 2192 },
+		{ "max_page_size", offsetof(nvrm_device_info, max_page_size), 2208 },
+		{ "numa_node", offsetof(nvrm_device_info, numa_node), 2224 },
+		{ "page_sizes", offsetof(nvrm_device_info, page_sizes), 2240 },
+		{ "caps", offsetof(nvrm_device_info, caps), 3856 },
+		{ "ndecorators", offsetof(nvrm_device_info, ndecorators), 3968 },
+		{ "decorators", offsetof(nvrm_device_info, decorators), 3976 },
+	};
+	/* CPD-ON */
+	unsigned i;
+
+	for (i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		if (offsets[i].got != offsets[i].want)
+			printf("  %s: offset %ju, want %ju\n", offsets[i].name,
+			    (uintmax_t)offsets[i].got, (uintmax_t)offsets[i].want);
+		CHECK_EQ(offsets[i].got, offsets[i].want);
+	}
+
+	/* The 1.1 members follow the complete 1.0 structure, in table order. */
+	CHECK_EQ(offsetof(nvrm_device_info, rm_sm_version), 4008);
+	CHECK_EQ(offsetof(nvrm_device_info, compute_capability_major), 4024);
+	CHECK_EQ(offsetof(nvrm_device_info, compute_capability_minor), 4040);
+	CHECK_EQ(offsetof(nvrm_device_info, vbios), 4056);
+	CHECK_EQ(offsetof(nvrm_device_info, gsp_firmware),
+	    4056 + sizeof(nvrm_version_field));
+	CHECK_EQ(sizeof(nvrm_device_info), offsetof(nvrm_device_info,
+	    gsp_firmware) + sizeof(nvrm_version_field));
+}
+
+static void
 test_names_and_fields(void)
 {
 	unsigned i;
@@ -807,6 +1047,11 @@ test_names_and_fields(void)
 	CHECK_STR(nvrm_reason_text(-1), "unknown reason");
 	CHECK_STR(nvrm_reason_text(NVRM_R__COUNT), "unknown reason");
 	CHECK(strlen(nvrm_reason_text(NVRM_R_NOT_QUERIED)) > 10);
+	CHECK_STR(nvrm_reason_text(NVRM_R_VERSION_INCONSISTENT),
+	    "the kernel module version sysctls disagree with its version string");
+	CHECK_EQ(nvrm_reason_from_id("version_inconsistent"),
+	    NVRM_R_VERSION_INCONSISTENT);
+	CHECK_EQ(nvrm_reason_from_id("not_a_reason"), -1);
 	CHECK_STR(nvrm_source_name(NVRM_S_BOARD), "board");
 	CHECK_STR(nvrm_source_name(-1), "unknown");
 	CHECK_STR(nvrm_source_name(NVRM_S__COUNT), "unknown");
@@ -828,9 +1073,16 @@ test_names_and_fields(void)
 	for (i = 0; i < NVRM_R__COUNT; i++)
 		CHECK(strlen(nvrm_reason_id(i)) > 0 &&
 		    strlen(nvrm_reason_text(i)) > 0);
+}
+
+static void
+test_field_table(void)
+{
+	unsigned i;
+
 	/* the field table covers each kind and group exactly as declared */
 	CHECK(nvrm_nfields >= 30);
-	CHECK_EQ(nvrm_ngroups, 3);
+	CHECK_EQ(nvrm_ngroups, 4);
 	for (i = 0; i < nvrm_nfields; i++)
 		CHECK(nvrm_fields[i].offset < sizeof(nvrm_device_info));
 	/* every member of nvrm_device_info before the capabilities has exactly
@@ -850,14 +1102,17 @@ test_names_and_fields(void)
 				sz = nvrm_fields[j].kind == NVRM_K_U64 ?
 				    sizeof(nvrm_u64) :
 				    nvrm_fields[j].kind == NVRM_K_STR ?
-				    sizeof(nvrm_str) : sizeof(nvrm_list);
+				    sizeof(nvrm_str) :
+				    nvrm_fields[j].kind == NVRM_K_LIST ?
+				    sizeof(nvrm_list) : sizeof(nvrm_version_field);
 			}
 			CHECK_EQ(found, 1);
 			rows += found;
 			pos += sz;
 		}
 		CHECK_EQ(pos, offsetof(nvrm_device_info, caps));
-		CHECK_EQ(rows, nvrm_nfields);
+		/* The five appended members are checked separately below. */
+		CHECK_EQ(rows + 5, nvrm_nfields);
 	}
 	/* ... and the whole struct is tied, not only the part before the
 	 * capabilities: the capability array, the decorator count and the
@@ -875,9 +1130,12 @@ test_names_and_fields(void)
 		CHECK_EQ(offsetof(nvrm_device_info, ndecorators), caps_end);
 		CHECK_EQ(offsetof(nvrm_device_info, decorators),
 		    (cnt_end + al - 1) / al * al);
-		CHECK_EQ(sizeof(nvrm_device_info),
+		CHECK_EQ(offsetof(nvrm_device_info, rm_sm_version),
 		    offsetof(nvrm_device_info, decorators) +
 		    sizeof(np->decorators));
+		CHECK_EQ(sizeof(nvrm_device_info),
+		    offsetof(nvrm_device_info, gsp_firmware) +
+		    sizeof(np->gsp_firmware));
 		CHECK_EQ(sizeof(np->caps) / sizeof(np->caps[0]), NVRM_NCAPS);
 		CHECK_EQ(sizeof(np->decorators) / sizeof(np->decorators[0]),
 		    NVRM_MAX_DECORATORS);
@@ -891,6 +1149,8 @@ test_names_and_fields(void)
 		CHECK_EQ(info.classes.reason, NVRM_R_NOT_QUERIED);
 		CHECK_EQ(info.sm_count.reason, NVRM_R_NOT_QUERIED);
 		CHECK_EQ(info.caps[NVRM_NCAPS - 1].reason, NVRM_R_NOT_QUERIED);
+		CHECK(!info.vbios.version.available);
+		CHECK_STR(info.vbios.version.reason, "not_queried");
 	}
 }
 
@@ -915,6 +1175,15 @@ test_accessors_refresh_json_table(void)
 	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_E_IO);
 	CHECK_EQ(info_of(ctx, 0)->gpc_count.reason, NVRM_R_OS_CALL_FAILED);
 	nvrm_close(ctx);
+	/* a version's own failed system call also makes refresh fail */
+	reset_env();
+	ctx = must_enum("discrete");
+	nvrm_fake_inject_str_fail(NVRM_SP_VBIOS, NVRM_R_OS_CALL_FAILED);
+	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_E_IO);
+	t_check_unavailable_version_field(info_of(ctx, 0), "vbios", "",
+	    "os_call_failed");
+	nvrm_close(ctx);
+	reset_env();
 	/* a failed system call during enumeration fails it, in a string, a
 	 * list or a capability alone; the message names the GPU */
 	{
@@ -1117,6 +1386,8 @@ test_fake_direct(void)
 	CHECK_EQ(o->gpu_u64(g, NVRM_P_RM_GPU_ID, 0, &v), 0);
 	CHECK_EQ(v, ids[0]);
 	CHECK_EQ(o->gpu_str(g, NVRM_SP_UUID, buf, sizeof(buf)), 0);
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_COUNT, buf, sizeof(buf)),
+	    NVRM_R_BACKEND_NONE);
 	CHECK_EQ(o->gpu_classes(g, cl, 2, &n), 0);
 	CHECK_EQ(n, 2);			/* truncated to the caller's room */
 
@@ -1149,13 +1420,47 @@ test_fake_direct(void)
 	reset_env();
 }
 
+static void
+test_public_versions(void)
+{
+	static const uint32_t built_for[] = { 580, 178, 4 };
+	static const uint32_t library[] = { 1, 2, 0 };
+	static const uint32_t symbols[] = { 1, 2 };
+	static const uint32_t schema[] = { 1, 2 };
+	nvrm_ctx *ctx;
+	const nvrm_version *v;
+
+	CHECK_EQ(NVRM_API_MAJOR, 1);
+	CHECK_EQ(NVRM_API_MINOR, 2);
+	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
+	    "");
+	t_check_version(nvrm_library_version(), "1.2.0", library, 3, "");
+	v = nvrm_symbol_version();
+	t_check_version(v, "NVRM_1.2", symbols, 2, "");
+	CHECK(v == nvrm_symbol_version());
+	t_check_version(nvrm_schema_version(), "1.2", schema, 2, "");
+	CHECK(nvrm_schema_version() == nvrm_schema_version());
+	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
+	CHECK(nvrm_library_version() == nvrm_library_version());
+
+	reset_env();
+	ctx = must_enum("discrete");
+	t_check_version(nvrm_driver_version(ctx), NVRM_RM_VERSION, built_for, 3,
+	    "");
+	t_check_version(nvrm_rm_api_version(ctx), NVRM_RM_VERSION, built_for, 3,
+	    "");
+	nvrm_close(ctx);
+}
+
 /* ---- JSON ---------------------------------------------------------------- */
+
+static void test_json_versions_and_errors(nvrm_ctx *ctx);
 
 static void
 test_json(void)
 {
 	nvrm_ctx *ctx;
-	FILE *fp, *ro, *dn;
+	FILE *fp;
 	char *buf = NULL;
 	size_t len = 0;
 	nvrm_device *dev;
@@ -1173,6 +1478,26 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":2") != NULL);
+	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
+	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
+	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
+	CHECK(strstr(buf, "\"versions\":{\"driver\":{\"available\":true,"
+	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
+	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"os\"},"
+	    "\"rm_api\":") != NULL);
+	CHECK(strstr(buf, "\"built_for\":{\"available\":true,"
+	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
+	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"library\":{\"available\":true,"
+	    "\"string\":\"1.2.0\",\"major\":1,\"minor\":2,\"patch\":0,"
+	    "\"parts\":[1,2,0],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
+	    "\"string\":\"NVRM_1.2\",\"major\":1,\"minor\":2,\"patch\":0,"
+	    "\"parts\":[1,2],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.2\","
+	    "\"major\":1,\"minor\":2,\"patch\":0,\"parts\":[1,2],"
+	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
 	CHECK(strstr(buf, "\"name\":\"dmabuf_export\",\"available\":true,"
@@ -1200,6 +1525,66 @@ test_json(void)
 	fclose(fp);
 	free(buf);
 
+	test_json_versions_and_errors(ctx);
+}
+
+static void
+test_json_versions_and_errors(nvrm_ctx *ctx)
+{
+	FILE *fp, *ro, *dn;
+	char *buf = NULL;
+	size_t len = 0;
+	pid_t pid;
+	int st;
+
+	/* A suffix is optional, and an unavailable version keeps its raw string
+	 * and reason while omitting every numeric part. */
+	CHECK_EQ(nvrm_version_parse("580.178.04-rc1", 10, &ctx->rm_api), 0);
+	buf = NULL;
+	len = 0;
+	fp = open_memstream(&buf, &len);
+	CHECK_EQ(nvrm_json_header(ctx, fp), 0);
+	fflush(fp);
+	CHECK(strstr(buf, "\"rm_api\":{\"available\":true,"
+	    "\"string\":\"580.178.04-rc1\",\"major\":580,\"minor\":178,"
+	    "\"patch\":4,\"parts\":[580,178,4],\"suffix\":\"-rc1\","
+	    "\"source\":\"rm\"}") != NULL);
+	fclose(fp);
+	free(buf);
+	ctx->driver.available = 0;
+	strcpy(ctx->driver.string, "N/A");
+	ctx->driver.nparts = 0;
+	ctx->driver.reason = "version_unparsed";
+	buf = NULL;
+	len = 0;
+	fp = open_memstream(&buf, &len);
+	CHECK_EQ(nvrm_json_header(ctx, fp), 0);
+	fflush(fp);
+	CHECK(strstr(buf, "\"driver\":{\"available\":false,\"string\":\"N/A\","
+	    "\"reason_id\":\"version_unparsed\",\"reason\":\"the version string "
+	    "has no readable numeric scheme\",\"source\":\"os\"}") != NULL);
+	fclose(fp);
+	free(buf);
+
+	/* An unknown stored reason id is a programming error, not version_unparsed. */
+	ctx->driver.reason = "os_call_faild";
+	fflush(stdout);
+	pid = fork();
+	if (pid == 0) {
+		signal(SIGABRT, abort_handler);
+		fp = open_memstream(&buf, &len);
+		if (fp == NULL)
+			_exit(2);
+		(void)nvrm_json_header(ctx, fp);
+		_exit(1);
+	}
+	CHECK(pid > 0);
+	waitpid(pid, &st, 0);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 77);
+	ctx->driver.reason = nvrm_reason_id(NVRM_R_VERSION_UNPARSED);
+	buf = NULL;
+	len = 0;
+
 	/* a stream that fails: the error is reported, not lost */
 	ro = fopen("/dev/null", "r");		/* writes fail, flush is fine */
 	CHECK_EQ(nvrm_json_end(0, ro), -1);
@@ -1217,6 +1602,12 @@ test_json(void)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 2") != NULL);
+	CHECK(strstr(buf, "\"version\": {") != NULL);
+	CHECK(strstr(buf, "\"versions\": {") != NULL);
+	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "
+	    "\"#/$defs/version\" }") != NULL);
+	CHECK(strstr(buf, "\"version_unparsed\"") != NULL);
 	CHECK(strstr(buf, "\"sm_count\"") != NULL);
 	CHECK(strstr(buf, "\"capability\"") != NULL);
 	fclose(fp);
@@ -1298,26 +1689,32 @@ test_boot_select(void)
 	CHECK(nvrm_backend_select("rm") == &nvrm_backend_rm_ops);
 }
 
-static const struct t_entry tests[] = {
-	T_NEEDED("threads", test_registry_threads,
-	    "it needs a registry no other test has touched")
-	T_NEEDED("boot", test_boot_select,
-	    "the registry is lazy: it fills on the first selection")
-	T_TEST("registry", test_registry)
-	T_TEST("enumerate", test_enumerate)
-	T_TEST("model", test_model_discrete)
-	T_TEST("model", test_model_unified)
-	T_TEST("model", test_model_unknown_and_sparse)
-	T_TEST("model", test_model_injections)
-	T_TEST("model", test_family_match)
-	T_TEST("decorators", test_decorators)
-	T_TEST("names", test_names_and_fields)
-	T_TEST("names", test_accessors_refresh_json_table)
-	T_TEST("names", test_field_reason_and_masks)
-	T_TEST("cap", test_cap_helper)
-	T_TEST("fake", test_fake_direct)
-	T_TEST("json", test_json)
-};
+#define CORE_TESTS(X, N)						\
+	N("threads", test_registry_threads, \
+	    "it needs a registry no other test has touched") \
+	N("boot", test_boot_select, \
+	    "the registry is lazy: it fills on the first selection") \
+	X("registry", test_registry) \
+	X("enumerate", test_enumerate) \
+	X("model", test_model_discrete) \
+	X("model", test_model_unified) \
+	X("model", test_model_unknown_and_sparse) \
+	X("model", test_device_versions) \
+	X("model", test_model_injections) \
+	X("model", test_compute_capability_table) \
+	X("model", test_family_match) \
+	X("decorators", test_decorators) \
+	X("abi", test_abi_1_0_layout) \
+	X("names", test_names_and_fields) \
+	X("names", test_field_table) \
+	X("names", test_accessors_refresh_json_table) \
+	X("names", test_field_reason_and_masks) \
+	X("cap", test_cap_helper) \
+	X("fake", test_fake_direct) \
+	X("version", test_public_versions) \
+	X("json", test_json)
+
+T_TABLE(tests, CORE_TESTS);
 
 int
 main(int argc, char **argv)

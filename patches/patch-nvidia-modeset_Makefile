@@ -1,9 +1,11 @@
 --- nvidia-modeset/Makefile.orig
 +++ nvidia-modeset/Makefile
-@@ -6,6 +6,19 @@
+@@ -6,6 +6,21 @@
  NVIDIA_MODESET_KERNEL = nv-modeset-kernel.o
  
  OBJS += ${NVIDIA_MODESET_KERNEL}
++SRCS += nv_version_sysctl.c
++CFLAGS += -DNV_VERSION_SYSCTL_MODESET
 +
 +# The symbols nvidia-drm.ko calls in this module (see the same note in
 +# ../nvidia/Makefile): exported by name on arm64.
