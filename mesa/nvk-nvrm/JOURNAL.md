@@ -172,8 +172,11 @@ Done:
 
 ## RESUME
 
-State: fork cloudbsd/26.3 at b5eb069d1f9 (pushed). In the worktree, the
-gallium nouveau deletions are unstaged (on disk only, 245 paths).
+State: fork cloudbsd/26.3 at b5eb069d1f9 (pushed), worktree clean.
+Decision (orchestrator, Mark can overrule): the gallium nouveau driver and
+winsys files stay in the tree, unbuilt, so upstream rebases do not hit
+modify/delete conflicts. The 245 on-disk deletions were restored. A make
+test check, "no gallium nouveau source in the build", guards it (Kimi r10).
 b5eb069d1f9 (Kimi r8 and r9) fixed the open findings of 019a93c8543 and
 4b21c1c37f2: option quoting, the UPSTREAM regular-file check, the failure
 listings, the quiet self-tests, the empty-build uAPI check, the help width,
@@ -182,9 +185,7 @@ those findings: the tegra leftovers and the predicate name (upstream churn,
 not worth it now).
 
 Resume order:
-1. The gallium deletion: wait for the decision above. Until then, do not
-   stage src/gallium/drivers/nouveau or src/gallium/winsys/nouveau.
-2. Then the older items below.
+1. The older items below.
 
 Next (open work only):
 1. Follow-up fork commit for the gate round 2 findings (Kimi for the
@@ -201,8 +202,8 @@ Next (open work only):
      install-deps (the tool lists differ). The stub message accuracy. The
      meson error text. The help text.
 2. Wire the fork make test into a Jenkins job (arm64 builder).
-3. When #2419 is committed, re-pin S2 in DESIGN.md section 1 and re-check the
-   S2 rows of section 3.
+3. Done: S2 re-pinned at 4a745c7 (PR #11); the one API change is
+   nvrm_client_open and nvrm_client_close (DESIGN.md section 1).
 4. Open review findings carried to the next design revision (gate round 5,
    interface and quality voices): make the cross-process stall log line
    traceable (sync id, peer pid where known); give the Makefile root refusal

@@ -104,7 +104,7 @@ need the same decision (section 9).
 |---|---|---|
 | Mesa | **26.3.1** (2026-11-18), the newest release on archive.mesa3d.org when checked live on 2026-11-22 | SHA256 `4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961`, the same as in the release notes |
 | libnvrm S1 | origin/main `7e28d7b` | `lib/libnvrm/include/nvrm/nvrm.h` |
-| libnvrm S2 | uncommitted working tree of `agent/2378-libnvrm-s2` on `7e28d7b` (#2419) | that tree's `nvrm.h` has SHA256 `7b914b41d1d36440a59c90b55decf36cf9f0198216b7fc78f4baafdd2c481995`. Re-pinning is a section 9 row |
+| libnvrm S2 | merged to main: PR #11, merge commit `4a745c7` (#2419) | `lib/libnvrm/include/nvrm/nvrm.h` at `4a745c7` has SHA256 `85cb8807ecda8a815fd3593f324baa05646f6e1cf264fefe815eeaa6c0a1152f`. The S2 rows of section 3 were checked against it: the client calls are `nvrm_client_open` and `nvrm_client_close` (named `nvrm_device_open` and `nvrm_device_close` in the earlier working tree); every other call the op map names is unchanged, and the gaps for #2439 (PTE kind, fixed or second CPU mapping, `nvrm_mem_info.handle`, unmap by VA range) are still gaps |
 | RM headers | open-gpu-kernel-modules `580.178.04` (MIT) | the `ogkm_tag` line of the repository root `SOURCES` |
 | Class and method headers for push buffers | Mesa `src/nouveau/headers/nvidia/classes/` (MIT, from open-gpu-doc) | see section 5 for the trimmed `clc96f.h` |
 
@@ -234,7 +234,7 @@ Longer reasoning is in section 3.3.
 | `pdev.destroy` | `nvrm_close` (S1) | free the root client | to work |
 | `pdev.get_vram_used` | none yet: `has_get_vram_used = false` | `FB_GET_INFO_V2` (#2439) | returns 0 |
 | `pdev.get_drm_primary_fd` | none | none | NULL op (returns -1) |
-| `pdev.create_dev` | `nvrm_device_open(NVRM_OPEN_ALLOW_MAP)`, `nvrm_vaspace_info_get` (S2) | `NV01_DEVICE_0`, `NV20_SUBDEVICE_0`, `FERMI_VASPACE_A` | every `vkCreateDevice` returns `VK_ERROR_FEATURE_NOT_PRESENT` and logs the stub line (3.3) |
+| `pdev.create_dev` | `nvrm_client_open(NVRM_OPEN_ALLOW_MAP)`, `nvrm_vaspace_info_get` (S2) | `NV01_DEVICE_0`, `NV20_SUBDEVICE_0`, `FERMI_VASPACE_A` | every `vkCreateDevice` returns `VK_ERROR_FEATURE_NOT_PRESENT` and logs the stub line (3.3) |
 | `dev.get_gpu_timestamp` | `nvrm_gpu_timestamp` (**S3**) | `NVC361_TIME_0/1` in USERMODE (3.3) | returns 0 |
 | `dev.alloc_mem` | `nvrm_mem_alloc` (S2): `LOCAL`/`VRAM` to `NVRM_MEM_VRAM`, `GART` to `NVRM_MEM_SYSMEM` (GB10: always system memory) | `NV01_MEMORY_LOCAL_USER` / `NV01_MEMORY_SYSTEM` via `NVOS32` | not reached |
 | `dev.alloc_tiled_mem` | **gap (#2439)**: no PTE kind or compression in `nvrm_mem_params` | `NVOS32_ATTR_*` | `has_alloc_tiled = false` |
@@ -748,7 +748,7 @@ and the hardware-preflight-and-verify skill (by PCI address or UUID), never by
 | Verify the Blackwell host-class semaphore fields (64-bit payload, `ACQ_CIRC_GEQ`, any strict GEQ), the non-stall interrupt method after a release, the copy class on a graphics channel, and the chipset value against the NVK chipset table | #2437 (S3 spike) |
 | Semaphore pool, per-export `NV_SEMAPHORE_SURFACE` syncs with the class check on import, per-(thread, device) event descriptors bound at device level, SET_TRIGGER wake, the fixed wait loop, CPU-side waits for imported syncs, CPU wait (spin then poll, kevent after `d_kqfilter`), device-loss events | **#2438** (libnvrm S4) |
 | Check against `vk_queue.c` that the section 5 feature set selects immediate submit with no `vk_sync_timeline` emulation | #2379 |
-| Re-pin S2 when #2419 is committed, and re-check the S2 rows of section 3 against it | #2379 |
+| Re-pin S2: done at `4a745c7` (section 1) | #2379 |
 | `mesa/nvk-nvrm/SOURCES` as the one source for the Mesa pin; section 1 then cites it | #2379 |
 | The nvkmd nvrm backend itself, from stub to V1 | #2379, blocked on the section 0 decision |
 | The existing agent-written `src/nouveau` patches in `graphics/mesa-devel` | #2309, the same section 0 decision |
@@ -765,7 +765,7 @@ order, and each step has a gate:
 
 | Step | Work | Gate before the next step |
 |---|---|---|
-| 1 | libnvrm S2, memory and VA (#2419) | committed and merged; S2 rows of section 3 re-checked |
+| 1 | libnvrm S2, memory and VA (#2419) | done: merged at `4a745c7`, S2 rows of section 3 re-checked |
 | 2 | libnvrm S1/S2 extensions for NVK (#2439), alongside S3 | fake-backend tests green |
 | 3 | libnvrm S3, channels and submit (#2437), including the spike items of section 9 | NOP and semaphore release complete on the card in a test boot |
 | 4 | libnvrm S4, the poll path (#2438) | a CPU wait wakes on a GPU release, fake and hardware |
