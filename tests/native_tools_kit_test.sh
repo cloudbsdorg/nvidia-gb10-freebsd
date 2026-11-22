@@ -26,6 +26,10 @@
 #       testboot-return is called last, the run is copied out;
 #   (g) every script is valid sh; the rc script (comments left out) has no kldload of a linux module, no kldunload
 #       and no bectl activate.
+# (e) and (f) make a stage in the test scratch directory, from NVNT_STAGE when set, else by building the modules from
+# this checkout (with the already-built RM cores) and building libnvrm/nvrm-info in scratch.  Real Linux-dependent
+# control modules are optional: NVNT_PHASE0_KO, NVNT_UVM_KO and NVNT_DRM_KO.  Their absence prints a named skip;
+# synthetic plants keep the rules tested.
 # Run: sh tests/native_tools_kit_test.sh   (no root; writes only under $GB10_WORK/tmp)
 
 set -u
@@ -35,17 +39,29 @@ export PATH LC_ALL
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/native-tools-testboot
 WORK=${GB10_WORK:-$HOME/work/gb10}
-STAGE=${NVNT_STAGE:-$WORK/logs/native-tools/stage-a682522}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/nvnt-kit.XXXXXX") || exit 2
 trap 'rm -rf "$T"' EXIT
+STAGE=$T/stage
+SHAFILE=$STAGE/SHA256.txt
 pass=0; fail=0
 ok() { pass=$((pass + 1)); echo "ok   $*"; }
 no() { fail=$((fail + 1)); echo "FAIL $*"; }
+skip() { echo "skip $1: $2 not set ($3)"; }
 expect() {	# expect <want status> <got status> <what>
 	if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (exit $2, wanted $1)"; fi
 }
 . "$KIT/guard.sh"
+
+# (e) root must not inherit a work directory under root's home when a defaulted path is needed
+(unset GB10_WORK; guard_work_default 0 make-be.sh "-m -s -o") > "$T/root-mb.out" 2>&1
+expect 2 $? "make-be.sh: root without GB10_WORK refuses the defaulted paths"
+grep -q 'set GB10_WORK or pass -m -s -o' "$T/root-mb.out" && ok "make-be.sh: the root refusal says how to provide the paths" || no "make-be.sh: $(cat "$T/root-mb.out")"
+(unset GB10_WORK; guard_work_default 0 check-be.sh -s) > "$T/root-cb.out" 2>&1
+expect 2 $? "check-be.sh: root without GB10_WORK refuses the defaulted hash list"
+grep -q 'set GB10_WORK or pass -s' "$T/root-cb.out" && ok "check-be.sh: the root refusal says how to provide the hash list" || no "check-be.sh: $(cat "$T/root-cb.out")"
+(unset GB10_WORK; guard_work_default 1001 make-be.sh "-m -s -o"); expect 0 $? "make-be.sh: non-root keeps the HOME default"
+(GB10_WORK="$WORK"; guard_work_default 0 check-be.sh -s); expect 0 $? "check-be.sh: an explicit GB10_WORK is accepted for root"
 
 # (a) guard_env
 cat > "$T/kld-clean" <<'EOF'
@@ -208,9 +224,86 @@ $SUMM "$T/r7" > /dev/null; [ "$(rowf "$T/r7/summary.json" load-nvidia status)" =
 mkrun "$T/r6" pass; grep -v '"row":"gpu-verify"' "$T/r6/results.jsonl" > "$T/r6/x"; mv "$T/r6/x" "$T/r6/results.jsonl"; $SUMM "$T/r6" > /dev/null; expect 1 $? "summarize: a planned row missing with no earlier failure fails"
 [ "$(rowf "$T/r6/summary.json" gpu-verify status)" = error ] && ok "summarize: the missing row is an error" || no "summarize: the missing row is not an error"
 
-# (e) make-be.sh with the hooks and a fake clone
-if [ ! -f "$STAGE/SHA256-native-a682522.txt" ]; then
-	no "the staged build $STAGE is missing: (e) and (f) need it (build main, stage it, or set NVNT_STAGE)"
+# (e) make-be.sh with the hooks and a fake clone.  The stage belongs to this run, not to a previous build.
+stage_error=
+stage_file() {
+	[ -s "$1" ] || { stage_error="$stage_error missing:$1"; return; }
+	cp "$1" "$STAGE/${1##*/}" || stage_error="$stage_error copy:$1"
+}
+stage_step() {
+	_ss_step=$1; shift
+	if "$@" > "$T/$_ss_step.log" 2>&1; then return 0; fi
+	_ss_keep=$WORK/tmp/nvnt-kit-failed-$_ss_step.log
+	if cp "$T/$_ss_step.log" "$_ss_keep"; then
+		echo "stage build step $_ss_step failed; log kept at $_ss_keep" >&2
+	else
+		echo "stage build step $_ss_step failed; could not keep a copy of its log at $_ss_keep" >&2
+	fi
+	return 1
+}
+stage_hashes() {
+	_sh_out=$1
+	: > "$_sh_out" || { echo "cannot write the stage hash list $_sh_out"; return 1; }
+	for _sh_f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
+		_sh_hash=$(sha256 -q "$STAGE/$_sh_f" 2> /dev/null); _sh_s=$?
+		[ "$_sh_s" = 0 ] || { echo "sha256 failed for $STAGE/$_sh_f (exit $_sh_s)"; return 1; }
+		[ -n "$_sh_hash" ] || { echo "sha256 printed nothing for $STAGE/$_sh_f"; return 1; }
+		printf 'SHA256 (%s) = %s\n' "$_sh_f" "$_sh_hash" >> "$_sh_out" || { echo "cannot append $_sh_f to $_sh_out"; return 1; }
+	done
+}
+mkdir -p "$STAGE"
+if [ -n "${NVNT_STAGE:-}" ]; then
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do stage_file "$NVNT_STAGE/$_f"; done
+else
+	# A prepared build/tree may predate the checkout.  Prepare and build this checkout in scratch instead; only the
+	# expensive, already-built RM core objects and the pinned sources come from GB10_WORK.
+	BW=$T/module-build
+	if ! (
+		mkdir -p "$BW/build" "$BW/logs" "$BW/tmp" &&
+		ln -s "$WORK/sources" "$BW/sources" &&
+		cp "$WORK/build/nv-kernel-gb10.o" "$WORK/build/nv-modeset-kernel-aarch64.o" "$BW/build/" &&
+		stage_step prepare-tree env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/prepare-tree.sh" &&
+		stage_step build-nvidia env -u NV_CORE_LINUX_COMPAT -u NVKMS_CORE_LINUX_COMPAT GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-shim.sh" &&
+		stage_step build-firmware env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-firmware.sh" &&
+		stage_step build-modeset env -u NV_CORE_LINUX_COMPAT -u NVKMS_CORE_LINUX_COMPAT GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-shim.sh" --module=nvidia-modeset
+	); then
+		stage_error="$stage_error module-build-failed"
+	else
+		stage_file "$BW/build/tree/nvidia/nvidia.ko"
+		stage_file "$BW/build/tree/nvidia-modeset/nvidia-modeset.ko"
+		stage_file "$BW/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko"
+	fi
+	_tag=$(awk '$1 == "ogkm_tag" { print $2; exit }' "$repo/SOURCES")
+	_ogkm=$WORK/sources/open-gpu-kernel-modules-$_tag
+	if [ ! -d "$_ogkm" ]; then
+		stage_error="$stage_error missing:$_ogkm"
+	else
+		mkdir -p "$T/obj/lib" "$T/obj/info"
+		if ! stage_step libnvrm-build env MAKEOBJDIR="$T/obj/lib" OGKM="$_ogkm" /usr/bin/make -C "$repo/lib/libnvrm"; then
+			stage_error="$stage_error libnvrm-build-failed"
+		elif ! stage_step nvrm-info-build env MAKEOBJDIR="$T/obj/info" LIBNVRM_OBJ="$T/obj/lib" /usr/bin/make -C "$repo/lib/libnvrm/nvrm-info"; then
+			stage_error="$stage_error nvrm-info-build-failed"
+		else
+			stage_file "$T/obj/lib/libnvrm.so.1"
+			stage_file "$T/obj/info/nvrm-info"
+		fi
+	fi
+fi
+if [ -z "$stage_error" ]; then
+	_sh_msg=$(stage_hashes "$SHAFILE") || stage_error="$stage_error $_sh_msg"
+fi
+if [ -z "$stage_error" ]; then
+	mkdir -p "$T/sha256-fail"; printf '#!/bin/sh\nexit 1\n' > "$T/sha256-fail/sha256"; chmod 0755 "$T/sha256-fail/sha256"
+	_sh_msg=$(PATH="$T/sha256-fail:$PATH" stage_hashes "$T/SHA256.fail"); _sh_s=$?
+	expect 1 $_sh_s "the stage hash builder fails when sha256 fails"
+	printf '%s\n' "$_sh_msg" | grep -q "sha256 failed for $STAGE/nvidia.ko" && ok "the stage hash failure names the file" || no "the stage hash failure is not clear: $_sh_msg"
+	printf '#!/bin/sh\nexit 0\n' > "$T/sha256-fail/sha256"
+	_sh_msg=$(PATH="$T/sha256-fail:$PATH" stage_hashes "$T/SHA256.empty"); _sh_s=$?
+	expect 1 $_sh_s "the stage hash builder fails when sha256 prints nothing"
+	printf '%s\n' "$_sh_msg" | grep -q "sha256 printed nothing for $STAGE/nvidia.ko" && ok "the empty stage hash failure names the file" || no "the empty stage hash failure is not clear: $_sh_msg"
+fi
+if [ -n "$stage_error" ]; then
+	no "the test stage could not be made:$stage_error; provide the pinned sources and built RM cores, or set NVNT_STAGE"
 else
 	mkclone() {
 		rm -rf "$1"; mkdir -p "$1/etc/rc.conf.d" "$1/boot/modules" "$1/boot/kernel" "$1/sbin" "$1/usr/local/etc/rc.d"
@@ -226,7 +319,20 @@ case \$1 in list) printf 'cloudbsd-rx7600\tNR\nnvidia-native-tools-test-20990101
 exit 0
 EOF
 	chmod 0755 "$T/bectl"
-	MB() { env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" "$@"; }
+	UVMKO=${NVNT_UVM_KO:-}
+	DRMKO=${NVNT_DRM_KO:-}
+	if [ -n "$UVMKO" ]; then UVM_WANT=needs-linux; else UVM_WANT=not-available; fi
+	if [ -n "$DRMKO" ]; then PRIME_WANT=needs-linuxkpi; else PRIME_WANT=not-available; fi
+	MB() {
+		[ -z "$UVMKO" ] || set -- -u "$UVMKO" "$@"
+		[ -z "$DRMKO" ] || set -- -d "$DRMKO" "$@"
+		env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" "$@"
+	}
+	for _opt in u d; do
+		env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/missing-$_opt/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -$_opt "$T/missing-$_opt.ko" > "$T/missing-$_opt.out" 2>&1
+		expect 2 $? "make-be.sh -$_opt: a missing control module is a usage error"
+		grep -q "control module $T/missing-$_opt.ko is missing or unreadable" "$T/missing-$_opt.out" && ok "make-be.sh -$_opt: the usage error names the missing control" || no "make-be.sh -$_opt: $(cat "$T/missing-$_opt.out")"
+	done
 	mkclone "$T/clone/root"
 	MB -D 20990102 -m "$STAGE" -o "$WORK/logs/native-tools-testboot" > "$T/mb.out" 2>&1; expect 0 $? "make-be.sh builds the fake clone"
 	R=$T/clone/root
@@ -238,9 +344,40 @@ EOF
 	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
 		cmp -s "$STAGE/$_f" "$R/boot/modules.nvnative-test/$_f" && ok "make-be.sh: $_f is installed" || no "make-be.sh: $_f is not installed"
 	done
-	[ "$(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null)" = needs-linux ] && ok "make-be.sh: the uvm row is needs-linux (nvidia-uvm.ko depends on the Linuxulator)" || no "make-be.sh: the uvm row is $(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null)"
+	[ "$(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null)" = "$UVM_WANT" ] && ok "make-be.sh: the uvm row is $UVM_WANT" || no "make-be.sh: the uvm row is $(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null), wanted $UVM_WANT"
+	[ "$(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/prime-import" 2> /dev/null)" = "$PRIME_WANT" ] && ok "make-be.sh: the PRIME row is $PRIME_WANT" || no "make-be.sh: the PRIME row is $(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/prime-import" 2> /dev/null), wanted $PRIME_WANT"
+	# Synthetic controls always cover classification, without depending on a historical module or a personal dataset.
+	: > "$T/synthetic-uvm.ko"; : > "$T/synthetic-drm.ko"; mkdir -p "$T/classify-stub"
+	cat > "$T/classify-stub/kldxref" <<'EOF'
+#!/bin/sh
+for _d do :; done
+for _k in "$_d"/*; do
+	_n=${_k##*/}; printf '  module %s\n' "${_n%.ko}"
+	case $_n in
+	synthetic-uvm.ko) printf '    depends on kernel.\n    depends on linux64elf.\n' ;;
+	synthetic-drm.ko) printf '    depends on kernel.\n    depends on linuxkpi.\n' ;;
+	*) printf '    depends on kernel.\n' ;;
+	esac
+done
+EOF
+	cat > "$T/classify-stub/nm" <<'EOF'
+#!/bin/sh
+for _k do :; done
+case ${_k##*/} in
+synthetic-uvm.ko) printf '                 U linux_uvm_synthetic\n' ;;
+synthetic-drm.ko) printf '                 U linuxkpi_drm_synthetic\n' ;;
+*) printf '                 U printf\n' ;;
+esac
+EOF
+	chmod 0755 "$T/classify-stub/kldxref" "$T/classify-stub/nm"
+	mkclone "$T/clone-synthetic/root"
+	env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-synthetic/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 NVNT_TEST_PATH="$T/classify-stub" GB10_WORK="$WORK" sh "$KIT/make-be.sh" -u "$T/synthetic-uvm.ko" -d "$T/synthetic-drm.ko" -D 20990106 -m "$STAGE" -s "$SHAFILE" -o "$WORK/logs/native-tools-testboot" > "$T/mb-synthetic.out" 2>&1
+	expect 0 $? "make-be.sh classifies synthetic controls with stubbed kldxref and nm"
+	_sr=$T/clone-synthetic/root/usr/local/share/nvidia-native-tools-test/static-rows
+	[ "$(head -1 "$_sr/uvm-ioctl-suite" 2> /dev/null)" = needs-linux ] && grep -q 'linux64elf' "$_sr/uvm-ioctl-suite" && ok "make-be.sh: a Linux dependency makes the uvm row needs-linux" || no "make-be.sh: the synthetic uvm row is $(head -2 "$_sr/uvm-ioctl-suite" 2> /dev/null)"
+	[ "$(head -1 "$_sr/prime-import" 2> /dev/null)" = needs-linuxkpi ] && grep -q 'linuxkpi_drm_synthetic' "$_sr/prime-import" && ok "make-be.sh: a LinuxKPI importer makes the PRIME row needs-linuxkpi" || no "make-be.sh: the synthetic PRIME row is $(head -2 "$_sr/prime-import" 2> /dev/null)"
 	grep -q 'bectl activate' "$T/bectl.log" && no "make-be.sh armed the boot without --activate" || ok "make-be.sh does not arm without --activate"
-	TMPDIR=$T sh "$KIT/check-be.sh" -m "$R" -U -s "$STAGE/SHA256-native-a682522.txt" > "$T/cb.out" 2>&1
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb.out" 2>&1
 	# the commit comparisons (the version file, the files of the commit, the VENDOR pins read from the commit) cannot
 	# pass for a work tree installed with NVNT_NO_GIT_CHECK; every other check must
 	_cbf=$(grep '^FAIL' "$T/cb.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
@@ -279,34 +416,71 @@ EOF
 	guard_ko_native "$STAGE/nvidia-modeset.ko" "$T/kodep" $LK > /dev/null; expect 0 $? "guard_ko_native: the staged nvidia-modeset.ko of main is native"
 	guard_ko_native "$STAGE/nvidia.ko" "$T/kodep" > /dev/null; expect 2 $? "guard_ko_native: no LinuxKPI module to compare with is an error"
 	guard_ko_native "$STAGE/nvidia.ko" "$T/elsewhere-dir" $LK > /dev/null; expect 2 $? "guard_ko_native: a scratch directory not ending in /kodep is refused"
-	[ -f "$WORK/logs/uvm-2373/nvidia-v6-phase0.ko" ] && { guard_ko_native "$WORK/logs/uvm-2373/nvidia-v6-phase0.ko" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: the v6 nvidia.ko (linux64elf, linux_common) fails"; }
-	[ -f "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" ] && { guard_ko_native "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: nvidia-uvm-v5.ko fails"; }
+	if [ -n "${NVNT_PHASE0_KO:-}" ]; then
+		guard_ko_native "$NVNT_PHASE0_KO" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: the real phase-0 nvidia.ko control fails"
+	else
+		skip "guard_ko_native phase-0 module" NVNT_PHASE0_KO "the phase-0 nvidia.ko built with the Linuxulator"
+	fi
+	if [ -n "${NVNT_UVM_KO:-}" ]; then
+		guard_ko_native "$NVNT_UVM_KO" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: the real nvidia-uvm.ko control fails"
+	else
+		skip "guard_ko_native uvm module" NVNT_UVM_KO "a nvidia-uvm.ko built with the Linuxulator"
+	fi
+	# Synthetic controls make the Linux-dependent cases testable without a historical module or a personal dataset.
+	: > "$T/synthetic.ko"
+	mkdir -p "$T/kldstub"
+	cat > "$T/kldstub/kldxref" <<'EOF'
+#!/bin/sh
+printf '  module nvidia\n    depends on linux64elf.\n    depends on linux_common.\n'
+EOF
+	chmod 0755 "$T/kldstub/kldxref"
+	( PATH="$T/kldstub:$PATH"; guard_ko_native "$T/synthetic.ko" "$T/kodep" $LK > "$T/synthetic-deps.out" ); expect 1 $? "guard_ko_native: a synthetic module with Linux dependencies fails"
+	grep -q 'depends on linux64elf linux_common' "$T/synthetic-deps.out" && ok "guard_ko_native: the synthetic dependency plant is what fails" || no "guard_ko_native: the synthetic dependency plant did not fire"
 	# a module calling into LinuxKPI by unprefixed names, with no MODULE_DEPEND on it, is caught by its imports
 	guard_lkpi_imports "$STAGE/nvidia.ko" $LK > /dev/null; expect 0 $? "guard_lkpi_imports: nvidia.ko of main imports nothing LinuxKPI defines"
-	[ -f "$WORK/logs/uvm-2373/nvidia-drm-v5.ko" ] && { guard_lkpi_imports "$WORK/logs/uvm-2373/nvidia-drm-v5.ko" $LK > "$T/lki.out"; expect 1 $? "guard_lkpi_imports: nvidia-drm.ko (a LinuxKPI user) fails: $(cut -c1-90 "$T/lki.out")"; }
+	if [ -n "${NVNT_DRM_KO:-}" ]; then
+		guard_lkpi_imports "$NVNT_DRM_KO" $LK > "$T/lki.out"; expect 1 $? "guard_lkpi_imports: the real nvidia-drm.ko control fails: $(cut -c1-90 "$T/lki.out")"
+	else
+		skip "guard_lkpi_imports drm module" NVNT_DRM_KO "a nvidia-drm.ko built with LinuxKPI"
+	fi
 	mkdir -p "$T/nmstub2"; printf '#!/bin/sh\ncase "$1" in -u) echo "                 U idr_alloc"; echo "                 U printf" ;; *) echo "0000000000001000 T idr_alloc" ;; esac\n' > "$T/nmstub2/nm"; chmod 0755 "$T/nmstub2/nm"
-	( PATH="$T/nmstub2:$PATH"; guard_lkpi_imports /x /y > /dev/null ); expect 1 $? "guard_lkpi_imports: an unprefixed LinuxKPI import (idr_alloc) fails"
-	[ -f "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" ] && { guard_undef "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" > /dev/null; expect 1 $? "guard_undef: nvidia-uvm-v5.ko has Linux symbols"; }
+	( PATH="$T/nmstub2:$PATH"; guard_lkpi_imports /x /y > "$T/synthetic-import.out" ); expect 1 $? "guard_lkpi_imports: an unprefixed LinuxKPI import (idr_alloc) fails"
+	grep -q 'idr_alloc' "$T/synthetic-import.out" && ok "guard_lkpi_imports: the failure names the planted idr_alloc import" || no "guard_lkpi_imports: the planted import did not fire: $(cat "$T/synthetic-import.out")"
+	if [ -n "${NVNT_UVM_KO:-}" ]; then
+		guard_undef "$NVNT_UVM_KO" > /dev/null; expect 1 $? "guard_undef: the real nvidia-uvm.ko control has Linux symbols"
+	else
+		skip "guard_undef uvm module" NVNT_UVM_KO "a nvidia-uvm.ko built with the Linuxulator"
+	fi
+	cat > "$T/kldstub/kldxref" <<'EOF'
+#!/bin/sh
+printf '  module nvidia_uvm\n    depends on kernel.\n'
+EOF
+	mkdir -p "$T/nmstub3"
+	printf '#!/bin/sh\nprintf "                 U linux_synthetic\\n                 U printf\\n"\n' > "$T/nmstub3/nm"; chmod 0755 "$T/nmstub3/nm" "$T/kldstub/kldxref"
+	( PATH="$T/kldstub:$T/nmstub3:$PATH"; guard_ko_native "$T/synthetic.ko" "$T/kodep" $LK > "$T/synthetic-native-undef.out" ); expect 1 $? "guard_ko_native: a synthetic module with an undefined Linux symbol fails"
+	grep -q 'linux_synthetic' "$T/synthetic-native-undef.out" && ok "guard_ko_native: the failure names the planted linux_synthetic symbol" || no "guard_ko_native: the planted undefined symbol did not fire: $(cat "$T/synthetic-native-undef.out")"
+	( PATH="$T/nmstub3:$PATH"; guard_undef "$T/synthetic.ko" > "$T/synthetic-undef.out" ); expect 1 $? "guard_undef: a synthetic undefined Linux symbol fails"
+	grep -q 'linux_synthetic' "$T/synthetic-undef.out" && ok "guard_undef: the failure names the planted linux_synthetic symbol" || no "guard_undef: the planted undefined symbol did not fire: $(cat "$T/synthetic-undef.out")"
 	guard_copyout_dataset /x zroot/bootenv/cloudbsd-rx7600 zroot/bootenv/cloudbsd-rx7600 > /dev/null; expect 1 $? "guard_copyout_dataset: under a boot environment root named bootenv fails"
 	guard_copyout_dataset /x zroot/ROOT zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 1 $? "guard_copyout_dataset: the boot environment root itself fails"
 	guard_copyout_dataset /x tank/ROOT/x zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: another pool's ROOT is not a boot environment"
-	guard_copyout_dataset /x zroot/home/mlapointe zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: the home dataset passes"
-	guard_copyout_dataset /x zroot/home/mlapointe - > /dev/null; expect 2 $? "guard_copyout_dataset: no bootfs is an error"
+	guard_copyout_dataset /x zroot/home/test zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: the home dataset passes"
+	guard_copyout_dataset /x zroot/home/test - > /dev/null; expect 2 $? "guard_copyout_dataset: no bootfs is an error"
 	guard_copyout_dataset /x tank/results - zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: a data pool without bootfs passes"
 	guard_copyout_dataset /x tank/ROOT/a zroot/ROOT/b tank/ROOT/c > /dev/null; expect 1 $? "guard_copyout_dataset: under the boot environment root of a second pool fails"
 	mkdir -p "$R/etc/rc.conf.d"; : > "$R/etc/rc.conf.d/linux"
-	TMPDIR=$T sh "$KIT/check-be.sh" -m "$R" -U -s "$STAGE/SHA256-native-a682522.txt" > "$T/cb-ov.out" 2>&1
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-ov.out" 2>&1
 	grep -q '^FAIL etc/rc.conf.d/linux exists' "$T/cb-ov.out" && ! grep -q '^ok   no later rc.conf' "$T/cb-ov.out" && ok "check-be.sh: an rc.conf.d/linux override is a FAIL, with no ok after it" || no "check-be.sh: the rc.conf.d/linux override is not reported cleanly"
 	rm -f "$R/etc/rc.conf.d/linux"
 	printf 'linux_enable="YES"\n' >> "$R/etc/rc.conf"
-	TMPDIR=$T sh "$KIT/check-be.sh" -m "$R" -U -s "$STAGE/SHA256-native-a682522.txt" > "$T/cb2.out" 2>&1
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb2.out" 2>&1
 	grep -q '^FAIL rc.conf: linux_enable' "$T/cb2.out" && ok "check-be.sh catches linux_enable=YES planted in the clone" || no "check-be.sh misses a planted linux_enable=YES"
 
 	# (f) the rc one-shot, foreground, stubbed system commands
 	S=$T/stubs; mkdir -p "$S" "$T/dev" "$T/kitroot/static-rows" "$T/mods" "$T/copyout"
 	ln -s /dev/null "$T/dev/nvidia1"; ln -s /dev/null "$T/dev/nvidiactl"; ln -s /dev/null "$T/dev/nvidia-modeset"
 	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do cp "$STAGE/$_f" "$T/mods/"; done
-	cp "$STAGE/SHA256-native-a682522.txt" "$T/kitroot/SHA256.txt"
+	cp "$SHAFILE" "$T/kitroot/SHA256.txt"
 	for _f in guard.sh summarize.py gpu-detect.sh; do cp "$KIT/$_f" "$T/kitroot/"; done
 	mkdir -p "$T/kitroot/repo"; ( cd "$repo" && tar -cf - tests/libnvrm SOURCES lib/libnvrm/schema ) | tar -xf - -C "$T/kitroot/repo"
 	cp "$R"/usr/local/share/nvidia-native-tools-test/static-rows/* "$T/kitroot/static-rows/"
@@ -364,7 +538,7 @@ EOF
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:needs-linux render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done

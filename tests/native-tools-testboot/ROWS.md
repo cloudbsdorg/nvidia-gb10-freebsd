@@ -10,9 +10,9 @@ It loads no Linuxulator module and no LinuxKPI module, and it runs no Linux bina
   `*linux*` entry from `kld_list`. It also blocks those drivers in devmatch, through rc.conf and
   the loader kenv. The AMD card therefore has no driver during this boot, and the console stays
   on the EFI frame buffer.
-- `/boot/modules.nvnative-test` holds the staged build of nvidia-gb10-freebsd main (a682522 or
-  later): `nvidia_gsp_ga10x_fw.ko`, `nvidia.ko` and `nvidia-modeset.ko`, none of which has a Linux
-  dependency, plus `nvrm-info` and `libnvrm.so.1`. `make-be.sh` and `check-be.sh` refuse a module
+- `/boot/modules.nvnative-test` holds a build of nvidia-gb10-freebsd main without the Linux dependency
+  (see #2363): `nvidia_gsp_ga10x_fw.ko`, `nvidia.ko` and `nvidia-modeset.ko`, plus `nvrm-info` and
+  `libnvrm.so.1`. `make-be.sh` and `check-be.sh` refuse a module
   that depends on `linux*`, `drm*` or `dmabuf`, or that has undefined `linux_`, `lkpi_` or
   `linuxkpi_` symbols.
 
@@ -57,8 +57,8 @@ planned row with its status. It carries two verdicts:
 | nvrm-info | `tests/libnvrm/boot_nvrm_info.sh` runs `nvrm-info` (libnvrm, RM-direct) in every mode against the driver and compares it with sysctl, pciconf and the board's stated VRAM and SM (`make-be.sh -V -S`) |
 | nvrm-info-native | the row ran under `ktrace -i -t cn`. Every file that a successful execve ran (the image and its interpreters) must be a FreeBSD-branded ELF or a #! script, at an absolute path that still exists; a relative or vanished path is an error. Any kldload or kldunload call fails the row |
 | nvrm-info-no-new-module | no module appeared while it ran |
-| uvm-ioctl-suite, uvm-owner-probe, uvm-owner-race | needs-linux: `nvidia-uvm.ko` declares MODULE_DEPEND on linux64elf (linux on amd64) and linux_common, and registers a Linux ioctl handler (uvm-bsd `sys/uvm_main.c`); `make-be.sh` writes the kldxref evidence |
-| prime-import | needs-linuxkpi: `nvidia-drm.ko` and amdgpu are drm-kmod modules |
+| uvm-ioctl-suite, uvm-owner-probe, uvm-owner-race | `make-be.sh -u` classifies the supplied `nvidia-uvm.ko`. A module that declares MODULE_DEPEND on linux64elf (linux on amd64) and linux_common, and registers a Linux ioctl handler, is needs-linux; with no module the rows are not-available. The detail holds the kldxref and nm evidence |
+| prime-import | `make-be.sh -d` classifies the supplied `nvidia-drm.ko`; a drm-kmod module is needs-linuxkpi. With no module the row is not-available |
 | render-uapi | not-available: main has the header and documents only |
 | nvrm-s2-memory | not-available until libnvrm S2 (memory allocation and copy timing) is on main |
 | env-after, env-after-delta | the guard a last time, and no module new since env-loaded |
@@ -68,7 +68,7 @@ planned row with its status. It carries two verdicts:
 
 The run is written to `/var/db/nvidia-native-tools-test/<stamp>/` in the boot environment. It is
 then copied to the copy-out directory, by default
-`/home/mlapointe/work/gb10/logs/native-tools-testboot/<stamp>/`. A run holds:
+`${GB10_WORK:-$HOME/work/gb10}/logs/native-tools-testboot/<stamp>/`. A run holds:
 
 - `results.jsonl`: one `{"row","status","detail"}` per line.
 - `summary.json` and `summary.txt`: the reading. The last line of `summary.txt` is PASS, FAIL or

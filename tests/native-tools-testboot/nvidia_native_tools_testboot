@@ -15,7 +15,8 @@
 #   2. sets and reads back kern.panic_reboot_wait_time=5 and debug.debugger_on_panic=0;
 #   3. env-before: the no-Linux guard (guard.sh) on kldstat -v and compat.linux, before anything is loaded;
 #   4. checks the staged files against the hash list, then loads, as root and by full path, the GSP firmware module,
-#      nvidia.ko and nvidia-modeset.ko of /boot/modules.nvnative-test (built from main a682522: no Linux dependency);
+#      nvidia.ko and nvidia-modeset.ko of /boot/modules.nvnative-test (a build of main without the Linux dependency,
+#      see #2363);
 #   5. env-loaded: the guard again, with nvidia.ko as the positive control;
 #   6. finds the GPU with gpu-detect.sh (vendored from uvm-bsd: PCI class, vendor, the driver parent, never
 #      /dev/nvidia0), opens the chosen node once as root and verifies it is the chosen card;

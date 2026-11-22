@@ -873,11 +873,16 @@ API is tested without hardware; the RM backend is tested against a scripted kern
   devmatch);
 - only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
   Linux dependency since #2363;
-- `nvrm-info` traced under `ktrace`, so that every file it executes must be a FreeBSD-branded ELF.
+- `gpu-detect.sh` and `nvrm-info` traced under `ktrace`, so that every file they execute is checked.
 
-A row fails when any module whose name contains `linux` is loaded, or when a non-FreeBSD binary
-runs. The uvm-bsd tests are recorded as needs-linux, because `nvidia-uvm.ko` still depends on the
-Linuxulator; PRIME is recorded as needs-linuxkpi. Results are `summary.json` (schema
+The environment check fails when a loaded file other than the kernel, or a module record in such a
+file, has a Linux-layer name listed by `guard_layer_name`, or when `compat.linux` answers. Module
+records built into the kernel file are only reported. A failed environment check makes every row
+`not-available` and the verdict `fail`. A traced tool fails its row when it executes a non-FreeBSD binary,
+calls `fexecve`, or calls `execve` with no path. A correct run on current main ends with the verdict
+`incomplete`: some rows are `not-available`, `needs-linux` or `needs-linuxkpi`. Without the optional
+UVM and DRM control modules their rows are `not-available`; the known Linux-dependent controls make
+the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json` (schema
 `native-tools-summary/1`) plus per-tool JSON. See
 [tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
 statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`

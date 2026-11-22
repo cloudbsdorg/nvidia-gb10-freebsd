@@ -9,10 +9,12 @@
 # Usage: check-be.sh [-s SHA256FILE] [-c COMMIT] [-U] [-m MOUNTED_ROOT | BE]
 #   BE         a boot environment to mount with bectl (run as root)
 #   -m ROOT    check the tree already mounted at ROOT instead
-#   -s FILE    the hash list it was built from (default $GB10_WORK/logs/native-tools/stage-a682522/SHA256-native-a682522.txt,
-#              GB10_WORK defaulting to /home/mlapointe/work/gb10)
+#   -s FILE    the hash list it was built from (default $GB10_WORK/logs/native-tools/stage/SHA256.txt,
+#              GB10_WORK defaulting to $HOME/work/gb10)
 #   -c COMMIT  the commit the kit must record (default HEAD of this repository)
 #   -U         do not check root ownership (the host test installs without root; only with -m)
+# Environment: with GB10_TEST_HOOKS=1, not root and NVNT_NO_GIT_CHECK=1, an archive without git metadata is still
+# checked; the commit comparisons fail, as the host test already expects, instead of hiding every later check.
 #
 # Checks, each printed "ok" or "FAIL"; exit 0 when all are ok, 1 when one failed, 2 on a usage error:
 #   - staged files: the five files of the list equal their full hashes, are root-owned (0444, nvrm-info 0555), are
@@ -39,8 +41,10 @@ LC_ALL=C
 export PATH LC_ALL
 KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
-WORK=${GB10_WORK:-/home/mlapointe/work/gb10}
-SHAFILE=$WORK/logs/native-tools/stage-a682522/SHA256-native-a682522.txt
+. "$KITDIR/guard.sh"
+WORK=${GB10_WORK:-$HOME/work/gb10}
+SHAFILE=$WORK/logs/native-tools/stage/SHA256.txt
+SHAFILE_GIVEN=0
 COMMIT=
 MNT=
 NOOWNER=0
@@ -48,7 +52,7 @@ help() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }'
 usage() { echo "check-be.sh: ${1:-give a boot environment or -m ROOT} (check-be.sh -h shows every option)" >&2; exit 2; }
 while [ $# -gt 0 ]; do
 	case $1 in
-	-s) [ $# -ge 2 ] || usage "-s needs a value"; SHAFILE=$2; shift 2 ;;
+	-s) [ $# -ge 2 ] || usage "-s needs a value"; SHAFILE=$2; SHAFILE_GIVEN=1; shift 2 ;;
 	-c) [ $# -ge 2 ] || usage "-c needs a value"; COMMIT=$2; shift 2 ;;
 	-m) [ $# -ge 2 ] || usage "-m needs a value"; MNT=$2; shift 2 ;;
 	-U) NOOWNER=1; shift ;;
@@ -61,11 +65,18 @@ BE=${1:-}
 [ -n "$MNT" ] || [ -n "$BE" ] || usage
 [ -z "$MNT" ] || [ -z "$BE" ] || { echo "check-be.sh: give a boot environment or -m ROOT, not both" >&2; exit 2; }
 [ "$NOOWNER" = 0 ] || [ -n "$MNT" ] || { echo "check-be.sh: -U is only for a tree given with -m" >&2; exit 2; }
+if [ "$SHAFILE_GIVEN" = 0 ]; then guard_work_default "$(id -u)" check-be.sh -s || exit $?; fi
 [ -f "$SHAFILE" ] || { echo "check-be.sh: no hash list $SHAFILE (give -s FILE)" >&2; exit 2; }
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 git_() { git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" "$@"; }
 case ${COMMIT:-HEAD} in -*) echo "check-be.sh: the commit must not start with a dash" >&2; exit 2 ;; esac
-COMMIT=$(git_ rev-parse --verify --end-of-options "${COMMIT:-HEAD}^{commit}" 2> /dev/null) || { echo "check-be.sh: -c names no commit of $REPO" >&2; exit 2; }
+NO_GIT=0
+if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ] && [ "${NVNT_NO_GIT_CHECK:-0}" = 1 ] && ! git_ rev-parse --git-dir > /dev/null 2>&1; then
+	# An archive has no commit id: keep COMMIT empty and use NO_GIT to record the deliberate rev-parse bypass.
+	NO_GIT=1; COMMIT=${COMMIT:-}
+else
+	COMMIT=$(git_ rev-parse --verify --end-of-options "${COMMIT:-HEAD}^{commit}" 2> /dev/null) || { echo "check-be.sh: -c names no commit of $REPO" >&2; exit 2; }
+fi
 
 MOUNTED=0
 MNTBASE=
@@ -97,8 +108,8 @@ RCS=$MNT/usr/local/etc/rc.d/nvidia_native_tools_testboot
 RCC=$MNT/etc/rc.conf
 FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1"
 FORBID_RE='(linux|^amdgpu|^radeonkms|^i915kms|^drm|^dmabuf|^nvidia|^lindebugfs)'
-echo "check-be.sh: ${BE:-$MNT}, commit $COMMIT, list $SHAFILE"
-. "$KITDIR/guard.sh"
+echo "check-be.sh: ${BE:-$MNT}, commit ${COMMIT:-none}, list $SHAFILE"
+[ "$NO_GIT" = 0 ] || echo "check-be.sh: no git metadata; the commit comparisons below are expected to FAIL"
 
 linked() { _acc=$MNT; for _c in $(echo "$1" | tr / ' '); do _acc=$_acc/$_c; [ ! -L "$_acc" ] || return 0; done; return 1; }
 for _rel in boot/loader.conf boot/modules.nvnative-test usr/local/share/nvidia-native-tools-test usr/local/etc/rc.d/nvidia_native_tools_testboot usr/local/etc/nvidia_native_tools_testboot.version usr/local/sbin/testboot-return etc/rc.conf etc/rc.conf.d/nvidia_native_tools_testboot sbin/shutdown; do

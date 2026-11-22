@@ -22,6 +22,15 @@
 #     execve, which covers a #! script's interpreter and the ELF run-time linker) is a FreeBSD-branded ELF, or a #!
 #     script; a row that calls kldload or kldunload fails (the trace names a file id for kldunload, not a module).
 
+# guard_work_default <effective uid> <program> <defaulted options>: root must not silently use root's home for these
+# paths; the caller exits with this function's status.  Non-root and an explicitly set GB10_WORK keep the old default.
+guard_work_default()
+{
+	[ "$1" = 0 ] && [ -z "${GB10_WORK:-}" ] || return 0
+	echo "$2: running as root without GB10_WORK; set GB10_WORK or pass $3" >&2
+	return 2
+}
+
 # guard_kld_names <kldstat -v file>: every file and module name of the listing, one per line
 guard_kld_names()
 {
@@ -136,7 +145,7 @@ guard_ko_native()
 	rm -f "$_sd.out"
 	_bad=
 	for _x in $_d; do if guard_layer_name "$_x"; then _bad="$_bad $_x"; fi; done
-	if [ -n "$_bad" ]; then echo "fail ${_k##*/} depends on$_bad: it needs the Linux layer; build it from main a682522 or later"; return 1; fi
+	if [ -n "$_bad" ]; then echo "fail ${_k##*/} depends on$_bad: it needs the Linux layer; build nvidia.ko and nvidia-modeset.ko from main (no Linux dependency since #2363) and stage them with -m"; return 1; fi
 	_ul=$(guard_undef "$_k"); _us=$?
 	[ "$_us" = 0 ] || { echo "$_ul"; return "$_us"; }
 	_ll=$(guard_lkpi_imports "$_k" "$@"); _ls=$?

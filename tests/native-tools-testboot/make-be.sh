@@ -11,17 +11,17 @@
 #   -b BASE_BE    the boot environment to clone (default NORMAL_BE)
 #   -D, -n        the name is nvidia-native-tools-test-<DATE>-<SEQ> (today, 1); an existing name is refused with the
 #                 next free SEQ
-#   -m STAGEDIR   the staged build (default $GB10_WORK/logs/native-tools/stage-a682522): nvidia_gsp_ga10x_fw.ko,
+#   -m STAGEDIR   the staged build (default $GB10_WORK/logs/native-tools/stage): nvidia_gsp_ga10x_fw.ko,
 #                 nvidia.ko, nvidia-modeset.ko, nvrm-info and libnvrm.so.1, built from nvidia-gb10-freebsd main
-#   -s FILE       the hash list (default STAGEDIR/SHA256-native-a682522.txt): five lines SHA256 (name) = <64 hex>
+#   -s FILE       the hash list (default STAGEDIR/SHA256.txt): five lines SHA256 (name) = <64 hex>
 #   -o COPYOUT    where the one-shot copies its run (default $GB10_WORK/logs/native-tools-testboot);
 #                 an absolute path on a dataset outside the boot environments
 #   -V, -S        the board's VRAM in bytes and SM version, for boot_nvrm_info.sh (default 17179869184 and 12.0: the
 #                 16 GiB RTX 5060 Ti of amp001)
-#   -u UVM_KO     the nvidia-uvm.ko whose dependencies decide the uvm rows (default
-#                 $GB10_WORK/logs/uvm-2373/nvidia-uvm-v5.ko, the module of the v7 boot); it is read, never installed
-#   -d DRM_KO     the nvidia-drm.ko whose dependencies decide the PRIME row (default
-#                 $GB10_WORK/logs/uvm-2373/nvidia-drm-v5.ko); read, never installed
+#   -u UVM_KO     the nvidia-uvm.ko whose dependencies decide the uvm rows; without it they are not-available;
+#                 the module is read, never installed
+#   -d DRM_KO     the nvidia-drm.ko whose dependencies decide the PRIME row; without it that row is not-available;
+#                 the module is read, never installed
 #   --dry-run     build and check the boot environment, never arm it (the default)
 #   --activate    finish with bectl activate -t BE (the orchestrator's decision; never while a Fable agent runs)
 #
@@ -44,9 +44,9 @@
 #   7. unmounts; with --activate arms the one-shot boot.
 # The running system is not touched: nothing is loaded, unloaded or rebooted.
 #
-# Environment: GB10_WORK (default /home/mlapointe/work/gb10).  Test hooks, honoured only with GB10_TEST_HOOKS=1 and
+# Environment: GB10_WORK (default $HOME/work/gb10).  Test hooks, honoured only with GB10_TEST_HOOKS=1 and
 # when not root: NVNT_BECTL (the bectl to run), NVNT_MNT (the clone's mount point), NVNT_NOT_ROOT (no root
-# ownership), NVNT_NO_GIT_CHECK (the work tree is installed).
+# ownership), NVNT_NO_GIT_CHECK (the work tree is installed), NVNT_TEST_PATH (stub tools first on PATH).
 
 set -eu
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
@@ -55,21 +55,28 @@ export PATH LC_ALL
 
 KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
-WORK=${GB10_WORK:-/home/mlapointe/work/gb10}
+. "$KITDIR/guard.sh"
+WORK=${GB10_WORK:-$HOME/work/gb10}
 BECTL=bectl
 HOOKS=0
-if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ]; then HOOKS=1; BECTL=${NVNT_BECTL:-bectl}; fi
+if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ]; then
+	HOOKS=1; BECTL=${NVNT_BECTL:-bectl}
+	[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
+fi
 NORMAL=cloudbsd-rx7600
 BASE=
 DATE=$(date -u +%Y%m%d)
 SEQ=1
-STAGE=$WORK/logs/native-tools/stage-a682522
+STAGE=$WORK/logs/native-tools/stage
+STAGE_GIVEN=0
 SHAFILE=
+SHAFILE_GIVEN=0
 COPYOUT=$WORK/logs/native-tools-testboot
+COPYOUT_GIVEN=0
 VRAM=17179869184
 SM=12.0
-UVMKO=$WORK/logs/uvm-2373/nvidia-uvm-v5.ko
-DRMKO=$WORK/logs/uvm-2373/nvidia-drm-v5.ko
+UVMKO=
+DRMKO=
 ACTIVATE=0
 FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1"
 # a kld_list or devmatch entry of these names is stripped from the clone (LinuxKPI drivers, the Linux ABI, NVIDIA)
@@ -85,27 +92,31 @@ while [ $# -gt 0 ]; do
 	-b) need "$1" "$#"; BASE=$2; shift 2 ;;
 	-D) need "$1" "$#"; DATE=$2; shift 2 ;;
 	-n) need "$1" "$#"; SEQ=$2; shift 2 ;;
-	-m) need "$1" "$#"; STAGE=$2; shift 2 ;;
-	-s) need "$1" "$#"; SHAFILE=$2; shift 2 ;;
-	-o) need "$1" "$#"; COPYOUT=$2; shift 2 ;;
+	-m) need "$1" "$#"; STAGE=$2; STAGE_GIVEN=1; shift 2 ;;
+	-s) need "$1" "$#"; SHAFILE=$2; SHAFILE_GIVEN=1; shift 2 ;;
+	-o) need "$1" "$#"; COPYOUT=$2; COPYOUT_GIVEN=1; shift 2 ;;
 	-V) need "$1" "$#"; VRAM=$2; shift 2 ;;
 	-S) need "$1" "$#"; SM=$2; shift 2 ;;
-	-u) need "$1" "$#"; UVMKO=$2; shift 2 ;;
-	-d) need "$1" "$#"; DRMKO=$2; shift 2 ;;
+	-u) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; UVMKO=$2; shift 2 ;;
+	-d) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; DRMKO=$2; shift 2 ;;
 	--dry-run) ACTIVATE=0; shift ;;
 	--activate) ACTIVATE=1; shift ;;
 	-h | --help) help ;;
 	*) usage "unknown argument: $1" ;;
 	esac
 done
+_root_opts=
+[ "$STAGE_GIVEN" = 1 ] || _root_opts="$_root_opts -m"
+[ "$SHAFILE_GIVEN" = 1 ] || _root_opts="$_root_opts -s"
+[ "$COPYOUT_GIVEN" = 1 ] || _root_opts="$_root_opts -o"
+if [ -n "$_root_opts" ]; then guard_work_default "$(id -u)" make-be.sh "${_root_opts# }" || exit $?; fi
 [ -n "$BASE" ] || BASE=$NORMAL
-[ -n "$SHAFILE" ] || SHAFILE=$STAGE/SHA256-native-a682522.txt
+[ -n "$SHAFILE" ] || SHAFILE=$STAGE/SHA256.txt
 case $DATE in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "make-be.sh: -D must be YYYYMMDD" >&2; exit 2 ;; esac
 case $SEQ in '' | *[!0-9]* | 0*) echo "make-be.sh: -n must be a positive number" >&2; exit 2 ;; esac
 case $VRAM in '' | *[!0-9]*) echo "make-be.sh: -V must be a number of bytes" >&2; exit 2 ;; esac
 case $SM in [0-9]*.[0-9]*) ;; *) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 case $SM in *[!0-9.]* | *.*.*) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
-. "$KITDIR/guard.sh"
 _l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit 2; }
 for _n in "$NORMAL" "$BASE"; do
 	case $_n in *[!A-Za-z0-9._-]* | -* | '') echo "make-be.sh: unusable boot environment name: $_n" >&2; exit 2 ;; esac
@@ -185,7 +196,7 @@ for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	_d=$(deps "$STAGE/$_k") || { echo "make-be.sh: cannot read the dependencies of $_k" >&2; exit 1; }
 	[ -n "$_d" ] || { echo "make-be.sh: kldxref reports no dependency at all for $_k (not even kernel): it could not read it" >&2; exit 1; }
 	_bad=$(printf '%s\n' "$_d" | grep -iE 'linux|drm|dmabuf' | tr '\n' ' ')
-	[ -z "$_bad" ] || { echo "make-be.sh: $_k depends on $_bad: not a native module (build it from main at a682522 or later)" >&2; exit 1; }
+	[ -z "$_bad" ] || { echo "make-be.sh: $_k depends on $_bad: not a native module; build nvidia.ko and nvidia-modeset.ko from main (no Linux dependency since #2363) and stage them with -m" >&2; exit 1; }
 	_l=$(guard_undef "$STAGE/$_k") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
 	echo "native $_k: depends on $(printf '%s\n' "$_d" | tr '\n' ' ')"
 done
@@ -198,14 +209,16 @@ done
 SR=$SCRATCH/static-rows
 rm -rf "$SR"; mkdir "$SR"
 classify() {	# classify <ko> <what it is for>: needs-linux, needs-linuxkpi or not-available (native but not loaded by this kit, or not inspectable), with the evidence
-	if [ ! -r "$1" ]; then printf 'not-available\ncould not inspect %s (%s): the file is missing or unreadable\n' "$1" "$2"; return; fi
+	if [ -z "$1" ]; then printf 'not-available\nno control module was supplied for %s\n' "$2"; return; fi
+	[ -r "$1" ] || { echo "make-be.sh: control module $1 is missing or unreadable" >&2; return 2; }
 	_d=$(deps "$1") || { printf 'not-available\nkldxref could not read %s\n' "$1"; return; }
 	if [ -z "$_d" ]; then printf 'not-available\nkldxref reports no dependency for %s: it could not read it\n' "$1"; return; fi
 	_us=0; _ul=$(guard_undef "$1") || _us=$?
 	case $_us in 0) _u= ;; 1) _u=${_ul##*symbols: } ;; *) printf 'not-available\n%s\n' "${_ul#* }"; return ;; esac
 	_lx=$(printf '%s\n' "$_d" | grep -i linux | grep -vi linuxkpi | tr '\n' ' ')
 	_kp=$(printf '%s\n' "$_d" | grep -iE 'linuxkpi|^drmn?$|dmabuf' | tr '\n' ' ')
-	_h=$(sha256 -q "$1")
+	if ! _h=$(sha256 -q "$1" 2> /dev/null); then echo "make-be.sh: sha256 failed for control module $1" >&2; return 1; fi
+	[ -n "$_h" ] || { echo "make-be.sh: sha256 printed nothing for control module $1" >&2; return 1; }
 	if [ -n "$_lx" ]; then
 		printf 'needs-linux\n%s (%s, sha256 %s) depends on the Linuxulator: %sundefined symbols: %s\n' "$(basename "$1")" "$2" "$_h" "$_lx" "${_u:-none}"
 	elif [ -n "$_kp" ]; then
