@@ -695,22 +695,28 @@ unconfigure() {
 		esac
 		safe_parents "$_d" "$_f" "$_mode" || { note "deinstall: refusing $_d$_f: a directory on the way is a symbolic link or not root's"; continue; }
 		[ -f "$_d$_f" ] && [ ! -L "$_d$_f" ] || continue
+		_reason="changed since make configure"
+		_backup_note=
+		[ "$_bak" = - ] || _backup_note="; backup kept: $_d$_bak"
 		if [ -n "$_sum" ] && [ "$(sha256 -q "$_d$_f")" = "$_sum" ]; then
 			if [ "$_new" = new ]; then
 				rm -f -- "$_d$_f"
 				note "deinstall: removed $_d$_f (make configure created it)"
+				continue
 			elif [ -f "$_d$_bak" ] && [ ! -L "$_d$_bak" ]; then
 				mv -f -- "$_d$_bak" "$_d$_f"
 				note "deinstall: $_d$_f restored from $_d$_bak"
+				continue
 			fi
-			continue
+			_reason="unchanged, but backup $_d$_bak is missing or unsafe"
+			_backup_note=
 		fi
 		if [ "$_old" = unset ]; then
 			kv_unset "$_d$_f" "$_k"
 		else
 			kv_set "$_d$_f" "$_k" "$_old"
 		fi
-		note "deinstall: $_d$_f changed since make configure: only $_k put back (to $_old)${_bak#-:+; backup kept: $_d$_bak}"
+		note "deinstall: $_d$_f $_reason: only $_k put back (to $_old)$_backup_note"
 	done <<EOF
 $_rec
 EOF
@@ -1071,21 +1077,64 @@ do_install() {
 	note "install: next: make configure (loader.conf and rc.conf for loading at boot), or kldload nvidia-drm"
 }
 
-# migrate_manifest DESTDIR: commit 23c18da kept the manifest in
-# PREFIX/share/nvidia-gb10-freebsd; it is moved to STATEDIR (its paths are
-# absolute, only its own line changes), so deinstall and a reinstall still
-# know the files that install wrote.
+# migrate_manifest DESTDIR PREFIX [user|root]: commit 23c18da kept the
+# manifest in PREFIX/share/nvidia-gb10-freebsd; it is moved to STATEDIR (its
+# paths are absolute, only its own line changes), so deinstall and a reinstall
+# still know the files that install wrote.  A root migration trusts only a
+# root-owned manifest below root-owned, non-link directories, and every mode
+# copies only paths install could have written.
 migrate_manifest() {
+	_d=$1
 	_mp=${2:-/usr/local}
-	_old=$1$_mp/share/$name/installed.manifest
+	_mode=${3:-root}
+	_old=$_d$_mp/share/$name/installed.manifest
+	_man=$_d$STATEDIR/installed.manifest
 	[ -f "$_old" ] && [ ! -L "$_old" ] || return 0
-	[ ! -e "$1$STATEDIR/installed.manifest" ] || return 0
-	mkdir -p -- "$1$STATEDIR"
-	awk -v o="$_mp/share/$name/installed.manifest" -v n="$STATEDIR/installed.manifest" \
-	    '$1 == o { $1 = n } { print }' "$_old" > "$1$STATEDIR/installed.manifest"
-	printf '%s dir\n' "$STATEDIR" >> "$1$STATEDIR/installed.manifest"
+	[ ! -e "$_man" ] && [ ! -L "$_man" ] || return 0
+	if ! safe_parents "$_d" "$STATEDIR/installed.manifest" "$_mode"; then
+		note "not migrating $_old: a destination directory is a symbolic link or not root's"
+		return 1
+	fi
+	if [ "$_mode" = root ]; then
+		if ! safe_parents "$_d" "$_mp/share/$name/installed.manifest" root \
+		    || [ "$(stat -f '%u' "$_old")" != 0 ]; then
+			note "not migrating $_old: not root's"
+			return 1
+		fi
+	fi
+	mkdir -p -- "$_d$STATEDIR"
+	: > "$_man"
+	printf '@prefix %s\n' "$_mp" >> "$_man"
+	while read -r _f _rest; do
+		[ -n "$_f" ] || continue
+		case $_f in @*) continue ;; esac
+		if [ "$_f" = "$_mp/share/$name/installed.manifest" ] || [ "$_f" = "$STATEDIR/installed.manifest" ]; then
+			printf '%s%s%s\n' "$STATEDIR/installed.manifest" "${_rest:+ }" "$_rest" >> "$_man"
+		elif [ "$_rest" = dir ]; then
+			# Recreate only the directory records needed below; never copy
+			# a directory path from an untrusted manifest verbatim.
+			continue
+		elif allowed_path "$_f" "$_mp"; then
+			printf '%s%s%s\n' "$_f" "${_rest:+ }" "$_rest" >> "$_man"
+		else
+			note "refusing manifest path $_f: not a file make install writes"
+		fi
+	done < "$_old"
+	# Preserve cleanup of directories an earlier install created, but only
+	# when they are parents of an authorized path retained above.
+	awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_man" | while read -r _f; do
+		_dir=$(dirname -- "$_f")
+		while [ "$_dir" != / ]; do
+			if awk -v d="$_dir" '$1 == d && $2 == "dir" { found = 1 } END { exit !found }' "$_old"; then
+				printf '%s dir\n' "$_dir"
+			fi
+			_dir=$(dirname -- "$_dir")
+		done
+	done | awk '!seen[$0]++' >> "$_man"
+	printf '%s dir\n' "$STATEDIR" >> "$_man"
 	rm -f -- "$_old"
-	note "moved the manifest of an earlier install from $_old to $1$STATEDIR/installed.manifest"
+	rmdir -- "$(dirname -- "$_old")" 2>/dev/null || true
+	note "moved the manifest of an earlier install from $_old to $_man"
 }
 
 # install_stage STAGE DESTDIR PREFIX [user]
@@ -1114,7 +1163,16 @@ install_stage() {
 		[ "$(stat -f '%u' "$_d")" = 0 ] || die "refusing DESTDIR $_d as root: not owned by root"
 	fi
 	safe_parents "$_d" "$STATEDIR/x" "$_mode" || die "refusing $_d$STATEDIR: a directory on the way is a symbolic link or not root's"
-	migrate_manifest "$_d" "$_pfx"
+	migrate_manifest "$_d" "$_pfx" "$_mode" \
+	    || die "install: migration refused; remove the planted file or check its owner"
+	_manifest_pfx=$_pfx
+	if [ -e "$_man" ] || [ -L "$_man" ]; then
+		[ ! -L "$_man" ] || die "refusing $_man: symbolic link"
+		_recorded=$(awk '$1 == "@prefix" { print $2; exit }' "$_man")
+		[ -z "$_recorded" ] || _manifest_pfx=$_recorded
+		[ "$_manifest_pfx" = "$_pfx" ] \
+		    || die "install: PREFIX $_pfx differs from the recorded $_manifest_pfx; make deinstall PREFIX=$_manifest_pfx first"
+	fi
 	_newdirs=
 	_dir=$STATEDIR
 	while [ "$_dir" != / ] && [ ! -d "$_d$_dir" ]; do
@@ -1162,6 +1220,7 @@ $_dir"
 	# Pending manifest: the previous lines plus a pending line (with the
 	# sha256 or link target about to be written) for every staged path.
 	{
+		printf '@prefix %s\n' "$_pfx"
 		cat "$_prev"
 		while read -r _f; do
 			pending_line "$_s" "$_f"
@@ -1179,16 +1238,25 @@ $_dir"
 		fi
 	done < "$_w/list"
 	# Files of the previous install that this stage no longer has.
-	awk '$2 != "dir" { print $1 }' "$_prev" | sort -u | while read -r _f; do
+	awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_prev" | sort -u | while read -r _f; do
 		[ "$_f" = "$STATEDIR/installed.manifest" ] && continue
 		grep -qxF -- "$_f" "$_w/list" && continue
-		path_ok "$_f" && safe_parents "$_d" "$_f" "$_mode" || continue
+		if ! path_ok "$_f"; then
+			note "install: refusing manifest path $_f"
+			continue
+		fi
+		if ! allowed_path "$_f" "$_manifest_pfx"; then
+			note "install: refusing manifest path $_f: not a file make install writes"
+			continue
+		fi
+		safe_parents "$_d" "$_f" "$_mode" || continue
 		rm -f -- "$_d$_f.new"
 		if still_ours "$_d" "$_prev" "$_f"; then
 			rm -f -- "$_d$_f"
 		fi
 	done
 	{
+		printf '@prefix %s\n' "$_pfx"
 		while read -r _f; do
 			manifest_line "$_d" "$_f"
 		done < "$_w/list"
@@ -1233,7 +1301,7 @@ do_deinstall() {
 			fi
 		done
 	fi
-	[ ! -f "$MANIFEST" ] || note "deinstall: removing the $(awk '$2 != "dir"' "$MANIFEST" | awk '{ print $1 }' | sort -u | wc -l | tr -d ' ') files listed in $MANIFEST"
+	[ ! -f "$MANIFEST" ] || note "deinstall: removing the $(awk '$1 !~ /^@/ && $2 != "dir"' "$MANIFEST" | awk '{ print $1 }' | sort -u | wc -l | tr -d ' ') files listed in $MANIFEST"
 	[ ! -f "$DESTDIR$STATEDIR/configured" ] || note "deinstall: and taking out what make configure set ($DESTDIR$STATEDIR/configured)"
 	if [ -n "$DESTDIR" ] && [ "$(id -u)" != 0 ]; then
 		ask "Remove them from $DESTDIR?" || die "deinstall: nothing removed"
@@ -1257,16 +1325,23 @@ deinstall_manifest() {
 	fi
 	_man=$_d$STATEDIR/installed.manifest
 	unconfigure "$_d" "$_mode"
-	migrate_manifest "$_d" "$_pfx"
-	[ -f "$_man" ] || return 0
+	migrate_manifest "$_d" "$_pfx" "$_mode" \
+	    || die "deinstall: migration refused; remove the planted file or check its owner"
 	[ ! -L "$_man" ] || die "refusing $_man: symbolic link"
+	[ -f "$_man" ] || return 0
 	safe_parents "$_d" "$STATEDIR/installed.manifest" "$_mode" || die "refusing $_man: a directory on the way is a symbolic link or not root's"
+	_recorded=$(awk '$1 == "@prefix" { print $2; exit }' "$_man")
+	[ -z "$_recorded" ] || _pfx=$_recorded
 	_kept=$_man.kept
 	: > "$_kept"
-	awk '$2 != "dir" { print $1 }' "$_man" | sort -u | while read -r _f; do
+	awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_man" | sort -u | while read -r _f; do
 		[ "$_f" = "$STATEDIR/installed.manifest" ] && continue
 		if ! path_ok "$_f"; then
 			note "deinstall: refusing manifest path $_f"
+			continue
+		fi
+		if ! allowed_path "$_f" "$_pfx"; then
+			note "deinstall: refusing manifest path $_f: not a file make install writes"
 			continue
 		fi
 		if ! safe_parents "$_d" "$_f" "$_mode"; then
@@ -1290,6 +1365,7 @@ deinstall_manifest() {
 		# the kept files stay listed, with the directories, so a later
 		# install or deinstall still knows them
 		awk '$2 == "dir"' "$_man" >> "$_kept"
+		printf '@prefix %s\n' "$_pfx" >> "$_kept"
 		mv -f -- "$_kept" "$_man"
 		chmod 444 "$_man"
 		_rc=1
@@ -1321,16 +1397,20 @@ do_clean() {
 
 # test-install: the stock-install test (tests/install-e2e/run.sh) for this
 # repository.  E2E_REPO_URL is what the guest clones (a mirror the test
-# host serves; the GitHub URL is the default for a real user), E2E_OS,
-# E2E_ARCH, E2E_BACKEND and E2E_SSH choose the machine.
+# host serves; the GitHub URL is the default for a real user), E2E_REF
+# overrides the default checkout HEAD (the mirror must carry that commit),
+# and E2E_OS, E2E_ARCH, E2E_BACKEND and E2E_SSH choose the machine.
 do_test_install() {
 	setup
 	_url=${MK_E2E_REPO_URL:-}
 	[ -n "$_url" ] || _url=$(git -C "$repo" remote get-url origin 2>/dev/null || echo https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git)
-	set -- --repo-url "$_url" --ref "$(git -C "$repo" rev-parse HEAD)" \
+	_ref=${MK_E2E_REF:-}
+	[ -n "$_ref" ] || _ref=$(git -C "$repo" rev-parse HEAD) || die "test-install: cannot resolve checkout HEAD"
+	set -- --repo-url "$_url" \
 	    --installed-manifest "$STATEDIR/installed.manifest" \
 	    --expected-manifest tests/install-e2e/expected.manifest --load nvidia-drm \
 	    --os "${MK_E2E_OS:-16.0-CURRENT}" --arch "${MK_E2E_ARCH:-aarch64}" --backend "${MK_E2E_BACKEND:-vmm}"
+	set -- "$@" --ref "$_ref"
 	[ -z "${MK_E2E_SSH:-}" ] || set -- "$@" --ssh "$MK_E2E_SSH"
 	# the licence settings reach the guest's make install-prereqs only when
 	# the person running the test gave them (make test-install

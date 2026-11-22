@@ -27,12 +27,12 @@ sh tests/install-e2e/run.sh --repo-url URL [--ref REF] [--os OS] [--arch ARCH] \
 | Argument | Meaning | Default |
 |---|---|---|
 | `--repo-url` | what the guest clones. For a test this is the read-only mirror the test host serves on the VM network; a real user clones from GitHub | required |
-| `--ref` | the commit, branch or tag to test | the default branch |
+| `--ref` | the commit, branch or tag to test; only `[0-9A-Za-z._/-]` | checkout HEAD through `make test-install`; the default branch when `run.sh` is called directly |
 | `--os` | `16.0-CURRENT` (the latest official snapshot, checked live), `15.1-RELEASE`, ... | `16.0-CURRENT` |
 | `--arch` | `aarch64` or `amd64` | `aarch64` |
 | `--backend` | `vmm`: a new VM from the FreeBSD project's BASIC-CLOUDINIT image through cloudbsd-vmm, deleted afterwards. `ssh`: a fresh stock machine you made, reached as `USER@HOST` | `vmm` |
 | `--ssh-key` | the private key for reaching the guest (a path; the key itself is never printed or put on a command line) | ssh's own |
-| `--installed-manifest` | the manifest `make install` writes (`path mode owner:group sha256`, `path link -> target`, `path dir`) | none |
+| `--installed-manifest` | the manifest `make install` writes (`path mode owner:group sha256`, `path link -> target`, `path dir`; `@prefix PREFIX` is metadata, not a path) | none |
 | `--expected-manifest` | the manifest the repository commits (`path mode owner:group`, `path link target`; `#` comments), relative to the checkout | none |
 | `--load` | a kernel module to `kldload` after install and unload after (the VM only); it must load or be refused cleanly, with no panic | none |
 | `--make-arg` | added to every make command line in the guest, for example `ACCEPT_NVIDIA_LICENSE=1` when the person running the test accepts that licence (a repository never gets a licence accepted any other way) | none |
@@ -85,6 +85,7 @@ Exit status: `0` pass, `1` fail, `2` usage (or run as root).
 `make test-install ACCEPT_NVIDIA_LICENSE=1` runs `run.sh` with this repository's manifest
 (`/var/db/nvidia-gb10-freebsd/installed.manifest`), `expected.manifest`, `--load nvidia-drm`
 and, because you gave it, `--make-arg ACCEPT_NVIDIA_LICENSE=1`; without a licence setting
-the guest stops at the licence, as any install would. `E2E_REPO_URL=`, `E2E_OS=`, `E2E_ARCH=`, `E2E_BACKEND=` and `E2E_SSH=` choose the
-rest. `tests/install_e2e_test.sh` tests the harness itself on a fixture repository, without a
-VM.
+the guest stops at the licence, as any install would. The default `--ref` is the checkout's
+`git rev-parse HEAD`; the mirror must carry that commit. Set `E2E_REF=` to override it.
+`E2E_REPO_URL=`, `E2E_OS=`, `E2E_ARCH=`, `E2E_BACKEND=` and `E2E_SSH=` choose the rest.
+`tests/install_e2e_test.sh` tests the harness itself on a fixture repository, without a VM.

@@ -11,14 +11,17 @@
 #
 # A recipe never runs $(MAKE): make -n would execute such a line, and the
 # contract lint dry-runs every required target in an empty directory.
+#
+# Environment rule: DESTDIR and PREFIX may come from the environment; YES,
+# ASSUME_YES and the licence settings never do (only the command line).
 
 REPO_PURPOSE = application
 # Where downloads and the build go; empty means ./work in this checkout.
 WORK =
 # Install root for the user-space files; kernel modules go to /boot/modules.
-PREFIX = /usr/local
+PREFIX ?= /usr/local
 # Staging root for packaging; empty installs onto this system.
-DESTDIR =
+DESTDIR ?=
 # The kernel sources (sys/) and the FreeBSD source top; empty means
 # /usr/src when it matches the running kernel, else a tree that
 # make install-prereqs fetched into WORK.
@@ -37,6 +40,7 @@ ACCEPT_ALL_LICENSES = 0
 # make test-install: the repository the test machine clones, the stock
 # FreeBSD it runs, and how the machine is made (tests/install-e2e/README.md)
 E2E_REPO_URL =
+E2E_REF =
 E2E_OS = 16.0-CURRENT
 E2E_ARCH = aarch64
 E2E_BACKEND = vmm
@@ -44,7 +48,7 @@ E2E_SSH =
 JSON = 0
 
 DRIVER = sh scripts/make.sh
-DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_BSDSRCTOP="$(BSDSRCTOP)" MK_DRMKMODDIR="$(DRMKMODDIR)" MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_JSON="$(JSON)" MK_PURPOSE="$(REPO_PURPOSE)" MK_ACCEPT_NVIDIA_LICENSE="$(ACCEPT_NVIDIA_LICENSE)" MK_ACCEPT_ALL_LICENSES="$(ACCEPT_ALL_LICENSES)" MK_E2E_REPO_URL="$(E2E_REPO_URL)" MK_E2E_OS="$(E2E_OS)" MK_E2E_ARCH="$(E2E_ARCH)" MK_E2E_BACKEND="$(E2E_BACKEND)" MK_E2E_SSH="$(E2E_SSH)"
+DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_BSDSRCTOP="$(BSDSRCTOP)" MK_DRMKMODDIR="$(DRMKMODDIR)" MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_JSON="$(JSON)" MK_PURPOSE="$(REPO_PURPOSE)" MK_ACCEPT_NVIDIA_LICENSE="$(ACCEPT_NVIDIA_LICENSE)" MK_ACCEPT_ALL_LICENSES="$(ACCEPT_ALL_LICENSES)" MK_E2E_REPO_URL="$(E2E_REPO_URL)" MK_E2E_REF="$(E2E_REF)" MK_E2E_OS="$(E2E_OS)" MK_E2E_ARCH="$(E2E_ARCH)" MK_E2E_BACKEND="$(E2E_BACKEND)" MK_E2E_SSH="$(E2E_SSH)"
 
 help:
 	@printf '%s\n' \
@@ -84,6 +88,10 @@ help:
 		"  SYSDIR= BSDSRCTOP= DRMKMODDIR=   your own source trees" \
 		"  E2E_OS= E2E_ARCH= E2E_BACKEND=vmm|ssh E2E_SSH=user@host" \
 		"  E2E_REPO_URL=     the test-install machine and source" \
+		"  E2E_REF=          ref to test (default: checkout HEAD)" \
+		"" \
+		"Environment: DESTDIR and PREFIX may come from the environment;" \
+		"YES, ASSUME_YES and the licence settings never do (only the command line)." \
 		"" \
 		"Run make in this directory as a normal user; steps that" \
 		"need root use doas, sudo or su."

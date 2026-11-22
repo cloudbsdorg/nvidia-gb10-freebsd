@@ -39,7 +39,7 @@
 # machine could be had).  Exit 0 pass, 1 fail, 2 usage, 3 blocked.
 
 set -u
-PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+PATH=${PATH:-/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin}
 export PATH
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 
@@ -77,6 +77,10 @@ while [ $# -gt 0 ]; do
 	shift
 done
 [ -n "$repo_url" ] || { echo "run.sh: --repo-url is required" >&2; exit 2; }
+case $ref in
+'') ;;
+*[!0-9A-Za-z._/-]*) echo "run.sh: invalid --ref (use only [0-9A-Za-z._/-])" >&2; exit 2 ;;
+esac
 case $arch in aarch64|amd64) ;; *) echo "run.sh: --arch is aarch64 or amd64" >&2; exit 2 ;; esac
 case $os in
 *-CURRENT|*-RELEASE|*-STABLE|*-BETA*|*-RC*) ;;
@@ -171,8 +175,13 @@ ssh)
 	# shellcheck disable=SC2029
 	ssh "$@" "$ssh_target" "cd $_rd && sh guest.sh $guest_args" > "$results/guest.out" 2>&1
 	grc=$?
-	ssh "$@" "$ssh_target" "cd $_rd && tar -cf - results" | tar -xf - -C "$results" \
-	    || hstep collect false 1 "could not bring the results back"
+	if ! ssh "$@" "$ssh_target" "cd $_rd && tar -cf - results" | tar -xf - -C "$results"; then
+		hstep collect false 1 "could not bring the results back"
+		grc=1
+	elif [ ! -f "$results/results/summary.json" ]; then
+		hstep collect false 1 "could not bring the results back"
+		grc=1
+	fi
 	;;
 vmm)
 	case $arch in

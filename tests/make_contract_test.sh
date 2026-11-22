@@ -37,8 +37,18 @@
 #   (q) tests/install-e2e/expected.manifest equals what install writes
 #   (s) someone else's drm.ko is kept, and ours is not installed
 #   (t) a manifest at the place commit 23c18da used is moved; deinstall
-#       then removes everything
+#       then removes everything; migration never writes through a dangling
+#       manifest symlink or a symlinked state parent; a refused migration
+#       makes deinstall fail instead of reporting success
 #   (u) every module of the module table is among the installed files
+#   (v) a migrated manifest cannot make deinstall remove an arbitrary file
+#   (w) deinstall undoes a configured key when its unchanged file's backup
+#       is missing, and never prints a malformed backup-kept suffix
+#   (x) test-install defaults --ref to checkout HEAD, with E2E_REF as override
+#   (y) environment DESTDIR and PREFIX survive make; environment licence
+#       acceptance never does
+#   (z) the manifest records PREFIX; a different PREFIX cannot reinstall
+#       over it, and deinstall with that different PREFIX uses the record
 #   (r) the NVIDIA licence: YES=1 alone and no terminal both stop with the
 #       explanation; ACCEPT_NVIDIA_LICENSE=1 and ACCEPT_ALL_LICENSES=1
 #       accept and record it; a changed licence asks again; preflight and
@@ -78,6 +88,38 @@ for m in make gmake; do
 	(cd "$repo" && "$m" -r -n install deinstall deps install-deps >/dev/null 2>&1) \
 	    && ok "$m -n install deinstall deps install-deps" || bad "$m -n of the install targets"
 done
+
+# (y) the environment rule is part of the user-facing contract: staging
+# roots may come from the environment, but confirmation and licence choices
+# are command-line-only.  Check the values without running an install.
+_mhelp=$(cd "$repo" && make -s help)
+if sed -n '1,45p' "$repo/Makefile" | grep -qF 'DESTDIR and PREFIX may come from the environment' \
+    && sed -n '1,45p' "$repo/Makefile" | grep -qF 'ASSUME_YES and the licence settings never do (only the command line)' \
+    && printf '%s\n' "$_mhelp" | grep -qF 'DESTDIR and PREFIX may come from the environment' \
+    && printf '%s\n' "$_mhelp" | grep -qF 'ASSUME_YES and the licence settings never do (only the command line)'; then
+	ok "Makefile header and help document the environment rule"
+else
+	bad "(y) Makefile header or help omits the environment rule"
+fi
+for _v in YES ASSUME_YES ACCEPT_NVIDIA_LICENSE ACCEPT_ALL_LICENSES; do
+	_value=$(cd "$repo" && env "$_v=1" make -s -V "$_v")
+	[ "$_value" = 0 ] && ok "environment $_v cannot enable $_v" \
+	    || bad "(y) environment $_v=1 produced $_value"
+done
+
+# (x) local work is tested by default; E2E_REF overrides the checkout HEAD
+_e2e=$(sed -n '/^do_test_install() {/,/^}/p' "$repo/scripts/make.sh")
+if printf '%s\n' "$_e2e" | grep -qF '_ref=${MK_E2E_REF:-}' \
+    && printf '%s\n' "$_e2e" | grep -qF '[ -n "$_ref" ] || _ref=$(git -C "$repo" rev-parse HEAD)' \
+    && printf '%s\n' "$_e2e" | grep -qF 'set -- "$@" --ref "$_ref"' \
+    && grep -q '^E2E_REF =' "$repo/Makefile" \
+    && grep -qF 'MK_E2E_REF="$(E2E_REF)"' "$repo/Makefile" \
+    && (cd "$repo" && make -s help) | grep -q 'E2E_REF=.*default: checkout HEAD' \
+    && grep -q 'mirror must carry that commit' "$repo/tests/install-e2e/README.md"; then
+	ok "test-install: checkout HEAD is the default and E2E_REF overrides it"
+else
+	bad "(x) test-install does not default to checkout HEAD with an E2E_REF override"
+fi
 
 # (b) preflight on an empty WORK
 W=$S/work
@@ -147,7 +189,7 @@ deinst() { MK_WORK=$W MK_DESTDIR=$1 MK_YES=1 mk deinstall > "$2" 2>&1 < /dev/nul
 # check_manifest MANIFEST ROOT: each file line's mode, owner and sha256
 # match ROOT; prints one line per mismatch
 check_manifest() {
-	awk '$2 != "dir" && $2 != "link"' "$1" | while read -r p m o h; do
+	awk '$1 !~ /^@/ && $2 != "dir" && $2 != "link"' "$1" | while read -r p m o h; do
 		[ -f "$2$p" ] || { echo "missing $p"; continue; }
 		[ "$(stat -f '%Lp' "$2$p")" = "$m" ] || echo "mode $p"
 		[ "$(stat -f '%Su:%Sg' "$2$p")" = "$o" ] || echo "owner $p"
@@ -183,6 +225,50 @@ else
 	bad "install YES=1 (rc $rc): $(tail -n 3 "$S/d.out")"
 fi
 
+# (y) environment DESTDIR and PREFIX must survive make.  Before the fix,
+# avoid the live root install that the discarded DESTDIR would request.
+D9=$S/dest9
+mkdir -p "$D9/boot/modules" "$D9/etc"
+if [ "$(cd "$repo" && env DESTDIR="$D9" make -V DESTDIR)" = "$D9" ] \
+    && [ "$(cd "$repo" && env PREFIX=/opt/gb10 make -V PREFIX)" = /opt/gb10 ]; then
+	(cd "$repo" && env DESTDIR="$D9" PREFIX=/opt/gb10 make install YES=1 WORK="$W") > "$S/y.out" 2>&1 < /dev/null
+	rc=$?
+	if [ "$rc" = 0 ] && [ -f "$D9/opt/gb10/etc/rc.d/nvidia_linux" ] \
+	    && [ -f "$D9/var/db/nvidia-gb10-freebsd/installed.manifest" ] \
+	    && [ ! -e "$D9/usr/local/etc/rc.d/nvidia_linux" ]; then
+		ok "environment DESTDIR and PREFIX select the install root"
+	else
+		bad "(y) environment install (rc $rc): $(tail -n 3 "$S/y.out")"
+	fi
+else
+	bad "(y) make discards environment DESTDIR or PREFIX; live install not attempted"
+fi
+
+# (z) PREFIX belongs to the install, not to the later deinstall command.
+# A different PREFIX cannot reinstall over a manifest; deinstall still
+# removes every file by using the prefix recorded at install time.
+D10=$S/dest10
+mkdir -p "$D10/boot/modules" "$D10/usr/local/etc" "$D10/etc"
+inst "$D10" "$S/z1.out"
+rc1=$?
+M10=$D10/var/db/nvidia-gb10-freebsd/installed.manifest
+grep -q '^@prefix /usr/local$' "$M10"
+pfxrc=$?
+env MK_WORK="$W" MK_DESTDIR="$D10" MK_YES=1 MK_PREFIX=/opt \
+    sh "$repo/scripts/make.sh" install > "$S/z2.out" 2>&1 < /dev/null
+rc2=$?
+env MK_WORK="$W" MK_DESTDIR="$D10" MK_YES=1 MK_PREFIX=/opt \
+    sh "$repo/scripts/make.sh" deinstall > "$S/z3.out" 2>&1 < /dev/null
+rc3=$?
+if [ "$rc1" = 0 ] && [ "$pfxrc" = 0 ] \
+    && [ "$rc2" != 0 ] && grep -q 'make deinstall PREFIX=/usr/local first' "$S/z2.out" \
+    && [ "$rc3" = 0 ] && [ ! -e "$D10/usr/local/etc/rc.d/nvidia_linux" ] \
+    && [ ! -e "$D10/boot/modules/nvidia.ko" ] && [ ! -e "$M10" ] && [ ! -e "$D10/opt" ]; then
+	ok "recorded PREFIX rejects a reinstall mismatch and survives a deinstall mismatch"
+else
+	bad "(z) PREFIX mismatch (rc $rc1 $rc2 $rc3): $(tail -n 3 "$S/z3.out" | sed "s|$S|SCRATCH|g" | tr '\n' ' ')"
+fi
+
 # (l) mutant: a wrong sha256 must be caught
 sed '1,/ 444 [^ ]* [0-9a-f]/s/\( 444 [^ ]* \)[0-9a-f]*/\1deadbeef/' "$M" > "$S/mut.manifest"
 [ -n "$(check_manifest "$S/mut.manifest" "$D")" ] && ok "mutant: wrong sha256 caught" || bad "mutant: wrong sha256 not caught"
@@ -215,13 +301,13 @@ else
 fi
 
 # (h) deinstall keeps the changed file and refuses a .. path
-printf 'outside\n' > "$S/outside"
+printf 'outside\n' > "$S/outside-file"
 chmod u+w "$M"
-printf '%s 444 %s %s\n' "/../../outside" "$me" "$(sha256 -q "$S/outside")" >> "$M"
+printf '%s 444 %s %s\n' "/../../outside" "$me" "$(sha256 -q "$S/outside-file")" >> "$M"
 deinst "$D" "$S/h.out"
 rc=$?
 # exit 1: a file was kept; it stays listed in the manifest
-if [ "$rc" = 1 ] && [ "$(cat "$D/usr/local/share/man/man4/nvidia.4")" = changed ] && [ -f "$S/outside" ] \
+if [ "$rc" = 1 ] && [ "$(cat "$D/usr/local/share/man/man4/nvidia.4")" = changed ] && [ -f "$S/outside-file" ] \
     && grep -q 'kept .*nvidia.4' "$S/h.out" && grep -q 'refusing manifest path' "$S/h.out" \
     && grep -q '^/usr/local/share/man/man4/nvidia.4 ' "$M"; then
 	ok "deinstall keeps a changed file, lists it, exits 1, and refuses a .. path"
@@ -309,6 +395,23 @@ else
 	bad "unconfigure: $(diff "$S/m.before" "$S/m.after" | head -4) $(tail -n 2 "$S/m3.out")"
 fi
 
+# (w) the configured file is unchanged but its backup has been removed:
+# deinstall must still undo the key instead of skipping the record
+D8=$S/dest8
+mkdir -p "$D8/boot" "$D8/etc" "$D8/var/db"
+printf 'hostname="h"\n' > "$D8/etc/rc.conf"
+MK_WORK=$W MK_DESTDIR=$D8 MK_YES=1 mk configure > "$S/w1.out" 2>&1 < /dev/null
+rc1=$?
+rm -f "$D8"/etc/rc.conf.bak-*
+MK_WORK=$W MK_DESTDIR=$D8 MK_YES=1 mk deinstall > "$S/w2.out" 2>&1 < /dev/null
+rc2=$?
+if [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && ! grep -q '^nvidia_gb10_autoload=' "$D8/etc/rc.conf" \
+    && grep -q '^hostname="h"' "$D8/etc/rc.conf" && grep -q 'backup .* missing' "$S/w2.out"; then
+	ok "unconfigure undoes a key when the unchanged file's backup is missing"
+else
+	bad "(w) missing backup (rc $rc1 $rc2): $(tail -n 3 "$S/w2.out")"
+fi
+
 # (n) a path planted in the stage is refused, and nothing is written
 D4=$S/dest4
 mkdir -p "$D4"
@@ -358,6 +461,14 @@ rc=$?
 MK_WORK=$WL mk preflight --json > "$S/r.json" 2>/dev/null
 grep -q '"name": "licence", "state": "missing".*ACCEPT_NVIDIA_LICENSE=1' "$S/r.json" \
     && ok "preflight: licence missing, with the setting to add" || bad "preflight licence missing"
+(cd "$repo" && env ACCEPT_NVIDIA_LICENSE=1 make preflight JSON=1 WORK="$WL") > "$S/r-env.json" 2>&1
+rc=$?
+if [ "$rc" = 1 ] && grep -q '"name": "licence", "state": "missing"' "$S/r-env.json" \
+    && [ ! -e "$WL/sources/nvidia-licence.accepted" ]; then
+	ok "environment ACCEPT_NVIDIA_LICENSE does not accept the licence"
+else
+	bad "(y) environment licence acceptance was not ignored (rc $rc)"
+fi
 lic MK_YES=1 MK_ACCEPT_NVIDIA_LICENSE=1 > "$S/r3.out" 2>&1
 rc=$?
 [ "$rc" = 0 ] && grep -q 'accepted by ACCEPT_NVIDIA_LICENSE=1' "$WL/sources/nvidia-licence.accepted" \
@@ -415,6 +526,55 @@ snap "$D6" > "$S/t.after"
     && ok "a manifest at the old place is moved and deinstall removes everything" \
     || bad "(t) rc $rc: $(diff "$S/t.before" "$S/t.after" | head -4 | tr '\n' ' ')"
 
+# (t) neither a dangling destination symlink nor a symlinked var/db may
+# redirect the migration's write outside the DESTDIR
+mkdir -p "$S/outside"
+D6A=$S/dest6-dangling
+mkdir -p "$D6A/usr/local/share/nvidia-gb10-freebsd" "$D6A/var/db/nvidia-gb10-freebsd"
+: > "$D6A/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+ln -s "$S/outside/x" "$D6A/var/db/nvidia-gb10-freebsd/installed.manifest"
+deinst "$D6A" "$S/t-dangling.out"
+D6B=$S/dest6-parent
+mkdir -p "$D6B/usr/local/share/nvidia-gb10-freebsd" "$D6B/var"
+: > "$D6B/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+ln -s "$S/outside" "$D6B/var/db"
+deinst "$D6B" "$S/t-parent.out"
+if [ ! -e "$S/outside/x" ] && [ ! -e "$S/outside/nvidia-gb10-freebsd/installed.manifest" ]; then
+	ok "migration never writes through a dangling manifest or state-parent symlink"
+else
+	bad "(t) migration followed a symlink: $(find "$S/outside" -maxdepth 3 -print | sed "s|$S/||g" | tr '\n' ' ')"
+fi
+
+# (t) a migration refused for an unsafe destination is a deinstall error,
+# not a successful deinstall that leaves the real old manifest behind
+D6C=$S/dest6-refused
+mkdir -p "$D6C/usr/local/share/nvidia-gb10-freebsd" "$D6C/var"
+: > "$D6C/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+ln -s "$S/outside" "$D6C/var/db"
+deinst "$D6C" "$S/t-refused.out"
+rc=$?
+if [ "$rc" = 1 ] && grep -q 'remove the planted file or check its owner' "$S/t-refused.out"; then
+	ok "deinstall fails with an actionable error when migration is refused"
+else
+	bad "(t) refused migration returned rc $rc: $(tail -n 3 "$S/t-refused.out" | tr '\n' ' ')"
+fi
+
+# (v) a user-planted path in an old-place manifest is neither migrated nor
+# removed by deinstall
+D7=$S/dest7
+mkdir -p "$D7/etc" "$D7/usr/local/share/nvidia-gb10-freebsd"
+printf 'x\n' > "$D7/etc/keep"
+printf '/etc/keep 444 %s %s\n' "$me" "$(sha256 -q "$D7/etc/keep")" \
+    > "$D7/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+deinst "$D7" "$S/v.out"
+rc=$?
+if [ -f "$D7/etc/keep" ] && [ "$(cat "$D7/etc/keep")" = x ] \
+    && grep -q 'refusing manifest path /etc/keep' "$S/v.out"; then
+	ok "deinstall refuses an arbitrary path from a migrated manifest"
+else
+	bad "(v) arbitrary manifest path (rc $rc): $(tail -n 3 "$S/v.out")"
+fi
+
 # (u) every module of the module table is a path install may write
 bad_paths=$(printf '%s\n' $mods | sed 's|.*/|/boot/modules/|' | while read -r pth; do
 	grep -q "^$pth " "$S/q.manifest" || echo "$pth"
@@ -423,7 +583,7 @@ done)
 
 # (q) the expected manifest in the repository is what install writes
 # (owners as a root install sets them)
-awk '$2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, "root:wheel" }' \
+awk '$1 ~ /^@/ || $2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, "root:wheel" }' \
     "$S/q.manifest" 2>/dev/null | sort > "$S/q.got"
 grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF' | sort > "$S/q.want"
 [ -s "$S/q.got" ] && cmp -s "$S/q.got" "$S/q.want" && ok "tests/install-e2e/expected.manifest matches what install writes" \

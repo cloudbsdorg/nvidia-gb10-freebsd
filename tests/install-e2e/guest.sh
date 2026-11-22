@@ -26,7 +26,8 @@
 #   --results             where steps.jsonl, summary.json and the logs go
 #   --installed-manifest  the manifest make install writes (path mode
 #                         owner:group sha256 / path link -> target / path
-#                         dir); checked against the files on disk
+#                         dir; @prefix PREFIX is metadata, not a path);
+#                         checked against the files on disk
 #   --expected-manifest   the manifest the repository commits (path mode
 #                         owner:group [type], path relative to the
 #                         checkout); compared with the installed one
@@ -40,6 +41,12 @@
 #   --watch DIR           one more directory for the nothing-left check
 #                         (beside /boot/modules, /boot/loader.conf,
 #                         /etc/rc.conf, /usr/local and /var/db)
+#
+# Test-only load hook: with --load, GUEST_TEST_HOOKS=1 and
+# GUEST_KLD_TEST_DIR=DIR use DIR/kldstat, DIR/kldload, DIR/kldunload and
+# DIR/doas by full path for the load step only; DIR is never added to PATH.
+# DIR must be a real directory owned by the invoking user, not writable by
+# group or other.  guest.sh always refuses to run as root.
 #
 # Output: one JSON object per line in RESULTS/steps.jsonl (schema
 # schema/stock-install-step-1.schema.json):
@@ -92,6 +99,30 @@ $2"
 done
 [ -n "$repo_url" ] && [ -n "$results" ] || { echo "guest.sh: --repo-url and --results are required" >&2; exit 2; }
 [ "$(id -u)" != 0 ] || { echo "guest.sh: run it as a normal user, not root" >&2; exit 2; }
+kldstat_cmd=kldstat
+kldload_cmd=kldload
+kldunload_cmd=kldunload
+doas_cmd=doas
+if [ "$noload" = 0 ] && [ -n "$load_mod" ] \
+    && [ "${GUEST_TEST_HOOKS:-0}" = 1 ] && [ -n "${GUEST_KLD_TEST_DIR:-}" ]; then
+	_hd=$GUEST_KLD_TEST_DIR
+	[ -d "$_hd" ] && [ ! -L "$_hd" ] \
+	    || { echo "guest.sh: GUEST_KLD_TEST_DIR is not a real directory" >&2; exit 2; }
+	_hs=$(stat -f '%u %Lp' "$_hd") || exit 2
+	_hu=${_hs%% *}
+	_hm=${_hs##* }
+	[ "$_hu" = "$(id -u)" ] && [ $((0$_hm & 022)) = 0 ] \
+	    || { echo "guest.sh: GUEST_KLD_TEST_DIR must be owned by the invoking user and not writable by group or other" >&2; exit 2; }
+	for _c in kldstat kldload kldunload doas; do
+		[ -f "$_hd/$_c" ] && [ ! -L "$_hd/$_c" ] && [ -x "$_hd/$_c" ] \
+		    || { echo "guest.sh: GUEST_KLD_TEST_DIR/$_c is not a safe executable" >&2; exit 2; }
+	done
+	_hd=$(CDPATH= cd -- "$_hd" && pwd -P)
+	kldstat_cmd=$_hd/kldstat
+	kldload_cmd=$_hd/kldload
+	kldunload_cmd=$_hd/kldunload
+	doas_cmd=$_hd/doas
+fi
 mkdir -p -- "$results/logs" || exit 2
 results=$(cd "$results" && pwd -P)
 J=$results/steps.jsonl
@@ -223,13 +254,13 @@ if [ -n "$inst_man" ]; then
 	_bad=
 	if [ -f "$inst_man" ]; then
 		cp "$inst_man" "$results/installed.manifest"
-		_bad=$(awk '$2 != "dir" && $2 != "link"' "$inst_man" | while read -r p m o h; do
+		_bad=$(awk '$1 !~ /^@/ && $2 != "dir" && $2 != "link"' "$inst_man" | while read -r p m o h; do
 			[ -f "$p" ] || { echo "missing:$p"; continue; }
 			[ "$(stat -f '%Lp' "$p")" = "$m" ] || echo "mode:$p"
 			[ "$(stat -f '%Su:%Sg' "$p")" = "$o" ] || echo "owner:$p"
 			[ "$h" = - ] || [ "$(sha256 -q "$p")" = "$h" ] || echo "sha256:$p"
 		done)
-		_n=$(awk '$2 != "dir"' "$inst_man" | wc -l | tr -d ' ')
+		_n=$(awk '$1 !~ /^@/ && $2 != "dir"' "$inst_man" | wc -l | tr -d ' ')
 		[ -z "$_bad" ] && record manifest-on-disk true 0 0 "$_n entries match the files on disk" \
 		    || record manifest-on-disk false 1 0 "$(printf '%s ' $_bad)"
 	else
@@ -240,7 +271,7 @@ fi
 # 8 the installed manifest against the one the repository commits
 if [ -n "$exp_man" ] && [ -n "$inst_man" ]; then
 	if [ -f "$W/$exp_man" ] && [ -f "$inst_man" ]; then
-		awk '$2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, $3 }' "$inst_man" | sort > "$results/installed.norm"
+		awk '$1 ~ /^@/ || $2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, $3 }' "$inst_man" | sort > "$results/installed.norm"
 		grep -v '^#' "$W/$exp_man" | awk 'NF' | sort > "$results/expected.norm"
 		if cmp -s "$results/installed.norm" "$results/expected.norm"; then
 			record manifest-expected true 0 0 "$(wc -l < "$results/expected.norm" | tr -d ' ') entries equal $exp_man"
@@ -282,23 +313,65 @@ fi
 # is still running afterwards), then unload
 if [ "$noload" = 0 ] && [ -n "$load_mod" ]; then
 	_t0=$(date +%s)
-	kldstat | awk 'NR > 1 { print $1, $5 }' > "$results/kld.before"
-	doas kldload -v "$load_mod" > "$results/logs/load.log" 2>&1
-	_lrc=$?
-	kldstat >> "$results/logs/load.log" 2>&1
-	dmesg | tail -n 40 >> "$results/logs/load.log" 2>&1
-	if [ "$_lrc" = 0 ]; then
-		_detail="kldload $load_mod loaded"
+	_load_error=
+	_load_rc=0
+	_lrc=0
+	"$kldstat_cmd" > "$results/kld.before.raw" 2> "$results/logs/load.log"
+	_brc=$?
+	if [ "$_brc" != 0 ]; then
+		_load_rc=$_brc
+		_load_error="kldstat before load failed (rc $_brc)"
 	else
-		_detail="kldload $load_mod refused (rc $_lrc), no panic"
+		awk 'NR > 1 { print $1, $5 }' "$results/kld.before.raw" > "$results/kld.before"
+		"$doas_cmd" "$kldload_cmd" -v "$load_mod" > "$results/logs/load.log" 2>&1
+		_lrc=$?
+		"$kldstat_cmd" > "$results/kld.after.raw" 2>> "$results/logs/load.log"
+		_arc=$?
+		if [ "$_arc" != 0 ]; then
+			_load_rc=$_arc
+			_load_error="kldstat after load failed (rc $_arc)"
+		else
+			cat "$results/kld.after.raw" >> "$results/logs/load.log"
+			dmesg | tail -n 40 >> "$results/logs/load.log" 2>&1
+			# Unload what this load added (and nothing else), newest id first.
+			awk 'NR > 1 { print $1, $5 }' "$results/kld.after.raw" > "$results/kld.after"
+			_added=$(awk 'FILENAME == ARGV[1] { had[$2] = 1; next } !($2 in had) { print $1, $2 }' \
+			    "$results/kld.before" "$results/kld.after" | sort -rn | awk '{ print $2 }')
+			for _m in $_added; do
+				"$doas_cmd" "$kldunload_cmd" -v -n "${_m%.ko}" >> "$results/logs/load.log" 2>&1 || true
+			done
+			"$kldstat_cmd" > "$results/kld.unloaded.raw" 2>> "$results/logs/load.log"
+			_urc=$?
+			if [ "$_urc" != 0 ]; then
+				_load_rc=$_urc
+				_load_error="kldstat after unload failed (rc $_urc)"
+			else
+				awk 'NR > 1 { print $5 }' "$results/kld.unloaded.raw" > "$results/kld.unloaded"
+			fi
+		fi
 	fi
-	# unload what this load added (and nothing else), newest id first
-	kldstat | awk 'NR > 1 { print $1, $5 }' > "$results/kld.after"
-	for _m in $(awk 'NR == FNR { had[$2] = 1; next } !($2 in had) { print $1, $2 }' "$results/kld.before" "$results/kld.after" \
-	    | sort -rn | awk '{ print $2 }'); do
-		doas kldunload -v -n "${_m%.ko}" >> "$results/logs/load.log" 2>&1 || true
-	done
-	record load true "$_lrc" "$(($(date +%s) - _t0))" "$_detail"
+	if [ -n "$_load_error" ]; then
+		record load false "$_load_rc" "$(($(date +%s) - _t0))" "$_load_error"
+	else
+		_left=
+		for _m in $_added; do
+			if grep -qxF -- "$_m" "$results/kld.unloaded"; then
+				_left="$_left $_m"
+			fi
+		done
+		_left=${_left# }
+		_pass=false
+		if [ "$_lrc" = 0 ]; then
+			[ -n "$_left" ] || _pass=true
+			_detail="kldload $load_mod loaded"
+		else
+			[ -n "$_added" ] || _pass=true
+			_detail="kldload $load_mod refused (rc $_lrc), no panic"
+			[ -z "$_added" ] || _detail="$_detail; modules added: $(printf '%s' "$_added" | tr '\n' ' ')"
+		fi
+		[ -z "$_left" ] || _detail="$_detail; leftover modules: $_left"
+		record load "$_pass" "$_lrc" "$(($(date +%s) - _t0))" "$_detail"
+	fi
 fi
 
 # 11 rc.d scripts and devd files the install wrote
