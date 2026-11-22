@@ -33,7 +33,7 @@ SYSDIR=${SYSDIR:-/usr/src/sys}
 mkdir -p "$GB10/tmp" || exit 1
 W=$(mktemp -d "$GB10/tmp/libnvrm-test.XXXXXXXX") || exit 1
 trap 'rm -rf "$W"' EXIT INT TERM
-unset NVRM_BACKEND NVRM_FAKE_PROFILE NVRM_FAKE_FAIL NVRM_TEST_SKIP
+unset NVRM_BACKEND NVRM_FAKE_PROFILE NVRM_FAKE_FAIL NVRM_TEST_SKIP NVRM_TEST_ONLY
 
 PASS=0
 FAIL=0
@@ -254,6 +254,20 @@ if [ $rc -eq 1 ] && grep -q 'BELOW 100%' "$W/mplant.out"; then ok "coverage gate
 rc=$?
 if [ $rc -eq 1 ] && grep -q 'BELOW 100%' "$W/plant.out"; then ok "coverage gate plant: skipping the decorator tests fails the gate (BELOW 100%)"; else bad "coverage gate plant: not the gate's verdict (rc=$rc): $(cat "$W/plant.out")"; fi
 
+# test runner: a group that matches nothing fails the run (both binaries), and
+# an entry that later ones depend on runs whatever is skipped
+for t in mem_test core_test; do
+	(cd "$W/cov" && NVRM_TEST_ONLY=nosuch HOME=$W TMPDIR=$W ./$t >"$W/only-$t.out" 2>&1)
+	rc=$?
+	if [ $rc -ne 0 ] && grep -q 'NVRM_TEST_ONLY=nosuch names no group; groups: ' "$W/only-$t.out"; then ok "$t: NVRM_TEST_ONLY with an unknown group fails and lists the groups"; else bad "$t: NVRM_TEST_ONLY=nosuch did not fail with the group list (rc=$rc)"; fi
+	(cd "$W/cov" && NVRM_TEST_SKIP=nosuch HOME=$W TMPDIR=$W ./$t >"$W/skip-$t.out" 2>&1)
+	rc=$?
+	if [ $rc -ne 0 ] && grep -q 'NVRM_TEST_SKIP=nosuch names no group' "$W/skip-$t.out"; then ok "$t: NVRM_TEST_SKIP with an unknown group fails"; else bad "$t: NVRM_TEST_SKIP=nosuch did not fail (rc=$rc)"; fi
+done
+(cd "$W/cov" && ./core_test >"$W/core-all.out" 2>&1; NVRM_TEST_SKIP=boot ./core_test >"$W/core-skipboot.out" 2>&1)
+rc=$?
+if [ $rc -eq 0 ] && tail -2 "$W/core-skipboot.out" | head -1 | grep -Eq '^subset run: ([0-9]+) of \1 entries ran$' && [ "$(tail -1 "$W/core-skipboot.out")" = "$(tail -1 "$W/core-all.out")" ]; then ok "core_test: NVRM_TEST_SKIP=boot still runs boot (required) and says how many entries ran"; else bad "core_test: NVRM_TEST_SKIP=boot changed what ran: $(tail -2 "$W/core-skipboot.out")"; fi
+
 # ---- source mutants: a wrong core must make a test fail ----------------------
 mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	MD=$W/mutsrc.$1
@@ -339,6 +353,7 @@ mutant fake-sparse nvrm_fake_mem.c 's/memset(p, 0, n);/(void)0;/' mem_test
 mutant fake-exported nvrm_fake_mem.c 's/ || !o->exported//' mem_test
 mutant fake-spare-limit nvrm_fake_mem.c 's/	    export_spare_limit(\*fd);/	    NVRM_OK;/' mem_test
 mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
+mutant fake-obj-leak nvrm_fake_mem.c '/^fk_mem_free/,/^}/s/		obj_unref(m->o);//' mem_test
 mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,$/	return (1 ? NVRM_OK : status_fail(err, errlen,/' rm_mem_test
 mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got;/out->page_size = a->page_size;/' rm_mem_test
 mutant wb-default nvrm_rm_mem.c 's/(void)import_page_size(surface\.attr, &got);/got = a->page_size;/' rm_mem_test
@@ -350,6 +365,11 @@ mutant rm-snoop nvrm_rm_mem.c 's/_CACHE_SNOOP, _ENABLE) : 0);/_CACHE_SNOOP, _ENA
 mutant rm-close-sweep nvrm_rm_mem.c '/^rmm_client_close/,/^}/s/		free(r);//' rm_mem_test
 mutant rm-alloc-unknown-page nvrm_rm_mem.c 's/	if (got == 0) {$/	if (0) {/' rm_mem_test
 mutant rm-node nvrm_rm_mem.c 's/DEVICE_PATH_FMT, c->minor);/DEVICE_PATH_FMT, 0);/' rm_mem_test
+mutant fake-orphan-mark nvrm_fake_mem.c 's/			m->o->orphans++;/			(void)0;/' mem_test
+mutant fake-map-user nvrm_fake_mem.c 's/	return (g->wrapper == m->serial);/	return (g->o == m->o \&\& g->user == m->user);/' mem_test
+mutant fake-leak-count nvrm_fake_mem.c 's/	leaked_objects += o->orphans < o->refs;/	(void)0;/' mem_test
+mutant rm-give-back nvrm_rm_mem.c '/^give_back/,/^}/s/	(void)nvrm_rm_free(c->s, c->device, m->h);//' rm_mem_test
+mutant rm-writeback-text nvrm_rm_mem.c 's/(uintmax_t)(a->page_size >> 10));/(uintmax_t)(a->page_size >> 11));/' rm_mem_test
 mutant rm-leak nvrm_rm.c 's/		nvrm_rm_free(g->be, g->device, g->subdevice);//' rm_test
 # merge-review fixes (Opus A R1 R6, Opus B 1-10): each has a mutant that must die
 mutant ada-copy nvrm_table.c 's/0xC997, 0xC7B5,/0xC997, 0,/' core_test

@@ -520,6 +520,14 @@ surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
 	return (NVRM_OK);
 }
 
+/* Hand a just-allocated object back to the RM and drop its record. */
+static void
+give_back(nvrm_bclient *c, nvrm_bmem *m)
+{
+	(void)nvrm_rm_free(c->s, c->device, m->h);
+	free(m);
+}
+
 static int
 rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
     nvrm_bmem_info *out, char *err, size_t errlen)
@@ -570,15 +578,18 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
 		rc = surface_query(c, m->h, &surface, err, errlen);
 		if (rc != NVRM_OK) {
-			(void)nvrm_rm_free(c->s, c->device, m->h);
-			free(m);
+			give_back(c, m);
 			return (rc);
 		} else if (DRF_VAL(OS32, _ATTR, _PAGE_SIZE, surface.attr) ==
 		    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
-			(void)nvrm_rm_free(c->s, c->device, m->h);
-			free(m);
+			give_back(c, m);
+			/* The core always passes a page size (the caller's or
+			 * its default), so 0 never reaches this backend. */
 			snprintf(err, errlen, "the RM did not say which page "
-			    "size it used; ask for an explicit page size");
+			    "size it used for the requested %ju KiB page; the "
+			    "object was freed: this RM version cannot be used "
+			    "for that allocation",
+			    (uintmax_t)(a->page_size >> 10));
 			return (NVRM_E_NOTSUP);
 		} else
 			(void)import_page_size(surface.attr, &got);
@@ -586,8 +597,7 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	/* A size the table does not have means the RM used a page this library
 	 * cannot check mappings against, so the object is given back. */
 	if (got == 0) {
-		(void)nvrm_rm_free(c->s, c->device, m->h);
-		free(m);
+		give_back(c, m);
 		snprintf(err, errlen, "the RM allocated with a page size this "
 		    "library does not know");
 		return (NVRM_E_NOTSUP);
