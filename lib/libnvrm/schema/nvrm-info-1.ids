@@ -1,0 +1,48 @@
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# nvrm-info schema 1: the frozen identifiers.  Format: KIND NUMBER NAME MINOR,
+# MINOR being the schema minor that introduced the identifier.  Identifiers may
+# be ADDED here (append a line that names the new schema minor, and raise the
+# schema minor); a line may never be removed, renamed or renumbered: that is a
+# new schema major kept beside this one.  tests/libnvrm/ids_check.py compares
+# this file with the schema the library generates and, in a git checkout, with
+# the copy at the base revision (see ids_base_ref in tests/libnvrm_test.sh);
+# the test suite fails on any change to a line, on an added line that does not
+# raise the minor, and when this file is missing.  To add an identifier, run
+#   ids_check.py --emit SCHEMA THIS-FILE > NEW-FILE
+# (the old lines stay as they are, the new ids get the schema minor), after
+# raising SCHEMA_MINOR.  The first schema of the interface is minor 0; nothing
+# earlier was released.
+source 0 rm 0
+source 1 os 0
+source 2 derived 0
+source 3 family 0
+source 4 board 0
+reason 1 not_queried 0
+reason 2 rm_control_failed 0
+reason 3 rm_not_supported 0
+reason 4 os_not_reported 0
+reason 5 family_unknown 0
+reason 6 input_unavailable 0
+reason 7 no_numa_node 0
+reason 8 backend_does_not_provide 0
+reason 9 class_absent 0
+reason 10 os_call_failed 0
+reason 11 value_unusable 0
+reason 12 family_has_no_class 0
+error 1 no_backend 0
+error 2 open_failed 0
+error 3 version_mismatch 0
+error 4 rm_call_failed 0
+error 5 out_of_memory 0
+error 6 invalid_argument 0
+error 7 no_gpu 0
+error 8 capsicum_limit_failed 0
+capability 0 dmabuf_export 0
+capability 1 ats 0
+capability 2 self_hosted 0
+capability 3 display_enabled 0
+capability 4 soc 0
+capability 5 coherent_gpu_memory 0
+capability 6 os_device_wc_active 0

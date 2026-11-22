@@ -1,0 +1,147 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 21, 2026
+.Dt NVRM 7
+.Os
+.Sh NAME
+.Nm nvrm
+.Nd model of the libnvrm device description
+.Sh DESCRIPTION
+.Xr nvrm 3
+describes a GPU in layers.
+Every device starts as an abstract device; each layer fills or overrides only
+what it knows, and the rest stays unavailable with a reason.
+Consumers use the abstract and class members only.
+.Bl -tag -width "board decorators"
+.It abstract device
+Identity: PCI location and identifiers, subsystem identifiers, RM GPU id, UUID.
+.It class
+What any compute or graphics GPU reports: architecture, implementation, chip
+id, SM version, GPC, TPC and SM counts, the class list, memory sizes, page
+sizes and the capability flags.
+.It family
+Values only a generation table knows, selected by the pair of GPFIFO and
+compute classes the GPU lists: family name, the channel, compute, 3D and copy
+classes and the page size candidates.
+A GPU the table does not know is still described; the family values are then
+unavailable with the reason
+.Li family_unknown .
+The library core names no chip.
+.It board decorators
+Entries keyed by PCI subsystem identifiers that only add or override options.
+A decorator never decides whether a GPU is supported.
+None exists yet: none is added without a real board that needs it.
+.El
+.Ss Availability
+Every value is available, or carries a reason identifier and a source:
+.Li rm ,
+.Li os ,
+.Li derived ,
+.Li family
+or
+.Li board .
+An unavailable value is never reported as a number.
+VRAM size 0 on a unified-memory part is available, with the value 0.
+.Ss Reasons
+The reason identifiers of an unavailable value:
+.Bl -tag -width "family_has_no_class" -compact
+.It Li not_queried
+the value was not queried.
+.It Li rm_control_failed
+the RM control returned an error.
+.It Li rm_not_supported
+the RM reports the control is not supported on this GPU.
+.It Li os_not_reported
+the OS layer does not report the value.
+.It Li family_unknown
+the GPU matched no row of the generation table (the family is unknown).
+.It Li family_has_no_class
+the family is known and has no class of this kind.
+.It Li input_unavailable
+a value this one is computed from is unavailable.
+.It Li no_numa_node
+the GPU is not attached to a NUMA node.
+.It Li backend_does_not_provide
+the backend does not provide the value.
+.It Li class_absent
+the GPU does not list the class.
+.It Li os_call_failed
+the system call to the driver failed.
+.It Li value_unusable
+the RM answered, but the answer failed a consistency check (it names another
+device, or exceeds what the library can count).
+.El
+.Ss Capabilities
+A fixed, indexed set of flags; the index is stable and new flags are only
+appended.
+Each is available (yes or no) or carries a reason.
+.Bl -tag -width "0 coherent_gpu_memory" -compact
+.It 0 Li dmabuf_export
+the RM can export memory as a dma-buf (GPU info index DMABUF_CAPABILITY).
+.It 1 Li ats
+address translation services (GPU_ATS_CAPABILITY).
+.It 2 Li self_hosted
+the GPU is self-hosted (GPU_SELF_HOSTED_CAPABILITY).
+.It 3 Li display_enabled
+the GPU has an enabled display engine (DISPLAY_ENABLED).
+.It 4 Li soc
+the GPU is part of a system on a chip (the SOC bit of the GPU id flags).
+.It 5 Li coherent_gpu_memory
+GPU memory is CPU coherent (COHERENT_GPU_MEMORY_MODE is not NONE).
+.It 6 Li os_device_wc_active
+the OS layer maps device memory write-combined on this host: the sysctl
+.Va hw.nvidia.altra_device_wc_active ,
+the Ampere Altra memory attribute decision.
+.El
+.Ss Backends
+.Bl -tag -width "fake"
+.It rm
+The NVIDIA kernel module, through the RM escape ioctls.
+The RM version of the module must equal the version
+.Xr nvrm 3
+was built for; otherwise it refuses to run and says which version it found.
+.It fake
+Synthetic data for tests and for machines without a GPU.
+.El
+.Ss Capsicum
+The default is least privilege.
+After enumeration the descriptors are limited to the ioctl and event rights
+and to the RM escapes control and free: enough to read device information and
+to release it, with no allocation.
+A caller that will allocate RM objects after
+.Xr cap_enter 2
+sets
+.Dv NVRM_ENUM_ALLOW_ALLOC
+in the enumeration option flags; the descriptors then also keep the allocate
+escape.
+There is no mapping right in either case, and this version of the library
+has no call that maps device memory, inside or outside capability mode.
+It must say so before the limit is applied, because Capsicum rights can only be
+narrowed, never widened.
+.Xr nvrm-info 8
+uses the default.
+After enumeration the process may call
+.Xr cap_enter 2
+and keep calling
+.Fn nvrm_device_refresh .
+OS-layer values (sysctl, card list) are read before and kept.
+.Ss JSON
+Schema
+.Li nvrm-info/1 ,
+minor 0;
+documents name it in the
+.Li schema
+member.
+Additive changes raise the minor number; a breaking change is a new major
+schema installed beside the old one.
+The identifiers (reason ids, error codes, source names and the capability
+index and name pairs) are frozen in
+.Pa lib/libnvrm/schema/nvrm-info-1.ids ;
+the test suite compares the schema with that baseline and refuses one that
+removes, renames or renumbers an identifier.
+Until the first package release the interface is provisional (see
+.Xr nvrm 3 ) ,
+and this schema is minor 0 of it.
+.Sh SEE ALSO
+.Xr nvrm 3 ,
+.Xr nvrm-info 8
