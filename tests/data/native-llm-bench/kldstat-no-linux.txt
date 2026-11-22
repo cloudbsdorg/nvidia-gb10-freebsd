@@ -1,0 +1,43 @@
+Id Refs Address                Size Name
+ 1  168 0xffff000000000000  1594e28 kernel
+ 2    1 0xffff000001595000    3d768 if_aq.ko
+ 3    1 0xffff0000015d5000   4f2068 zfs.ko
+ 4    1 0xffff0005ce800000    24000 filemon.ko
+ 5    1 0xffff0005cea00000   993000 amdgpu.ko
+ 6    2 0xffff0005ce824000    ec000 drm.ko
+ 7    2 0xffff0005cf393000    26000 linuxkpi_video.ko
+ 8    3 0xffff0005cf3b9000    2d000 dmabuf.ko
+ 9    3 0xffff0005ce910000    27000 lindebugfs.ko
+10    1 0xffff0005ce937000    32000 ttm.ko
+11    1 0xffff0005ce969000    5e000 amdgpu_psp_13_0_7_sos_bin.ko
+12    1 0xffff0005d0400000    5d000 amdgpu_psp_13_0_7_ta_bin.ko
+13    1 0xffff0005d045d000    67000 amdgpu_smu_13_0_7_bin.ko
+14    1 0xffff0005d04c4000    5a000 amdgpu_dcn_3_2_1_dmcub_bin.ko
+15    1 0xffff0005d051e000    5a000 amdgpu_gc_11_0_2_pfp_bin.ko
+16    1 0xffff0005d0578000    6e000 amdgpu_gc_11_0_2_me_bin.ko
+17    1 0xffff0005d0800000    4d000 amdgpu_gc_11_0_2_rlc_bin.ko
+18    1 0xffff0005d084d000    84000 amdgpu_gc_11_0_2_mec_bin.ko
+19    1 0xffff0005d08d1000    41000 amdgpu_gc_11_0_2_imu_bin.ko
+20    1 0xffff0005ce9c7000    2a000 amdgpu_sdma_6_0_2_bin.ko
+21    1 0xffff0005d0912000    82000 amdgpu_vcn_4_0_4_bin.ko
+22    1 0xffff0005d0994000    61000 amdgpu_gc_11_0_2_mes_2_bin.ko
+23    1 0xffff0005d0c00000    56000 amdgpu_gc_11_0_2_mes1_bin.ko
+24    1 0xffff0005d0c56000    51000 vmm.ko
+25    2 0xffff0005d0ca7000    23000 hconf.ko
+26    1 0xffff0005d0cca000    22000 hcons.ko
+27    3 0xffff0005d0cec000    24000 hidmap.ko
+28    1 0xffff0005d0d10000    22000 hms.ko
+29    1 0xffff0005d0d32000    25000 hmt.ko
+30    1 0xffff0005d0d57000    22000 hsctrl.ko
+31    1 0xffff0005d0d79000    6a000 if_bnxt.ko
+32    1 0xffff0005e6200000    2b000 ig4.ko
+34    1 0xffff0005e628e000    2b000 mqueuefs.ko
+36    1 0xffff0005e62f1000    22000 pty.ko
+37    1 0xffff0005e6313000    25000 fdescfs.ko
+38    1 0xffff0005e6338000    2b000 linprocfs.ko
+39    1 0xffff0005e6363000    27000 linsysfs.ko
+40    1 0xffff0005e638a000    24000 imgact_binmisc.ko
+41    1 0xffff0005e63ae000    32000 snd_uaudio.ko
+42    1 0xffff0005ee600000    54000 if_wg.ko
+43    1 0xffff0005ee654000    27000 cuse.ko
+44    1 0xffff0005ee67b000    22000 mac_ntpd.ko

@@ -1,0 +1,47 @@
+{
+ "records": [
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "path": "native",
+   "path_status": "native",
+   "model": "m",
+   "source": "~/work/gb10/llm/history/runs/20261122T0537Z-native-radv-b12627/radv.json:1"
+  },
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "cpu-altra",
+   "backend": "cpu",
+   "path": "native",
+   "path_status": "native",
+   "model": "m",
+   "source": "x.json:1"
+  },
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "path": "linuxulator",
+   "path_status": "superseded",
+   "model": "m",
+   "superseded_by": "20261122T0537Z-native-radv-b12627"
+  },
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "nvidia-rtx5060ti",
+   "backend": "vulkan",
+   "path": "linuxulator",
+   "path_status": "last-resort",
+   "model": "m"
+  },
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "nvidia-rtx5060ti",
+   "backend": "cuda",
+   "path": "linuxulator",
+   "path_status": "last-resort",
+   "model": "m"
+  }
+ ]
+}

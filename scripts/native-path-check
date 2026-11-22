@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# native-path-check - check a bench-history.json against the native-path
+# registry (docs/native-paths.json). Standard library only.
+"""Check that every benchmark record says whether it ran on a native FreeBSD
+path or through the Linuxulator, and that the claim agrees with the registry.
+
+Usage: native-path-check [--registry FILE] [--jsonl] BENCH_HISTORY_JSON
+
+Exit status: 0 ok, 1 violations, 2 usage or unreadable/invalid input.
+"""
+import json
+import os
+import sys
+
+PATHS = ("native", "linuxulator")
+STATUSES = ("native", "superseded", "last-resort")
+CHECKED_FIELDS = ("path", "path_status", "card", "backend", "superseded_by")
+USAGE = "usage: native-path-check [--registry FILE] [--jsonl] BENCH_HISTORY_JSON"
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_REGISTRY = os.path.normpath(os.path.join(HERE, "..", "docs", "native-paths.json"))
+
+
+def load_registry(path):
+    """Return {(card, backend): native_bool}; raise ValueError when malformed.
+    Time:  O(entries).
+    Space: O(entries).
+    """
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict):
+        raise ValueError("registry is not a JSON object")
+    entries = doc["paths"]
+    if doc.get("version") != 1:
+        raise ValueError("registry version must be 1, got %r" % (doc.get("version"),))
+    if not isinstance(entries, list):
+        raise ValueError('"paths" is not a list')
+    reg = {}
+    for n, e in enumerate(entries):
+        if not isinstance(e, dict):
+            raise ValueError("paths[%d] is not an object" % n)
+        card, backend, native = e["card"], e["backend"], e["native"]
+        if not isinstance(card, str) or not isinstance(backend, str):
+            raise ValueError("paths[%d]: card and backend must be strings" % n)
+        if not isinstance(native, bool):
+            raise ValueError("paths[%d]: native must be true or false, got %r" % (n, native))
+        if (card, backend) in reg:
+            raise ValueError("duplicate registry pair (%s, %s)" % (card, backend))
+        reg[(card, backend)] = native
+    return reg
+
+
+def _str(r, name):
+    v = r.get(name)
+    return v if isinstance(v, str) else None
+
+
+def superseder_problem(r, natives):
+    """Return None when the superseded record names a real native successor,
+    else a sentence saying which part failed.
+    Time:  O(natives of the same card and backend).
+    Space: O(1).
+    """
+    by = r.get("superseded_by")
+    if not isinstance(by, str) or not by:
+        return "no superseded_by field naming the native run that supersedes it"
+    same = [n for n in natives.get((r["card"], r["backend"]), ()) if n["model"] == r.get("model")]
+    if not same:
+        return "no native record for (%s, %s) and model %r" % (r["card"], r["backend"], r.get("model"))
+    later = [n for n in same if n["date"] is not None and r.get("date") is not None and n["date"] >= r["date"]]
+    if not later:
+        return "no native record for the same model dated on or after %s" % (r.get("date"),)
+    if not any(by in n["source"] for n in later):
+        return "superseded_by %r is not in the source of any such native record" % (by,)
+    return None
+
+
+def check(records, reg, registry_path):
+    """Return (violations, counts). One violation per record and rule broken.
+    Time:  O(records).
+    Space: O(violations).
+    """
+    out = []
+    counts = dict.fromkeys(PATHS, 0)
+    natives = {}
+    for r in records:
+        if (isinstance(r, dict) and r.get("path") == "native" and isinstance(r.get("card"), str)
+                and isinstance(r.get("backend"), str) and isinstance(r.get("source"), str)):
+            natives.setdefault((r["card"], r["backend"]), []).append(
+                {"model": r.get("model"), "date": _str(r, "date"), "source": r["source"]})
+    for i, r in enumerate(records):
+        if not isinstance(r, dict):
+            out.append({"index": i, "date": None, "card": None, "backend": None,
+                        "path": None, "path_status": None, "rule": "record-invalid",
+                        "detail": "record is %s, not an object" % type(r).__name__})
+            continue
+
+        def bad(rule, detail, r=r, i=i):
+            def show(v):
+                return v if isinstance(v, (str, type(None))) else repr(v)
+            out.append({"index": i, "date": show(r.get("date")), "card": show(r.get("card")),
+                        "backend": show(r.get("backend")), "path": show(r.get("path")),
+                        "path_status": show(r.get("path_status")), "rule": rule, "detail": detail})
+
+        wrong = ["%s is %s" % (n, type(r[n]).__name__) for n in CHECKED_FIELDS
+                 if r.get(n) is not None and not isinstance(r[n], str)]
+        if wrong:
+            bad("field-type", "fields must be strings: " + ", ".join(wrong))
+            continue
+        missing = [n for n in ("card", "backend") if r.get(n) is None]
+        if missing:
+            bad("field-missing", "record has no " + " and no ".join(missing))
+            continue
+        path, status = r.get("path"), r.get("path_status")
+        card, backend = r["card"], r["backend"]
+        accepted = " or ".join(PATHS)
+        if path is None:
+            bad("path-missing", "record has no path field; accepted values: %s" % accepted)
+        elif path not in PATHS:
+            bad("path-invalid", "path %r is not valid; accepted values: %s" % (path, accepted))
+        else:
+            counts[path] += 1
+        key = (card, backend)
+        if key not in reg:
+            bad("unknown-pair", "(%s, %s) is not in the registry: fix the record or add the pair to %s"
+                % (card, backend, registry_path))
+            continue
+        if path not in PATHS:
+            continue
+        native = reg[key]
+        if path == "native" and not native:
+            bad("native-without-path", "registry says (%s, %s) has no native path" % key)
+        if status not in STATUSES:
+            bad("status-invalid", "path_status %r is not valid; accepted values: %s"
+                % (status, ", ".join(STATUSES)))
+        elif path == "native":
+            if status != "native":
+                bad("status-invalid", "native record needs path_status native, got %r" % (status,))
+        elif native:
+            if status != "superseded":
+                bad("linux-where-native", "native path exists for (%s, %s): linuxulator run must be superseded, got %r" % (key + (status,)))
+            else:
+                why = superseder_problem(r, natives)
+                if why:
+                    bad("superseded-without-native", "superseded, but " + why)
+        elif status != "last-resort":
+            bad("status-invalid", "no native path: linuxulator record needs path_status last-resort, got %r" % (status,))
+    return out, counts
+
+
+def emit(doc, jsonl):
+    if jsonl:
+        for v in doc["violations"]:
+            print(json.dumps(v))
+        print(json.dumps({k: v for k, v in doc.items() if k != "violations"}))
+    else:
+        print(json.dumps(doc, indent=1))
+
+
+def fail(msg, jsonl, usage=False):
+    emit({"version": 1, "status": "error", "checked": 0,
+          "counts": dict.fromkeys(PATHS, 0), "violations": [], "error": msg + ("\n" + USAGE if usage else "")},
+         jsonl)
+    if usage and not jsonl:
+        print(msg, file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+    return 2
+
+
+def main(argv):
+    args = list(argv)
+    jsonl = "--jsonl" in args
+    registry = DEFAULT_REGISTRY
+    files = []
+    while args:
+        a = args.pop(0)
+        if a in ("-h", "--help"):
+            print(USAGE)
+            print("  --registry FILE  native-path registry (default: %s)" % DEFAULT_REGISTRY)
+            print("  --jsonl          one JSON line per violation, then a summary line")
+            return 0
+        if a == "--jsonl":
+            continue
+        if a == "--registry":
+            if not args:
+                return fail("--registry needs a FILE", jsonl, True)
+            registry = args.pop(0)
+        elif a.startswith("-"):
+            return fail("unknown option %s" % a, jsonl, True)
+        else:
+            files.append(a)
+    if len(files) != 1:
+        return fail("expected one BENCH_HISTORY_JSON, got %d" % len(files), jsonl, True)
+    is_default = registry == DEFAULT_REGISTRY
+    registry = os.path.abspath(registry)
+    try:
+        reg = load_registry(registry)
+    except KeyError as e:
+        return fail("registry %s: missing key %s" % (registry, json.dumps(e.args[0])), jsonl)
+    except (OSError, ValueError, TypeError) as e:
+        hint = ""
+        if is_default and not os.path.exists(registry):
+            hint = "; pass --registry FILE (docs/native-paths.json in the source tree)"
+        return fail("cannot read registry %s: %s%s" % (registry, e, hint), jsonl)
+    try:
+        with open(files[0], encoding="utf-8") as f:
+            doc = json.load(f)
+        records = doc["records"]
+        if not isinstance(records, list):
+            raise ValueError("records is not a list")
+        if not records:
+            raise ValueError("no records")
+    except KeyError as e:
+        return fail("%s: missing key %s" % (files[0], json.dumps(e.args[0])), jsonl)
+    except (OSError, ValueError, TypeError) as e:
+        return fail("cannot read %s: %s" % (files[0], e), jsonl)
+    violations, counts = check(records, reg, registry)
+    emit({"version": 1, "status": "violations" if violations else "ok", "checked": len(records),
+          "counts": counts, "violations": violations, "error": None}, jsonl)
+    return 1 if violations else 0
+
+
+def run(argv):
+    try:
+        return main(argv)
+    except Exception as e:  # never a traceback: status error, exit 2
+        return fail("internal error: %s: %s" % (type(e).__name__, e), "--jsonl" in argv)
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

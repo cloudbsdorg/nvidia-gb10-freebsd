@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "retrieved": "2026-11-22",
+  "model": "llama-2-7b.Q4_0",
+  "parameters": "source-specific; see sources[].note",
+  "groups": [
+    {
+      "card": "amd-rx7600",
+      "backend": "vulkan",
+      "sources": [
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-17845940",
+          "build": "91f8c9c5f (10156)",
+          "os": "Arch Linux (Mesa 26.1.4-arch1.1)",
+          "note": "RADV_PERFTEST=nogttspill, -ngl 100"
+        }
+      ],
+      "results": [
+        {
+          "fa": 0,
+          "test": "pp512",
+          "median": 1167.20
+        },
+        {
+          "fa": 0,
+          "test": "tg128",
+          "median": 58.03
+        },
+        {
+          "fa": 1,
+          "test": "pp512",
+          "median": 1353.47
+        },
+        {
+          "fa": 1,
+          "test": "tg128",
+          "median": 60.88
+        }
+      ]
+    },
+    {
+      "card": "nvidia-rtx5060ti",
+      "backend": "vulkan",
+      "sources": [
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686767",
+          "build": "89f10baad (7898)",
+          "os": "CachyOS Linux"
+        },
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686845",
+          "build": "89f10baad (7898)",
+          "os": "CachyOS Linux",
+          "note": "x4 slot"
+        },
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-13937285",
+          "build": "89d10295 (6002)",
+          "os": "not stated"
+        }
+      ],
+      "results": [
+        {
+          "fa": 0,
+          "test": "pp512",
+          "median": 3342.62
+        },
+        {
+          "fa": 0,
+          "test": "tg128",
+          "median": 92.19
+        },
+        {
+          "fa": 1,
+          "test": "pp512",
+          "median": 3848.92
+        },
+        {
+          "fa": 1,
+          "test": "tg128",
+          "median": 95.98
+        }
+      ]
+    },
+    {
+      "card": "nvidia-rtx5060ti",
+      "backend": "cuda",
+      "sources": [
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/15013#discussioncomment-13972383",
+          "build": "89d10295 (6002)",
+          "os": "not stated"
+        },
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/15013#discussioncomment-16020010",
+          "build": "f7db3f378 (8214)",
+          "os": "not stated"
+        },
+        {
+          "url": "https://github.com/ggml-org/llama.cpp/discussions/15013#discussioncomment-16868218",
+          "build": "1e5ad35d5 (9093)",
+          "os": "Windows, CUDA 13.1"
+        }
+      ],
+      "results": [
+        {
+          "fa": 0,
+          "test": "pp512",
+          "median": 3737.25
+        },
+        {
+          "fa": 0,
+          "test": "tg128",
+          "median": 92.52
+        },
+        {
+          "fa": 1,
+          "test": "pp512",
+          "median": 4427.42
+        },
+        {
+          "fa": 1,
+          "test": "tg128",
+          "median": 95.69
+        }
+      ]
+    }
+  ]
+}

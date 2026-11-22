@@ -1,0 +1,19 @@
+{
+ "_note": "Published llama-bench results, Llama 2 7B Q4_0 (TheBloke llama-2-7b.Q4_0.gguf), -ngl 99 -fa 0,1, pp512/tg128. Collected 2026-11-19 from ggml-org/llama.cpp discussions 10879 (Vulkan), 15013 (CUDA), 15021 (ROCm). 'compare': true rows feed the median; others are reference only.",
+ "rows": [
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"Linux (CachyOS)","build":"89f10baad (7898)","fa":0,"pp512":3460.92,"tg128":93.51,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686767"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"Linux (CachyOS)","build":"89f10baad (7898)","fa":1,"pp512":3912.65,"tg128":97.01,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686767"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"Linux (CachyOS), x4 slot","build":"89f10baad (7898)","fa":0,"pp512":3342.62,"tg128":92.19,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686845"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"Linux (CachyOS), x4 slot","build":"89f10baad (7898)","fa":1,"pp512":3848.92,"tg128":95.98,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-15686845"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"not stated","build":"89d10295 (6002)","fa":0,"pp512":3226.80,"tg128":74.47,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-13937285"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"Vulkan","os":"not stated","build":"89d10295 (6002)","fa":1,"pp512":3504.54,"tg128":78.10,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-13937285"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"CUDA","os":"not stated","build":"89d10295 (6002)","fa":0,"pp512":3737.25,"tg128":90.94,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/15013#discussioncomment-13972383"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"CUDA","os":"not stated","build":"89d10295 (6002)","fa":1,"pp512":4195.53,"tg128":93.46,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/15013#discussioncomment-13972383"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"CUDA","os":"not stated","build":"89d10295 (6002)","fa":0,"pp512":3728.09,"tg128":90.95,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-13937285"},
+  {"card":"nv","gpu":"RTX 5060 Ti 16 GB","backend":"CUDA","os":"not stated","build":"89d10295 (6002)","fa":1,"pp512":4163.39,"tg128":93.30,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879#discussioncomment-13937285"},
+  {"card":"amd","gpu":"RX 7600 8 GB","backend":"Vulkan","os":"not stated","build":"91f8c9c (scoreboard row)","fa":0,"pp512":1167.20,"tg128":58.03,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879"},
+  {"card":"amd","gpu":"RX 7600 8 GB","backend":"Vulkan","os":"not stated","build":"91f8c9c (scoreboard row)","fa":1,"pp512":1353.47,"tg128":60.88,"compare":true,"url":"https://github.com/ggml-org/llama.cpp/discussions/10879"},
+  {"card":"amd","gpu":"RX 7600 8 GB","backend":"ROCm","os":"Linux (implied)","build":"lemonade-sdk llamacpp-rocm, not stated","fa":0,"pp512":1006.77,"tg128":53.27,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/15021#discussioncomment-17632509"},
+  {"card":"amd","gpu":"RX 7600 8 GB","backend":"ROCm","os":"Linux (implied)","build":"lemonade-sdk llamacpp-rocm, not stated","fa":1,"pp512":1308.31,"tg128":58.73,"compare":false,"url":"https://github.com/ggml-org/llama.cpp/discussions/15021#discussioncomment-17632509"}
+ ]
+}

@@ -449,6 +449,19 @@ fake_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 	return (0);
 }
 
+uint64_t
+nvrm_fake_gpu_vram_kb(const nvrm_gpu *g)
+{
+	return (g->p->fail[NVRM_P_VRAM_KB] != 0 ? 0 :
+	    g->p->val[NVRM_P_VRAM_KB]);
+}
+
+uint32_t
+nvrm_fake_gpu_id(const nvrm_gpu *g)
+{
+	return (g->id);
+}
+
 static int
 fake_limit(nvrm_backend *be, int allow_alloc)
 {
@@ -473,4 +486,5 @@ const nvrm_backend_ops nvrm_backend_fake_ops = {
 	.gpu_str = fake_gpu_str,
 	.gpu_classes = fake_gpu_classes,
 	.limit = fake_limit,
+	.mem = &nvrm_fake_mem_ops,
 };

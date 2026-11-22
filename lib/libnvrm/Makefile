@@ -27,21 +27,21 @@ OGKM?=	${GB10_WORK:U${HOME}/work/gb10}/sources/open-gpu-kernel-modules-${OGKM_TA
 LIB=		nvrm
 SHLIB_MAJOR=	1
 VERSION_MAP=	${.CURDIR}/Version.map
-SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fields.c nvrm_json.c \
-		nvrm_names.c nvrm_rm.c nvrm_table.c
+SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fake_mem.c nvrm_fields.c \
+		nvrm_json.c nvrm_mem.c nvrm_names.c nvrm_rm.c nvrm_rm_mem.c \
+		nvrm_table.c nvrm_va.c
 INCSDIR=	${INCLUDEDIR}/nvrm
 INCS=		include/nvrm/nvrm.h
-MAN=		man/nvrm.3 man/nvrm.7
-NVRM_FUNCS=	nvrm_enumerate nvrm_close nvrm_backend_name \
-		nvrm_rm_running_version nvrm_device_count nvrm_device_get \
-		nvrm_device_info_get nvrm_device_refresh nvrm_strerror \
-		nvrm_error_id nvrm_reason_id nvrm_reason_text \
-		nvrm_source_name nvrm_cap_name nvrm_info_nfields \
-		nvrm_info_field nvrm_json_document nvrm_json_header \
-		nvrm_json_device nvrm_json_end nvrm_json_error \
-		nvrm_json_schema
+MAN=		man/nvrm.3 man/nvrm_mem.3 man/nvrm.7
+# The man links come from Version.map, the one list of the exported calls:
+# NVRM_1.0 (discovery) links to nvrm.3, NVRM_1.1 (memory and VA) to nvrm_mem.3.
+NVRM_FUNCS!=	awk '/^NVRM_1\.0 /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
+NVRM_MEM_FUNCS!=	awk '/^NVRM_1\.1 /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
 .for f in ${NVRM_FUNCS}
 MLINKS+=	nvrm.3 ${f}.3
+.endfor
+.for f in ${NVRM_MEM_FUNCS}
+MLINKS+=	nvrm_mem.3 ${f}.3
 .endfor
 CFLAGS+=	-I${.CURDIR} -I${.CURDIR}/include -std=gnu11 -Wall -Wextra \
 		-Wno-unused-parameter -Werror

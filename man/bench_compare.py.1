@@ -1,0 +1,145 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 19, 2026
+.Dt BENCH_COMPARE.PY 1
+.Os
+.Sh NAME
+.Nm bench_compare.py
+.Nd percentage tables for llama-bench JSON results
+.Sh SYNOPSIS
+.Nm
+.Cm published
+.Ar published.json
+.Ar CARD Ns = Ns Ar OURS.json
+.Op Ar ...
+.Op Fl -format Ar fmt
+.Nm
+.Cm delta
+.Ar a.json
+.Ar b.json
+.Op Fl -label-a Ar label
+.Op Fl -label-b Ar label
+.Op Fl -format Ar fmt
+.Nm
+.Op Fl h | -help
+.Sh DESCRIPTION
+.Nm
+turns
+.Xr llama-bench 1
+JSON files into tables with one percentage per row.
+It has two modes.
+.Pp
+In
+.Cm published
+mode every
+.Cm CARD=OURS.json
+pair is compared against a published file, which is a JSON object with a
+.Cm rows
+list.
+Every row of that file names a card, a GPU, a backend, an operating system, a
+build, the flash-attention setting, the numbers for pp512 and tg128, and a
+.Cm compare
+flag.
+For every card, every flash-attention setting of our file and every test
+(pp512, tg128) the row gives our throughput, the median of the published
+numbers for that card and setting, the smallest and the largest of them, how
+many there were, and the percentage.
+.Pp
+In
+.Cm delta
+mode two of our own runs are compared the same way.
+.Pp
+The percentage of the
+.Cm published
+mode is (ours − median) / median;
+the percentage of the
+.Cm delta
+mode is (a − b) / b,
+where a is the first run and b the second.
+The number is signed: a positive number means our run is faster than the
+number it is compared with.
+It is printed with one decimal, a plus sign for the positive numbers and
+U+2212 MINUS SIGN (not the ASCII hyphen) for the negative ones.
+.Pp
+A published row with
+.Cm "compare": false
+is printed under "Reference only": it never enters the median, and it carries
+its own percentage against our run.
+A row without a
+.Cm compare
+key at all is compared.
+The flag must be a JSON boolean: a string, a number or null is an error.
+.Pp
+A row of a bench file is named from both of its counters: a row that measured
+the prompt only is
+.Cm ppN ,
+a row that measured the generation only is
+.Cm tgN ,
+and a row that measured both is
+.Cm ppNtgM .
+The combined row comes from the combined prompt-and-generation test of
+.Xr llama-bench 1 ,
+.Cm -pg N,M ;
+.Cm -p
+and
+.Cm -n
+are the two separate tests.
+A file with the same row twice is refused.
+.Pp
+One of our rows that has no published row for its card, its test and its
+flash-attention setting is reported on stderr, one line per row: it is in the
+table with an empty median, which says nothing about the run.
+This is what a run with the default flash attention of
+.Xr llama-bench 1
+looks like: that default is AUTO, it is written as
+.Cm -1 ,
+and a
+.Cm -1
+row matches no published
+.Cm fa
+0 or
+.Cm fa
+1 row.
+.Pp
+The output format is chosen with
+.Cm --format :
+.Cm md
+(the default),
+.Cm json
+or
+.Cm html .
+The labels of the two runs of the
+.Cm delta
+mode are chosen with
+.Cm --label-a
+and
+.Cm --label-b ;
+without them the name of the file is used.
+.Cm -h
+and
+.Cm --help
+print the usage and exit 0.
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+The table was printed.
+.It 2
+The input was wrong.
+One line
+.Pq Li "bench_compare.py: ..."
+on stderr, never a traceback.
+A number that is not finite (NaN, Infinity) is wrong input: no table can hold
+it.
+.El
+.Sh EXAMPLES
+Our run against the published numbers for the same card:
+.Bd -literal -offset indent
+$ bench_compare.py published published.json nv=ours.json
+.Ed
+.Pp
+Our two runs against each other, as an HTML table:
+.Bd -literal -offset indent
+$ bench_compare.py delta build-a.json build-b.json --format html
+.Ed
+.Sh SEE ALSO
+.Xr llama-bench 1

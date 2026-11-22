@@ -1,0 +1,58 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 20, 2026
+.Dt RUN-CUDA-LLAMA.SH 1
+.Os
+.Sh NAME
+.Nm run-cuda-llama.sh
+.Nd run the llama.cpp CUDA build on the NVIDIA GPU through the Linuxulator
+.Sh SYNOPSIS
+.Nm
+.Ar PROG
+.Op Ar args ...
+.Sh DESCRIPTION
+Runs a program from the official llama.cpp
+.Pa ubuntu-cuda-13.5-arm64
+release (with the cudart and cuBLAS libraries from the matching cudart asset
+merged into the same directory) against NVIDIA's Linux libcuda, through the
+Linuxulator, with the CUDA shim preloaded and the Ubuntu 24.04 glibc loader.
+The kernel side is nvidia.ko and uvm-bsd.
+.Pp
+.Ar PROG
+is a program in the release directory, for example
+.Nm llama-bench ,
+.Nm llama-cli
+or
+.Nm llama-server .
+The script changes into that directory first, because ggml finds its backend
+libraries next to the loader and in the current directory only.
+Pass absolute model paths.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev GB10_WORK"
+.It Ev GB10_WORK
+Work root, default
+.Pa $HOME/work/gb10 .
+.It Ev LL
+The release directory, default
+.Pa $GB10_WORK/llm/cuda/llama-b12531-cuda/llama-b12531 .
+.It Ev SHIMDIR
+Directory with
+.Pa shim.so ,
+default
+.Pa $GB10_WORK/build/linux-cuda .
+.El
+.Pp
+.Ev GGML_BACKEND_PATH
+is unset, because it names one backend library and stops ggml from loading the others.
+.Sh EXIT STATUS
+The exit status of
+.Ar PROG ;
+2 for a usage error or no
+.Ev HOME ;
+1 when a required file is missing.
+.Sh EXAMPLES
+.Dl run-cuda-llama.sh llama-bench --list-devices
+.Dl run-cuda-llama.sh llama-bench -m /home/me/work/models/m.gguf -ngl 99 -fa 1
+.Sh SEE ALSO
+.Xr bench-report.sh 1 ,
+.Xr run-nv-vulkan.sh 1

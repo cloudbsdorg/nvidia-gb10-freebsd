@@ -125,8 +125,11 @@ alone lists the targets. The numbered steps below are what `make build` runs, on
   (`DRMKMODDIR=`, an absolute path), and the FreeBSD source headers (`BSDSRCTOP=`, the parent
   of `SYSDIR` by default).
 - A host with an Ampere Altra CPU (not to be confused with the GPU generation) needs PCIe
-  workarounds in the kernel. They are in a separate kernel tree, not in this repository; ask
-  for it when you report (see the end of this section). Other arm64 machines do not need them.
+  workarounds in the kernel, and `nvidia-drm` (like every drm-kmod driver) needs a LinuxKPI fix
+  on any arm64 machine. Both are FreeBSD kernel patches in
+  [`kernel-patches/`](kernel-patches/README.md), with a step-by-step guide to apply them, build
+  the kernel and boot it next to the stock one. `nvidia.ko` alone on an arm64 machine that is
+  not an Altra needs none of them.
 
 ### 2. Get the code and sources
 
@@ -216,10 +219,22 @@ kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
 ```sh
 kldstat                  # the four modules, drm and its linuxkpi modules; with the providers also
                          # nvidia_linux, nvidia_modeset_linux, linux64 and linux_common
-dmesg | tail             # nvidia0: <NVIDIA ...> on vgapci0
-ls /dev/nvidia*          # /dev/nvidia0 /dev/nvidiactl
-sleep 30 < /dev/nvidia0 &   # hold the device open: the GPU and GSP start on the first open
-sysctl hw.nvidia.gpus.0  # firmware and VBIOS versions, while the device is held open
+dmesg | tail             # nvidiaN: <NVIDIA ...> on vgapciM
+ls /dev/nvidia*          # one /dev/nvidiaN per GPU, plus /dev/nvidiactl
+# Which node is which card: never assume the first number; a second NVIDIA GPU or the
+# attach order moves it (a BMC moves the vgapci and dri/card numbers).
+# Each nvidiaN's newbus parent is its vgapci device; pciconf names the vendor and bus.
+unset NV
+units=$(sysctl -N dev.nvidia 2>/dev/null | sed -n 's/^dev\.nvidia\.\([0-9]*\)\.%parent$/\1/p')
+for u in $units; do echo "/dev/nvidia$u $(pciconf -l "$(sysctl -n dev.nvidia.$u.%parent)")"; done
+set -- $units
+case $# in
+0) echo "no nvidiaN attached: see dmesg | grep -i nvidia" >&2 ;;
+1) NV=/dev/nvidia$1 ;;
+*) echo "several NVIDIA GPUs: set NV to the node on the bus you want, from the list" >&2 ;;
+esac
+sleep 30 < "${NV:?no NVIDIA node chosen}" &   # GPU and GSP start on the first open
+sysctl hw.nvidia.gpus    # firmware and VBIOS versions, while the device is held open
 ```
 
 ### 6. Load at boot
@@ -261,14 +276,19 @@ when `linux_enable` is on and `nvidia.ko` is loaded, and `nvidia_modeset_linux.k
 In short (details in the [status table](#what-works-status-2026-11-20) below):
 
 - KMS and Xorg modesetting work, with software rendering only.
-- `nvidia-smi` runs through the Linuxulator: `sh scripts/fetch-nvidia-smi.sh`, plus
-  `linux_base-rl9`, and the provider modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
-  (step 6); see [nvidia-smi](#nvidia-smi).
-- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator, with the
-  same provider modules. CUDA also
-  needs `nvidia-uvm.ko` from [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd)
-  (private; ask for access when you report), built per its README, and Linuxulator additions
-  that are in the cloudbsd-src kernel, not in a stock one. Native versions are in progress.
+- Native NVIDIA user space on FreeBSD arm64 today: only `nvrm-info` (device enumeration, from
+  [libnvrm](#libnvrm-and-nvrm-info); not yet run on hardware: it passes against libnvrm's
+  simulated device, and the first run on a real GPU is pending). NVIDIA ships no FreeBSD arm64 Vulkan or CUDA, and the native NVK and CUDA work
+  (Track [#2379](https://track.cloudbsd.org/work_packages/2379), [#2362](https://track.cloudbsd.org/work_packages/2362)) has not reached a workload.
+- Linux-only, last resort: CUDA, Vulkan and `nvidia-smi` monitoring run only through NVIDIA's
+  Linux libraries under the Linuxulator. They are kept only because no native path exists
+  ([Linux dependencies](docs/LINUX-DEPENDENCY-AUDIT.md)); a native path replaces each of them as
+  soon as it exists. They need the provider modules `nvidia_linux.ko` and
+  `nvidia_modeset_linux.ko` (step 6). `nvidia-smi`: `sh scripts/fetch-nvidia-smi.sh`, plus
+  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi). CUDA also needs `nvidia-uvm.ko` from
+  [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (private; ask for access when
+  you report), built per its README, and Linuxulator additions that are in the cloudbsd-src
+  kernel, not in a stock one.
 - There are no published packages yet.
 - To report a problem, open an issue at
   <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the failing step's output,
@@ -280,14 +300,16 @@ In short (details in the [status table](#what-works-status-2026-11-20) below):
 |---|---|
 | `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
-| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on `/dev/dri/card1`; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
+| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node (`card1` on the test host, found by PCI bus); Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
-| `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below) |
-| CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below |
+| Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
+| `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort |
+| CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
+| CUDA, native | not started: Track #2362 |
 | Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
 | Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
-| Accelerated native rendering (Mesa NVK over a render interface in `nvidia-drm`) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
+| Accelerated native rendering and native Vulkan (Mesa NVK; on libnvrm for compute, Track #2379) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | fix committed (3414fd7), waits for test boot 6 |
 | Cross-GPU buffer import (PRIME) of system-memory buffers | implemented (#2228), waits for a test boot; see [Cross-GPU buffers](#cross-gpu-buffers-prime-import) |
 | CUDA | does not work yet: needs `nvidia-uvm` (clean-room module in progress) |
@@ -301,8 +323,9 @@ FreeBSD. It comes from the clean-room module
 Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
 UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
-**Numbers.** Measured with llama.cpp b12531 (`llama-bench`, defaults otherwise), in tokens per
-second. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
+**Numbers.** Linux-only, last resort: the official Ubuntu arm64 llama.cpp b12531 builds on
+NVIDIA's Linux libraries, under the Linuxulator (`llama-bench`, defaults otherwise), in tokens per
+second. They are not native numbers; there is no native NVIDIA path to measure yet. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
 speed over 128 tokens.
 
 | Backend | Model | pp512 | tg128 |
@@ -342,8 +365,13 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
 It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
 Linux ioctl bridges are the optional modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
 (see [Linux bridges](#linux-bridges-nvidia_linuxko) below). An **Ampere Altra** does need kernel workarounds for its PCIe
-(32-bit configuration reads, emulation of misaligned device accesses); those are kernel
-changes kept in a separate kernel tree, not here. Other arm64 machines should not need them.
+(32-bit configuration reads, emulation of misaligned device accesses), and `nvidia-drm`, like
+every drm-kmod driver, needs LinuxKPI to map write-combining memory non-cacheable on arm64.
+Those are FreeBSD kernel patches, kept in [`kernel-patches/`](kernel-patches/README.md) with a
+step-by-step guide (check whether you need them, fetch the matching source, apply, build,
+install as `kernel.patched`, test once with `nextboot`, make it the default, go back, redo after
+updates), a helper `kernel-patches/apply.sh` and the manual page `kernel-patches(7)`. Other
+arm64 machines need only the LinuxKPI patch, and only for `nvidia-drm`.
 
 On the Altra the driver also maps write-combining BARs as Device memory. It decides this itself
 from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_active`; see
@@ -384,6 +412,10 @@ sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "
 DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
 sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
 sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
+sh tests/pd_split_test.sh        # the prefill/decode split client, against two stub servers
+sh tests/bench_compare_test.sh   # the llama-bench comparison tables
+sh tests/run-nv-vulkan_test.sh   # the Vulkan launcher, without a GPU and without a Linux root
+sh tests/manpages_test.sh        # the man pages of the commands pass "mandoc -T lint -W warning"
 ```
 
 `build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
@@ -446,8 +478,8 @@ kldload $GB10_WORK/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
 kldload $GB10_WORK/build/tree/nvidia/nvidia.ko    # no Linux layer is loaded
 kldload $GB10_WORK/build/tree/nvidia-modeset/nvidia-modeset.ko
 kldload $GB10_WORK/build/tree/nvidia-drm/nvidia-drm.ko
-dmesg | tail                                      # nvidia0: <NVIDIA ...> on vgapci0
-ls /dev/nvidia*                                   # /dev/nvidia0 /dev/nvidiactl
+dmesg | tail                                      # nvidiaN: <NVIDIA ...> on vgapciM
+ls /dev/nvidia*                                   # /dev/nvidiaN per GPU, /dev/nvidiactl
 ```
 
 `nvidia.ko` depends on the GSP firmware module for its architecture: `nvidia_gsp_ga10x_fw`
@@ -461,11 +493,12 @@ path, as above, works because a dependency that is already loaded is accepted; k
 `kldload` line first. If `kldload` says `depends on nvidia_gsp_ga10x_fw_fw - not available`, the
 module is not installed or `kldxref` was not run. See `man/nvidia.4`.
 
-The GPU is initialised, and GSP booted, on the first open of `/dev/nvidia0`; it is shut down
-again when the last open closes. `sysctl hw.nvidia.gpus.0` shows the firmware and VBIOS
+The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN` (find N by
+PCI bus as in [Check it worked](#5-check-it-worked), never by assuming 0); it is shut down
+again when the last open closes. `sysctl hw.nvidia.gpus` shows the firmware and VBIOS
 versions while something holds the device open.
 
-If that first open fails (`nvidia0: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
+If that first open fails (`nvidiaN: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
 program gets `EIO`), the driver frees what the open took and the open can be tried again. See
 `man/nvidia.4`.
 
@@ -513,8 +546,9 @@ a cacheable load from a register page is a synchronous external abort, which the
 
 On the Altra, Normal memory accesses to PCIe BARs are not safe (the root complex mishandles
 some of them), so write-combining requests fall back to Device-nGnRE there as well. The
-FreeBSD kernel tree applies the same rule to its own write-combining mappings, Device for the
-kernel and Normal non-cacheable for user processes. `nvidia.ko` applies its table to the
+FreeBSD kernel patches in [`kernel-patches/`](kernel-patches/README.md) apply the same rule to
+LinuxKPI's write-combining mappings, Device for the kernel and Normal non-cacheable for user
+processes (`compat.linuxkpi.altra_82288`). `nvidia.ko` applies its table to the
 mappings it makes itself, the kernel ones and the user ones alike.
 
 ## Video memory and fictitious pages (nvidia-drm)
@@ -718,19 +752,26 @@ $R/noble/lib/ld-linux-aarch64.so.1 --library-path "$R/noble/lib/aarch64-linux-gn
 USERMODE register window (see [Memory attributes on arm64](#memory-attributes-on-arm64)). The
 ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
 
+[`scripts/run-nv-vulkan.sh`](scripts/run-nv-vulkan.sh) wraps all of this: it sets the two
+variables, runs the programs from the llama directory (so they find their backends, also under
+`daemon(8)`) and starts them through the Ubuntu root's own dynamic linker. It is described in
+[`docs/llm.md`](docs/llm.md#nvidia).
+
 ## Running LLMs
 
-How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured, and
-splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
+How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured,
+splitting prefill and decode between two servers, the NVIDIA Vulkan launcher and the llama-bench
+comparison tables): [`docs/llm.md`](docs/llm.md).
 
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `SOURCES` | pins for NVIDIA's sources |
-| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client of [`docs/llm.md`](docs/llm.md) |
+| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client, `bench_compare.py`, the llama-bench comparison tables, and `run-nv-vulkan.sh`, the Vulkan launcher of [`docs/llm.md`](docs/llm.md) |
 | `patches/` | one unified diff per changed file of NVIDIA's FreeBSD OS layer |
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
+| `kernel-patches/` | patches to the FreeBSD kernel itself (LinuxKPI write-combining on arm64; Ampere Altra PCIe workarounds), `apply.sh`, `kernel-patches(7)` and a [step-by-step README](kernel-patches/README.md) |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
 | `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` |
@@ -741,6 +782,7 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
+| `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 | `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
@@ -876,10 +918,38 @@ class list, VRAM, BAR1, page sizes, capability flags). Every value is available 
 reason; the layers are abstract device, class, family (a generation table keyed by class ids)
 and board decorators (none yet). Backends are providers: `rm` and `fake`
 (`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
-capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; this
-version has no call that maps device memory). No GPU is a success with zero devices. The interface is provisional
+capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; the
+enumeration descriptors never carry a mapping right). No GPU is a success with zero devices. The interface is provisional
 until the first package release. A context is not thread-safe, and a forked child must only
 `nvrm_close` it (see `nvrm(3)`). `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
 `lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
-the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
+the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm_mem(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
 the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.
+
+GPU memory (`nvrm_mem(3)`, API minor 1, symbol version `NVRM_1.1`) is what NVK and a native CUDA
+runtime build on. `nvrm_client_open()` makes a client for one GPU: its own RM session, its own GPU
+virtual address space (the library hands out the addresses), and every object made through it.
+On it: VA reservations (sparse or not), video and system memory with a chosen page size (4 KiB,
+64 KiB, 2 MiB, 512 MiB), registered user pages, GPU mappings at fixed addresses, CPU mappings,
+and sharing by descriptor (export, import). CPU mapping needs `NVRM_OPEN_ALLOW_MAP`: the client then
+opens spare descriptors of this GPU's own device node (`/dev/nvidiaN`, N reported by the driver), so
+it keeps working after `cap_enter()`; each CPU mapping or export uses one. The
+CPU attribute of a mapping follows the rule in `nvrm(7)` (on arm64, video memory is Device unless the
+OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()` obey it. A release the
+RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
+software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
+API is tested without hardware; the RM backend is tested against a scripted kernel
+(`tests/libnvrm/rm_mem_test.c`).
+
+## Native CUDA toolchain (cuda-native)
+
+`lib/cuda-native/` is the first piece of native CUDA (Track #2380, stage C1.1 #2425). It holds the
+SDK tree that clang takes as `--cuda-path`. Its headers are written from the public CUDA
+references and from what clang's CUDA runtime wrapper includes by name; no file of NVIDIA's CUDA
+toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg install llvm23`).
+`sh lib/cuda-native/mksdk.sh obj/cuda-native` builds the tree. Then
+`/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
+emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
+The stub `ptxas`/`fatbinary` tools and `libcudart` let clang fully compile and link, but every launch returns `cudaErrorNotSupported` (801); the libdevice math library, real compiler and runtime, device execution and `libcuda` are not there yet.
+Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips
+without LLVM 23).

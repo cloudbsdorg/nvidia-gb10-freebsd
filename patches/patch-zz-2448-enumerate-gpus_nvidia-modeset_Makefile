@@ -1,0 +1,16 @@
+--- nvidia-modeset/Makefile.orig
++++ nvidia-modeset/Makefile
+@@ -1,4 +1,5 @@
+ SRCS = nvidia-modeset-freebsd.c
++SRCS += device_if.h bus_if.h pci_if.h vnode_if.h
+ KMOD = nvidia-modeset
+ 
+ KMODDIR ?= /boot/modules
+@@ -30,6 +31,7 @@
+ CFLAGS += -Imachine
+ 
+ # So that the build can include sys/stddef.h
++CFLAGS += -I../nvidia
+ CFLAGS += -I${SYSDIR}/sys
+ 
+ CFLAGS += -I../common/inc

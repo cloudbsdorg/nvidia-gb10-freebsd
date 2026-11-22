@@ -5,3 +5,4 @@ tmp/
 .depend.*
 work/
 tests/install-e2e/results/*/checkout/
+__pycache__/

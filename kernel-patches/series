@@ -1,0 +1,16 @@
+# FreeBSD kernel patches, in the order they are applied (patch -p1 from the
+# top of a FreeBSD source tree).  One file name per line; "#" starts a
+# comment.  apply.sh and tests/kernel_patches_test.sh read this file.
+#
+# The four patches touch disjoint sets of files, so each one can be applied
+# or left out on its own.  0001 is for every arm64 machine with a drm-kmod
+# driver; 0002, 0003 and 0004 are for Ampere Altra hosts and are inert
+# elsewhere.
+#
+# checked: main      2cc3f14701c9309d18f24069d2b1bea6f3bb3df8 2026-11-22 (applies, no fuzz; GENERIC arm64 buildkernel)
+# checked: stable/15 55b89b7b529f1c37a749adadb11aba4f8e9e51ca 2026-11-20 (applies, no fuzz; GENERIC arm64 buildkernel)
+# checked: main      c502df9eb193 2026-11 (the base they were written on; applies, no fuzz; GENERIC arm64 buildkernel)
+0001-linuxkpi-arm64-write-combining.diff
+0002-linuxkpi-altra-erratum-82288.diff
+0003-arm64-kernel-alignment-fixup.diff
+0004-pci-host-generic-altra-ecam.diff
