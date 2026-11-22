@@ -210,7 +210,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
     text = f.read()
 synopsis = text.split(".Nm clang++", 2)[2].split(".Sh DESCRIPTION", 1)[0]
 for option in (".Fl L Ns Ar outdir/lib64", ".Fl l Ns Cm cudart",
-               ".Fl Wl,-rpath, Ns Ar outdir/lib64"):
+               ".Fl Wl,-rpath, Ns Qq $PWD/ Ns Ar outdir/lib64"):
     assert option in synopsis, option
 PY
 expect_rc "the full-link SYNOPSIS supplies library path, libcudart and rpath" $? 0
@@ -693,7 +693,7 @@ native_rel=$(sed -n 's/^#define CUDA_NATIVE_VERSION \([0-9][0-9]*\)$/\1/p' "$CN/
 native_version=$(printf '%d.%d.%d' \
     $((native_rel / 10000)) $((native_rel % 10000 / 100)) $((native_rel % 100)))
 # The sources are POSIX sh even though the installed names have no suffix.
-# mksdk.sh substitutes the one cuda.h version into both installed tools.
+# Only the shared library has version placeholders; the tools are copied as-is.
 # Time: O(number of tools).  Space: O(1).
 for tool in nvptxas nvfatbin; do
 	case $tool in nvptxas) public=ptxas ;; nvfatbin) public=fatbinary ;; esac
@@ -703,7 +703,7 @@ for tool in nvptxas nvfatbin; do
 	expect_rc "mksdk.sh installs executable $tool and $public" $? 0
 	! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/$tool" &&
 	    cmp -s "$SDK/bin/$tool" "$SDK/bin/$public"
-	expect_rc "$tool and $public have the cuda.h version substituted identically" $? 0
+	expect_rc "$tool and $public are identical and have no version placeholder" $? 0
 done
 # Time: O(number of installed tool names).  Space: O(1).
 for tool in nvptxas ptxas nvfatbin fatbinary; do
@@ -712,6 +712,113 @@ for tool in nvptxas ptxas nvfatbin fatbinary; do
 	[ $rc -eq 0 ] && grep -q '^usage: ' "$W/$tool-help.out" && [ ! -s "$W/$tool-help.err" ]
 	expect_rc "$tool -h prints usage on stdout" $? 0
 done
+python3 -I - "$CN/man" "$W/nvptxas-help.out" "$W/nvfatbin-help.out" \
+    "$SDK" "$W" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+accepted = {
+    "nvptxas": ["-h", "--help", "-m64", "-O0", "-O1", "-O2", "-O3",
+                "-g", "-lineinfo", "--dont-merge-basicblocks", "--return-at-end",
+                "--gpu-name", "--output-file", "--version", "--json"],
+    "nvfatbin": ["-h", "--help", "-64", "-g", "--create", "--image3",
+                 "--version", "--json"],
+}
+usage_forms = {
+    "nvptxas": ["[-m64]", "[-O0|-O1|-O2|-O3]", "[-g]", "[-lineinfo]",
+                "[--dont-merge-basicblocks]", "[--return-at-end]",
+                "--gpu-name ARCH", "--output-file FILE", "[--] INPUT.ptx",
+                "--version [--json]", "-h|--help"],
+    "nvfatbin": ["[-64]", "[-g]", "--create FILE",
+                 "--image3=kind=elf|ptx,sm=NNN,file=INPUT",
+                 "--version [--json]", "-h|--help"],
+}
+for tool, options in accepted.items():
+    text = (Path(sys.argv[1]) / (tool + ".1")).read_text(encoding="utf-8")
+    usage_path = Path(sys.argv[2 if tool == "nvptxas" else 3])
+    usage = usage_path.read_text(encoding="utf-8")
+    lines = usage.splitlines()
+    assert lines and all(len(line) <= 80 for line in lines), (tool, "width", lines)
+    joined = " ".join(line.strip() for line in lines)
+    for option in options:
+        macro = r"(?m)^\.Fl " + re.escape(option[1:]) + r"(?:\s*[,.])?$"
+        assert re.search(macro, text), (tool, option, "manual")
+    for form in usage_forms[tool]:
+        assert form in joined, (tool, form, "usage")
+
+# Drive real compiles from the same accepted-option table.  Help and version
+# forms have their own checks; --json is valid only after --version.
+work = Path(sys.argv[5]) / "accepted-options"
+work.mkdir()
+ptx = work / "input.ptx"
+elf = work / "input.o"
+ptx.write_text(".target sm_120\n.visible .entry accepted() { ret; }\n", encoding="ascii")
+elf.write_bytes(b"ELF payload\n")
+for tool, options in accepted.items():
+    for index, option in enumerate(options):
+        if option in ("-h", "--help", "--version", "--json"):
+            continue
+        output = work / ("%s-%d.out" % (tool, index))
+        if tool == "nvptxas":
+            extra = {
+                "--gpu-name": ["--gpu-name", "sm_120"],
+                "--output-file": ["--output-file", str(output)],
+            }.get(option, [option])
+            command = [str(Path(sys.argv[4]) / "bin" / tool)] + extra + [
+                "--gpu-name", "sm_120", "--output-file", str(output), str(ptx)]
+            magic = b"CUDA-NATIVE-STUB-CUBIN 1\n"
+        else:
+            image = "--image3=kind=elf,sm=120,file=" + str(elf)
+            extra = {
+                "--create": ["--create", str(output)],
+                "--image3": ["--image3=kind=ptx,sm=120,file=" + str(ptx)],
+            }.get(option, [option])
+            command = [str(Path(sys.argv[4]) / "bin" / tool)] + extra + [
+                "--create", str(output), image]
+            magic = b"CUDA-NATIVE-STUB-FATBIN 1\n"
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert result.returncode == 0, (tool, option, result.stderr.decode("utf-8", "replace"))
+        assert output.read_bytes().startswith(magic), (tool, option, "output")
+PY
+expect_rc "manuals, exact usage grammar, width and real accepted-option compiles agree" $? 0
+python3 -I - "$W/nvptxas-help.out" "$W/ptxas-help.out" \
+    "$W/nvfatbin-help.out" "$W/fatbinary-help.out" <<'PY'
+import sys
+from pathlib import Path
+for path, canonical in zip(sys.argv[1:], ("nvptxas", "nvptxas", "nvfatbin", "nvfatbin")):
+    first = Path(path).read_text(encoding="utf-8").splitlines()[0]
+    assert first.startswith("usage: " + canonical + " "), (path, first)
+fatbin = Path(sys.argv[3]).read_text(encoding="utf-8")
+assert "--image3=kind=elf|ptx,sm=NNN,file=INPUT" in fatbin
+PY
+expect_rc "usage uses canonical tool names and nvfatbin advertises elf|ptx" $? 0
+
+# Prove that the exact usage assertion is not satisfied by the -g substring in
+# --gpu-name.  The old substring check accepts this mutant; the grammar check
+# must reject it.  A removed parser case must also fail a real invocation.
+cp -R "$SDK" "$W/sdk-usage-mutant"
+sed -i '' 's/ \[-g\]//' "$W/sdk-usage-mutant/bin/nvptxas"
+"$W/sdk-usage-mutant/bin/nvptxas" -h >"$W/usage-mutant.out" 2>"$W/usage-mutant.err"
+rc=$?
+[ $rc -eq 0 ] && grep -q -- '-g' "$W/usage-mutant.out"
+expect_rc "usage mutation fixture retains the old misleading -g substring" $? 0
+python3 -I - "$W/usage-mutant.out" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    joined = " ".join(line.strip() for line in f)
+assert "[-g]" in joined, joined
+PY
+expect_rc "mutant: removing only [-g] from nvptxas usage is detected" $? 1
+cp -R "$SDK" "$W/sdk-no-lineinfo"
+sed -i '' 's/ | -lineinfo//' "$W/sdk-no-lineinfo/bin/nvptxas"
+"$W/sdk-no-lineinfo/bin/nvptxas" -lineinfo --gpu-name sm_120 \
+    --output-file "$W/no-lineinfo.o" "$W/accepted-options/input.ptx" \
+    >"$W/no-lineinfo.out" 2>"$W/no-lineinfo.err"
+rc=$?
+[ $rc -eq 2 ] && grep -Fq 'unsupported option -lineinfo' "$W/no-lineinfo.err"
+expect_rc "mutant: deleting the -lineinfo parser case breaks its real compile" $? 0
 # Text and JSON versions have one source and one strict schema.
 # Time: O(number of canonical tools).  Space: O(version JSON).
 for tool in nvptxas nvfatbin; do
@@ -743,6 +850,11 @@ done
 # Both installed tools share one helper file, found relative to their own bin/
 # directory rather than through a fixed SDK path.
 TOOL_LIB=$SDK/share/cuda-native/cuda-native-tool-lib.sh
+! grep -Fq '@CUDA_NATIVE_' "$CN/tools/nvptxas.sh" &&
+    ! grep -Fq '@CUDA_NATIVE_' "$CN/tools/nvfatbin.sh" &&
+    ! grep -Fq '@CUDA_NATIVE_' "$TOOL_LIB" &&
+    [ "$(grep -c 's/@CUDA_NATIVE_VERSION@/$rel_version/g' "$CN/mksdk.sh")" -eq 1 ]
+expect_rc "one mksdk substitution serves the only source file with placeholders" $? 0
 [ -f "$TOOL_LIB" ] && sh -n "$TOOL_LIB" >"$W/tool-lib-syntax.out" 2>&1 &&
     grep -Fq '@CUDA_NATIVE_VERSION@' "$CN/tools/cuda-native-tool-lib.sh" &&
     grep -Fq '@CUDA_NATIVE_VERSION_MAJOR@' "$CN/tools/cuda-native-tool-lib.sh" &&
@@ -754,12 +866,43 @@ grep -Fq '2427' "$CN/tools/cuda-native-tool-lib.sh" 2>/dev/null &&
     ! grep -Fq '2427' "$CN/tools/nvptxas.sh" &&
     ! grep -Fq '2427' "$CN/tools/nvfatbin.sh"
 expect_rc "only the shared tool library contains a 2427 literal" $? 0
+python3 -I - "$CN/tools/nvptxas.sh" "$CN/tools/nvfatbin.sh" <<'PY'
+import sys
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as f:
+        lines = [line.strip() for line in f if "--version" in line and not line.lstrip().startswith("echo ")]
+    assert lines == ['[ "${1:-}" = --version ] && handle_version "$@"'], (path, lines)
+PY
+expect_rc "both tools delegate every --version path to the shared helper" $? 0
 cp -R "$SDK" "$W/sdk-tool-lib-relocated"
 "$W/sdk-tool-lib-relocated/bin/ptxas" --version >"$W/relocated-ptxas.out" 2>"$W/relocated-ptxas.err"
 rc=$?
 [ $rc -eq 0 ] && grep -Fqx "nvptxas (cuda-native) $native_version stub" "$W/relocated-ptxas.out" &&
     [ ! -s "$W/relocated-ptxas.err" ]
 expect_rc "a relocated ptxas still loads its shared tool library" $? 0
+mkdir -p "$W/symlink-bin" "$W/share/cuda-native"
+printf 'echo DECOY >&2\nexit 1\n' >"$W/share/cuda-native/cuda-native-tool-lib.sh"
+# Time: O(number of canonical tools).  Space: O(one version line).
+for tool in nvptxas nvfatbin; do
+	ln -s "$SDK/bin/$tool" "$W/symlink-bin/$tool"
+	"$W/symlink-bin/$tool" --version >"$W/symlink-$tool.out" 2>"$W/symlink-$tool.err"
+	rc=$?
+	[ $rc -eq 0 ] && grep -Fqx "$tool (cuda-native) $native_version stub" \
+	    "$W/symlink-$tool.out" && [ ! -s "$W/symlink-$tool.err" ]
+	expect_rc "$tool resolves its real installation when invoked through a symlink" $? 0
+done
+
+# Dropping the first major-version sed expression used to affect only the
+# placeholder-free tools.  It must now damage the shared library and be seen.
+cp -R "$CN" "$W/cn-substitution"
+awk '!done && /s\/@CUDA_NATIVE_VERSION_MAJOR@/ { done=1; next } { print }' \
+    "$W/cn-substitution/mksdk.sh" >"$W/cn-substitution/mksdk.sh.new" &&
+    mv "$W/cn-substitution/mksdk.sh.new" "$W/cn-substitution/mksdk.sh"
+sh "$W/cn-substitution/mksdk.sh" "$W/sdk-substitution" >"$W/substitution-mutant.log" 2>&1
+rc=$?
+[ $rc -eq 0 ] && grep -Fq '@CUDA_NATIVE_VERSION_MAJOR@' \
+    "$W/sdk-substitution/share/cuda-native/cuda-native-tool-lib.sh"
+expect_rc "mutant: dropping the shared library's major-version substitution is caught" $? 0
 
 [ -f "$SDK/lib64/libcudart.so.13" ] && [ -L "$SDK/lib64/libcudart.so" ] &&
     [ "$(readlink "$SDK/lib64/libcudart.so")" = libcudart.so.13 ]
@@ -941,6 +1084,29 @@ ptx_sha=$(/sbin/sha256 -q "$W/direct.ptx")
 cmp -s "$W/direct.expected-fatbin" "$W/direct.fatbin" &&
     ! grep -q -F 'NVFATBIN-STUB-1' "$W/direct.fatbin"
 expect_rc "fatbinary writes the cuda-native magic, member size/hash lines, --- and ordered bytes" $? 0
+python3 -I - "$CN/tools/nvfatbin.sh" "$W/direct.fatbin" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    source = f.read()
+assert 'cp -- "$image_file" "$WORK/img.$index"' in source
+for operation in ('wc -c <"$WORK/img.$index"',
+                  '/sbin/sha256 -q -- "$WORK/img.$index"',
+                  'cat -- "$WORK/img.$index" >>"$payload"'):
+    assert operation in source, operation
+with open(sys.argv[2], "rb") as f:
+    header, payload = f.read().split(b"\n---\n", 1)
+lines = header.split(b"\n")[1:]
+offset = 0
+for line in lines:
+    fields = dict(field.split("=", 1) for field in line.decode("ascii").split(" ") if "=" in field)
+    size = int(fields["size"])
+    member = payload[offset:offset + size]
+    assert len(member) == size
+    assert hashlib.sha256(member).hexdigest() == fields["sha256"]
+    offset += size
+assert offset == len(payload)
+PY
+expect_rc "fatbinary sizes, hashes and appends one private copy of each image" $? 0
 "$SDK/bin/ptxas" --version --json >"$W/ptxas-alias-version.json"
 "$SDK/bin/fatbinary" --version --json >"$W/fatbinary-alias-version.json"
 python3 -I - "$W/direct-ptxas.trace" "$W/direct-fatbin.trace" \
@@ -1001,6 +1167,57 @@ rc=$?
     [ ! -s "$W/control-fatbin.trace" ] && grep -q 'control characters' "$W/control-fatbin.err"
 expect_rc "fatbinary refuses a CR in an image path without tracing it" $? 0
 
+utf8_ptx=$W/rené.ptx
+utf8_ptx_output=$W/cubin-é.o
+cp "$W/direct.ptx" "$utf8_ptx"
+CUDA_NATIVE_TRACE="$W/utf8-ptxas.trace" "$SDK/bin/ptxas" -m64 \
+    --gpu-name sm_120 --output-file "$utf8_ptx_output" "$utf8_ptx" \
+    >"$W/utf8-ptxas.out" 2>"$W/utf8-ptxas.err"
+rc=$?
+[ $rc -eq 0 ] && [ -s "$utf8_ptx_output" ]
+expect_rc "ptxas accepts valid UTF-8 input and output paths" $? 0
+utf8_elf=$W/imagé.o
+utf8_fatbin=$W/fatbin-é.fatbin
+cp "$W/direct.elf" "$utf8_elf"
+CUDA_NATIVE_TRACE="$W/utf8-fatbin.trace" "$SDK/bin/fatbinary" -64 \
+    --create "$utf8_fatbin" --image3=kind=elf,sm=120,file="$utf8_elf" \
+    >"$W/utf8-fatbin.out" 2>"$W/utf8-fatbin.err"
+rc=$?
+[ $rc -eq 0 ] && [ -s "$utf8_fatbin" ] && [ ! -s "$W/utf8-fatbin.err" ]
+expect_rc "fatbinary accepts valid UTF-8 image and output paths" $? 0
+python3 -I - "$W/utf8-ptxas.trace" "$W/utf8-fatbin.trace" \
+    "$utf8_ptx" "$utf8_ptx_output" "$utf8_elf" "$utf8_fatbin" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    pt = json.loads(f.read())
+with open(sys.argv[2], encoding="utf-8") as f:
+    fb = json.loads(f.read())
+assert pt["input"] == sys.argv[3] and pt["output"] == sys.argv[4]
+assert fb["images"][0]["file"] == sys.argv[5] and fb["output"] == sys.argv[6]
+PY
+expect_rc "JSON parsers recover the exact UTF-8 input and output paths" $? 0
+
+invalid_ptx=$W/$(printf 'input\351.ptx')
+cp "$W/direct.ptx" "$invalid_ptx"
+: >"$W/invalid-ptxas.trace"
+CUDA_NATIVE_TRACE="$W/invalid-ptxas.trace" "$SDK/bin/ptxas" -m64 \
+    --gpu-name sm_120 --output-file "$W/invalid-ptxas.o" "$invalid_ptx" \
+    >"$W/invalid-ptxas.out" 2>"$W/invalid-ptxas.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -e "$W/invalid-ptxas.o" ] &&
+    [ ! -s "$W/invalid-ptxas.trace" ] && grep -q 'invalid UTF-8' "$W/invalid-ptxas.err"
+expect_rc "ptxas refuses malformed UTF-8 without emitting output or a trace" $? 0
+invalid_elf=$W/$(printf 'image\351.o')
+cp "$W/direct.elf" "$invalid_elf"
+: >"$W/invalid-fatbin.trace"
+CUDA_NATIVE_TRACE="$W/invalid-fatbin.trace" "$SDK/bin/fatbinary" -64 \
+    --create "$W/invalid.fatbin" --image3=kind=elf,sm=120,file="$invalid_elf" \
+    >"$W/invalid-fatbin.out" 2>"$W/invalid-fatbin.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -e "$W/invalid.fatbin" ] &&
+    [ ! -s "$W/invalid-fatbin.trace" ] && grep -q 'invalid UTF-8' "$W/invalid-fatbin.err"
+expect_rc "fatbinary refuses malformed UTF-8 without emitting output or a trace" $? 0
+
 printf 'X' >"$W/-sabc"
 (cd "$W" && "$SDK/bin/fatbinary" -64 --create dash.fatbin \
     --image3=kind=elf,sm=120,file=-sabc) >"$W/dash-image.out" 2>"$W/dash-image.err"
@@ -1009,6 +1226,48 @@ dash_sha=$(cd "$W" && /sbin/sha256 -q -- ./-sabc)
 dash_recorded=$(sed -n '2s/.* sha256=//p' "$W/dash.fatbin" 2>/dev/null)
 [ $rc -eq 0 ] && [ "$dash_recorded" = "$dash_sha" ]
 expect_rc "fatbinary hashes a dash-prefixed image as a file, not a sha256 option" $? 0
+
+mkdir "$W/dash-ptx"
+# Time: O(number of dash-prefixed fixtures).  Space: O(fixture count).
+for dash_input in -sabc -g -O9 --verison --unsupported; do
+	cp "$W/direct.ptx" "$W/dash-ptx/$dash_input"
+done
+dash_index=0
+# Time: O(number of accepted dash-prefixed inputs).  Space: O(one output).
+for dash_input in -sabc -g -O9; do
+	(cd "$W/dash-ptx" && timeout 5 "$SDK/bin/ptxas" -m64 --gpu-name sm_120 \
+	    --output-file "dash-$dash_index.o" -- "$dash_input") \
+	    >"$W/dash-ptxas-$dash_index.out" 2>"$W/dash-ptxas-$dash_index.err"
+	rc=$?
+	dash_ptx_sha=$(/sbin/sha256 -q -- "$W/dash-ptx/$dash_input")
+	dash_ptx_recorded=$(sed -n '3s/^ptx-sha256=//p' \
+	    "$W/dash-ptx/dash-$dash_index.o" 2>/dev/null)
+	# Compare bytes too, so an option-looking input cannot pass by name alone.
+	sed '1,4d' "$W/dash-ptx/dash-$dash_index.o" \
+	    >"$W/dash-ptx/dash-$dash_index.payload" 2>/dev/null
+	[ $rc -eq 0 ] && [ "$dash_ptx_recorded" = "$dash_ptx_sha" ] &&
+	    cmp -s "$W/direct.ptx" "$W/dash-ptx/dash-$dash_index.payload"
+	expect_rc "ptxas -- $dash_input hashes and preserves the intended PTX" $? 0
+	dash_index=$((dash_index + 1))
+done
+# Existing files must never turn unrecognised options into operands.
+# Time: O(number of unsupported spellings).  Space: O(1).
+for dash_input in -sabc -O9 --verison --unsupported; do
+	(cd "$W/dash-ptx" && "$SDK/bin/ptxas" -m64 --gpu-name sm_120 \
+	    --output-file refused.o "$dash_input") \
+	    >"$W/dash-refused.out" 2>"$W/dash-refused.err"
+	rc=$?
+	[ $rc -eq 2 ] && [ ! -e "$W/dash-ptx/refused.o" ] &&
+	    grep -Fq -- "unsupported option $dash_input" "$W/dash-refused.err"
+	expect_rc "an existing $dash_input file does not legitimise an unsupported option" $? 0
+done
+(cd "$W/dash-ptx" && "$SDK/bin/ptxas" -m64 --gpu-name sm_120 \
+    --output-file two-after-delimiter.o -- -g -sabc) \
+    >"$W/two-after-delimiter.out" 2>"$W/two-after-delimiter.err"
+rc=$?
+[ $rc -eq 2 ] && grep -Fq 'only one PTX input is accepted' "$W/two-after-delimiter.err" &&
+    [ ! -e "$W/dash-ptx/two-after-delimiter.o" ]
+expect_rc "after -- every argument is positional and a second input is refused" $? 0
 
 # An option added only to the validator must not leave a second parser spinning.
 cp -R "$CN" "$W/cn-parse-once"
@@ -1030,6 +1289,16 @@ expect_rc "ptxas rejects an unsupported option with rc 2 and its diagnostic" $? 
 rc=$?
 [ $rc -eq 2 ] && grep -Fqx 'nvfatbin: unsupported option --unsupported; not supported by the cuda-native stub; see nvfatbin(1); use -h for usage' "$W/fatbin-refuse.err"
 expect_rc "fatbinary rejects an unsupported option with rc 2 and its diagnostic" $? 0
+(
+	CUDA_NATIVE_TOOL=x
+	. "$CN/tools/cuda-native-tool-lib.sh"
+	unsupported_option -q
+) >"$W/third-tool.out" 2>"$W/third-tool.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -s "$W/third-tool.out" ] &&
+    grep -Fqx 'x: unsupported option -q; not supported by the cuda-native stub; see x(1); use -h for usage' \
+    "$W/third-tool.err"
+expect_rc "the shared unsupported-option helper names any calling tool" $? 0
 "$SDK/bin/ptxas" -m64 --gpu-name sm_120 --output-file "$W/two-inputs.o" \
     "$W/direct.ptx" "$W/direct.ptx" >"$W/two-inputs.out" 2>"$W/two-inputs.err"
 rc=$?
@@ -1070,13 +1339,66 @@ rc=$?
 expect_rc "the linked program runs and every launch reports cudaErrorNotSupported (801)" $? 0
 # The same options as the manual's full-link SYNOPSIS, with its placeholders
 # replaced by this test's SDK, source and output.
-PATH="$SDK/bin:$PATH" "$CXX" -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 \
+"$CXX" -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 \
     "$K/launch_main.cu" -L"$SDK/lib64" -lcudart -Wl,-rpath,"$SDK/lib64" \
     -o "$W/synopsis-main" >"$W/synopsis-link.log" 2>&1 &&
     "$W/synopsis-main" >"$W/synopsis-run.out" 2>"$W/synopsis-run.err"
 rc=$?
 [ $rc -eq 0 ] && grep -qx 'launch=801' "$W/synopsis-run.out" && [ ! -s "$W/synopsis-run.err" ]
 expect_rc "a binary linked with the SYNOPSIS options starts and returns launch=801" $? 0
+python3 -I - "$CN/man/libcudart-stub.3" "$CN/man/cuda-native-toolchain.7" "$SRC/README.md" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    runtime = f.read()
+with open(sys.argv[2], encoding="utf-8") as f:
+    toolchain = f.read()
+with open(sys.argv[3], encoding="utf-8") as f:
+    readme = f.read()
+assert '-Wl,-rpath,"$PWD/obj/cuda-native/lib64"' in runtime
+assert '.Fl Wl,-rpath, Ns Qq $PWD/ Ns Ar outdir/lib64' in toolchain
+assert '-Wl,-rpath,obj/' not in runtime
+assert '.Fl Wl,-rpath, Ns Ar outdir/lib64' not in toolchain
+assert '-Wl,-rpath,obj/' not in readme
+PY
+expect_rc "every documented RUNPATH is absolute" $? 0
+python3 -I - "$SRC/README.md" <<'PY'
+import sys
+from pathlib import Path
+rows = [line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+        if line.startswith("| CUDA, native |")]
+assert len(rows) == 1, rows
+row = rows[0]
+assert "not started" not in row, row
+for text in ("in progress", "full compile and link work with stubs",
+             "`cudaErrorNotSupported` (801)", "no GPU execution yet", "Track #2362"):
+    assert text in row, (text, row)
+assert "in progress (" not in row, row
+PY
+expect_rc "README native CUDA status says in progress without a milestone code" $? 0
+mkdir -p "$W/manual-example/obj" "$W/manual-example/elsewhere"
+cp -R "$SDK" "$W/manual-example/obj/cuda-native"
+(
+    cd "$W/manual-example" && "$CXX" -x cuda --cuda-path=obj/cuda-native \
+        --cuda-gpu-arch=sm_120 "$K/launch_main.cu" -Lobj/cuda-native/lib64 \
+        -Wl,-rpath,"$PWD/obj/cuda-native/lib64" -lcudart -o manual-main
+) >"$W/manual-example-link.log" 2>&1 &&
+    (cd "$W/manual-example/elsewhere" && "$W/manual-example/manual-main") \
+    >"$W/manual-example-run.out" 2>"$W/manual-example-run.err"
+rc=$?
+"$LLVM/bin/llvm-readelf" -d "$W/manual-example/manual-main" >"$W/manual-example.dynamic" 2>&1
+python3 -I - "$W/manual-example.dynamic" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    lines = [line for line in f if "(RUNPATH)" in line or "(RPATH)" in line]
+assert lines
+for line in lines:
+    path = line.rsplit("[", 1)[1].split("]", 1)[0]
+    assert path.startswith("/") or path.startswith("$ORIGIN"), path
+PY
+check_rc=$?
+[ $rc -eq 0 ] && grep -qx 'launch=801' "$W/manual-example-run.out" &&
+    [ ! -s "$W/manual-example-run.err" ] && [ $check_rc -eq 0 ]
+expect_rc "the absolute-RUNPATH example links and runs from another directory" $? 0
 CUDA_NATIVE_STUB_TRACE=1 "$W/launch_main" >"$W/launch-trace.out" 2>"$W/launch-trace.jsonl"
 rc=$?
 [ $rc -eq 0 ] && grep -qx 'launch=801' "$W/launch-trace.out" && [ -s "$W/launch-trace.jsonl" ]
@@ -1095,6 +1417,91 @@ python3 -I "$SRC/tests/libnvrm/schema_validate.py" \
     "$SCHEMAS/cuda-native-stub-trace-1.schema.json" "$W/runtime-path.jsonl" \
     >"$W/runtime-path.schema" 2>&1
 expect_rc "runtime JSONL written to a path validates against the trace schema" $? 0
+CUDA_NATIVE_STUB_TRACE="$W/no-such-trace-dir/trace.jsonl" "$W/launch_main" \
+    >"$W/unwritable-trace.out" 2>"$W/unwritable-trace.err"
+rc=$?
+[ $rc -eq 0 ] && grep -qx 'launch=801' "$W/unwritable-trace.out" &&
+    [ "$(wc -l <"$W/unwritable-trace.err")" -eq 1 ] &&
+    grep -Fq 'libcudart-stub: cannot open trace file ' "$W/unwritable-trace.err" &&
+    grep -Fq 'tracing is disabled' "$W/unwritable-trace.err" &&
+    grep -Fq 'CUDA_NATIVE_STUB_TRACE' "$W/unwritable-trace.err" &&
+    grep -Fq 'writable path or unset it' "$W/unwritable-trace.err" &&
+    [ ! -e "$W/no-such-trace-dir/trace.jsonl" ]
+expect_rc "an unwritable trace states its consequence, variable and recovery once" $? 0
+
+# Interpose issetugid at compile time; no set-id executable or root is needed.
+cat >"$W/trace_setid.c" <<'EOF'
+/* Copyright (c) 2026 REVYTECH, Inc. */
+/* SPDX-License-Identifier: BSD-2-Clause */
+#include <unistd.h>
+static int
+fake_issetugid(void)
+{
+	return 1;
+}
+#define issetugid fake_issetugid
+#include "cudart_stub.c"
+int
+main(int argc, char **argv)
+{
+	FILE *stream;
+
+	if (argc != 2 || fake_issetugid() != 1)
+		return 2;
+	if (setenv("CUDA_NATIVE_STUB_TRACE", argv[1], 1) != 0)
+		return 2;
+	stream = trace_open();
+	if (stream != NULL) {
+		if (stream != stderr)
+			fclose(stream);
+		return 1;
+	}
+	return access(argv[1], F_OK) == -1 ? 0 : 1;
+}
+EOF
+"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/libcudart-stub" \
+    "$W/trace_setid.c" -o "$W/trace_setid" >"$W/trace-setid-build.log" 2>&1 &&
+    "$W/trace_setid" "$W/setid-must-not-exist.jsonl" \
+    >"$W/trace-setid.out" 2>"$W/trace-setid.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -e "$W/setid-must-not-exist.jsonl" ] &&
+    [ ! -s "$W/trace-setid.out" ] && [ ! -s "$W/trace-setid.err" ]
+expect_rc "an issetugid test hook suppresses CUDA_NATIVE_STUB_TRACE and creates no file" $? 0
+
+# Force only the registration calloc to fail; no resource exhaustion is needed.
+cat >"$W/register_oom.c" <<'EOF'
+/* Copyright (c) 2026 REVYTECH, Inc. */
+/* SPDX-License-Identifier: BSD-2-Clause */
+#include <stdlib.h>
+static void *
+fake_calloc(size_t count, size_t size)
+{
+	(void)count;
+	(void)size;
+	return NULL;
+}
+#define calloc fake_calloc
+#include "cudart_stub.c"
+int
+main(void)
+{
+	static const char good[] = "CUDA-NATIVE-STUB-FATBIN 1\n---\n";
+	struct cuda_native_fatbin_wrapper wrapper = {
+		CUDA_NATIVE_FATBIN_WRAPPER_MAGIC, 1, good, NULL
+	};
+
+	return __cudaRegisterFatBinary(&wrapper) == NULL ? 0 : 1;
+}
+EOF
+"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/libcudart-stub" \
+    "$W/register_oom.c" -o "$W/register_oom" >"$W/register-oom-build.log" 2>&1 &&
+    "$W/register_oom" >"$W/register-oom.out" 2>"$W/register-oom.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/register-oom.out" ] &&
+    grep -Fqx 'libcudart-stub: cannot allocate a fatbin registration: host memory exhausted' \
+    "$W/register-oom.err" &&
+    ! grep -Eq 'freeing|raising|rerunning|rebuild|--cuda-path' "$W/register-oom.err"
+expect_rc "a registration allocation failure states only host-memory exhaustion" $? 0
 python3 -I - "$W/launch-trace.jsonl" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -1108,8 +1515,10 @@ assert len(registered) == 1 and registered[0]["members"] == 1
 assert len(functions) == 1 and "vadd" in functions[0]["name"]
 assert len(launches) == 2 and all(r["status"] == 801 for r in launches)
 assert len(events("register_fatbin_end")) == 1
+unregistered = events("unregister_function")
+assert len(unregistered) == 1 and "vadd" in unregistered[0]["name"]
 assert len(events("unregister_fatbin")) == 1
-assert len(records) == 6
+assert len(records) == 7
 PY
 expect_rc "runtime trace records one one-member fatbin, vadd, end/unregister and two 801 launches" $? 0
 "$LLVM/bin/llvm-readelf" -d "$W/launch_main" >"$W/launch.dynamic" 2>&1
@@ -1171,6 +1580,8 @@ cat >"$W/bad_fatbin.c" <<'EOF'
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 struct wrapper {
 	int magic;
 	int version;
@@ -1204,6 +1615,79 @@ member_header(size_t members)
 	p[4] = '\0';
 	return data;
 }
+static char *
+long_member_header(void)
+{
+	static const char magic[] = "CUDA-NATIVE-STUB-FATBIN 1\n";
+	static const char prefix[] = "member kind=elf sm=120 size=";
+	static const char suffix[] = " sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+	size_t digits = 70000;
+	size_t size = strlen(magic) + strlen(prefix) + digits + strlen(suffix) + 4;
+	char *data = malloc(size + 1), *p;
+
+	if (data == NULL)
+		return NULL;
+	p = data;
+	memcpy(p, magic, strlen(magic));
+	p += strlen(magic);
+	memcpy(p, prefix, strlen(prefix));
+	p += strlen(prefix);
+	memset(p, '0', digits);
+	p += digits;
+	memcpy(p, suffix, strlen(suffix));
+	p += strlen(suffix);
+	memcpy(p, "---\n", 4);
+	p += 4;
+	*p = '\0';
+	return data;
+}
+static const char *
+unterminated_header(void)
+{
+	static const char text[] = "CUDA-NATIVE-STUB-FATBIN 1\nmember kind=elf";
+	long page_arg = sysconf(_SC_PAGESIZE);
+	size_t page, length = sizeof(text);
+	char *mapping, *data;
+
+	if (page_arg <= 0)
+		return NULL;
+	page = (size_t)page_arg;
+	if (length > page)
+		return NULL;
+	mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED || mprotect(mapping + page, page, PROT_NONE) != 0)
+		return NULL;
+	data = mapping + page - length;
+	memcpy(data, text, length);
+	return data;
+}
+static const char *
+guard_page_fatbin(void)
+{
+	static const char text[] =
+	    "CUDA-NATIVE-STUB-FATBIN 1\n"
+	    "member kind=ptx sm=120 size=3 sha256="
+	    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+	    "---\n"
+	    "PTX";
+	long page_arg = sysconf(_SC_PAGESIZE);
+	size_t page, length = sizeof(text) - 1;
+	char *mapping, *data;
+
+	if (page_arg <= 0)
+		return NULL;
+	page = (size_t)page_arg;
+	if (length > page)
+		return NULL;
+	mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED || mprotect(mapping + page, page, PROT_NONE) != 0)
+		return NULL;
+	data = mapping + page - length;
+	memcpy(data, text, length);
+	return data;
+}
 int
 main(int argc, char **argv)
 {
@@ -1230,12 +1714,22 @@ main(int argc, char **argv)
 	else if (strcmp(argv[1], "too-many-members") == 0)
 		wrapper.data = allocated = member_header(65);
 	else if (strcmp(argv[1], "oversized-header") == 0)
-		wrapper.data = allocated = member_header(1024);
+		wrapper.data = allocated = long_member_header();
+	else if (strcmp(argv[1], "unterminated-header") == 0)
+		wrapper.data = unterminated_header();
+	else if (strcmp(argv[1], "guard-page") == 0)
+		wrapper.data = guard_page_fatbin();
 	else
 		return 2;
 	if (wrapper.data == NULL && strcmp(argv[1], "null-data") != 0)
 		return 2;
 	handle = __cudaRegisterFatBinary(&wrapper);
+	if (strcmp(argv[1], "guard-page") == 0) {
+		if (handle == NULL)
+			return 1;
+		__cudaUnregisterFatBinary(handle);
+		return 0;
+	}
 	if (handle == NULL && getenv("CUDA_NATIVE_STUB_TRACE") != NULL) {
 		int refused = __cudaRegisterFunction(NULL, NULL, NULL, "orphan", 0,
 		    NULL, NULL, NULL, NULL, NULL);
@@ -1253,7 +1747,12 @@ EOF
     >"$W/bad-fatbin-build.out" 2>&1
 expect_rc "the bad-fatbin refusal fixture links against libcudart-stub" $? 0
 # Time: O(number of bad wrapper cases).  Space: O(one diagnostic).
-for case_name in bad-magic bad-data bad-header bad-member null-data too-many-members oversized-header; do
+for case_name in bad-magic bad-data bad-header bad-member null-data too-many-members oversized-header unterminated-header; do
+	expected_reason=
+	case $case_name in
+	too-many-members) expected_reason='too many members in cuda-native fatbin' ;;
+	oversized-header) expected_reason='cuda-native fatbin header exceeds 64 KiB' ;;
+	esac
 	"$W/bad_fatbin" "$case_name" >"$W/$case_name.out" 2>"$W/$case_name.err"
 	rc=$?
 	[ $rc -eq 0 ] && [ ! -s "$W/$case_name.out" ] &&
@@ -1261,7 +1760,71 @@ for case_name in bad-magic bad-data bad-header bad-member null-data too-many-mem
 	    grep -q '^libcudart-stub: ' "$W/$case_name.err" &&
 	    grep -q 'rebuild' "$W/$case_name.err" &&
 	    grep -Fq -- '--cuda-path=' "$W/$case_name.err"
-	expect_rc "__cudaRegisterFatBinary refuses $case_name with NULL and one stderr line" $? 0
+	check_rc=$?
+	if [ -n "$expected_reason" ] && ! grep -Fq "$expected_reason" "$W/$case_name.err"; then
+		check_rc=1
+	fi
+	expect_rc "__cudaRegisterFatBinary refuses $case_name with NULL and one stderr line" $check_rc 0
+done
+
+# A complete fatbin ends at a protected page boundary.  No scan may look for a
+# terminator in the NUL-free payload or beyond the final payload byte.
+(ulimit -c 0; "$W/bad_fatbin" guard-page) \
+    >"$W/guard-page.out" 2>"$W/guard-page.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/guard-page.out" ] && [ ! -s "$W/guard-page.err" ]
+expect_rc "a valid fatbin ending at a guard page registers without an overread" $? 0
+
+# An unrecognised parser result must be refused, not treated as success.  Change
+# the too-many-members result without changing its call site; the old default
+# branch accepts it, while an explicit success case rejects it as malformed.
+cp -R "$CN" "$W/cn-extra-header-error"
+awk '
+/if \(count >= CUDA_NATIVE_FATBIN_MEMBER_LIMIT\)/ {
+	print
+	getline
+	sub(/return .*;/, "return -4;")
+	print
+	next
+}
+{ print }
+' "$W/cn-extra-header-error/libcudart-stub/cudart_stub.c" \
+    >"$W/cn-extra-header-error/cudart_stub.c.new" &&
+    mv "$W/cn-extra-header-error/cudart_stub.c.new" \
+    "$W/cn-extra-header-error/libcudart-stub/cudart_stub.c"
+sh "$W/cn-extra-header-error/mksdk.sh" "$W/sdk-extra-header-error" \
+    >"$W/extra-header-error-mksdk.log" 2>&1
+build_rc=$?
+if [ $build_rc -eq 0 ]; then
+	"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror "$W/bad_fatbin.c" \
+	    -L"$W/sdk-extra-header-error/lib64" \
+	    -Wl,-rpath,"$W/sdk-extra-header-error/lib64" -lcudart \
+	    -o "$W/bad_fatbin-extra-error" >"$W/extra-header-error-build.log" 2>&1
+	build_rc=$?
+fi
+if [ $build_rc -eq 0 ]; then
+	"$W/bad_fatbin-extra-error" too-many-members \
+	    >"$W/extra-header-error.out" 2>"$W/extra-header-error.err"
+	rc=$?
+else
+	rc=99
+fi
+[ $build_rc -eq 0 ] && [ $rc -eq 0 ] &&
+    [ "$(wc -l <"$W/extra-header-error.err")" -eq 1 ] &&
+    grep -Fq 'malformed cuda-native fatbin header' "$W/extra-header-error.err"
+expect_rc "mutant: an additional fatbin parser error is refused as malformed" $? 0
+# The two limits have distinct reasons in the machine-readable refusal too.
+# Time: O(two traces).  Space: O(one trace).
+for case_name in too-many-members oversized-header; do
+	case $case_name in
+	too-many-members) expected_reason='too many members in cuda-native fatbin' ;;
+	oversized-header) expected_reason='cuda-native fatbin header exceeds 64 KiB' ;;
+	esac
+	CUDA_NATIVE_STUB_TRACE=1 "$W/bad_fatbin" "$case_name" \
+	    >"$W/$case_name-trace.out" 2>"$W/$case_name-trace.err"
+	rc=$?
+	[ $rc -eq 0 ] && grep -Fq "\"reason\":\"$expected_reason\"" "$W/$case_name-trace.err"
+	expect_rc "$case_name refusal trace names its specific limit" $? 0
 done
 CUDA_NATIVE_STUB_TRACE=1 "$W/bad_fatbin" bad-data >"$W/refused-trace.out" 2>"$W/refused-trace.err"
 rc=$?

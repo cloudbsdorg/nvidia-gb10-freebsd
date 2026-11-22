@@ -15,6 +15,7 @@
 .Ar arch
 .Fl -output-file
 .Ar file
+.Op Fl -
 .Ar input.ptx
 .Pp
 .Nm
@@ -44,21 +45,37 @@ The SHA-256 is taken over that unchanged PTX.
 The container is written through a temporary file in the output directory and
 renamed into place.
 .Pp
-The accepted options are
+The accepted compile options are
 .Fl m64 ,
-.Fl O0
-through
+.Fl O0 ,
+.Fl O1 ,
+.Fl O2 ,
 .Fl O3 ,
+.Fl g ,
+.Fl lineinfo ,
+.Fl -dont-merge-basicblocks ,
+.Fl -return-at-end ,
 .Fl -gpu-name
 and
 .Fl -output-file .
 The last two options also accept an equals sign between the option and its
 value.
 The architecture, output and one input are required.
+The optional
+.Fl -
+argument ends option processing; every later argument is positional, and the
+single input may therefore have a dash-prefixed name such as
+.Pa -g .
+A path such as
+.Pa ./-g
+also avoids option parsing without the delimiter.
 .Fl h
 and
 .Fl -help
 print usage.
+Every argument that starts with a dash before
+.Fl -
+is parsed as an option, regardless of whether a same-named file exists.
 Every unsupported option is refused instead of being ignored.
 .Pp
 .Fl -version
@@ -99,6 +116,10 @@ and
 fields, and is validated by
 .Pa share/cuda-native/schema/nvptxas-trace-1.schema.json
 in the SDK tree.
+Arguments containing control bytes or malformed UTF-8 are refused before
+writing output or a trace.
+Valid UTF-8 paths are accepted, and JSON metacharacters are escaped, keeping
+every emitted string parseable as UTF-8 JSON.
 .El
 .Sh EXIT STATUS
 .Ex -std

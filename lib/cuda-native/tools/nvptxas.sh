@@ -8,37 +8,24 @@
 # an optional JSONL trace file.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
-export PATH
+LC_ALL=C
+export PATH LC_ALL
 umask 022
 
 CUDA_NATIVE_TOOL=nvptxas
-. "$(dirname -- "$0")/../share/cuda-native/cuda-native-tool-lib.sh" || exit 1
+tool_path=$(realpath "$0") || exit 1
+. "$(dirname -- "$tool_path")/../share/cuda-native/cuda-native-tool-lib.sh" || exit 1
 
 usage()
 {
-	echo "usage: ptxas [-m64] [-O0..-O3] --gpu-name ARCH --output-file FILE INPUT.ptx"
-	echo "       ptxas --version [--json]"
+	echo "usage: $CUDA_NATIVE_TOOL [-m64] [-O0|-O1|-O2|-O3] [-g] [-lineinfo]"
+	echo "       $CUDA_NATIVE_TOOL [--dont-merge-basicblocks] [--return-at-end]"
+	echo "       $CUDA_NATIVE_TOOL --gpu-name ARCH --output-file FILE [--] INPUT.ptx"
+	echo "       $CUDA_NATIVE_TOOL --version [--json]"
+	echo "       $CUDA_NATIVE_TOOL -h|--help"
 }
 
-if [ "${1:-}" = --version ]; then
-	if [ $# -gt 2 ]; then
-		case $3 in
-		-*) unsupported_option "$3" ;;
-		*) unexpected_argument "$3" "only --json may follow --version" ;;
-		esac
-	fi
-	if [ $# -eq 1 ]; then
-		show_version text
-	elif [ "$2" = --json ]; then
-		show_version json
-	else
-		case $2 in
-		-*) unsupported_option "$2" ;;
-		*) unexpected_argument "$2" "only --json may follow --version" ;;
-		esac
-	fi
-	exit 0
-fi
+[ "${1:-}" = --version ] && handle_version "$@"
 
 arch=
 input=
@@ -71,6 +58,15 @@ while [ $# -gt 0 ]; do
 		output=${1#--output-file=}
 		shift
 		;;
+	--)
+		shift
+		# Time: O(remaining arguments).  Space: O(1).
+		while [ $# -gt 0 ]; do
+			[ -z "$input" ] || unexpected_argument "$1" "only one PTX input is accepted"
+			input=$1
+			shift
+		done
+		;;
 	-*)
 		unsupported_option "$1"
 		;;
@@ -84,9 +80,12 @@ done
 [ -n "$arch" ] || die2 "--gpu-name is required"
 [ -n "$output" ] || die2 "--output-file is required"
 [ -n "$input" ] || die2 "one PTX input is required"
-case $arch$input$output in
-*[[:cntrl:]]*) die2 "control characters in arguments are not supported" ;;
+case $input in
+-*) input=./$input ;;
 esac
+validate_utf8_argument "$arch" "--gpu-name"
+validate_utf8_argument "$input" "the input path"
+validate_utf8_argument "$output" "the output path"
 arch_tail=${arch#sm_}
 case $arch_tail in
 *[af]) arch_digits=${arch_tail%?} ;;
@@ -101,17 +100,17 @@ case $arch_digits in
 esac
 [ -f "$input" ] && [ -r "$input" ] && [ -s "$input" ] ||
     fail "cannot read a nonempty PTX input: $input"
-target_count=$(grep -c '^[[:space:]]*\.target[[:space:]]' "$input")
+target_count=$(grep -c '^[[:space:]]*\.target[[:space:]]' -- "$input")
 case $target_count in
 0) fail "input has no .target line: $input" ;;
 1) ;;
 *) fail "input has multiple .target lines: $input" ;;
 esac
-target=$(sed -n 's/^[[:space:]]*\.target[[:space:]]*\([^[:space:],]*\).*$/\1/p' "$input")
+target=$(sed -n 's/^[[:space:]]*\.target[[:space:]]*\([^[:space:],]*\).*$/\1/p' -- "$input")
 [ -n "$target" ] || fail "input has an empty .target architecture: $input"
 [ "$target" = "$arch" ] ||
     fail ".target $target does not match --gpu-name $arch"
-ptx_sha=$(/sbin/sha256 -q "$input") || fail "cannot hash PTX input: $input"
+ptx_sha=$(/sbin/sha256 -q -- "$input") || fail "cannot hash PTX input: $input"
 
 [ ! -d "$output" ] || fail "output is a directory: $output"
 parent=$(dirname -- "$output")

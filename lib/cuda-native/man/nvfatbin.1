@@ -44,12 +44,15 @@ A line containing only
 .Li ---
 separates the metadata from the complete member payloads, which follow in
 argument order with no added bytes.
-The size and SHA-256 are measured over each unchanged input.
+Each input is copied once into the private build directory; its size, SHA-256
+and appended payload all come from that copy, so they describe the same bytes.
 The output is built privately in its destination directory and renamed into
 place only after every image has been read.
 .Pp
 .Fl 64
-is accepted for clang compatibility.
+and
+.Fl g
+are accepted for clang compatibility.
 .Fl -create
 also accepts an equals sign before its value.
 .Fl h
@@ -98,6 +101,10 @@ The image array records each kind, numeric SM value and input path in order.
 The record is validated by
 .Pa share/cuda-native/schema/nvfatbin-trace-1.schema.json
 in the SDK tree.
+Arguments containing control bytes or malformed UTF-8 are refused before
+writing output or a trace.
+Valid UTF-8 paths are accepted, and JSON metacharacters are escaped, keeping
+every emitted string parseable as UTF-8 JSON.
 .El
 .Sh EXIT STATUS
 .Ex -std

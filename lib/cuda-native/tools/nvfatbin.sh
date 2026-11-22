@@ -8,37 +8,23 @@
 # CUDA_NATIVE_TRACE names an optional JSONL trace file.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
-export PATH
+LC_ALL=C
+export PATH LC_ALL
 umask 022
 
 CUDA_NATIVE_TOOL=nvfatbin
-. "$(dirname -- "$0")/../share/cuda-native/cuda-native-tool-lib.sh" || exit 1
+tool_path=$(realpath "$0") || exit 1
+. "$(dirname -- "$tool_path")/../share/cuda-native/cuda-native-tool-lib.sh" || exit 1
 
 usage()
 {
-	echo "usage: fatbinary [-64] --create FILE --image3=kind=elf,sm=NNN,file=INPUT [...]"
-	echo "       fatbinary --version [--json]"
+	echo "usage: $CUDA_NATIVE_TOOL [-64] [-g] --create FILE"
+	echo "       $CUDA_NATIVE_TOOL --image3=kind=elf|ptx,sm=NNN,file=INPUT [...]"
+	echo "       $CUDA_NATIVE_TOOL --version [--json]"
+	echo "       $CUDA_NATIVE_TOOL -h|--help"
 }
 
-if [ "${1:-}" = --version ]; then
-	if [ $# -gt 2 ]; then
-		case $3 in
-		-*) unsupported_option "$3" ;;
-		*) unexpected_argument "$3" "only --json may follow --version" ;;
-		esac
-	fi
-	if [ $# -eq 1 ]; then
-		show_version text
-	elif [ "$2" = --json ]; then
-		show_version json
-	else
-		case $2 in
-		-*) unsupported_option "$2" ;;
-		*) unexpected_argument "$2" "only --json may follow --version" ;;
-		esac
-	fi
-	exit 0
-fi
+[ "${1:-}" = --version ] && handle_version "$@"
 
 # Split the field order clang emits.  A comma in the file name is retained.
 split_image()
@@ -62,9 +48,6 @@ split_image()
 	'' | *[!0-9]*) die2 "image sm must be a decimal number: $image_sm" ;;
 	esac
 	[ -n "$image_file" ] || die2 "image file is empty"
-	case $image_file in
-	*[[:cntrl:]]*) die2 "control characters in image paths are not supported" ;;
-	esac
 }
 
 create=
@@ -94,9 +77,7 @@ parse()
 			shift
 			;;
 		--image3=*)
-			case $1 in
-			*[[:cntrl:]]*) die2 "control characters in image specifications are not supported" ;;
-			esac
+			validate_utf8_argument "$1" "image specifications"
 			image_args="$image_args$1
 "
 			images=$((images + 1))
@@ -114,9 +95,7 @@ parse()
 parse "$@"
 [ -n "$create" ] || die2 "--create is required"
 [ "$images" -gt 0 ] || die2 "at least one --image3 is required"
-case $create in
-*[[:cntrl:]]*) die2 "control characters in the output path are not supported" ;;
-esac
+validate_utf8_argument "$create" "the output path"
 [ ! -d "$create" ] || fail "output is a directory: $create"
 parent=$(dirname -- "$create")
 [ -d "$parent" ] || fail "output directory does not exist: $parent"
@@ -140,13 +119,14 @@ while IFS= read -r image_arg; do
 	split_image "$image_arg"
 	[ -f "$image_file" ] && [ -r "$image_file" ] && [ -s "$image_file" ] ||
 	    fail "cannot read a nonempty image: $image_file"
-	image_size=$(wc -c <"$image_file") || fail "cannot measure image: $image_file"
+	cp -- "$image_file" "$WORK/img.$index" || fail "cannot copy image: $image_file"
+	image_size=$(wc -c <"$WORK/img.$index") || fail "cannot measure image: $image_file"
 	image_size=$(printf '%s' "$image_size" | tr -d '[:space:]')
-	image_sha=$(/sbin/sha256 -q -- "$image_file") || fail "cannot hash image: $image_file"
+	image_sha=$(/sbin/sha256 -q -- "$WORK/img.$index") || fail "cannot hash image: $image_file"
 	printf 'member kind=%s sm=%s size=%s sha256=%s\n' \
 	    "$image_kind" "$image_sm" "$image_size" "$image_sha" >>"$out" ||
 	    fail "cannot write output: $create"
-	cat -- "$image_file" >>"$payload" || fail "cannot read image: $image_file"
+	cat -- "$WORK/img.$index" >>"$payload" || fail "cannot read image copy: $image_file"
 	[ "$index" -eq 0 ] || printf ',' >>"$json"
 	e_file=$(json_escape "$image_file")
 	printf '{"kind":"%s","sm":%s,"file":"%s"}' \

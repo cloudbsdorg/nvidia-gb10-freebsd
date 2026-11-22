@@ -143,20 +143,22 @@ trap 'exit 143' TERM
 mkdir "$NEW/bin" "$NEW/lib64" "$NEW/nvvm" "$NEW/nvvm/libdevice" || exit 1
 mkdir -p "$NEW/share/cuda-native/schema" || exit 1
 cp -R "$HERE/sdk/include" "$NEW/include" || exit 1
-# Time: O(number of tools and schemas).  Space: O(1).
+# Time: O(number of tools).  Space: O(1).
 for tool in nvptxas nvfatbin; do
+	cp "$HERE/tools/$tool.sh" "$NEW/bin/$tool" || exit 1
+	chmod 755 "$NEW/bin/$tool" || exit 1
+done
+# substitute SRC DST: fill the version placeholders carried by one source.
+# Time: O(source size).  Space: O(source size) in sed's output stream.
+substitute() {
 	sed -e "s/@CUDA_NATIVE_VERSION@/$rel_version/g" \
 	    -e "s/@CUDA_NATIVE_VERSION_MAJOR@/$rel_major/g" \
 	    -e "s/@CUDA_NATIVE_VERSION_MINOR@/$rel_minor/g" \
 	    -e "s/@CUDA_NATIVE_VERSION_PATCH@/$rel_patch/g" \
-	    "$HERE/tools/$tool.sh" >"$NEW/bin/$tool" || exit 1
-	chmod 755 "$NEW/bin/$tool" || exit 1
-done
-sed -e "s/@CUDA_NATIVE_VERSION@/$rel_version/g" \
-    -e "s/@CUDA_NATIVE_VERSION_MAJOR@/$rel_major/g" \
-    -e "s/@CUDA_NATIVE_VERSION_MINOR@/$rel_minor/g" \
-    -e "s/@CUDA_NATIVE_VERSION_PATCH@/$rel_patch/g" \
-    "$HERE/tools/cuda-native-tool-lib.sh" >"$NEW/share/cuda-native/cuda-native-tool-lib.sh" || exit 1
+	    "$1" >"$2"
+}
+substitute "$HERE/tools/cuda-native-tool-lib.sh" \
+    "$NEW/share/cuda-native/cuda-native-tool-lib.sh" || exit 1
 cp "$NEW/bin/nvptxas" "$NEW/bin/ptxas" || exit 1
 cp "$NEW/bin/nvfatbin" "$NEW/bin/fatbinary" || exit 1
 # Time: O(number of schemas).  Space: O(1).
