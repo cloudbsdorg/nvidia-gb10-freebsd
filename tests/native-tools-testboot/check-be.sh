@@ -271,7 +271,7 @@ case $_co in
 *) bad "copy-out '$_co' is not an absolute path" ;;
 esac
 [ -x "$MNT/usr/local/bin/python3" ] && ok "python3 is in the clone (summarize.py needs it)" || bad "no /usr/local/bin/python3 in the clone: summary.json would not be written"
-grep -Eq '^nvidia_native_tools_testboot_vram="[0-9]+"$' "$_rcd" 2> /dev/null && grep -Eq '^nvidia_native_tools_testboot_sm="[0-9]+\.[0-9]+"$' "$_rcd" 2> /dev/null && ok "the board's VRAM and SM are set: $(grep -E '_(vram|sm)=' "$_rcd" | tr '\n' ' ')" || bad "the board's VRAM or SM is not set in $_rcd"
+grep -Eq '^nvidia_native_tools_testboot_vram="[0-9]+"$' "$_rcd" 2> /dev/null && grep -Eq '^nvidia_native_tools_testboot_vram_reserve="[0-9]+"$' "$_rcd" 2> /dev/null && grep -Eq '^nvidia_native_tools_testboot_sm="[0-9]+\.[0-9]+"$' "$_rcd" 2> /dev/null && ok "the board's nominal VRAM, the largest VRAM reserve and the compute capability are set: $(grep -E '_(vram|vram_reserve|sm)=' "$_rcd" | tr '\n' ' ')" || bad "the board's nominal VRAM, VRAM reserve (make-be.sh -R) or compute capability is not set in $_rcd"
 
 if [ "$rc" = 0 ]; then echo "check-be.sh: all checks passed"; else echo "check-be.sh: FAILED: do not arm this boot environment; fix what failed above, or remove it (bectl destroy ${BE:-BE}) and build a new one with make-be.sh -n N"; fi
 exit $rc

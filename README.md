@@ -775,6 +775,35 @@ the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json
 statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
 tests the kit without a boot.
 
+What the `nvrm-info` row expects of the board. `boot_nvrm_info.sh` requires three environment
+variables; `make-be.sh` always writes them to `rc.conf.d` from its options, whose defaults are the
+amp001 board (the 16 GiB RTX 5060 Ti; the values are in `tests/libnvrm/board-amp001.env`, the one
+place that states them). The comparison is `tests/libnvrm/boot_compare.py`, which refuses a reserve
+the boot would reject, as `make-be.sh` does:
+
+- `-V` (`BOOT_EXPECT_VRAM_BYTES`, default 17179869184): the nominal VRAM in bytes, 0 for a
+  unified-memory part;
+- `-R` (`BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES`, default 268435456): the most the driver may reserve
+  of it, below `-V` unless `-V` is 0. The RM reports the usable size (17103323136 on that card),
+  which must lie between nominal less the reserve and nominal;
+- `-S` (`BOOT_EXPECT_SM`, default 12.0): the compute capability. It is compared with
+  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card).
+
+The GPU uuid is found through the device unit whose `dev.nvidia.<unit>.pci_bus_id` is the device's
+PCI location (000d:01:00.0 on amp001; the units are not nvrm-info's indexes: a BMC display can take
+unit 0). When the unit was found that way (a module with the new sysctls),
+`dev.nvidia.<unit>.uuid` is required and must equal the nvrm-info uuid, as must
+`hw.nvidia.gpus.<unit>.uuid`. When it was found only through `dev.nvidia.<unit>.%location` (an older
+module), only `hw.nvidia.gpus.<unit>.uuid` is required. A `pci_bus_id` that is present but not
+`dddd:bb:ss.f` in lowercase hex is a FAIL of its own ("malformed"), and the `%location` fallback is
+still tried. `versions.driver` must equal
+`hw.nvidia.version_major`, `_minor` and `_patch` as integers, with `hw.nvidia.version_available`
+1 and the string equal to the pinned tag; `running_rm_version` must equal it.
+`sh tests/libnvrm/boot_fixture_test.sh` runs the comparison on the real capture of the first boot
+(`tests/data/nvrm-info-boot-20261122T095018Z`, which must fail), on a derived fixture (which must
+pass) and on mutations of it. It makes its scratch directory (default `tmp/` of the checkout) when
+it is missing; its exit status is the number of failures, or 99 when it cannot make the directory.
+
 ## Native CUDA toolchain (cuda-native)
 
 `lib/cuda-native/` is the first piece of native CUDA (Track #2380, stage C1.1 #2425). It holds the
