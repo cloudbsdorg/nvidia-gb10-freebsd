@@ -45,6 +45,15 @@
     {
       "type": "object",
       "additionalProperties": false,
+      "required": ["event", "name"],
+      "properties": {
+        "event": { "const": "unregister_function" },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["event"],
       "properties": {
         "event": { "const": "unregister_fatbin" },

@@ -441,3 +441,18 @@ The review fixes are in:
 Test: 119 checks green, cpd clean (PMD language cpp).
 The orchestrator finding of the 12:50Z entry (the duplicate schema_validate.py) is resolved: the copy is deleted and tests use tests/libnvrm/schema_validate.py.
 Next: rebase onto main, then gate round 2, then commit, PR and merge.
+
+## 2026-11-22T15:10Z commit 3c (Kimi k3.1-pro): the Review-open items of 4c2938c
+Work in this commit:
+- The two DEFECTs: dash-prefixed input paths in nvptxas, and the fatbin header read is bounded by the limit.
+- The 64 KiB bound is tested.
+- One --version block, in the shared library.
+- Each image is copied once, then hashed.
+- Absolute RUNPATH in the examples.
+- The stub trace is ignored under issetugid().
+- An unwritable trace is reported.
+- Real-path lookup of the shared helpers.
+- Trace lines are valid JSON.
+- Usage and man page fixes.
+- The README status row for native CUDA.
+Test: 219 passed. Next: rebase onto main, then gate rounds 1 and 2.

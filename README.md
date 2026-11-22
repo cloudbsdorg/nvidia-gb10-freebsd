@@ -306,7 +306,7 @@ In short (details in the [status table](#what-works-status-2026-11-20) below):
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort |
 | CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
-| CUDA, native | not started: Track #2362 |
+| CUDA, native | in progress: full compile and link work with stubs; every launch returns `cudaErrorNotSupported` (801); no GPU execution yet (Track #2362) |
 | Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
 | Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
 | Accelerated native rendering and native Vulkan (Mesa NVK; on libnvrm for compute, Track #2379) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |

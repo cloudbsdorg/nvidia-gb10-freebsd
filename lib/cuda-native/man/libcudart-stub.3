@@ -58,11 +58,14 @@ lines before the
 .Li ---
 separator, reports that count in the optional trace and allocates a separate
 record for each valid fatbin.
-The record retains copied kernel names so they can be released at unregister.
+The record retains copied kernel names so unregister can trace and release each one.
 Bad magic, bad data or a malformed header writes one
 .Ql libcudart-stub:
 diagnostic to standard error and returns
 .Dv NULL .
+If the registration record cannot be allocated, the diagnostic instead ends in
+.Ql host memory exhausted ,
+which states the host-side cause.
 .Pp
 .Fn __cudaRegisterFunction
 adds the device kernel name to the record, and
@@ -84,7 +87,7 @@ The launch configuration functions return zero.
 .Fn __cudaRegisterFatBinary
 returns a per-fatbin handle or
 .Dv NULL
-for bad input.
+for bad input or a host-memory allocation failure.
 .Fn __cudaRegisterFunction
 returns zero, or 1 if host-side name storage cannot be allocated.
 These return values describe only the stub's host-side bookkeeping; none
@@ -98,6 +101,11 @@ each fatbin/function registration, registration end/unregister and kernel
 launch writes one JSON object on its own standard-error line.
 When set to any other nonempty value, the JSON lines are appended to the file
 named by that value.
+If the file cannot be opened, one diagnostic is written to standard error per
+process and the host program continues without the trace.
+The diagnostic states that tracing is disabled and advises setting
+.Ev CUDA_NATIVE_STUB_TRACE
+to a writable path or unsetting it.
 The event shapes are:
 .Bd -literal -offset indent
 {"event":"register_fatbin","members":1}
@@ -105,11 +113,15 @@ The event shapes are:
 {"event":"register_fatbin_end"}
 {"event":"launch","status":801}
 {"event":"unregister_fatbin"}
+{"event":"unregister_function","name":"_Z4vaddPKfS0_Pfi"}
 .Ed
 The member count and kernel name reflect the actual registration.
 Every object validates against
 .Pa share/cuda-native/schema/cuda-native-stub-trace-1.schema.json .
 When the variable is unset or empty, these calls write no trace.
+It is also ignored whenever
+.Fn issetugid
+reports a set-id process.
 .El
 .Sh EXAMPLES
 Compile and link a CUDA source with an SDK in
@@ -117,7 +129,7 @@ Compile and link a CUDA source with an SDK in
 .Bd -literal -offset indent
 /usr/local/llvm23/bin/clang++ -x cuda \e
     --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 kernel.cu \e
-    -Lobj/cuda-native/lib64 -Wl,-rpath,obj/cuda-native/lib64 -lcudart
+    -Lobj/cuda-native/lib64 -Wl,-rpath,"$PWD/obj/cuda-native/lib64" -lcudart
 .Ed
 .Pp
 A resulting launch returns 801 rather than running the kernel.
