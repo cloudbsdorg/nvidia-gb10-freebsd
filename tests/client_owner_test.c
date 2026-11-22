@@ -1,0 +1,837 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * client_owner_test.c - the client ownership table of
+ * src/gb10-client-owner/nv_client_owner.h (Track #2373): which file a
+ * client was allocated on, through the ioctls that allocate and free one.
+ * With -DWITH_NVOS the layouts of the header's structures are compared to
+ * the real nvos.h (MIT).
+ */
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define	NVCO_MALLOC(n)	malloc(n)
+#define	NVCO_FREE(p)	free(p)
+#include "nv_client_owner.h"
+
+#ifdef WITH_NVOS
+#include "nvtypes.h"
+#include "nvos.h"
+#include "nv_escape.h"
+#define	SAME(mine, real, field) \
+	_Static_assert(offsetof(struct mine, field) == offsetof(real, field), #mine "." #field " offset differs from nvos.h")
+_Static_assert(sizeof(struct nvco_free_params) == sizeof(NVOS00_PARAMETERS), "NVOS00 size");
+_Static_assert(sizeof(struct nvco_alloc_object_params) == sizeof(NVOS05_PARAMETERS), "NVOS05 size");
+_Static_assert(sizeof(struct nvco_alloc_params) == sizeof(NVOS21_PARAMETERS), "NVOS21 size");
+_Static_assert(sizeof(struct nvco_alloc64_params) == sizeof(NVOS64_PARAMETERS), "NVOS64 size");
+SAME(nvco_free_params, NVOS00_PARAMETERS, hRoot);
+SAME(nvco_free_params, NVOS00_PARAMETERS, hObjectOld);
+SAME(nvco_free_params, NVOS00_PARAMETERS, status);
+SAME(nvco_alloc_object_params, NVOS05_PARAMETERS, hObjectNew);
+SAME(nvco_alloc_object_params, NVOS05_PARAMETERS, hClass);
+SAME(nvco_alloc_object_params, NVOS05_PARAMETERS, status);
+SAME(nvco_alloc_params, NVOS21_PARAMETERS, hObjectNew);
+SAME(nvco_alloc_params, NVOS21_PARAMETERS, hClass);
+SAME(nvco_alloc_params, NVOS21_PARAMETERS, status);
+SAME(nvco_alloc64_params, NVOS64_PARAMETERS, hObjectNew);
+SAME(nvco_alloc64_params, NVOS64_PARAMETERS, hClass);
+SAME(nvco_alloc64_params, NVOS64_PARAMETERS, status);
+_Static_assert(NVCO_ESC_RM_ALLOC == NV_ESC_RM_ALLOC, "NV_ESC_RM_ALLOC");
+_Static_assert(NVCO_ESC_RM_ALLOC_OBJECT == NV_ESC_RM_ALLOC_OBJECT, "NV_ESC_RM_ALLOC_OBJECT");
+_Static_assert(NVCO_ESC_RM_FREE == NV_ESC_RM_FREE, "NV_ESC_RM_FREE");
+_Static_assert(NVCO_CLASS_ROOT == NV01_ROOT, "NV01_ROOT");
+_Static_assert(NVCO_CLASS_ROOT_NON_PRIV == NV01_ROOT_NON_PRIV, "NV01_ROOT_NON_PRIV");
+_Static_assert(NVCO_CLASS_ROOT_CLIENT == NV01_ROOT_CLIENT, "NV01_ROOT_CLIENT");
+#endif
+
+static int fails;
+
+#define	CHECK(cond, ...) do {						\
+	if (!(cond)) {							\
+		fails++;						\
+		printf("FAIL %s:%d: ", __FILE__, __LINE__);		\
+		printf(__VA_ARGS__);					\
+		printf("\n");						\
+	}								\
+} while (0)
+
+#define	A_FILE	((const void *)0x1000)
+#define	B_FILE	((const void *)0x2000)
+#define	C_FP	((const void *)0x3001)
+#define	A_FP	((const void *)0x1001)	/* the open file the owner's hold is taken on */
+#define	B_FP	((const void *)0x2001)
+#define	C_FILE	((const void *)0x3000)
+#define	CA	0xC1D00000u
+#define	CB	0xC1D00001u
+
+static struct nvco_table t;
+static int unl;	/* nvco_begin_free's out parameter, kept for the matching end */
+
+/* a record with no free in flight (the model tests of a quiet table); the kernel always passes the mark it took */
+static int
+nvco_after_ioctl(struct nvco_table *tt, const void *owner, unsigned nr, size_t size, const void *args)
+{
+	return (nvco_after_ioctl_marked(tt, owner, nr, size, args, nvco_alloc_mark(tt)));
+}
+
+static void
+alloc21(const void *f, uint32_t h, uint32_t cls, uint32_t status)
+{
+	struct nvco_alloc_params p;
+
+	memset(&p, 0, sizeof(p));
+	p.hRoot = p.hObjectParent = p.hObjectNew = h;
+	p.hClass = cls;
+	p.status = status;
+	nvco_after_ioctl(&t, f, NVCO_ESC_RM_ALLOC, sizeof(p), &p);
+}
+
+static void
+alloc64(const void *f, uint32_t h, uint32_t cls, uint32_t status)
+{
+	struct nvco_alloc64_params p;
+
+	memset(&p, 0, sizeof(p));
+	p.hRoot = p.hObjectParent = p.hObjectNew = h;
+	p.hClass = cls;
+	p.status = status;
+	nvco_after_ioctl(&t, f, NVCO_ESC_RM_ALLOC, sizeof(p), &p);
+}
+
+static void
+free_obj(const void *f, uint32_t root, uint32_t old, uint32_t status)
+{
+	struct nvco_free_params p = { root, root, old, status };
+
+	nvco_after_ioctl(&t, f, NVCO_ESC_RM_FREE, sizeof(p), &p);
+}
+
+/* a fresh table: A owns CA (NVOS64, NV01_ROOT), B owns CB (NVOS21, NV01_ROOT_NON_PRIV) */
+static void
+fresh(void)
+{
+	nvco_destroy(&t);
+	alloc64(A_FILE, CA, NVCO_CLASS_ROOT, 0);
+	alloc21(B_FILE, CB, NVCO_CLASS_ROOT_NON_PRIV, 0);
+}
+
+static void
+test_recording(void)
+{
+	struct nvco_alloc_object_params ao;
+
+	nvco_destroy(&t);
+
+	/* two users, each with a client on their own file */
+	alloc64(A_FILE, CA, NVCO_CLASS_ROOT, 0);
+	alloc21(B_FILE, CB, NVCO_CLASS_ROOT_NON_PRIV, 0);
+	CHECK(nvco_owns(&t, A_FILE, CA), "A owns its client (NVOS64, NV01_ROOT)");
+	CHECK(nvco_owns(&t, B_FILE, CB), "B owns its client (NVOS21, NV01_ROOT_NON_PRIV)");
+	CHECK(!nvco_owns(&t, B_FILE, CA), "B does not own A's client");
+	CHECK(!nvco_owns(&t, A_FILE, CB), "A does not own B's client");
+	CHECK(!nvco_owns(&t, A_FILE, CA + 2), "an unallocated handle is owned by nobody");
+	CHECK(!nvco_owns(&t, NULL, CA), "a NULL owner owns no client");
+
+	/* NV01_ROOT_CLIENT, the class new client code allocates */
+	alloc64(A_FILE, 0xCAFE0010u, NVCO_CLASS_ROOT_CLIENT, 0);
+	CHECK(nvco_owns(&t, A_FILE, 0xCAFE0010u), "NV01_ROOT_CLIENT makes a client");
+	{
+		struct nvco_alloc64_params p64;
+
+		memset(&p64, 0, sizeof(p64));
+		p64.hClass = NVCO_CLASS_ROOT_CLIENT;
+		CHECK(nvco_is_client_op(NVCO_ESC_RM_ALLOC, sizeof(p64), &p64), "NV01_ROOT_CLIENT alloc is a client op");
+	}
+	nvco_remove_handle(&t, 0xCAFE0010u);
+
+	/* only root classes make a client; a device (0x80) or a memory object is not one */
+	alloc64(A_FILE, 0xCAFE0001u, 0x80, 0);
+	CHECK(!nvco_owns(&t, A_FILE, 0xCAFE0001u), "a non-root class is not a client");
+	/* failed allocations are not recorded */
+	alloc64(A_FILE, 0xCAFE0002u, NVCO_CLASS_ROOT, 0x1B);
+	alloc21(A_FILE, 0xCAFE0003u, NVCO_CLASS_ROOT, 0x1B);
+	CHECK(!nvco_owns(&t, A_FILE, 0xCAFE0002u) && !nvco_owns(&t, A_FILE, 0xCAFE0003u),
+	    "a failed allocation (params status) is not recorded");
+	/* a wrong argument size is ignored, not guessed */
+	{
+		struct nvco_alloc64_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.hObjectNew = 0xCAFE0004u;
+		nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(p) - 1, &p);
+		CHECK(!nvco_owns(&t, A_FILE, 0xCAFE0004u), "an ALLOC with an odd size is ignored");
+	}
+	/* the legacy allocation ioctl */
+	memset(&ao, 0, sizeof(ao));
+	ao.hObjectNew = 0xCAFE0005u;
+	ao.hClass = NVCO_CLASS_ROOT;
+	nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC_OBJECT, sizeof(ao), &ao);
+	CHECK(nvco_owns(&t, A_FILE, 0xCAFE0005u), "NV_ESC_RM_ALLOC_OBJECT with NV01_ROOT makes a client");
+	/* another escape code is ignored */
+	{
+		struct nvco_alloc_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.hObjectNew = 0xCAFE0006u;
+		nvco_after_ioctl(&t, A_FILE, 0x2A, sizeof(p), &p);
+		CHECK(!nvco_owns(&t, A_FILE, 0xCAFE0006u), "another escape code records nothing");
+	}
+
+	/* a file that is not an nvidiactl file (owner NULL) owns nothing */
+	{
+		size_t before = t.n;
+
+		alloc64(NULL, 0xCAFE0007u, NVCO_CLASS_ROOT, 0);
+		CHECK(t.n == before, "an ownerless allocation adds no entry");
+	}
+	CHECK(!nvco_owns(&t, NULL, 0xCAFE0007u) && !nvco_owns(&t, A_FILE, 0xCAFE0007u),
+	    "an add with no owner records nothing");
+
+	/* the operations that must be serialised with the table (decoded before the RM call) */
+	{
+		struct nvco_alloc64_params p64;
+		struct nvco_alloc_params p21;
+		struct nvco_free_params fr = { CA, CA, CA, 0 }, fc = { CA, CA, CA + 5, 0 };
+
+		memset(&p64, 0, sizeof(p64));
+		memset(&p21, 0, sizeof(p21));
+		CHECK(nvco_is_client_op(NVCO_ESC_RM_ALLOC, sizeof(p64), &p64), "NVOS64 root alloc is a client op");
+		p21.hClass = NVCO_CLASS_ROOT_NON_PRIV;
+		CHECK(nvco_is_client_op(NVCO_ESC_RM_ALLOC, sizeof(p21), &p21), "NVOS21 non-priv root alloc is a client op");
+		p64.hClass = 0x80;
+		CHECK(!nvco_is_client_op(NVCO_ESC_RM_ALLOC, sizeof(p64), &p64), "a device alloc is not");
+		CHECK(!nvco_is_client_op(NVCO_ESC_RM_ALLOC, sizeof(p64) - 1, &p64), "an odd size is not");
+		CHECK(nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fr), &fr), "freeing the client is a client op");
+		CHECK(!nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fc), &fc), "freeing a child is not");
+		CHECK(!nvco_is_client_op(0x2A, sizeof(p21), &p21), "a control call is not");
+	}
+
+}
+
+static void
+test_decoding_and_holds(void)
+{
+	fresh();
+	/* NV_ESC_RM_ALLOC_OBJECT is decoded too (a legacy root client must take the lock and be recorded) */
+	{
+		struct nvco_alloc_object_params o;
+
+		memset(&o, 0, sizeof(o));
+		o.hClass = NVCO_CLASS_ROOT;
+		CHECK(nvco_is_client_op(NVCO_ESC_RM_ALLOC_OBJECT, sizeof(o), &o), "NV_ESC_RM_ALLOC_OBJECT with NV01_ROOT is a client op");
+		o.hClass = 0x80;
+		CHECK(!nvco_is_client_op(NVCO_ESC_RM_ALLOC_OBJECT, sizeof(o), &o), "NV_ESC_RM_ALLOC_OBJECT with a device class is not");
+	}
+	/* one decoder: a request that is not a client op changes nothing, whatever the layout says */
+	{
+		struct nvco_alloc64_params p64;
+		size_t before = t.n;
+
+		memset(&p64, 0, sizeof(p64));
+		p64.hObjectNew = 0xCAFE0008u;
+		p64.hClass = NVCO_CLASS_ROOT;
+		nvco_after_ioctl(&t, A_FILE, 0x2A, sizeof(p64), &p64);
+		nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(p64) + 8, &p64);
+		CHECK(t.n == before, "a non-client op records nothing");
+	}
+	/* a client allocated where nothing can own it evicts a stale entry for its handle (the RM reused it) */
+	alloc64(A_FILE, 0xCAFE0009u, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_owns(&t, A_FILE, 0xCAFE0009u), "stale entry listed");
+	alloc64(NULL, 0xCAFE0009u, NVCO_CLASS_ROOT, 0);
+	CHECK(!nvco_owns(&t, A_FILE, 0xCAFE0009u), "an ownerless allocation of the handle evicts the stale entry");
+	/* holds: per client, only for the owner, and a free waits for them */
+	{
+		int ok;
+		struct nvco_free_params fr = { CB, CB, CB, 0 }, fc = { CB, CB, CB + 1, 0 };
+
+		CHECK(!nvco_hold(&t, A_FILE, A_FP, CB), "A cannot hold B's client");
+		CHECK(!nvco_hold(&t, NULL, B_FP, CB), "no file holds anything");
+		CHECK(!nvco_hold(&t, B_FILE, B_FP, CB + 77), "an unlisted handle cannot be held");
+		CHECK(!nvco_busy(&t, CB), "nothing in flight");
+		CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds its client");
+		CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "holds nest per client");
+		CHECK(nvco_busy(&t, CB), "busy while held");
+		CHECK(!nvco_busy(&t, CA + 9), "another client is not busy");
+		CHECK(nvco_unhold(&t, B_FP, CB) && nvco_busy(&t, CB), "one of two holds dropped: still busy");
+		CHECK(nvco_unhold(&t, B_FP, CB) && !nvco_busy(&t, CB), "second drop: free to go");
+		CHECK(!nvco_unhold(&t, B_FP, CB), "an unmatched release changes nothing and says so");
+		CHECK(!nvco_busy(&t, CB), "an unmatched release does not underflow");
+		(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fr), &fr, &ok);
+		CHECK(ok && nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fr), &fr, &ok) == CB, "a client free names its handle");
+		(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fc), &fc, &ok);
+		CHECK(!ok, "a child free names none");
+	}
+
+	/* freeing a child object is not freeing the client */
+	free_obj(A_FILE, CA, CA + 100, 0);
+	CHECK(nvco_owns(&t, A_FILE, CA), "freeing a child leaves the client");
+	/* a failed free leaves it */
+	free_obj(A_FILE, CA, CA, 0x1B);
+	CHECK(nvco_owns(&t, A_FILE, CA), "a failed free leaves the client");
+
+	/* B frees A's client through B's file (RM may allow it): the handle leaves the table for everyone */
+	free_obj(B_FILE, CA, CA, 0);
+	CHECK(!nvco_owns(&t, A_FILE, CA), "a freed client is gone from its owner");
+	/* the RM reuses the handle for B: B owns it, A cannot claim it */
+	alloc64(B_FILE, CA, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_owns(&t, B_FILE, CA) && !nvco_owns(&t, A_FILE, CA), "a reused handle belongs to its new owner");
+	/* an add for a listed handle by the same owner changes nothing */
+	alloc64(B_FILE, CA, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_owns(&t, B_FILE, CA) && !nvco_owns(&t, A_FILE, CA), "a re-add for the same owner changes nothing");
+	/* another file's client under a listed handle (the table and the RM disagree) is never handed over */
+	{
+		struct nvco_alloc64_params p64;
+
+		memset(&p64, 0, sizeof(p64));
+		p64.hRoot = p64.hObjectParent = p64.hObjectNew = CA;
+		p64.hClass = NVCO_CLASS_ROOT;
+		CHECK(nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(p64), &p64) == -1, "the collision is reported");
+		CHECK(!nvco_owns(&t, A_FILE, CA) && !nvco_owns(&t, B_FILE, CA), "a collision leaves the handle unowned");
+	}
+
+}
+
+static void
+test_hold_lifecycle(void)
+{
+	struct nvco_free_params refused = { CB, CB, CB, 0x1B }, done = { CB, CB, CB, 0 };
+	uint64_t tk;
+
+	fresh();
+	/* a release names the owner: another file's release changes nothing */
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds");
+	CHECK(!nvco_unhold(&t, A_FP, CB) && nvco_busy(&t, CB), "A cannot release B's hold");
+	CHECK(!nvco_unhold(&t, NULL, CB) && nvco_busy(&t, CB), "no file releases it either");
+	CHECK(nvco_unhold(&t, B_FP, CB) && !nvco_busy(&t, CB), "B releases it");
+	/* an eviction while held revokes, and the holder can still release; the entry then goes */
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds again");
+	alloc64(NULL, CB, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_busy(&t, CB) && !nvco_owns(&t, B_FILE, CB), "revoked: still held, no longer owned");
+	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "a revoked client cannot be held again");
+	CHECK(nvco_unhold(&t, B_FP, CB), "the holder releases a revoked client");
+	CHECK(nvco_find(&t, CB) == NULL, "the revoked entry goes with its last hold");
+	/* a new client under a handle that is still held is refused, and the old one is revoked */
+	CHECK(nvco_hold(&t, A_FILE, A_FP, CA), "A holds");
+	CHECK(nvco_add(&t, CA, B_FILE) == -1 && !nvco_owns(&t, B_FILE, CA) && !nvco_owns(&t, A_FILE, CA),
+	    "an add over a held handle fails closed");
+	CHECK(nvco_unhold(&t, A_FP, CA) && nvco_find(&t, CA) == NULL, "A releases; the entry goes");
+	/* a re-add for the same owner while holds are in flight revokes (the table and the RM disagree) */
+	alloc64(A_FILE, CA, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_hold(&t, A_FILE, A_FP, CA) && nvco_add(&t, CA, A_FILE) == -1 && !nvco_owns(&t, A_FILE, CA),
+	    "a same-owner re-add under a hold revokes");
+	CHECK(nvco_unhold(&t, A_FP, CA), "released");
+	CHECK(nvco_alloc_handle(&(struct nvco_alloc64_params){ .hObjectNew = 0x1234 }) == 0x1234, "the new handle is read from the shared offset");
+	/* a free in progress (by any file) refuses new holds so that the holds drain */
+	fresh();
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds");
+	tk = nvco_begin_free(&t, CB, &unl);
+	CHECK(tk != 0, "a free of a listed client begins");
+	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "no new hold while a free waits");
+	CHECK(nvco_busy(&t, CB), "the hold in flight still counts");
+	CHECK(nvco_unhold(&t, B_FP, CB) && !nvco_busy(&t, CB), "it drains");
+	nvco_end_free(&t, CB, tk, unl, 0);
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "a free that did not happen lets holds in again");
+	CHECK(nvco_unhold(&t, B_FP, CB), "released");
+	tk = nvco_begin_free(&t, CB + 50, &unl);
+	CHECK(tk != 0 && unl && nvco_find(&t, CB + 50) != NULL && nvco_find(&t, CB + 50)->tomb, "a free of an unlisted handle leaves a tombstone");
+	nvco_end_free(&t, CB + 50, tk, unl, 0);
+	CHECK(nvco_find(&t, CB + 50) == NULL, "a refused free of an unlisted handle leaves nothing");
+	/* a refused free (params status): the kernel ends the count whatever the result */
+	tk = nvco_begin_free(&t, CB, &unl);
+	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(refused), &refused);
+	nvco_end_free(&t, CB, tk, unl, 0);
+	CHECK(nvco_owns(&t, B_FILE, CB), "the RM refused the free: owned again");
+	tk = nvco_begin_free(&t, CB, &unl);
+	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(done), &done);
+	CHECK(nvco_find(&t, CB) == NULL, "the free happened: gone");
+}
+
+static void
+test_free_counts_and_decoders(void)
+{
+	struct nvco_free_params done = { CB, CB, CB, 0 };
+	struct nvco_free_params fc = { CB, CB, CB + 1, 0 };
+	uint64_t tk, tk2;
+	int ok;
+
+	/* frees are counted: one interrupted free must not let holds in while another still waits */
+	fresh();
+	tk = nvco_begin_free(&t, CB, &unl);
+	tk2 = nvco_begin_free(&t, CB, &unl);
+	CHECK(tk != 0 && tk == tk2, "two frees wait on the same client");
+	nvco_end_free(&t, CB, tk, unl, 0);
+	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "one free is still waiting: no new hold");
+	nvco_end_free(&t, CB, tk2, unl, 0);
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "both ended: holds are allowed again");
+	CHECK(nvco_unhold(&t, B_FP, CB), "released");
+	nvco_end_free(&t, CB, tk, unl, 0);
+	CHECK(nvco_owns(&t, B_FILE, CB), "an unmatched end_free does not underflow the count");
+	/* a stranger's free is counted too: the RM frees in the window after the lock drops */
+	tk = nvco_begin_free(&t, CB, &unl);
+	CHECK(tk != 0 && !nvco_hold(&t, B_FILE, B_FP, CB), "a free by any file keeps new holds out until it ends");
+	nvco_end_free(&t, CB, tk, unl, 0);
+	/* a hold must come from one open file */
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB) && !nvco_hold(&t, B_FILE, A_FP, CB), "a second file cannot share the hold");
+	CHECK(!nvco_unhold(&t, A_FP, CB) && nvco_unhold(&t, B_FP, CB), "only the file that held can release");
+	/* a closing file revokes a held entry instead of leaving it attributed to a freed owner */
+	CHECK(nvco_hold(&t, B_FILE, B_FP, CB), "B holds");
+	nvco_remove_owner(&t, B_FILE);
+	CHECK(!nvco_owns(&t, B_FILE, CB) && !nvco_hold(&t, B_FILE, B_FP, CB), "close revokes a held entry");
+	CHECK(nvco_unhold(&t, B_FP, CB) && nvco_find(&t, CB) == NULL, "the holder can still release it, and it goes");
+	/* a count is only given back to the client its token names: the handle was freed and reused meanwhile */
+	fresh();
+	tk = nvco_begin_free(&t, CA, &unl);
+	free_obj(B_FILE, CA, CA, 0);
+	alloc64(C_FILE, CA, NVCO_CLASS_ROOT, 0);
+	tk2 = nvco_begin_free(&t, CA, &unl);
+	CHECK(tk2 != 0 && tk2 != tk, "the reused handle is a different client (token %llu vs %llu)", (unsigned long long)tk2, (unsigned long long)tk);
+	nvco_end_free(&t, CA, tk, unl, 0);
+	CHECK(!nvco_hold(&t, C_FILE, C_FILE, CA), "the old free's end must not release the new client's free");
+	/* the two free decoders agree */
+	(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(done), &done, &ok);
+	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(done), &done), "decoders agree on a client free");
+	(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fc), &fc, &ok);
+	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fc), &fc), "decoders agree on a child free");
+	(void)nvco_client_free_handle(NVCO_ESC_RM_FREE, sizeof(fc) - 1, &fc, &ok);
+	CHECK(ok == nvco_is_client_op(NVCO_ESC_RM_FREE, sizeof(fc) - 1, &fc), "decoders agree on an odd size");
+}
+
+static void
+test_rm_lag(void)
+{
+	struct nvco_free_params done = { CB, CB, CB, 0 };
+	struct nvco_alloc64_params a64;
+	uint64_t tk;
+
+	/* the table is updated after the RM call returned (nothing is locked across it): every lag fails closed */
+	fresh();
+	/* (a) a new client the RM created but the table has not recorded yet is unknown: refused */
+	CHECK(!nvco_hold(&t, A_FILE, A_FP, CA + 0x300), "RM returned, not yet recorded: no hold");
+	/* (b) the owner's free is in flight (counted): holds are refused until it ends */
+	tk = nvco_begin_free(&t, CB, &unl);
+	CHECK(tk != 0, "B's free begins");
+	CHECK(!nvco_hold(&t, B_FILE, B_FP, CB), "RM free in flight: no new hold");
+	/* (c) the RM freed CB and another file's alloc reused the handle before B's free was recorded */
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CB;
+	a64.hClass = NVCO_CLASS_ROOT;
+	CHECK(nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64) == -1, "the reuse collides with the unrecorded free");
+	CHECK(!nvco_owns(&t, A_FILE, CB) && !nvco_owns(&t, B_FILE, CB), "both parties are unowned");
+	nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_FREE, sizeof(done), &done);
+	nvco_end_free(&t, CB, tk, unl, 0);
+	CHECK(!nvco_owns(&t, B_FILE, CB) && !nvco_owns(&t, A_FILE, CB), "the late record of the free changes nothing");
+	/* (d) a reuse that is recorded cleanly after the free is recorded is owned by the new file */
+	alloc64(A_FILE, CB, NVCO_CLASS_ROOT, 0);
+	CHECK(nvco_owns(&t, A_FILE, CB) && !nvco_owns(&t, B_FILE, CB), "a clean reuse belongs to the new owner");
+	/* (e) a hold taken before the RM free was recorded keeps the entry: the late free cannot drop it under the holder */
+	fresh();
+	CHECK(nvco_hold(&t, A_FILE, A_FP, CA), "A holds CA");
+	nvco_after_ioctl(&t, A_FILE, NVCO_ESC_RM_FREE, sizeof((struct nvco_free_params){ CA, CA, CA, 0 }),
+	    &(struct nvco_free_params){ CA, CA, CA, 0 });
+	CHECK(nvco_busy(&t, CA) && !nvco_owns(&t, A_FILE, CA), "late free under a hold: revoked, still held");
+	CHECK(nvco_unhold(&t, A_FP, CA) && nvco_find(&t, CA) == NULL, "the holder releases; the entry goes");
+}
+
+static void
+test_late_record_stranger_gen(void)
+{
+	struct nvco_alloc64_params a64;
+	uint64_t tk, mark;
+	size_t i;
+
+	/* late record, case 1: the free of the unlisted handle is still IN FLIGHT when the allocation's record lands */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CA + 0x40;
+	a64.hClass = NVCO_CLASS_ROOT;
+	tk = nvco_begin_free(&t, CA + 0x40, &unl);
+	CHECK(tk != 0 && unl && nvco_find(&t, CA + 0x40) != NULL && nvco_find(&t, CA + 0x40)->tomb, "a free of an unlisted handle leaves a tombstone");
+	CHECK(!nvco_hold(&t, A_FILE, A_FP, CA + 0x40), "a tombstone cannot be held");
+	/* a free that ended before the allocation's mark cannot have taken its client */
+	tk = nvco_begin_free(&t, CA + 0x41, &unl);
+	nvco_end_free(&t, CA + 0x41, tk, unl, 1);
+	mark = nvco_alloc_mark(&t);
+	a64.hObjectNew = CA + 0x41;
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0 && nvco_owns(&t, A_FILE, CA + 0x41),
+	    "a free that ended before the mark does not refuse the record");
+	/* a free that began before the mark but ended after it is caught (it may have reached the RM after the allocation) */
+	fresh();
+	tk = nvco_begin_free(&t, CA + 0x44, &unl);
+	mark = nvco_alloc_mark(&t);
+	nvco_end_free(&t, CA + 0x44, tk, unl, 1);
+	a64.hObjectNew = CA + 0x44;
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1 && !nvco_owns(&t, A_FILE, CA + 0x44),
+	    "a free that began before the mark and ended after it refuses the record");
+	/* junk frees (the RM refuses them) cost nothing: any number of them leaves other records alone */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	for (i = 0; i < 4 * NVCO_FREELOG; i++) {
+		tk = nvco_begin_free(&t, 0x77000000u + (uint32_t)i, &unl);
+		nvco_end_free(&t, 0x77000000u + (uint32_t)i, tk, unl, 0);
+	}
+	a64.hObjectNew = CA + 0x45;
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0 && nvco_owns(&t, A_FILE, CA + 0x45),
+	    "a flood of refused frees of junk handles does not make allocations unrecordable");
+	CHECK(t.n == 3, "and leaves no entries behind (%zu)", t.n);
+	/* the log of successful unlisted frees overflowing during an allocation fails closed */
+	mark = nvco_alloc_mark(&t);
+	for (i = 0; i < NVCO_FREELOG; i++) {
+		tk = nvco_begin_free(&t, 0x78000000u + (uint32_t)i, &unl);
+		nvco_end_free(&t, 0x78000000u + (uint32_t)i, tk, unl, 1);
+	}
+	a64.hObjectNew = CA + 0x46;
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1 && !nvco_owns(&t, A_FILE, CA + 0x46),
+	    "a log that overflowed with real frees during the allocation refuses the record");
+	/* an ownerless record (a device file) under a tombstone: nothing is owned and the tombstone stays for its free */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	tk = nvco_begin_free(&t, CA + 0x47, &unl);
+	a64.hObjectNew = CA + 0x47;
+	CHECK(nvco_after_ioctl_marked(&t, NULL, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0 && nvco_find(&t, CA + 0x47) != NULL
+	    && nvco_find(&t, CA + 0x47)->tomb && !nvco_hold(&t, NULL, A_FP, CA + 0x47), "an ownerless record leaves the tombstone to its free and owns nothing");
+	nvco_end_free(&t, CA + 0x47, tk, unl, 0);
+	CHECK(nvco_find(&t, CA + 0x47) == NULL, "the tombstone goes");
+
+	/* stranger: a free of a listed client by a file that does not own it is not permitted; the owner's is; an unlisted handle's is */
+	fresh();
+	CHECK(!nvco_free_permitted(&t, B_FILE, CA) && !nvco_free_permitted(&t, NULL, CA) && !nvco_free_permitted(&t, C_FILE, CA),
+	    "a stranger (another control file, a device file, a third file) may not free A's client");
+	CHECK(nvco_free_permitted(&t, A_FILE, CA), "the owner may free it");
+	CHECK(nvco_free_permitted(&t, B_FILE, CA + 0x500) && nvco_free_permitted(&t, NULL, CA + 0x500), "an unlisted handle may be freed by anyone (the RM decides)");
+
+	/* generation: 64 bits, never 0, even at the wrap */
+	fresh();
+	t.next_gen = UINT64_MAX - 1;
+	alloc64(A_FILE, CA + 0x60, NVCO_CLASS_ROOT, 0);
+	alloc64(A_FILE, CA + 0x61, NVCO_CLASS_ROOT, 0);
+	alloc64(A_FILE, CA + 0x62, NVCO_CLASS_ROOT, 0);
+	for (i = 0; i < t.n; i++)
+		CHECK(t.e[i].gen != 0, "entry %zu has a nonzero generation", i);
+	tk = nvco_begin_free(&t, CA + 0x61, &unl);
+	CHECK(tk != 0, "a token is nonzero at the wrap");
+	nvco_end_free(&t, CA + 0x61, tk, unl, 0);
+	CHECK(nvco_hold(&t, A_FILE, A_FP, CA + 0x61), "the count came back: holds work after the free at the wrap");
+	CHECK(nvco_unhold(&t, A_FP, CA + 0x61), "released");
+}
+
+static void
+test_tombstone_conversion(void)
+{
+	struct nvco_alloc64_params a64;
+	uint64_t tk, mark;
+
+	/* late record, case 1 again: the free of the unlisted handle is in flight when the record lands */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CA + 0x40;
+	a64.hClass = NVCO_CLASS_ROOT;
+	tk = nvco_begin_free(&t, CA + 0x40, &unl);
+	/* N1: the record that lands under a tombstone becomes the record (no stranger can make it collide); a hold is refused
+	 * while the free runs, and the free's end (refused by the RM) leaves the victim owning its client */
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0, "a record that lands under a tombstone is kept");
+	CHECK(nvco_find(&t, CA + 0x40) != NULL && !nvco_find(&t, CA + 0x40)->tomb && nvco_find(&t, CA + 0x40)->owner == A_FILE, "the tombstone became the record");
+	CHECK(nvco_find(&t, CA + 0x40)->gen != nvco_find(&t, CA + 0x40)->fgen, "the record is a new client: a new generation, the free keeps its own token");
+	CHECK(!nvco_owns(&t, A_FILE, CA + 0x40) && !nvco_hold(&t, A_FILE, A_FP, CA + 0x40), "and no hold is granted while the free runs");
+	nvco_end_free(&t, CA + 0x40, tk, unl, 0);
+	CHECK(nvco_find(&t, CA + 0x40) != NULL && nvco_owns(&t, A_FILE, CA + 0x40) && nvco_hold(&t, A_FILE, A_FP, CA + 0x40),
+	    "N1: after a refused free the victim owns its client and holds it");
+	CHECK(nvco_find(&t, CA + 0x40)->conv == 0 && nvco_find(&t, CA + 0x40)->fgen == nvco_find(&t, CA + 0x40)->gen,
+	    "the free that covered the record is over: an ordinary entry again");
+	CHECK(nvco_unhold(&t, A_FP, CA + 0x40), "released");
+	/* the same, but the RM did free the client: the free's end removes the record (a stale grant is never left) */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	tk = nvco_begin_free(&t, CA + 0x40, &unl);
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0, "record under the tombstone");
+	nvco_end_free(&t, CA + 0x40, tk, unl, 1);
+	CHECK(nvco_find(&t, CA + 0x40) == NULL && !nvco_owns(&t, A_FILE, CA + 0x40), "a free that freed the client removes the converted record");
+	/* two frees in flight on the tombstone, the record converts it, the first ends having freed a client: the entry is a
+	 * tombstone again until the second ends (the marker lives as long as its frees); a record landing then is not held */
+	fresh();
+	{
+		uint64_t k1, k2;
+		int u1, u2;
+
+		mark = nvco_alloc_mark(&t);
+		k1 = nvco_begin_free(&t, CA + 0x74, &u1);
+		k2 = nvco_begin_free(&t, CA + 0x74, &u2);
+		a64.hObjectNew = CA + 0x74;
+		CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0, "the record converts the tombstone of two frees");
+		nvco_end_free(&t, CA + 0x74, k1, u1, 1);
+		CHECK(nvco_find(&t, CA + 0x74) != NULL && nvco_find(&t, CA + 0x74)->tomb && !nvco_owns(&t, A_FILE, CA + 0x74),
+		    "the first free freed a client: the record goes, the second free's marker stays");
+		nvco_end_free(&t, CA + 0x74, k2, u2, 0);
+		CHECK(nvco_find(&t, CA + 0x74) == NULL, "and goes with the second free");
+	}
+	/* the free's token is its own: an old free's end does not touch a later record of the handle */
+	tk = nvco_begin_free(&t, CA + 0x72, &unl);
+	nvco_end_free(&t, CA + 0x72, tk, unl, 0);
+	a64.hObjectNew = CA + 0x72;
+	mark = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0, "new owner records");
+	nvco_end_free(&t, CA + 0x72, tk, unl, 1);
+	CHECK(nvco_owns(&t, B_FILE, CA + 0x72), "a stale free token does not remove the new owner's record");
+	/* a later record of a handle whose unlisted free ended with success is refused */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	a64.hObjectNew = CA + 0x40;
+	tk = nvco_begin_free(&t, CA + 0x40, &unl);
+	nvco_end_free(&t, CA + 0x40, tk, unl, 1);
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1 && !nvco_owns(&t, A_FILE, CA + 0x40),
+	    "case 2: a record that lands AFTER such a free ended, for an allocation that took its mark before, is refused");
+}
+
+static void
+test_conversion_races(void)
+{
+	struct nvco_alloc64_params a64;
+	uint64_t mark, m2, kx, ky;
+	int ux, uy;
+	uint32_t H = CA + 0x80;
+
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = H;
+	a64.hClass = NVCO_CLASS_ROOT;
+	/* a listed free that ends on an entry that went back to a marker is logged too: X begins (marker), A's record
+	 * converts it, A's own free Y begins (listed: unlisted 0), X ends having freed a client (the entry is a marker
+	 * again, Y still runs), B allocates H after that, Y frees B's client: B's late record must be refused */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	kx = nvco_begin_free(&t, H, &ux);
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == 0, "A's record converts X's marker");
+	ky = nvco_begin_free(&t, H, &uy);
+	CHECK(uy == 0, "Y found the converted record listed");
+	nvco_end_free(&t, H, kx, ux, 1);
+	CHECK(nvco_find(&t, H) != NULL && nvco_find(&t, H)->tomb && nvco_find(&t, H)->freeing == 1, "X freed a client: a marker again while Y runs");
+	m2 = nvco_alloc_mark(&t);
+	nvco_end_free(&t, H, ky, uy, 1);
+	CHECK(nvco_find(&t, H) == NULL, "the marker goes with Y");
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m2) == -1 && !nvco_owns(&t, B_FILE, H),
+	    "Y's success is logged: B's late record is refused");
+	/* a stale-log hit on a converted record with a free in flight leaves a marker, not a gap: C cannot be granted
+	 * a client that the in-flight free is about to take */
+	fresh();
+	mark = nvco_alloc_mark(&t);
+	nvco_end_free(&t, H, 0, 1, 1);	/* a free of H that freed a client, after B's mark: logged */
+	kx = nvco_begin_free(&t, H, &ux);	/* a second free of H: a marker, in flight */
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1, "B's late record is refused");
+	CHECK(nvco_find(&t, H) != NULL && nvco_find(&t, H)->tomb && nvco_find(&t, H)->freeing == 1, "the in-flight free keeps its marker");
+	m2 = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, C_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m2) == 0 && !nvco_owns(&t, C_FILE, H)
+	    && !nvco_hold(&t, C_FILE, C_FP, H), "C's record under the marker is no hold while the free runs");
+	nvco_end_free(&t, H, kx, ux, 1);
+	CHECK(nvco_find(&t, H) == NULL, "the free took it: nothing is listed");
+}
+
+static void
+test_second_free_and_eviction(void)
+{
+	struct nvco_alloc64_params a64;
+	uint64_t mark;
+
+	fresh();
+	/* n1 (second free of an unlisted handle while the first one's tombstone stands): B allocates H; before B's record
+	 * lands, B frees H twice, free 1 through another control file, free 2 through /dev/nvidia0 (who NULL).  Both are
+	 * unlisted from the caller's side (the tombstone is not a client), so the RM's success of free 2 is logged and B's
+	 * late record is refused.  Order of the RM: free 2 frees the client, free 1 then fails. */
+	{
+		int u1, u2, p1, p2;
+		uint64_t k1, k2;
+		uint32_t H = CA + 0x70;
+
+		mark = nvco_alloc_mark(&t);
+		p1 = nvco_free_permitted(&t, C_FILE, H);
+		k1 = nvco_begin_free(&t, H, &u1);
+		p2 = nvco_free_permitted(&t, NULL, H);
+		k2 = nvco_begin_free(&t, H, &u2);
+		CHECK(p1 && p2, "n1: both frees are permitted (an unlisted handle, then a tombstone)");
+		CHECK(u1 == 1 && u2 == 1, "n1: a free that finds a tombstone is an unlisted free too (u1 %d u2 %d)", u1, u2);
+		nvco_end_free(&t, H, k1, u1, 0);
+		nvco_end_free(&t, H, k2, u2, 1);
+		CHECK(nvco_find(&t, H) == NULL, "n1: the tombstone goes with its last free");
+		memset(&a64, 0, sizeof(a64));
+		a64.hObjectNew = H;
+		a64.hClass = 0x41;
+		CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1 && !nvco_owns(&t, B_FILE, H),
+		    "n1: B's late record is refused after the second free freed the client (fail closed)");
+	}
+	/* n2: while a tombstone stands, the owner-to-be's own control file may still free the handle (the RM decides) */
+	fresh();
+	{
+		int u1;
+		uint64_t k1 = nvco_begin_free(&t, CA + 0x71, &u1);
+
+		CHECK(nvco_free_permitted(&t, A_FILE, CA + 0x71) && nvco_free_permitted(&t, NULL, CA + 0x71) && nvco_free_permitted(&t, B_FILE, CA + 0x71),
+		    "n2: a standing tombstone does not make a file's own free EPERM");
+		nvco_end_free(&t, CA + 0x71, k1, u1, 0);
+	}
+
+	/* N4: a listed entry for h and a logged free of h (the allocation's mark is older): the record is refused AND the
+	 * stale entry is evicted, so nothing is left granting a client the free may have taken */
+	fresh();
+	{
+		uint32_t h = CA + 0x73;
+
+		alloc64(A_FILE, h, NVCO_CLASS_ROOT, 0);
+		mark = nvco_alloc_mark(&t);
+		memset(&a64, 0, sizeof(a64));
+		a64.hObjectNew = h;
+		a64.hClass = NVCO_CLASS_ROOT;
+		CHECK(nvco_find(&t, h) != NULL, "n4: the stale entry is listed before the late record");
+		nvco_end_free(&t, h, 0, 1, 1);	/* a free that freed a client, after the allocation's mark: logged */
+		CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mark) == -1, "n4: the record is refused");
+		CHECK(nvco_find(&t, h) == NULL, "n4: and the stale entry is evicted");
+	}
+
+}
+
+static void
+test_close_and_growth(void)
+{
+	fresh();
+	/* closing a file forgets exactly its handles, all of them */
+	alloc64(A_FILE, CA + 0x100, NVCO_CLASS_ROOT, 0);
+	alloc64(A_FILE, CA + 0x101, NVCO_CLASS_ROOT, 0);
+	nvco_remove_owner(&t, A_FILE);
+	CHECK(!nvco_owns(&t, A_FILE, CA) && !nvco_owns(&t, A_FILE, CA + 0x100) && !nvco_owns(&t, A_FILE, CA + 0x101),
+	    "close forgets all of the file's clients");
+	CHECK(nvco_owns(&t, B_FILE, CB), "close leaves other files' clients");
+
+	/* growth: many clients, all kept */
+	{
+		uint32_t i;
+
+		for (i = 0; i < 1000; i++)
+			alloc64(A_FILE, 0xD0000000u + i, NVCO_CLASS_ROOT, 0);
+		for (i = 0; i < 1000; i++)
+			CHECK(nvco_owns(&t, A_FILE, 0xD0000000u + i), "client %u kept after growth", i);
+		nvco_remove_owner(&t, A_FILE);
+		CHECK(t.n == 1, "only B's client is left (n = %zu)", t.n);
+	}
+}
+
+/*
+ * close-path: the owner of a converted record closes while the free that left the marker is still in flight.
+ * Names: H is the handle CA + 0x90.  L is a control file the RM treats as A1 (linked to it by NV_ESC_REGISTER_FD, so
+ * its clientOSInfo is A1's); A1 = A_FILE, A2 = B_FILE, X = C_FILE (the victim).
+ *   1 L frees the unlisted H: a marker; its RM call is still pending
+ *   2 A2 allocates H: the record converts the marker
+ *   3 A2 closes: the marker must stay (dropping it is the defect)
+ *   4 A1 allocates H: its record converts the marker again
+ *   5 A1 asks for a hold on H: refused while L's free runs
+ *   6 L's RM call took A1's client and returned: still a marker until the free ends
+ *   7 the free's end takes the record
+ *   8 X (handed H by the RM) records late: refused; no file owns H
+ * A closing owner with several entries (an ordinary one, a held one, a converted one with a free in flight) leaves
+ * none attributed to it, in any order.
+ */
+static void
+test_close_of_converted_owner(void)
+{
+	struct nvco_alloc64_params a64;
+	struct nvco_free_params f = { CA + 0x90, CA + 0x90, CA + 0x90, 0 };
+	struct nvco_entry *e;
+	uint64_t tk, k2, m, mx;
+	int ul, u2;
+	size_t i;
+	const void *L = (const void *)0x4000;
+
+	memset(&a64, 0, sizeof(a64));
+	a64.hObjectNew = CA + 0x90;
+	a64.hClass = NVCO_CLASS_ROOT;
+	fresh();
+	CHECK(nvco_free_permitted(&t, L, CA + 0x90), "close-path 1: L's free of the unlisted handle is permitted");
+	tk = nvco_begin_free(&t, CA + 0x90, &ul);
+	m = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m) == 0, "close-path 2: A2's record converts the marker");
+	nvco_remove_owner(&t, B_FILE);
+	e = nvco_find(&t, CA + 0x90);
+	CHECK(e != NULL && e->tomb && e->owner == NULL && e->freeing == 1, "close-path 3: the owner's close leaves the marker of the free in flight");
+	m = nvco_alloc_mark(&t);
+	CHECK(nvco_after_ioctl_marked(&t, A_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, m) == 0, "close-path 4: A1's record converts the marker again");
+	mx = nvco_alloc_mark(&t);
+	CHECK(!nvco_hold(&t, A_FILE, A_FP, CA + 0x90), "close-path 5: no hold on H while L's free runs");
+	CHECK(nvco_after_ioctl_marked(&t, L, NVCO_ESC_RM_FREE, sizeof(f), &f, 0) == 0, "close-path 6: L's RM free is recorded");
+	e = nvco_find(&t, CA + 0x90);
+	CHECK(e != NULL && e->freeing == 1 && !nvco_owns(&t, A_FILE, CA + 0x90), "close-path 6: and the entry is still covered by the free");
+	nvco_end_free(&t, CA + 0x90, tk, ul, 1);
+	CHECK(nvco_find(&t, CA + 0x90) == NULL, "close-path 7: the free's end takes the record");
+	CHECK(nvco_after_ioctl_marked(&t, C_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, mx) == -1, "close-path 8: X's late record is refused");
+	CHECK(!nvco_owns(&t, A_FILE, CA + 0x90) && !nvco_owns(&t, B_FILE, CA + 0x90) && !nvco_owns(&t, C_FILE, CA + 0x90)
+	    && !nvco_owns(&t, L, CA + 0x90), "close-path 8: no file owns H afterwards");
+
+	/* no free in flight any more: the converted record became ordinary and a close drops it */
+	fresh();
+	tk = nvco_begin_free(&t, CA + 0x91, &ul);
+	a64.hObjectNew = CA + 0x91;
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, nvco_alloc_mark(&t)) == 0, "close-path, no free in flight: B's record converts the marker");
+	nvco_end_free(&t, CA + 0x91, tk, ul, 0);
+	CHECK(nvco_find(&t, CA + 0x91) != NULL && nvco_find(&t, CA + 0x91)->conv == 0, "close-path, no free in flight: the refused free made the record ordinary");
+	nvco_remove_owner(&t, B_FILE);
+	CHECK(nvco_find(&t, CA + 0x91) == NULL, "close-path, no free in flight: an ordinary record of a closing owner is dropped");
+
+	/* a held entry of a closing owner is revoked, never dropped and never left attributed (the close path itself) */
+	fresh();
+	a64.hObjectNew = CA + 0x92;
+	CHECK(nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64) == 0 && nvco_hold(&t, B_FILE, B_FP, CA + 0x92),
+	    "close-path, held: B owns a client and holds it");
+	nvco_remove_owner(&t, B_FILE);
+	e = nvco_find(&t, CA + 0x92);
+	CHECK(e != NULL && e->revoked && e->refs == 1 && !nvco_owns(&t, B_FILE, CA + 0x92), "close-path, held: the close revokes the held entry");
+	CHECK(nvco_unhold(&t, B_FP, CA + 0x92), "close-path, held: the holder still finds its entry");
+	CHECK(nvco_find(&t, CA + 0x92) == NULL, "close-path, held: the last release drops the revoked entry");
+
+	/* a held converted record whose free is in flight: grants are refused while it runs, so a hold cannot exist
+	 * there; the close leaves a marker, and the entries before and after it are all dealt with (the swap-in path) */
+	fresh();
+	tk = nvco_begin_free(&t, CA + 0x93, &ul);
+	k2 = nvco_begin_free(&t, CA + 0x93, &u2);
+	for (i = 0; i < 3; i++) {
+		a64.hObjectNew = CA + 0xA0 + (uint32_t)i;
+		nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64);
+	}
+	a64.hObjectNew = CA + 0x93;
+	CHECK(nvco_after_ioctl_marked(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64, nvco_alloc_mark(&t)) == 0, "close-path, many: B's record converts a marker of two frees");
+	for (i = 0; i < 3; i++) {
+		a64.hObjectNew = CA + 0xB0 + (uint32_t)i;
+		nvco_after_ioctl(&t, B_FILE, NVCO_ESC_RM_ALLOC, sizeof(a64), &a64);
+	}
+	nvco_remove_owner(&t, B_FILE);
+	for (i = 0; i < t.n; i++)
+		CHECK(t.e[i].owner != B_FILE, "close-path, many: entry %zu (handle 0x%x) is still attributed to the closed file", i, t.e[i].handle);
+	e = nvco_find(&t, CA + 0x93);
+	CHECK(e != NULL && e->tomb && e->freeing == 2, "close-path, many: the converted record in the middle is a marker of both frees");
+	CHECK(nvco_find(&t, CA + 0xA1) == NULL && nvco_find(&t, CA + 0xB2) == NULL, "close-path, many: the ordinary records around it are dropped");
+	nvco_end_free(&t, CA + 0x93, tk, ul, 1);
+	nvco_end_free(&t, CA + 0x93, k2, u2, 0);
+	CHECK(nvco_find(&t, CA + 0x93) == NULL, "close-path, many: the marker goes with the last free");
+}
+
+int
+main(void)
+{
+	test_recording();
+	test_decoding_and_holds();
+	test_hold_lifecycle();
+	test_free_counts_and_decoders();
+	test_rm_lag();
+	test_late_record_stranger_gen();
+	test_tombstone_conversion();
+	test_second_free_and_eviction();
+	test_conversion_races();
+	test_close_and_growth();
+	test_close_of_converted_owner();
+	nvco_destroy(&t);
+
+	if (fails != 0)
+		return (1);
+	printf("client_owner_test: ok\n");
+	return (0);
+}

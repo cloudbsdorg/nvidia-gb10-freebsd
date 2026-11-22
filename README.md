@@ -178,7 +178,7 @@ Tested on one machine so far: an Ampere Altra running FreeBSD 16.0-CURRENT with 
 
 **CUDA prerequisites.** `libcuda` needs `/dev/nvidia-uvm`, which NVIDIA does not ship for
 FreeBSD. It comes from the clean-room module
-[uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (tested at commit 256297e). It also needs
+[uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (tested at commit 256297e; the version 2 `nvidia.ko` below needs a newer one, see Versions). It also needs
 Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
 UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
@@ -531,7 +531,7 @@ ship (`nv_uvm_types.h`, `nv_uvm_user_types.h`, `nvgputypes.h`) are copied into t
 `ogkm:<path>`. `tests/uvm_glue_test.sh` checks the exports, the structure layouts against the
 UVM specification, the interrupt order and the manifest.
 
-The module itself lives in its own repository (`nvidia-uvm-freebsd`), written clean-room
+The module itself lives in its own repository (uvm-bsd), written clean-room
 from a specification; this repository holds only the `nvidia.ko` side.
 
 ## nvidia-smi
@@ -618,6 +618,86 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 | `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
+
+## RM client ownership for nvidia-uvm
+
+**What and why.** The RM resolves a client handle with kernel privilege and never asks who
+is calling, and handles are predictable (`0xC1D00000` is the first client of a boot). So
+`nvidia.ko` records which open `/dev/nvidiactl` file each client was allocated on
+(`src/gb10-client-owner/nv_client_owner.h`, hooked into `nvidia_handle_ioctl` and
+`nvidia_close_ctl` by `patches/patch-zz-nvidia_client_owner_subr.c`) and exports two
+functions for `nvidia-uvm.ko` (the clean-room UVM driver, uvm-bsd):
+
+- `NV_STATUS nvUvmInterfaceClientHold(struct file *fp, NvHandle hClient)`: `NV_OK` only for a
+  devfs character device `nvidiactl` file of this module that owns the client, otherwise
+  `NV_ERR_INSUFFICIENT_PERMISSIONS`. On `NV_OK` the client is held: a free of it waits, and
+  the file cannot close (the hold keeps its own file reference).
+- `void nvUvmInterfaceClientRelease(struct file *fp, NvHandle hClient)`: call it exactly once
+  per `NV_OK`, never after a refusal. Holds are per client and nest, so an RM call made under
+  a hold delays only a free of that one client, not other users.
+
+**Guarantees.** The table lock is a leaf lock: it is never held across an RM call (the RM can run
+a file's close destructor, which takes it, from inside an RM call), so the table is updated after
+the RM call returns and may lag it; every lag fails closed. An unrecorded new client is refused. A reused handle leaves both parties
+unowned. A free in flight keeps new holds out. A free of a handle the table has not recorded leaves
+a short-lived marker (a tombstone) while it runs. A free of an unrecorded handle that the RM carried out is remembered
+(the last 64, `NVCO_FREELOG`), and an allocation that began before such a free ended is refused its
+record. A record that lands while a marker stands takes the marker over: no hold is granted on
+it until that free ends. If the RM refused that free, the owner keeps its record; nvidia-uvm requests on that client fail until
+the free ends, then work again. If the RM carried it out, the record is dropped with it. A free of a client the table lists by a file that does not own it is refused with `EPERM` before the
+RM is called, so a stranger can neither reach the RM in that window nor raise the count of a
+predictable handle. The owner's free first waits for the holds on the client, before the ioctl
+takes any other lock. A client freed leaves the table, a closing file forgets its clients, and only
+a control file can own one.
+If a client's free is still running when the file that owns that client closes, the entry goes back to a
+marker instead of being dropped, so a later record of the same handle is held back until the free ends.
+Default client-handle validation does not prevent this: a control file linked by `NV_ESC_REGISTER_FD` to
+another file of the same user is enough, so it does not need validation to be off.
+The free counts use 64-bit generation numbers that are never 0.
+
+**Versions.** `nvidia.ko` is module version 2. `nvidia-modeset.ko`, `nvidia-drm.ko` and
+`nvidia-uvm.ko` depend on exactly that. `nvidia-uvm.ko` has to come from the uvm-bsd branch
+`agent/2373-uvm-client-ownership` or later (its `MODULE_DEPEND` is in that repository; the
+"CUDA prerequisites" commit above predates it). So updating `nvidia.ko` alone does not fix the
+cross-user hole or keep the display: the four modules go together.
+
+- Symptom: `kldload` fails ("an error occurred while loading module"), and `dmesg` shows a
+  version mismatch or `symbol nvUvmInterfaceClientHold undefined` (or `...ClientRelease`).
+- Cause: the modules are from different builds, or `nvidia.ko` was built without the
+  `patch-zz-nvidia_client_owner_*` patches. An older `nvidia-uvm.ko` (version 1 dependency)
+  refuses the new `nvidia.ko`, and the new one refuses an old `nvidia.ko`.
+- Fix: rebuild `nvidia`, `nvidia-modeset`, `nvidia-drm` and `nvidia-uvm` from one tree made by
+  `scripts/prepare-tree.sh` and reload them together.
+
+**A stuck free.** A free of a client waits for the holds on it, in an interruptible sleep with
+wait channel `nvcobusy`, and every other ioctl on the same file waits behind it. `nvidia-uvm.ko`
+takes a hold for one request and releases it when the request ends, so the wait is normally
+short. A process that stays in `nvcobusy` means a hold was leaked, which is a bug in
+uvm-bsd: a leaked hold lasts until reboot (killing the waiting process only ends
+that one wait, and the client is never freed). A fatal signal, or a caught signal without
+`SA_RESTART`, ends the wait (`EINTR`, nothing freed); a restartable signal waits again.
+`ps -axo pid,wchan,comm | grep nvcobusy` finds the process. A console line
+`nvUvmInterfaceClientRelease: no hold on client ... (nvidia-uvm bug)` is the opposite fault, a
+release without a matching hold; quote it in the report if you see it (a debug kernel panics
+with "client release without a matching hold" instead). A console line
+`RM client 0x... could not be recorded for nvidia-uvm` means the table and the RM disagreed about a
+handle. The causes: the handle was listed for another file; a free of it that the RM carried out
+ended after the allocation began; 64 or more frees of other unrecorded handles that the RM carried out
+ended during the allocation (the log holds only the most recent ones); or memory ran out.
+nvidia-uvm refuses requests on that client until it is freed and allocated again. A free by a
+file that does not own a listed client fails with `EPERM` at once and changes nothing (free the
+client through the `/dev/nvidiactl` file that allocated it). A stranger therefore cannot free a
+client the table has recorded for its owner. While a handle is unrecorded (including while a free that found it
+unrecorded is in flight), any control file may free it and the RM decides: if the RM carries the free out, the owner
+loses that client. `nvUvmInterfaceClientHold` must be called from a sleepable context with
+no RM lock held, never from an RM callback; the same goes for `nvUvmInterfaceClientRelease`.
+
+**Tests.** `tests/client_owner_glue_test.sh` compiles the real glue (`src/gb10-client-owner/nvco_glue.h`)
+against fakes of the kernel and runs it, with mutants that must fail. `tests/client_owner_test.sh` reads `GB10_WORK` (a directory with `sources/` holding the
+pinned open-gpu-kernel-modules 580.178.04 checkout and the NVIDIA FreeBSD tarball) and `TMPDIR`;
+without them the layout and prepare-tree checks are skipped (a failure under `CI` or
+`REQUIRE_INPUTS`). It runs the table logic (layouts compared with the real `nvos.h`), checks the
+patch hooks, and runs deliberately broken copies of the header and the patch that it must reject.
 
 ## Licence
 

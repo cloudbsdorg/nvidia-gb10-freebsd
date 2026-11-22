@@ -159,6 +159,70 @@ Both merge reviews: MERGE AFTER FIXES. One fix commit, its own 2-round budget. T
 Evidence (red at 890b9b8, green here): Opus A's boot cases B (false pass) and C (false fail) and Opus B's probes (cap rename passes the suite, zero GPUs exit 1, rm_gpu_id source os) are all red at 890b9b8 and clean on this tree; the same cases now run inside tests/libnvrm_test.sh (boot script, doctored report; linuxkpi; kld-late; sysctl-broken). Every fix has mutants in that suite's mutant table (ada-copy, unknown-gpfifo, unknown-copy, cap-name-1, member-after-caps, source-rm-gpu-id, registry-once, fork-guard, fork-generation, nogpu-error, cap-rights, opts-null, ...) and plants for the shell-level checks (ids plants, doc_plant, minor_plant, the kldstat plant); Opus B's 26 mutants and Opus A's plants run against the final tree outside the repository (the hand-back lists them).
 Gate: round 1 receipt 540b18e5 (24 findings, 23 accepted, quality.7 rejected with the measurement that LIBADD adds nothing out of tree); one round-2 attempt was REFUSED (a voice skipped a ruling: no receipt) and its new findings were fixed before the counted round 2: ids numbering single definition and --emit round trip, per-line minors and --frozen against the parent commit's baseline, race precondition counted, fork generation (pid reuse) with a getpid seam, fake backend limited to one thread, boot FAILs say what to do, the mapping sentence says what this version cannot do. NVRM_FAKE_FAIL=nogpu stays (Opus B named it as the contract).
 
+## 2026-11-21T04:13:44Z (#2373 sec)
+- Plan: nv side adds the RM client ownership table (src/gb10-client-owner/nv_client_owner.h, patch-zz-* hooks) and exports nvUvmInterfaceClientOwnedByFile; branch is from agent/2088-build-host WITHOUT the uvm glue (that lives on agent/uvm-phase0): the new patches are separate zz files and apply over either.
+- Built nvidia.ko on the prepared tree (LLD stamp ok, export present, scratch ~/work/gb10/tmp/sec-2373/w). tests/client_owner_test.sh green with 5 plants + 4 hook plants red.
+- Next: gate round 1, commit, push, then uvm side. Resume: git status; commit with the Stewardship block.
+
+## 2026-11-21T04:24:15Z
+- Round 1 (receipt 2365788e): TOCTOU (DEFECT), cdevpriv type confusion (DEFECT), hook plants tautological (DEFECT), CI input (DEFECT), comments/labels/README (NIT). All fixed: table lock across client ops, ClientHold/Release, VCHR+nvidiactl checks, real plants. Rebuilt nvidia.ko OK. Next: round 2 with answers, commit, push. Resume: git status.
+
+## 2026-11-21T04:35:57Z
+- Round 2 (receipt c5ee21db): redesigned to per-client holds + file reference, ownerless eviction, NV01_ROOT_CLIENT class, single decoder, test exit status. Rebuilt nvidia.ko OK (LLD). Final receipt run next, then commit and push. Resume: git status; commit.
+
+## 2026-11-21T04:47:25Z
+- Round 3 findings (receipt c7d5d40a) fixed: Release owner check, revoked entries, begin_free + PCATCH, single decoders, real mutants. nvidia.ko rebuilt OK. Gate round 4 next. Note: exceeds the 2-round budget because the findings were genuine DEFECTs (security).
+
+## 2026-11-21T04:57:20Z
+- Round 4 findings (receipt 7dcc43ba): freeing count, owner-only counting, held-entry revoke at close, release matched on the held file, sx_xlocked guard, README. Rebuilt OK. Gate again, then commit. Resume: git status.
+
+## 2026-11-21T05:05:41Z
+- Round 5 (receipt ef8df6a3): escape numbers pinned, release diagnostic and context rule, xfer unwrap pins. Final gate then commit and push.
+
+## 2026-11-21T05:10:51Z
+- Round 6 (receipt aa8d461e): end_free owner-matched, test inputs no HOME default, README stuck-free text. Final gate, commit, push. Findings after this are recorded, not iterated (budget).
+
+## 2026-11-21T05:17:47Z
+- Round 7 (receipt 9ce936bd): collision never hands over a client, unrecorded-client diagnostic, honest layout skip. Final gate, then commit and push; further findings recorded only.
+
+## 2026-11-21T05:22:28Z
+- Round 8 (receipt 46ce47a3): doc and diagnostic wording only. Commit after this receipt.
+
+## 2026-11-21T06:45:29Z (#2373 fix round 3, after the crash)
+- State: working tree (uncommitted) has: nvco_glue.h (all glue, leaf lock: begin before fops_sx, RM call with no table lock, end after unlock), patch-zz subr patch reduced to include + 3 call sites, nv_client_owner.h comment, tests/client_owner_glue_test.sh + tests/data/nvidia_glue_harness.c (real glue vs kernel fakes; 15 mutants + 7 pin mutants red), tests/pins_lib.sh, rm-lag model rows. prepare-tree copies nvco_glue.h.
+- TODO nv: drop nothing else; MODULE_VERSION 2 + depends (nvidia_pci, modeset, drm patch); run client_owner_test.sh + glue test on git archive; gate 2 rounds; commit; then phase0 merge branch (agent/2373-nv-client-owner-phase0) with Makefile hunk context regenerated; then uvm side (harness, pins strip, CAP_IOCTL, PROVENANCE, C-Q, probe rows, race loops, JSON).
+- Gate budget: exactly 2 rounds per commit; open findings -> Stewardship Review-open + Track.
+
+## 2026-11-21T06:49:05Z
+- nv work done in tree: leaf lock glue, harness (glue test), MODULE_VERSION 2 patches, README. Built LLD OK. Gate round 1 running (log tmp/sec-2373/gate-n2-1.log). Next: round 2 with answers, commit, push; then phase0 merge branch.
+
+## 2026-11-21T06:58:06Z
+- nv round 1 receipt 739a635617fd487f67670383df74191f6192b5769ee31b3192f0b345a88c8915 fixed (token counting of any free, end under fops_sx, goto label, separate limiters, real pins, harness scenarios). Gate ROUND 2 running (gate-n2-2.log). After it: commit with Review-open list, push; then phase0 merge branch.
+
+## 2026-11-21T07:02:26Z
+- COMMITTED 4a25b0f on agent/2373-nv-client-owner (round1 739a6356, round2 7267b0fc), pushed. Open findings in the Stewardship (late-record, stranger-starve, token-wrap...). Next: phase0 merge branch in ~/work/gb10/wt-nv-2373-p0 (agent/2373-nv-client-owner-phase0), Makefile hunk regen, gate 2 rounds; then uvm commit; Track comments; ask orchestrator for a 3rd nv round (fail-open late record).
+
+## 2026-11-21T07:06:18Z (#2373 phase0 line)
+- agent/2373-nv-client-owner-phase0: uvm-phase0 + 2373 (be5f990, 4a25b0f) merged; README/prepare-tree conflicts resolved as union; zz Makefile hunk regenerated (applies with fuzz 0, all zz patches fuzz 0); nvidia.ko builds (LLD), 62 nvUvmInterface exports T incl. Hold/Release; uvm_glue_test 10/0, kmod_symbols_test PASS, prepare-tree_test 15/0, client_owner_test 51 ok. Gate round 1 running.
+
+## 2026-11-21T07:09:39Z
+- p0 gate round 1 receipt 04f6a365de2dab67d93646351ff9fcc909dc00c1233ec7607af09e74b3facede: README doc findings; fixed the 2373 ones (one uvm pin, names, versions list, prepare-tree pins), rejected phase0-side README content. Round 2 running (gate-p0-2.log).
+
+## 2026-11-21T07:48:44Z (#2373 follow-up commit)
+- Orchestrator: no round 3 on old commits; this is a NEW commit with 2 rounds. Fixes: EPERM for a stranger's free of a listed client (before the RM), 64-bit nonzero generations, late record: every free is logged with a sequence number and an allocation takes a mark before its RM call, a record that lands after a free of its handle began is refused (the tombstone alone left the reviewer's counterexample open: my harness showed the free completing before the record). Model rows + 3 glue mutants + 7 header plants. Folds in the staged JOURNAL.
+- round 1 receipt bc7942bc: dropped the global free log (flood DoS) for tombstones + a log of SUCCESSFUL unlisted frees by end sequence; removed h.core; rows+mutants. Round 2 running.
+
+## 2026-11-21T12:10:00Z (#2373 phase0 re-merge after #2398 rewrite)
+- Merged agent/2373-nv-client-owner (925525d) into agent/2373-nv-client-owner-phase0. Only conflict: JOURNAL.md, resolved as union (both sides append-only). Next: boot-build proof on fresh archive, gate.
+
+## 2026-11-22 (#2373 close-path commit, new commit on ea27f0c, own 2-round budget)
+- Orchestrator brief: route the nvco_remove_owner loop through nvco_remove_handle (the merge reviewer's proposed patch), model row (close-path 7-step), glue scenario scenario_close_path, plants close-ignored/remove-owner-keeps-held re-anchored plus new close-drops-marker (model and glue), README wording. Red on ea27f0c: model row 3 FAILs, glue scenario FAIL, close_path.c rc=1; green after: rc=0, client_owner_test.sh 81 ok rc=0, glue 44 ok rc=0, close_path.c rc=0.
+- Gate round 1 running. Next: answers file, round 2, commit, push, Track #2373 and WP #2406.
+- Round 1 receipt fba825ec5facfc74517f8f2e7c694f07b0ec483283c3e8aab87c673729e958a2 (5 voices FINDINGS). Answers in .round/tmp/answers.txt. Fixed: nvco_remove_entry (acts on the entry, no second lookup), held/many model rows, step labels, scenario ran-flag, README wrapped, pins on flattened text.
+
+## 2026-11-22 (#2373 phase0 merge of the close-path commit 3d6bc31)
+- Merged agent/2373-nv-client-owner (3d6bc31) into the phase0 line for the v5 boot build. Only conflict: JOURNAL.md, resolved as union (both sides append-only).
+
 ## 2026-11-22 Track #2417 (agent/2417-init-failure-safe, from a2e0546)
 - Commit 1 (init-failure path): red first (tests/open_dev_failure_test.sh on the old code: 5 FAIL, .round/red-commit1.txt), then patches/patch-zz-nvidia_init_failure_subr.c, patches/ogkm/patch-zz-2417 osinit patch, man/nvidia.4, README. Green 12/12; nvidia.ko builds (LLD) from the patched tree. Other suites on a fresh archive: same as the a2e0546 baseline (kmod_symbols stale default tree, prime_import_test D6 gb10_pageimport.h, render_uapi_layout 2 SKIP).
 - Next: review-and-record round 1, commit, push, Track comment, SHA to the orchestrator; then commit 2.
@@ -167,3 +231,7 @@ Gate: round 1 receipt 540b18e5 (24 findings, 23 accepted, quality.7 rejected wit
 - Commit 1 committed as 525f43b (round 2 receipt 7aab04e9), pushed; SHA sent to the orchestrator. Round 2 left Review-open lines (listed in the commit message).
 - Commit 2 (firmware): chose MODULE_DEPEND over firmware_get() in nvidia_attach, because attach runs inside kldload which holds kld_sx exclusive and firmware_get of an unregistered image queues loadimage -> linker_reference_module -> sx_xlock(kld_sx): deadlock (facts checked in tests/fw_depend_test.sh against /usr/src/sys). The module names are <KMOD>_fw (nvidia_gsp_ga10x_fw_fw), proven by fw_stub.awk and by kldxref on the built modules (linker.hints provides nvidia_gsp_ga10x_fw_fw). tests/fw_depend_test.sh 26 PASS, red on the tree without the patch (.round/red-commit2.txt) and on 8 plants. nvidia.ko builds (LLD) with the dependency in its metadata. Test-boot rows R1-R6 in tests/nvidia-fw-depend-testboot/ROWS.md (not armed).
 - Commit 2 round 1 receipt 61ec0a32 (security NO FINDINGS; quality 6, correctness 4, falsification 6, interface 8): all ACCEPTED and fixed (arch sets derived from the build, rc 2 tooling failures, GA100 is a tu10x part, single firmware_get site, man page diagnostics). fw_depend_test now 44 PASS, red without the patch (.round/red-commit2.txt).
+
+## 2026-11-22 (#2373 phase0: the #2417 init-failure fix, cherry-picked)
+- Orchestrator: the v6 boot build must carry the #2417 driver fix. Cherry-picked 525f43b (agent/2417-init-failure-safe, based on a2e0546 of build-host) onto the phase0 line, not merged: its patch-zz-nvidia_init_failure_subr.c, patches/ogkm/patch-zz-2417-...osinit.c, man/nvidia.4, tests/open_dev_failure_test.sh and tests/data/open_dev_harness.c, README and JOURNAL hunks. Only conflict: JOURNAL.md (union).
+- tests/open_dev_failure_test.sh on the result: 23 passed, 0 failed. Fresh archive build (work-2373-v6, base LLD 21.1.8): prepare-tree applies all patches, nvidia.ko 977051971cf2ad8e5ad844035a05565d8aed2d5d086916286c55e16ecd1d3ece, no rm_disable_adapter in the failed: path, osinit guard compiled in.
