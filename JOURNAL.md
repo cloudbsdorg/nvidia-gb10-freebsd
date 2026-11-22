@@ -297,3 +297,6 @@ Gate: round 1 receipt 540b18e5 (24 findings, 23 accepted, quality.7 rejected wit
 
 ## 2026-11-22 merge of a2e0546 (1452fc1) and the README Installation steps 4-6 (Track #2363)
 Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed the both-sides overlap (JOURNAL.md, README.md), receipt d2183dcf93943be2d97aa75c0d874665adfe9f930412bda22fd172ed43ae3142. The commit after it corrects Installation steps 4-6: nvidia.ko no longer loads linux64; the two providers and rc.d/nvidia_linux are installed for nvidia-smi and Linux CUDA/Vulkan; nvidia_linux_mode is set. linux_bridge_test (j) has the Opus B grep test: no 'also loads linux64' or 'plus linux64, linux_common', and the Installation section names nvidia_linux.ko, nvidia_modeset_linux.ko, rc.d/nvidia_linux and nvidia_linux_mode, with two plants.
+
+## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
+- scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
