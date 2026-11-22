@@ -5,9 +5,10 @@
 # build-shim.sh - measure the arm64 compile state of NVIDIA's FreeBSD OS
 # layer: build TREE/nvidia for arm64 and summarise the compiler errors.
 #
-# Usage: scripts/build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm] [TREE] [LOG]
+# Usage: scripts/build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux] [TREE] [LOG]
 #   --module the module directory to build: nvidia (the default),
-#            nvidia-modeset or nvidia-drm. The module may also be named by
+#            nvidia-modeset, nvidia-drm, nvidia-linux (nvidia_linux.ko) or
+#            nvidia-modeset-linux (nvidia_modeset_linux.ko, Track #2363). The module may also be named by
 #            its bare word as the first argument (nvidia-modeset), the form
 #            the README's build recipe uses.
 #   TREE      prepared working tree (from scripts/prepare-tree.sh); defaults
@@ -71,7 +72,9 @@
 # or is absent while objects of unknown origin are present - `make clean`
 # runs before the build. The stamp also records the BSDSRCTOP and the
 # DRMKMODDIR of the nvidia-drm module, whose objects are built against
-# those two trees' headers.
+# those two trees' headers. It also records NV_CORE_LINUX_COMPAT and
+# NVKMS_CORE_LINUX_COMPAT (the legacy Linux bridge switches), so switching
+# either one cleans the objects first.
 # The log is never /tmp; scratch files stay under $WORK/tmp.
 
 set -eu
@@ -92,7 +95,7 @@ SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # core file it replaces.
 MODULE=nvidia
 usage() {
-	echo "usage: build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm] [TREE] [LOG]" >&2
+	echo "usage: build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux] [TREE] [LOG]" >&2
 }
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -128,7 +131,7 @@ done
 # "nvidia-drm" are not plausible TREE paths.
 if [ $# -gt 0 ]; then
 	case $1 in
-	nvidia|nvidia-modeset|nvidia-drm)
+	nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux)
 		MODULE=$1
 		shift
 		;;
@@ -162,8 +165,22 @@ nvidia-drm)
 	RMOBNAME=
 	RMOBJDEF=
 	;;
+nvidia-linux)
+	# The Linux compat provider of nvidia.ko (Track #2363): our own BSD
+	# module, no RM core.
+	MODDIR=nvidia-linux
+	MODKO=nvidia_linux.ko
+	RMOBNAME=
+	RMOBJDEF=
+	;;
+nvidia-modeset-linux)
+	MODDIR=nvidia-modeset-linux
+	MODKO=nvidia_modeset_linux.ko
+	RMOBNAME=
+	RMOBJDEF=
+	;;
 *)
-	echo "build-shim: unknown module: $MODULE (nvidia, nvidia-modeset or nvidia-drm)" >&2
+	echo "build-shim: unknown module: $MODULE (nvidia, nvidia-modeset, nvidia-drm, nvidia-linux or nvidia-modeset-linux)" >&2
 	usage
 	exit 1
 	;;
@@ -287,8 +304,17 @@ STAMPFILE=$TREE/$MODDIR/.gb10-sysdir
 sysver=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" { print $3; exit }' \
     "$SYSDIR/sys/param.h" 2>/dev/null) || sysver=
 [ -n "$sysver" ] || sysver=unknown
+# NV_CORE_LINUX_COMPAT and NVKMS_CORE_LINUX_COMPAT (the legacy in-core Linux
+# bridge, Track #2363) choose which sources the objects are compiled from; make
+# reads them from the environment. They are in the stamp so that switching one
+# cleans first: without them an up-to-date native tree relinks the native objects,
+# prints "build: OK" and the module has no Linuxulator dependency.
+# (The patched Makefiles take the legacy path only for the value "yes", so an
+# unset and an empty switch are the same build and the same stamp line.)
 sysstamp="sysdir $SYSDIR
-version $sysver"
+version $sysver
+nv_core_linux_compat ${NV_CORE_LINUX_COMPAT:-}
+nvkms_core_linux_compat ${NVKMS_CORE_LINUX_COMPAT:-}"
 # The nvidia-drm module's objects are built against the drm-kmod tree's
 # headers and against the FreeBSD source tree BSDSRCTOP points at, so
 # both belong in the stamp: a changed one must clean the objects (the
@@ -306,24 +332,40 @@ if [ -L "$STAMPFILE" ]; then
 fi
 oldstamp=$(cat "$STAMPFILE" 2>/dev/null) || oldstamp=
 need_clean=0
+clean_why=
 if [ "$sysver" = unknown ]; then
 	# An unreadable sys/param.h cannot prove the objects match: clean
 	# always, even when an earlier run left the same "unknown" stamp.
 	need_clean=1
+	clean_why="$SYSDIR/sys/param.h is unreadable, so the objects cannot be proven to match"
 elif [ -n "$oldstamp" ]; then
-	[ "$oldstamp" = "$sysstamp" ] || need_clean=1
+	if [ "$oldstamp" != "$sysstamp" ]; then
+		need_clean=1
+		clean_why=
+		# name every stamp line that differs: the key is its first word; a key missing on one side is <absent>
+		printf '%s\n' "$sysstamp" > "$TMPDIR/stamp-new.$$"
+		printf '%s\n' "$oldstamp" > "$TMPDIR/stamp-old.$$"
+		for _k in $(awk '{ print $1 }' "$TMPDIR/stamp-new.$$" "$TMPDIR/stamp-old.$$" | sort -u); do
+			_n=$(awk -v k="$_k" '$1 == k { f = 1; sub(/^[^ ]* ?/, ""); print; exit } END { if (!f) print "<absent>" }' "$TMPDIR/stamp-new.$$")
+			_o=$(awk -v k="$_k" '$1 == k { f = 1; sub(/^[^ ]* ?/, ""); print; exit } END { if (!f) print "<absent>" }' "$TMPDIR/stamp-old.$$")
+			[ "$_n" = "$_o" ] || clean_why="$clean_why${clean_why:+; }$_k '$_o' -> '$_n'"
+		done
+		rm -f "$TMPDIR/stamp-new.$$" "$TMPDIR/stamp-old.$$"
+		[ -n "$clean_why" ] || clean_why="the stamp format changed"
+	fi
 else
 	# No stamp: any object already in the tree is of unknown origin.
 	for _f in "$TREE/$MODDIR"/*.o "$TREE/$MODDIR"/*.kld "$TREE/$MODDIR"/*.ko; do
 		if [ -e "$_f" ]; then
 			need_clean=1
+			clean_why="no stamp, and objects of unknown origin are in the tree"
 			break
 		fi
 	done
 fi
 : > "$LOG"
 if [ "$need_clean" -eq 1 ]; then
-	echo "build-shim: SYSDIR ($SYSDIR, __FreeBSD_version $sysver) differs from the stamp; running make clean first"
+	echo "build-shim: running make clean first: $clean_why"
 	crc=0
 	env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX \
 	    make -C "$TREE/$MODDIR" \
@@ -347,10 +389,10 @@ printf '%s\n' "$sysstamp" > "$STAMPFILE"
 # would misreport what gets linked (pass-2 u04 #3). Only the disposable
 # TREE copy of the core object is ever touched; NVIDIA's own file under
 # src/ stays pristine.
-# The nvidia-drm module has no RM core: it is NVIDIA's own FreeBSD code
-# against drm-kmod, and no core object is copied into its directory.
-if [ "$MODULE" = nvidia-drm ]; then
-	echo "note: the nvidia-drm module has no RM core object; none is linked in"
+# A module with an empty RMOBNAME (nvidia-drm, nvidia-linux, nvidia-modeset-linux)
+# links no RM core object: nothing is copied into its directory.
+if [ -z "$RMOBNAME" ]; then
+	echo "note: the $MODULE module has no RM core object; none is linked in"
 else
 	RMOBJ=${RMOBJ:-$RMOBJDEF}
 	if [ -f "$RMOBJ" ]; then

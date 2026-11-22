@@ -101,15 +101,25 @@ that user must be trusted with root:
 T=/home/YOUR_USER/work/gb10
 kenv hw.nvidia.registry.EnableGpuFirmware=1
 kldload $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $T/build/tree/nvidia/nvidia.ko            # also loads linux64 and linux_common, for now
+kldload $T/build/tree/nvidia/nvidia.ko            # the Linux providers below are optional
 kldload $T/build/tree/nvidia-modeset/nvidia-modeset.ko
-kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last
+kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last of the native modules; the providers come after
+```
+
+`nvidia-smi` and Linux CUDA and Vulkan need the two Linux provider modules as well (see
+[Linux bridges](#linux-bridges-nvidia_linuxko)). Loading them also loads the Linuxulator
+(`linux64`, `linux_common`). Skip this on a host that runs no Linux binaries:
+
+```sh
+kldload $T/build/tree/nvidia-linux/nvidia_linux.ko
+kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
 ```
 
 ### 5. Check it worked
 
 ```sh
-kldstat                  # the four modules, plus linux64, linux_common, drm and its linuxkpi modules
+kldstat                  # the four modules, drm and its linuxkpi modules; with the providers also
+                         # nvidia_linux, nvidia_modeset_linux, linux64 and linux_common
 dmesg | tail             # nvidia0: <NVIDIA ...> on vgapci0
 ls /dev/nvidia*          # /dev/nvidia0 /dev/nvidiactl
 sleep 30 < /dev/nvidia0 &   # hold the device open: the GPU and GSP start on the first open
@@ -129,9 +139,14 @@ install -o root -g wheel -m 555 \
     $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko \
     $T/build/tree/nvidia/nvidia.ko \
     $T/build/tree/nvidia-modeset/nvidia-modeset.ko \
-    $T/build/tree/nvidia-drm/nvidia-drm.ko /boot/modules/
+    $T/build/tree/nvidia-drm/nvidia-drm.ko \
+    $T/build/tree/nvidia-linux/nvidia_linux.ko \
+    $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko /boot/modules/
+install -o root -g wheel -m 555 $T/rc.d/nvidia_linux /usr/local/etc/rc.d/nvidia_linux
 kldxref /boot/modules
 sysrc kld_list+="nvidia_gsp_ga10x_fw nvidia nvidia-modeset nvidia-drm"   # once: += appends
+sysrc linux_enable=YES         # only for nvidia-smi, Linux CUDA and Vulkan: starts the Linuxulator
+sysrc nvidia_linux_mode=AUTO   # the default; YES or NO overrides it
 grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
     echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
 ```
@@ -139,14 +154,22 @@ grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
 `kld_list` loads in the order given. `nvidia.ko` reads `hw.nvidia.registry.*` from the kernel
 environment when it loads, so the `loader.conf` line takes effect for a `kld_list` load.
 
+The providers are not in `kld_list`: `rc.d/nvidia_linux` loads them after the Linuxulator is up.
+`nvidia_linux_mode` needs setting only to override its default. `AUTO` loads `nvidia_linux.ko`
+when `linux_enable` is on and `nvidia.ko` is loaded, and `nvidia_modeset_linux.ko` when
+`linux_enable` is on and `nvidia-modeset.ko` is loaded; `YES` loads them whenever the script runs;
+`NO` never. Without `linux_enable=YES` (set above) `AUTO` loads nothing. See `nvidia_linux(4)`.
+
 ### What works and what does not
 
 In short (details in the [status table](#what-works-status-2026-11-20) below):
 
 - KMS and Xorg modesetting work, with software rendering only.
 - `nvidia-smi` runs through the Linuxulator: `sh scripts/fetch-nvidia-smi.sh`, plus
-  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi).
-- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator. CUDA also
+  `linux_base-rl9`, and the provider modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
+  (step 6); see [nvidia-smi](#nvidia-smi).
+- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator, with the
+  same provider modules. CUDA also
   needs `nvidia-uvm.ko` from [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd)
   (private; ask for access when you report), built per its README, and Linuxulator additions
   that are in the cloudbsd-src kernel, not in a stock one. Native versions are in progress.
@@ -219,8 +242,10 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
 
 ### Kernel
 
-`nvidia.ko` needs no kernel change: its symbols resolve against a stock 16.0-CURRENT kernel plus
-`linux64.ko` and `linux_common.ko`. An **Ampere Altra** does need kernel workarounds for its PCIe
+`nvidia.ko` needs no kernel change: its symbols resolve against a stock 16.0-CURRENT kernel alone.
+It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
+Linux ioctl bridges are the optional modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
+(see [Linux bridges](#linux-bridges-nvidia_linuxko) below). An **Ampere Altra** does need kernel workarounds for its PCIe
 (32-bit configuration reads, emulation of misaligned device accesses); those are kernel
 changes kept in a separate kernel tree, not here. Other arm64 machines should not need them.
 
@@ -236,8 +261,11 @@ from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_
   (`DRMKMODDIR`), and the FreeBSD source tree it takes its headers from (`BSDSRCTOP`,
   the parent of `SYSDIR` by default).
 - `git`, `gmake`, `zstd`; the base system's `clang` and `ld.lld`.
-- For `nvidia-smi`: the Linuxulator (`linux64.ko`, loaded automatically by `nvidia.ko`) and
-  `linux_base-rl9`.
+- For `nvidia-smi` (and any Linux binary): the Linuxulator (`linux64.ko`), `nvidia_linux.ko` and
+  `linux_base-rl9`. `nvidia.ko` no longer loads the Linuxulator; load `nvidia_linux.ko` for Linux
+  programs, or install `rc.d/nvidia_linux` in `/usr/local/etc/rc.d`, put `nvidia` (and `nvidia_modeset` if you use it) in `kld_list`, set
+  `linux_enable=YES` and let it do it at boot (`nvidia_linux_mode=AUTO` loads a provider only for a
+  driver that is already loaded).
 - An Ampere-generation or newer GPU (RTX 30 series and later, and data-centre parts of the
   same generations). Those run the `gsp_ga10x` firmware this repository builds; Turing needs
   `gsp_tu10x`, which is not built yet.
@@ -319,7 +347,7 @@ environment.
 ```sh
 kenv hw.nvidia.registry.EnableGpuFirmware=1
 kldload $GB10_WORK/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $GB10_WORK/build/tree/nvidia/nvidia.ko    # also loads linux64 and linux_common
+kldload $GB10_WORK/build/tree/nvidia/nvidia.ko    # no Linux layer is loaded
 kldload $GB10_WORK/build/tree/nvidia-modeset/nvidia-modeset.ko
 kldload $GB10_WORK/build/tree/nvidia-drm/nvidia-drm.ko
 dmesg | tail                                      # nvidia0: <NVIDIA ...> on vgapci0
@@ -609,8 +637,10 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
+| `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` |
+| `rc.d/nvidia_linux` | loads the providers when the Linuxulator is configured |
 | `src/nvidia-drm-render/` | `nvidia-drm-render.h`, the render uAPI of nvidia-drm: layouts and ioctl numbers for the kernel work packages and the Mesa `nvdrm` backend; MIT |
-| `man/` | `nvidia_drm_render(4)`, the manual page of that interface |
+| `man/` | `nvidia_drm_render(4)`, the manual page of that interface; `nvidia(4)` and `nvidia_linux(4)`, the native driver and its Linux providers |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
@@ -698,6 +728,39 @@ pinned open-gpu-kernel-modules 580.178.04 checkout and the NVIDIA FreeBSD tarbal
 without them the layout and prepare-tree checks are skipped (a failure under `CI` or
 `REQUIRE_INPUTS`). It runs the table logic (layouts compared with the real `nvos.h`), checks the
 patch hooks, and runs deliberately broken copies of the header and the patch that it must reject.
+
+## Linux bridges (`nvidia_linux.ko`)
+
+`nvidia.ko` and `nvidia-modeset.ko` load and work with no `linux64`, no `linux_common` and no
+`/compat/linux`. (uvm-bsd, `nvidia-uvm.ko`, still depends on the Linuxulator until its own provider
+is split out; that is a follow-up in its repository.) What Linux binaries need lives in two modules
+that belong to the Linuxulator:
+
+| Module | Serves | Depends on |
+|---|---|---|
+| `nvidia_linux.ko` | Linux ioctls 0x4600-0x46ff, Linux device names of `/dev/nvidiactl` and `/dev/nvidiaN` | `nvidia` (1 to 2), `linux64elf` (`linux64` on amd64), `linux_common` |
+| `nvidia_modeset_linux.ko` | the NVKMS Linux ioctl and the `nvidia-modeset` device name | `nvidia_modeset`, `linux64elf` (`linux64` on amd64), `linux_common` |
+
+On amd64 only the 64-bit Linuxulator is served: a 32-bit Linux binary gets no NVIDIA ioctl
+translation from these modules.
+
+```sh
+sh scripts/build-shim.sh --module=nvidia-linux           # nvidia_linux.ko
+sh scripts/build-shim.sh --module=nvidia-modeset-linux   # nvidia_modeset_linux.ko
+kldload $GB10_WORK/build/tree/nvidia/nvidia.ko                          # no Linux layer
+kldload $GB10_WORK/build/tree/nvidia-linux/nvidia_linux.ko              # loads linux64 and linux_common, then bridges nvidia
+# or, once the modules are installed in /boot/modules and kldxref has run: kldload nvidia_linux
+kldunload nvidia                  # refused (Device busy) while nvidia_linux is loaded
+kldunload nvidia_linux            # unload the bridge first
+```
+
+`rc.d/nvidia_linux` loads them at boot when `linux_enable=YES` and the native module is already
+loaded (`nvidia_linux_mode=AUTO`, `YES` or `NO`). The old behaviour, in which `nvidia.ko` itself
+pulls in the Linuxulator, is still reachable: set `NV_CORE_LINUX_COMPAT=yes` in the environment of
+`scripts/build-shim.sh` for `nvidia.ko` and `NVKMS_CORE_LINUX_COMPAT=yes` for `nvidia-modeset.ko`
+(for example `NV_CORE_LINUX_COMPAT=yes sh scripts/build-shim.sh --module=nvidia`; the switches are
+in the build stamp, so changing one cleans the objects first). `tests/linux_bridge_test.sh` checks the
+module metadata, the imports and the fuzz 0 patch apply; see `nvidia_linux(4)` and `nvidia(4)`.
 
 ## Licence
 

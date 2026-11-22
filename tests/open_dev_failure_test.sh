@@ -269,7 +269,14 @@ if cmp -s "$SUBR" "$TMPD/subr.plant.c"; then bad "plant: post-init jump changed 
 else post_init_jump "$TMPD/subr.plant.c"; [ $? -eq 0 ] && ok "plant: a goto failed: after the init succeeded goes red" || bad "plant: post-init jump not seen"; fi
 
 echo "== docs (man/nvidia.4, README)"
-if mandoc -T lint "$repo/man/nvidia.4" > "$TMPD/lint.out" 2>&1 && [ ! -s "$TMPD/lint.out" ]; then
+# Only the cross-references to this repository's own pages may be reported
+# (not installed where mandoc looks): nvidia_linux(4) and nvidia_drm_render(4).
+# mandoc must exit 0, or exit non-zero having printed only those lines: a
+# failed run that prints nothing does not pass.
+mandoc -T lint "$repo/man/nvidia.4" > "$TMPD/lint.raw" 2>&1
+_lrc=$?
+grep -v -E 'STYLE: referenced manual not found: Xr (nvidia_linux|nvidia_drm_render) 4' "$TMPD/lint.raw" > "$TMPD/lint.out"
+if [ ! -s "$TMPD/lint.out" ] && { [ "$_lrc" -eq 0 ] || [ -s "$TMPD/lint.raw" ]; }; then
 	ok "man/nvidia.4 is mandoc -T lint clean"
 else
 	bad "man/nvidia.4 does not lint clean"; sed 's/^/    /' "$TMPD/lint.out"

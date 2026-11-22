@@ -27,6 +27,63 @@ The GPU is initialised, and its GSP (GPU System Processor) firmware is
 started, on the first open of
 .Pa /dev/nvidia Ns Ar N ,
 and it is shut down again when the last open closes.
+.Pp
+The module is native: it has no
+.Dv MODULE_DEPEND
+on the Linuxulator
+.Pq Dv linux , linux64elf , linux_common
+and imports no Linux symbol, so it loads and works on a host with no Linux
+layer.
+.Sh LINUX COMPATIBILITY
+Linux binaries (the Linux
+.Nm nvidia-smi ,
+Linux CUDA, a Linux Vulkan driver) reach the driver through
+.Xr nvidia_linux 4 ,
+a separate module that belongs to the Linuxulator.
+The core only announces its devices:
+.Bd -literal -offset indent
+#include "nvidia_bridge.h"
+
+int  nvidia_bridge_register(const struct nvidia_bridge_ops *);
+int  nvidia_bridge_unregister(const struct nvidia_bridge_ops *);
+.Ed
+.Pp
+A provider registers a table of two functions,
+.Fn nbo_cdev_add
+and
+.Fn nbo_cdev_del ,
+with the interface version
+.Dv NVIDIA_BRIDGE_KPI_VERSION
+(1) and the size of the table.
+The core refuses another version or size
+.Pq Er EINVAL ,
+and a second provider
+.Pq Er EBUSY .
+A core built with
+.Ev NV_CORE_LINUX_COMPAT
+carries the Linux bridge itself and refuses every provider
+.Pq Er ENXIO .
+On registration the provider is told about the devices that already exist.
+The interface is versioned apart from the module: any change to the layout of
+either structure raises
+.Dv NVIDIA_BRIDGE_KPI_VERSION ,
+and there is no compatible extension.
+.Pp
+Because
+.Xr nvidia_linux 4
+depends on
+.Nm ,
+.Nm
+cannot be unloaded while the provider is loaded:
+.Xr kldunload 8
+fails with
+.Er EBUSY
+and the module stays; unload the provider first.
+.Pp
+To build the old in-core Linux bridge, which makes
+.Nm
+depend on the Linuxulator again, build with
+.Ev NV_CORE_LINUX_COMPAT Ns = Ns Cm yes .
 .Sh FIRMWARE
 The GPU runs on GSP firmware, which the driver gets from
 .Xr firmware 9 .
@@ -81,6 +138,8 @@ of the driver.
 .El
 .Sh FILES
 .Bl -tag -width indent -compact
+.It Pa /dev/nvidiactl
+.It Pa /dev/nvidia Ns Ar N
 .It Pa /boot/modules/nvidia_gsp_ga10x_fw.ko
 .It Pa /boot/modules/nvidia_gsp_tu10x_fw.ko
 (amd64 only)
@@ -126,6 +185,8 @@ Load
 as root before the first open.
 .El
 .Sh SEE ALSO
+.Xr nvidia_drm_render 4 ,
+.Xr nvidia_linux 4 ,
 .Xr loader.conf 5 ,
 .Xr kldload 8 ,
 .Xr kldstat 8 ,

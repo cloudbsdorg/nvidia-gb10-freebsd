@@ -1,0 +1,161 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 21, 2026
+.Dt NVIDIA_LINUX 4
+.Os
+.Sh NAME
+.Nm nvidia_linux ,
+.Nm nvidia_modeset_linux
+.Nd Linux compatibility providers of the NVIDIA GPU driver
+.Sh SYNOPSIS
+To load the providers at boot, add to
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+nvidia_linux_load="YES"
+nvidia_modeset_linux_load="YES"
+.Ed
+.Pp
+or, in
+.Xr rc.conf 5 :
+.Bd -literal -offset indent
+kld_list="nvidia nvidia_modeset"
+linux_enable="YES"
+nvidia_linux_mode="AUTO"
+.Ed
+.Sh DESCRIPTION
+.Xr nvidia 4
+and the display module
+.Pa nvidia-modeset.ko
+load and work with no Linux layer: no
+.Pa linux64.ko ,
+no
+.Pa linux_common.ko
+and no
+.Pa /compat/linux .
+These two modules are the part that Linux binaries need, and they belong to the
+Linuxulator.
+They are present only when they are loaded.
+The unified-memory module
+.Pa nvidia-uvm.ko
+still depends on the Linuxulator itself until its own provider is split out.
+.Bl -tag -width indent
+.It Nm nvidia_linux
+Translates the Linux NVIDIA ioctl numbers
+.Pq 0x4600 to 0x46ff
+into the native encoding, and tells the Linuxulator the device names and the
+major and minor numbers of
+.Pa /dev/nvidiactl
+and
+.Pa /dev/nvidia Ns Ar N ,
+so that
+.Xr stat 2
+and
+.Pa /proc
+show them to Linux programs.
+The ioctl handler answers only for descriptors that are one of these devices,
+checked once when the call enters; for any other descriptor it returns
+.Er ENOIOCTL
+and the Linuxulator carries on with its other handlers.
+It uses the compat provider interface that
+.Xr nvidia 4
+exports, and is told about each device as it appears.
+It may be loaded before or after the devices exist.
+.It Nm nvidia_modeset_linux
+Does the same for the display ioctl of
+.Pa nvidia-modeset.ko
+and for the
+.Pa nvidia-modeset
+device name.
+.El
+.Pp
+Both depend on the native module they serve and on
+.Dv linux64elf
+(on arm64; on amd64 the 64-bit Linuxulator interface is
+.Dv linux64 )
+and
+.Dv linux_common ,
+so loading one loads the Linuxulator.
+On amd64 only the 64-bit Linuxulator is served: a 32-bit Linux binary gets no
+NVIDIA ioctl translation from these modules.
+A legacy build
+.Pq Ev NV_CORE_LINUX_COMPAT
+keeps the old in-core bridge.
+.Sh LOADING
+.Bl -tag -width indent
+.It Pa /usr/local/etc/rc.d/nvidia_linux
+Loads the providers when the Linuxulator is configured.
+.Va nvidia_linux_mode
+is one of:
+.Bl -tag -width indent -compact
+.It Cm AUTO
+the default; load a provider when
+.Va linux_enable
+is
+.Cm YES
+and the native module it bridges is already loaded
+.It Cm YES
+always load them
+.It Cm NO
+never load them
+.El
+.El
+.Pp
+A host with
+.Va linux_enable
+off and no provider loaded has no Linux code in its GPU stack.
+The old behaviour, in which loading
+.Xr nvidia 4
+loaded the Linuxulator, is reachable by building the core with
+.Ev NV_CORE_LINUX_COMPAT Ns = Ns Cm yes
+and
+.Ev NVKMS_CORE_LINUX_COMPAT Ns = Ns Cm yes .
+Do not load a provider with a core built that way: a legacy
+.Nm nvidia
+refuses a provider
+.Pq Er ENXIO ,
+and a legacy
+.Pa nvidia-modeset.ko
+carries the same bridge, so loading
+.Nm nvidia_modeset_linux
+beside it would register a second handler for the same ioctl.
+.Pp
+Listing the providers in
+.Va kld_list
+loads them, and with them the Linuxulator, whatever
+.Va nvidia_linux_mode
+says.
+The rc script skips a provider that is already loaded, and says so in
+.Cm AUTO
+mode when it skips one because the driver is not loaded yet.
+.Sh UNLOADING
+The providers depend on the native modules, so
+.Xr kldunload 8
+of a native module is refused
+.Pq Er EBUSY ,
+and the module stays loaded, while its provider is loaded.
+.Xr kldunload 8
+takes the file name
+.Pq Pa nvidia-modeset ,
+not the module name.
+Unload in the reverse order:
+.Bd -literal -offset indent
+kldunload nvidia_modeset_linux
+kldunload nvidia_linux
+kldunload nvidia-modeset
+kldunload nvidia
+.Ed
+.Pp
+Unloading a provider waits for any Linux ioctl that is inside its handler,
+as the Linuxulator holds its handler lock while it calls one.
+.Sh FILES
+.Bl -tag -width indent -compact
+.It Pa /boot/modules/nvidia_linux.ko
+.It Pa /boot/modules/nvidia_modeset_linux.ko
+.It Pa /usr/local/etc/rc.d/nvidia_linux
+.El
+.Sh SEE ALSO
+.Xr linux 4 ,
+.Xr nvidia 4 ,
+.Xr kldload 8 ,
+.Xr kldunload 8

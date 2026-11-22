@@ -1,0 +1,14 @@
+--- nvidia-modeset/Makefile.orig
++++ nvidia-modeset/Makefile
+@@ -38,6 +38,11 @@
+ SPECTRE_V2_RETPOLINE ?= 1
+ CFLAGS += -DNV_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
+ 
++# Track #2363: NVKMS_CORE_LINUX_COMPAT=yes builds the old in-core Linux bridge.
++.if defined(NVKMS_CORE_LINUX_COMPAT) && ${NVKMS_CORE_LINUX_COMPAT} == "yes"
++CFLAGS += -DNVKMS_CORE_LINUX_COMPAT
++.endif
++
+ include ../common/optional-cflags.mk
+ 
+ .include <bsd.kmod.mk>

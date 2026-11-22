@@ -202,6 +202,33 @@ copy_repo_src() {
 	    >> "$TREE/.prepared.patches"
 }
 
+# copy_bridge_src - the Linux compat provider KPI (Track #2363): the core side
+# (nvidia_bridge.h and nvidia_bridge.c) goes to TREE/nvidia/, where the zz
+# Makefile patch adds nvidia_bridge.c to SRCS; the two provider modules get
+# their own directories, TREE/nvidia-linux (nvidia_linux.ko) and
+# TREE/nvidia-modeset-linux (nvidia_modeset_linux.ko), each with the shared
+# headers. Every copy is made by copy_one, which records the SOURCE file in the
+# manifest once per destination. A missing file fails the run (set -e).
+# Time:  O(F) copy and sha256 runs for the F copies made.
+# Space: O(F) manifest lines.
+copy_one() {	# copy_one <path under src/gb10-linux-bridge> <path under TREE>
+	cp "$REPO/src/gb10-linux-bridge/$1" "$TREE/$2"
+	printf '%s  %s\n' "src/gb10-linux-bridge/$1" \
+	    "$(sha256 -q "$REPO/src/gb10-linux-bridge/$1")" >> "$TREE/.prepared.patches"
+}
+copy_bridge_src() {
+	mkdir -p "$TREE/nvidia" "$TREE/nvidia-linux" "$TREE/nvidia-modeset-linux"
+	copy_one nvidia_bridge.h nvidia/nvidia_bridge.h
+	copy_one nvidia_bridge.c nvidia/nvidia_bridge.c
+	copy_one nvidia_bridge.h nvidia-linux/nvidia_bridge.h
+	copy_one nvbridge_ioctl.h nvidia-linux/nvbridge_ioctl.h
+	copy_one nvidia-linux/Makefile nvidia-linux/Makefile
+	copy_one nvidia-linux/nvidia_linux_mod.c nvidia-linux/nvidia_linux_mod.c
+	copy_one nvbridge_ioctl.h nvidia-modeset-linux/nvbridge_ioctl.h
+	copy_one nvidia-modeset-linux/Makefile nvidia-modeset-linux/Makefile
+	copy_one nvidia-modeset-linux/nvidia_modeset_linux_mod.c nvidia-modeset-linux/nvidia_modeset_linux_mod.c
+}
+
 # finalize_marker - rewrite TREE/.prepared at the very end: the gb10 marker
 # line, "state done", then the applied-patch manifest, via a temp file and
 # mv(1) in the same directory, so a concurrent reader (build-shim.sh) never
@@ -249,6 +276,7 @@ tar -xJf "$TARBALL" -C "$TREE" --strip-components 2 "$TOPDIR/src/"
 tar -xJf "$TARBALL" -C "$TREE" --strip-components 1 "$TOPDIR/firmware/"
 apply_patches
 copy_repo_src
+copy_bridge_src
 finalize_marker
 
 echo "prepare-tree: $TREE ready"

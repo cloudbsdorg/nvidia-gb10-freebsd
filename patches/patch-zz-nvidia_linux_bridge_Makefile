@@ -1,0 +1,22 @@
+--- nvidia/Makefile.orig
++++ nvidia/Makefile
+@@ -47,6 +47,19 @@
+ OBJS+=		${RMOBJ}
+ NO_OBJ=		true
+ 
++# Track #2363: the compat provider KPI (nvidia_bridge.h). nvidia_linux.ko, the
++# Linux bridge owned by the Linuxulator, takes these two symbols; arm64
++# modules export only what EXPORT_SYMS names. NV_CORE_LINUX_COMPAT=yes builds
++# the old in-core Linux bridge instead (it makes nvidia.ko depend on the
++# Linuxulator again).
++SRCS+=		nvidia_bridge.c
++.if ${MACHINE_CPUARCH} == "aarch64"
++EXPORT_SYMS+=	nvidia_bridge_register nvidia_bridge_unregister
++.endif
++.if defined(NV_CORE_LINUX_COMPAT) && ${NV_CORE_LINUX_COMPAT} == "yes"
++CFLAGS+=	-DNV_CORE_LINUX_COMPAT
++.endif
++
+ stdarg.h:
+ 	@ln -s machine/stdarg.h stdarg.h
+ 

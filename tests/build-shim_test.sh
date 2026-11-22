@@ -66,6 +66,13 @@
 #                            (the stamp records it)
 #   (r) drm module:       an unchanged DRMKMODDIR does NOT clean
 #   (s) drm module:       an unchanged BSDSRCTOP does NOT clean either
+#   (t) legacy switches:  switching NV_CORE_LINUX_COMPAT (nvidia) or
+#                            NVKMS_CORE_LINUX_COMPAT (nvidia-modeset) on or
+#                            off cleans the objects first, an unchanged
+#                            switch does not (an up-to-date native tree used
+#                            to relink as "legacy"); a stamp from before the
+#                            switches existed is cleaned with a message that
+#                            names them, never an empty one
 #
 # Run: sh tests/build-shim_test.sh
 
@@ -511,6 +518,60 @@ if [ "$rc" -eq 0 ] && grep -q '^tampered4$' "$DRMKO"; then
 else
 	fail "(s) drm module, unchanged BSDSRCTOP: rc=$rc ko=$(cat "$DRMKO" 2>/dev/null)"
 fi
+
+# (t) the legacy Linux bridge switches are part of the stamp. A tampered
+# object survives only while the switch is unchanged.
+# run_shim_env <sysdir> <VAR=value|-> <module-args...>
+run_shim_env() {
+	rc=0
+	_rse_sys=$1
+	_rse_var=$2
+	shift 2
+	if [ "$_rse_var" = - ]; then
+		GB10_WORK="$TESTROOT" SYSDIR="$_rse_sys" \
+			sh "$SCRIPT" "$@" "$TREE" "$LOG" >"$TESTROOT/out" 2>"$TESTROOT/err" || rc=$?
+	else
+		env "$_rse_var" GB10_WORK="$TESTROOT" SYSDIR="$_rse_sys" \
+			sh "$SCRIPT" "$@" "$TREE" "$LOG" >"$TESTROOT/out" 2>"$TESTROOT/err" || rc=$?
+	fi
+}
+t_case() { # <dir> <ko> <module> <VAR>
+	_td=$1 _tko=$2 _tmod=$3 _tvar=$4
+	write_makefile good "$_td" "$_tko"
+	t_ok=1
+	run_shim_env "$SYSA" - --module="$_tmod"
+	[ "$rc" -eq 0 ] || t_ok=0
+	printf 'tampered-t\n' > "$TREE/$_td/fake.o"
+	run_shim_env "$SYSA" - --module="$_tmod"
+	grep -q '^tampered-t$' "$TREE/$_td/$_tko" || { t_ok=0; echo "  unchanged switch cleaned" >&2; }
+	run_shim_env "$SYSA" "$_tvar=yes" --module="$_tmod"
+	if grep -q '^tampered-t$' "$TREE/$_td/$_tko" || [ "$rc" -ne 0 ]; then t_ok=0; echo "  switching on did not clean (rc=$rc)" >&2; fi
+	grep -q "running make clean first:.*$(echo "$_tvar" | tr 'A-Z' 'a-z')" "$TESTROOT/out" || { t_ok=0; echo "  the clean message does not name $_tvar: $(head -2 "$TESTROOT/out")" >&2; }
+	grep -q "^obj $SYSA$" "$TREE/$_td/$_tko" || t_ok=0
+	printf 'tampered-t\n' > "$TREE/$_td/fake.o"
+	run_shim_env "$SYSA" "$_tvar=yes" --module="$_tmod"
+	grep -q '^tampered-t$' "$TREE/$_td/$_tko" || { t_ok=0; echo "  unchanged (on) switch cleaned" >&2; }
+	run_shim_env "$SYSA" - --module="$_tmod"
+	if grep -q '^tampered-t$' "$TREE/$_td/$_tko" || [ "$rc" -ne 0 ]; then t_ok=0; echo "  switching off did not clean (rc=$rc)" >&2; fi
+	if [ "$t_ok" -eq 1 ]; then
+		ok "(t) $_tvar: switching it cleans first, an unchanged value does not"
+	else
+		fail "(t) $_tvar: stamp=$(tr '\n' '|' < "$TREE/$_td/.gb10-sysdir" 2>/dev/null)"
+	fi
+}
+# an old two-line stamp (no switch lines): cleaned, and the message names the missing lines
+write_makefile good nvidia nvidia.ko
+run_shim_env "$SYSA" - --module=nvidia
+printf 'sysdir %s\nversion 1600001\n' "$SYSA" > "$TREE/nvidia/.gb10-sysdir"
+printf 'tampered-old\n' > "$TREE/nvidia/fake.o"
+run_shim_env "$SYSA" - --module=nvidia
+if [ "$rc" -eq 0 ] && ! grep -q '^tampered-old$' "$TREE/nvidia/nvidia.ko" && grep -q "nv_core_linux_compat '<absent>'" "$TESTROOT/out" && ! grep -q 'first: *$' "$TESTROOT/out"; then
+	ok "(t) an old-format stamp is cleaned and the message names the absent switch lines"
+else
+	fail "(t) old-format stamp: rc=$rc out=$(head -3 "$TESTROOT/out")"
+fi
+t_case nvidia nvidia.ko nvidia NV_CORE_LINUX_COMPAT
+t_case nvidia-modeset nvidia-modeset.ko nvidia-modeset NVKMS_CORE_LINUX_COMPAT
 
 echo "passed: $PASSED failed: $FAILED"
 if [ "$FAILED" -gt 0 ]; then

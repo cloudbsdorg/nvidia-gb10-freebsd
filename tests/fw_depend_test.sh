@@ -320,7 +320,15 @@ attach_has_get "$SUBR"; [ $? -eq 1 ] && ok "nvidia_attach() does not call firmwa
 awk '{ print } /^int nvidia_attach\(/ { print "    (void)firmware_get(\"x\");" }' "$SUBR" > "$TMPD/attach.plant.c"
 attach_has_get "$TMPD/attach.plant.c"; [ $? -eq 0 ] && ok "plant: firmware_get() added to nvidia_attach goes red" || bad "plant: firmware_get in attach not seen"
 
-if mandoc -T lint "$MAN" > "$TMPD/lint.out" 2>&1 && [ ! -s "$TMPD/lint.out" ]; then ok "man/nvidia.4 is mandoc -T lint clean"; else bad "man/nvidia.4 does not lint clean"; sed 's/^/    /' "$TMPD/lint.out"; fi
+# Cross-references to this repository's own pages (nvidia_linux(4) from #2363,
+# nvidia_drm_render(4)) are not installed where mandoc looks; only that
+# message is allowed (the filter of tests/linux_bridge_test.sh, minus the
+# self-reference). mandoc must exit 0, or exit non-zero having printed only
+# those lines: a failed run that prints nothing does not pass.
+mandoc -T lint "$MAN" > "$TMPD/lint.raw" 2>&1
+_lrc=$?
+grep -v -E 'STYLE: referenced manual not found: Xr (nvidia_linux|nvidia_drm_render) 4' "$TMPD/lint.raw" > "$TMPD/lint.out"
+if [ ! -s "$TMPD/lint.out" ] && { [ "$_lrc" -eq 0 ] || [ -s "$TMPD/lint.raw" ]; }; then ok "man/nvidia.4 is mandoc -T lint clean"; else bad "man/nvidia.4 does not lint clean"; sed 's/^/    /' "$TMPD/lint.out"; fi
 for w in nvidia_gsp_ga10x_fw_fw nvidia_gsp_tu10x_fw_fw kldxref; do
 	grep -q "$w" "$MAN" && ok "man/nvidia.4 names $w" || bad "man/nvidia.4 does not name $w"
 done
