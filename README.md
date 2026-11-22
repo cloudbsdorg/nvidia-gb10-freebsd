@@ -11,6 +11,150 @@ for open-gpu-kernel-modules). This repository holds the build scripts, our patch
 code (`patches/`, unified diffs, so they carry the changed lines and their context), a few
 small source files of our own, and the tests.
 
+## Installation
+
+Use the `agent/2088-build-host` branch; `main` is behind.
+
+### 1. What you need
+
+- FreeBSD 16.0-CURRENT on arm64, and the source for the kernel you are running
+  (`/usr/src/sys` by default; `SYSDIR=` to override).
+- An RTX 30-series or newer GPU (Ampere generation or later). Turing (RTX 20) is not supported
+  yet.
+- `pkg install git gmake zstd`. Use the base system's `clang` and `ld.lld`. The scripts here
+  set their own `PATH` with `/usr/bin` ahead of `/usr/local/bin`. When you build a module by
+  hand, keep `/usr/bin` first too: with binutils' GNU `ld` from `/usr/local/bin` the module
+  builds but will not load.
+- For `nvidia-drm`: the drm-kmod source tree the installed `drm.ko` was built from
+  (`DRMKMODDIR=`, an absolute path), and the FreeBSD source headers (`BSDSRCTOP=`, the parent
+  of `SYSDIR` by default).
+- A host with an Ampere Altra CPU (not to be confused with the GPU generation) needs PCIe
+  workarounds in the kernel. They are in a separate kernel tree, not in this repository; ask
+  for it when you report (see the end of this section). Other arm64 machines do not need them.
+
+### 2. Get the code and sources
+
+As a normal user. Work files go under `~/work/gb10`, or under `GB10_WORK=` (an absolute path).
+
+```sh
+git clone -b agent/2088-build-host https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git
+cd nvidia-gb10-freebsd
+sh scripts/fetch-sources.sh      # NVIDIA FreeBSD tarball + open-gpu-kernel-modules, checked against SOURCES
+sh scripts/prepare-tree.sh       # prints "prepare-tree: .../build/tree ready"
+```
+
+### 3. Build, in this order
+
+Run the commands one at a time and check each one's result before the next.
+
+```sh
+sh scripts/build-rmcore.sh
+sh scripts/build-shim.sh; echo $?    # pass 1: expected to fail and print 3, see below
+sh scripts/build-stubs.sh        # prints "still undefined vs OS layer: 0"
+sh scripts/build-shim.sh         # pass 2: prints "build: OK"
+sh scripts/build-firmware.sh
+sh scripts/build-rmcore.sh --core=nvidia-modeset
+sh scripts/build-shim.sh --module=nvidia-modeset
+DRMKMODDIR=/path/to/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm
+sh tests/kmod_symbols_test.sh
+```
+
+Pass 1 has no arm64 RM core to link yet, so it must fail exactly like this, and the script
+must exit 3 (the `rc 1` in its last line is make's status, not the script's):
+
+```
+errors: 1
+ld: error: nv-kernel.o is incompatible with aarch64elf
+build: FAILED (make rc 1)
+```
+
+Any other error, or any other failing step, means stop and report it (see the end of this
+section). The modules land under `$GB10_WORK/build/tree/`: `nvidia/nvidia.ko`,
+`nvidia-modeset/nvidia-modeset.ko`, `nvidia-drm/nvidia-drm.ko` and
+`firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko`. The [Build](#build) section explains each step.
+
+### 4. Test-load safely (root)
+
+Work over SSH or a serial console: once the driver loads, a monitor on the NVIDIA card goes
+dark until a program (Xorg, or another KMS client) sets a mode on it. A console on another GPU
+is not affected.
+
+Use a one-shot boot environment, so that a panic reboots into your normal one. The second
+setting keeps a GENERIC kernel from stopping in the debugger instead of rebooting. A hang that
+does not panic still needs a power cycle; the one-shot boot environment then still brings back
+your normal one.
+
+```sh
+bectl create nvidia-test
+bectl mount nvidia-test /mnt
+printf '%s\n' 'kern.panic_reboot_wait_time="5"' 'debug.debugger_on_panic="0"' >> /mnt/boot/loader.conf
+bectl umount nvidia-test
+bectl activate -t nvidia-test
+shutdown -r now
+```
+
+In that boot environment, as root. `T` is the `GB10_WORK` of the user who built the modules
+(`~/work/gb10` by default); replace `YOUR_USER`. These commands load files that user owns, so
+that user must be trusted with root:
+
+```sh
+T=/home/YOUR_USER/work/gb10
+kenv hw.nvidia.registry.EnableGpuFirmware=1
+kldload $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
+kldload $T/build/tree/nvidia/nvidia.ko            # also loads linux64 and linux_common, for now
+kldload $T/build/tree/nvidia-modeset/nvidia-modeset.ko
+kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last
+```
+
+### 5. Check it worked
+
+```sh
+kldstat                  # the four modules, plus linux64, linux_common, drm and its linuxkpi modules
+dmesg | tail             # nvidia0: <NVIDIA ...> on vgapci0
+ls /dev/nvidia*          # /dev/nvidia0 /dev/nvidiactl
+sleep 30 < /dev/nvidia0 &   # hold the device open: the GPU and GSP start on the first open
+sysctl hw.nvidia.gpus.0  # firmware and VBIOS versions, while the device is held open
+```
+
+### 6. Load at boot
+
+First reboot back into your normal boot environment (the one-shot one is gone after a reboot;
+`bectl list` shows `NR` on the active one). Keep a copy of it to boot back into if the
+boot-time load fails, then install the modules as root-owned files:
+
+```sh
+bectl create pre-nvidia
+T=/home/YOUR_USER/work/gb10
+install -o root -g wheel -m 555 \
+    $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko \
+    $T/build/tree/nvidia/nvidia.ko \
+    $T/build/tree/nvidia-modeset/nvidia-modeset.ko \
+    $T/build/tree/nvidia-drm/nvidia-drm.ko /boot/modules/
+kldxref /boot/modules
+sysrc kld_list+="nvidia_gsp_ga10x_fw nvidia nvidia-modeset nvidia-drm"   # once: += appends
+grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
+    echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
+```
+
+`kld_list` loads in the order given. `nvidia.ko` reads `hw.nvidia.registry.*` from the kernel
+environment when it loads, so the `loader.conf` line takes effect for a `kld_list` load.
+
+### What works and what does not
+
+In short (details in the [status table](#what-works-status-2026-11-20) below):
+
+- KMS and Xorg modesetting work, with software rendering only.
+- `nvidia-smi` runs through the Linuxulator: `sh scripts/fetch-nvidia-smi.sh`, plus
+  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi).
+- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator. CUDA also
+  needs `nvidia-uvm.ko` from [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd)
+  (private; ask for access when you report), built per its README, and Linuxulator additions
+  that are in the cloudbsd-src kernel, not in a stock one. Native versions are in progress.
+- There are no published packages yet.
+- To report a problem, open an issue at
+  <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the failing step's output,
+  `dmesg` and `uname -a`.
+
 ## What works (status 2026-11-20)
 
 | | Status |
@@ -474,3 +618,21 @@ fetched at build time, keeps NVIDIA's licences: MIT for open-gpu-kernel-modules,
 licence for the FreeBSD driver package and the firmware. `src/nvidia-drm-render/nvidia-drm-render.h`
 is MIT, because its layouts follow Mesa's MIT nouveau uAPI header and it is meant to be included by
 NVIDIA's MIT nvidia-drm sources and by Mesa. Provenance: [`PROVENANCE.md`](PROVENANCE.md).
+
+## libnvrm and nvrm-info
+
+`lib/libnvrm/` is the shared user-space layer for native NVIDIA access: C, BSD-2-Clause, no
+LinuxKPI and no Linux layer. `nvrm_enumerate()` opens `/dev/nvidiactl`, checks that the kernel
+module is the RM version the library was built for (580.178.04), lists and attaches the probed
+GPUs and describes each one (PCI identity, UUID, architecture, SM version, GPC/TPC/SM counts,
+class list, VRAM, BAR1, page sizes, capability flags). Every value is available or carries a
+reason; the layers are abstract device, class, family (a generation table keyed by class ids)
+and board decorators (none yet). Backends are providers: `rm` and `fake`
+(`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
+capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; this
+version has no call that maps device memory). No GPU is a success with zero devices. The interface is provisional
+until the first package release. A context is not thread-safe, and a forked child must only
+`nvrm_close` it (see `nvrm(3)`). `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
+`lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
+the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
+the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.

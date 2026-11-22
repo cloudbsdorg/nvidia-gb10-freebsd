@@ -1,0 +1,37 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Symbol versions of libnvrm.so.1.  Additive changes add to NVRM_1.0's
+ * successor (NVRM_1.1, ...); a new major keeps the old library installed.
+ *
+ * PROVISIONAL: NVRM_1.0 is frozen at the first package release and not
+ * before.  Until then the structures behind these calls may still change.
+ */
+NVRM_1.0 {
+	global:
+		nvrm_enumerate;
+		nvrm_close;
+		nvrm_backend_name;
+		nvrm_rm_running_version;
+		nvrm_device_count;
+		nvrm_device_get;
+		nvrm_device_info_get;
+		nvrm_device_refresh;
+		nvrm_strerror;
+		nvrm_error_id;
+		nvrm_reason_id;
+		nvrm_reason_text;
+		nvrm_source_name;
+		nvrm_cap_name;
+		nvrm_info_nfields;
+		nvrm_info_field;
+		nvrm_json_document;
+		nvrm_json_header;
+		nvrm_json_device;
+		nvrm_json_end;
+		nvrm_json_error;
+		nvrm_json_schema;
+	local:
+		*;
+};
