@@ -41,10 +41,12 @@
 #include <class/cl2080.h>
 #include <ctrl/ctrl0000/ctrl0000gpu.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
+#include <ctrl/ctrl2080/ctrl2080bios.h>
 #include <ctrl/ctrl2080/ctrl2080bus.h>
 #include <ctrl/ctrl2080/ctrl2080fb.h>
 #include <ctrl/ctrl2080/ctrl2080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080gr.h>
+#include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_internal.h"

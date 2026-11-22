@@ -122,8 +122,16 @@ nvrm_info_init(nvrm_device_info *info)
 	unsigned i;
 
 	memset(info, 0, sizeof(*info));
-	for (i = 0; i < nvrm_nfields; i++)
-		*nvrm_field_reason(info, &nvrm_fields[i]) = NVRM_R_NOT_QUERIED;
+	for (i = 0; i < nvrm_nfields; i++) {
+		if (nvrm_fields[i].kind == NVRM_K_VERSION) {
+			nvrm_version_field *v = (nvrm_version_field *)
+			    ((char *)info + nvrm_fields[i].offset);
+
+			v->version.reason = nvrm_reason_id(NVRM_R_NOT_QUERIED);
+		} else
+			*nvrm_field_reason(info, &nvrm_fields[i]) =
+			    NVRM_R_NOT_QUERIED;
+	}
 	for (i = 0; i < NVRM_NCAPS; i++)
 		info->caps[i].reason = NVRM_R_NOT_QUERIED;
 }
@@ -174,6 +182,23 @@ get_u64(const nvrm_backend_ops *ops, nvrm_gpu *g, nvrm_u64 *f,
 		avail(f, v * scale, prop_source[p]);
 }
 
+static void
+get_version(const nvrm_backend_ops *ops, nvrm_gpu *g, nvrm_version_field *f,
+    enum nvrm_sprop p, unsigned base)
+{
+	char raw[NVRM_VERSION_STRING_MAX + 1];
+	int r;
+
+	r = ops->gpu_str(g, p, raw, sizeof(raw));
+	f->source = NVRM_S_RM;
+	if (r != 0) {
+		memset(&f->version, 0, sizeof(f->version));
+		f->version.reason = nvrm_reason_id(r);
+		return;
+	}
+	(void)nvrm_version_parse(raw, base, &f->version);
+}
+
 /* Layer 0, the abstract device: identity. */
 static void
 query_identity(const nvrm_backend_ops *ops, nvrm_gpu *g,
@@ -197,6 +222,20 @@ query_identity(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	    sizeof(info->uuid.value));
 	info->uuid.reason = r;
 	info->uuid.source = NVRM_S_RM;
+}
+
+static int
+nvrm_compute_from_table(nvrm_device_info *info)
+{
+	uint32_t major, minor;
+
+	if (!NVRM_HAVE(info->architecture) || !NVRM_HAVE(info->implementation) ||
+	    !nvrm_compute_capability_for(info->architecture.value,
+	    info->implementation.value, &major, &minor))
+		return (0);
+	avail(&info->compute_capability_major, major, NVRM_S_DERIVED);
+	avail(&info->compute_capability_minor, minor, NVRM_S_DERIVED);
+	return (1);
 }
 
 /* Layer 1, the gpu class: what any compute or graphics GPU reports. */
@@ -225,6 +264,16 @@ query_gpu_class(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	info->sm_version_minor = raw_sm;
 	info->sm_version_major.value >>= 8;
 	info->sm_version_minor.value &= 0xff;
+	info->rm_sm_version = raw_sm;
+	if (!nvrm_compute_from_table(info)) {
+		int reason = NVRM_R_INPUT_MISSING;
+
+		if (NVRM_HAVE(raw_sm) && NVRM_HAVE(info->architecture) &&
+		    NVRM_HAVE(info->implementation))
+			reason = NVRM_R_FAMILY_UNKNOWN;
+		unavail(&info->compute_capability_major, reason, NVRM_S_DERIVED);
+		unavail(&info->compute_capability_minor, reason, NVRM_S_DERIVED);
+	}
 
 	/* GPC, TPC and SM counts from the enabled-unit masks. */
 	r = ops->gpu_u64(g, NVRM_P_GPC_MASK, 0, &mask);
@@ -407,6 +456,8 @@ nvrm_query_device(const nvrm_backend_ops *ops, nvrm_gpu *g,
 
 	nvrm_info_init(info);
 	query_identity(ops, g, info);
+	get_version(ops, g, &info->vbios, NVRM_SP_VBIOS, 16);
+	get_version(ops, g, &info->gsp_firmware, NVRM_SP_GSP_FIRMWARE, 10);
 	query_gpu_class(ops, g, info);
 
 	get_u64(ops, g, &info->vram_size, NVRM_P_VRAM_KB, 0, 1024);
@@ -428,10 +479,18 @@ info_has_call_failure(nvrm_device_info *info)
 {
 	unsigned i;
 
-	for (i = 0; i < nvrm_nfields; i++)
-		if (*nvrm_field_reason(info, &nvrm_fields[i]) ==
+	for (i = 0; i < nvrm_nfields; i++) {
+		if (nvrm_fields[i].kind == NVRM_K_VERSION) {
+			const nvrm_version_field *v = (const nvrm_version_field *)
+			    ((const char *)info + nvrm_fields[i].offset);
+
+			if (!v->version.available && strcmp(v->version.reason,
+			    nvrm_reason_id(NVRM_R_OS_CALL_FAILED)) == 0)
+				return (1);
+		} else if (*nvrm_field_reason(info, &nvrm_fields[i]) ==
 		    NVRM_R_OS_CALL_FAILED)
 			return (1);
+	}
 	for (i = 0; i < NVRM_NCAPS; i++)
 		if (info->caps[i].reason == NVRM_R_OS_CALL_FAILED)
 			return (1);
@@ -539,6 +598,8 @@ nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts, char *err,
 		return (rc);
 	}
 	ops->running_version(ctx->be, &ctx->running);
+	ops->driver_version(ctx->be, &ctx->driver);
+	ops->rm_api_version(ctx->be, &ctx->rm_api);
 	rc = open_devices(ctx, err, errlen);
 	if (rc == NVRM_OK)
 		rc = ops->limit(ctx->be, opts != NULL &&
@@ -571,6 +632,63 @@ const nvrm_str *
 nvrm_rm_running_version(const nvrm_ctx *ctx)
 {
 	return (&ctx->running);
+}
+
+#define NVRM_LIBRARY_VERSION_STRING \
+	NVRM_STRINGIFY(NVRM_API_MAJOR) "." NVRM_STRINGIFY(NVRM_API_MINOR) ".0"
+#define NVRM_SYMBOL_VERSION_STRING \
+	"NVRM_" NVRM_STRINGIFY(NVRM_API_MAJOR) "." NVRM_STRINGIFY(NVRM_API_MINOR)
+
+static nvrm_version built_for_version, library_version, symbol_version;
+static pthread_once_t versions_once = PTHREAD_ONCE_INIT;
+
+static void
+init_versions(void)
+{
+	(void)nvrm_version_parse(NVRM_RM_VERSION, 10, &built_for_version);
+	(void)nvrm_version_parse(NVRM_LIBRARY_VERSION_STRING, 10,
+	    &library_version);
+	memset(&symbol_version, 0, sizeof(symbol_version));
+	snprintf(symbol_version.string, sizeof(symbol_version.string), "%s",
+	    NVRM_SYMBOL_VERSION_STRING);
+	symbol_version.parts[0] = NVRM_API_MAJOR;
+	symbol_version.parts[1] = NVRM_API_MINOR;
+	symbol_version.width[0] = symbol_version.width[1] = 1;
+	symbol_version.nparts = 2;
+	symbol_version.available = 1;
+}
+
+const nvrm_version *
+nvrm_driver_version(const nvrm_ctx *ctx)
+{
+	return (&ctx->driver);
+}
+
+const nvrm_version *
+nvrm_rm_api_version(const nvrm_ctx *ctx)
+{
+	return (&ctx->rm_api);
+}
+
+const nvrm_version *
+nvrm_built_for_version(void)
+{
+	pthread_once(&versions_once, init_versions);
+	return (&built_for_version);
+}
+
+const nvrm_version *
+nvrm_library_version(void)
+{
+	pthread_once(&versions_once, init_versions);
+	return (&library_version);
+}
+
+const nvrm_version *
+nvrm_symbol_version(void)
+{
+	pthread_once(&versions_once, init_versions);
+	return (&symbol_version);
 }
 
 unsigned

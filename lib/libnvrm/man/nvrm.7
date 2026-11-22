@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 21, 2026
+.Dd November 22, 2026
 .Dt NVRM 7
 .Os
 .Sh NAME
@@ -17,8 +17,8 @@ Consumers use the abstract and class members only.
 Identity: PCI location and identifiers, subsystem identifiers, RM GPU id, UUID.
 .It class
 What any compute or graphics GPU reports: architecture, implementation, chip
-id, SM version, GPC, TPC and SM counts, the class list, memory sizes, page
-sizes and the capability flags.
+id, raw RM SM version and compute capability, GPC, TPC and SM counts, the class
+list, memory sizes, page sizes and the capability flags.
 .It family
 Values only a generation table knows, selected by the pair of GPFIFO and
 compute classes the GPU lists: family name, the channel, compute, 3D and copy
@@ -42,6 +42,29 @@ or
 .Li board .
 An unavailable value is never reported as a number.
 VRAM size 0 on a unified-memory part is available, with the value 0.
+.Ss SM and compute versions
+.Li sm_version_major
+and
+.Li sm_version_minor
+are the RM's numbering, formed by splitting the raw RM code at its high and low
+bytes; they are not necessarily CUDA compute capability numbers.
+.Li rm_sm_version
+preserves that raw code.
+.Li compute_capability_major
+and
+.Li compute_capability_minor
+are derived only from the architecture/implementation table.
+When that table has no row, both are unavailable with reason
+.Li family_unknown :
+neither an RM alias nor the raw high and low bytes is a compute capability.
+Zero or unavailable raw input without a table row leaves compute capability
+unavailable with reason
+.Li input_unavailable .
+The raw code remains available separately as
+.Li rm_sm_version
+when the RM reports it.
+For example, GB206 reports raw RM SM 10.4 but has compute capability 12.0;
+GB20B has compute capability 12.1.
 .Ss Reasons
 The reason identifiers of an unavailable value:
 .Bl -tag -width "family_has_no_class" -compact
@@ -70,6 +93,10 @@ the system call to the driver failed.
 .It Li value_unusable
 the RM answered, but the answer failed a consistency check (it names another
 device, or exceeds what the library can count).
+.It Li version_unparsed
+a version string has no readable numeric scheme or exceeds the parser bounds.
+.It Li version_inconsistent
+the kernel module version sysctls disagree with its version string.
 .El
 .Ss Capabilities
 A fixed, indexed set of flags; the index is stable and new flags are only
@@ -128,10 +155,16 @@ OS-layer values (sysctl, card list) are read before and kept.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 0;
+minor 1;
 documents name it in the
 .Li schema
 member.
+Document and header records have a
+.Li versions
+object whose members preserve each version string and, when available, expose
+its integer parts and source.
+The object covers the running driver, RM API, built-for RM, library, library
+symbols and schema versions.
 Additive changes raise the minor number; a breaking change is a new major
 schema installed beside the old one.
 The identifiers (reason ids, error codes, source names and the capability
@@ -141,7 +174,7 @@ the test suite compares the schema with that baseline and refuses one that
 removes, renames or renumbers an identifier.
 Until the first package release the interface is provisional (see
 .Xr nvrm 3 ) ,
-and this schema is minor 0 of it.
+and this schema is minor 1 of it.
 .Sh SEE ALSO
 .Xr nvrm 3 ,
 .Xr nvrm-info 8

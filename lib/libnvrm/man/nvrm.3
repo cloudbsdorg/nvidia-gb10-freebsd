@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 21, 2026
+.Dd November 22, 2026
 .Dt NVRM 3
 .Os
 .Sh NAME
@@ -8,6 +8,12 @@
 .Nm nvrm_close ,
 .Nm nvrm_backend_name ,
 .Nm nvrm_rm_running_version ,
+.Nm nvrm_driver_version ,
+.Nm nvrm_rm_api_version ,
+.Nm nvrm_built_for_version ,
+.Nm nvrm_library_version ,
+.Nm nvrm_symbol_version ,
+.Nm nvrm_schema_version ,
 .Nm nvrm_device_count ,
 .Nm nvrm_device_get ,
 .Nm nvrm_device_info_get ,
@@ -31,6 +37,7 @@
 libnvrm
 .Sh SYNOPSIS
 .In nvrm/nvrm.h
+.In nvrm/nvrm_version.h
 .Ft int
 .Fn nvrm_enumerate "nvrm_ctx **ctxp" "const nvrm_enum_opts *opts" "char *err" "size_t errlen"
 .Ft void
@@ -55,6 +62,18 @@ libnvrm
 .Fn nvrm_backend_name "const nvrm_ctx *ctx"
 .Ft const nvrm_str *
 .Fn nvrm_rm_running_version "const nvrm_ctx *ctx"
+.Ft const nvrm_version *
+.Fn nvrm_driver_version "const nvrm_ctx *ctx"
+.Ft const nvrm_version *
+.Fn nvrm_rm_api_version "const nvrm_ctx *ctx"
+.Ft const nvrm_version *
+.Fn nvrm_built_for_version void
+.Ft const nvrm_version *
+.Fn nvrm_library_version void
+.Ft const nvrm_version *
+.Fn nvrm_symbol_version void
+.Ft const nvrm_version *
+.Fn nvrm_schema_version void
 .Ft const char *
 .Fn nvrm_strerror "int error"
 .Ft const char *
@@ -124,7 +143,7 @@ holds one line saying why.
 .Va opts->flags
 selects privileges.
 Zero-initialize the structure
-.Pq Li "nvrm_enum_opts o = { 0 };" :
+.Pq Li "nvrm_enum_opts o = { 0 };\&"
 with no flag set, or with
 .Fa opts
 .Dv NULL ,
@@ -163,10 +182,11 @@ returns its description, a
 .Vt nvrm_device_info .
 Every member is an
 .Vt nvrm_u64 ,
-.Vt nvrm_str
+.Vt nvrm_str ,
+.Vt nvrm_list
 or
-.Vt nvrm_list :
-a value, a reason code and a source.
+.Vt nvrm_version_field .
+The first three contain a value, a reason code and a source.
 A value is valid only when
 .Fn NVRM_HAVE
 is true; otherwise
@@ -174,6 +194,22 @@ is true; otherwise
 says why it is not
 .Pq see Fn nvrm_reason_id
 and no number is made up.
+A version field contains a parsed
+.Vt nvrm_version
+and the source of its string; its
+.Va available
+member selects between the numeric parts and the string reason identifier.
+.Pp
+The
+.Li compute_capability_major
+and
+.Li compute_capability_minor
+members come only from the architecture/implementation table.
+With no table row they are unavailable with reason
+.Li family_unknown ;
+an alias or the raw RM SM code is never presented as compute capability.
+The raw code remains in
+.Li rm_sm_version .
 .Pp
 .Fn nvrm_device_refresh
 queries the GPU again through the descriptors that are already open.
@@ -195,10 +231,67 @@ the text view of
 .Xr nvrm-info 8
 all walk this one table.
 .Pp
+The device
+.Li versions
+group contains
+.Li vbios
+and
+.Li gsp_firmware ,
+both with source
+.Li rm .
+The VBIOS version combines the revision and OEM revision returned by separate
+RM BIOS-information controls, formats five two-digit hexadecimal fields, and
+parses that string in base 16.
+The GSP firmware version comes from the RM GSP-features control and is parsed
+in base 10 only when that control marks it valid.
+A failed control gives reason
+.Li rm_control_failed ;
+When the RM does not run on the GPU System Processor, or does not mark its
+firmware version valid, the reason is
+.Li rm_not_supported ,
+and an unreadable version string gives
+.Li version_unparsed .
+.Pp
 .Fn nvrm_backend_name
-names the backend in use and
+names the backend in use.
 .Fn nvrm_rm_running_version
-returns the version of the running kernel module, or why it is unknown.
+returns the legacy short version of the running kernel module, or why it is
+unknown.
+.Fn nvrm_driver_version
+returns that same running version as a parsed
+.Vt nvrm_version
+with source
+.Li os .
+When the kernel provides separate integer and suffix version sysctls, they must
+agree with the parsed version string; a disagreement makes this version
+unavailable with reason
+.Li version_inconsistent
+while preserving its string.
+.Fn nvrm_rm_api_version
+returns the version answer to the RM query with source
+.Li rm .
+.Fn nvrm_built_for_version
+returns the RM version against which the library was built.
+.Fn nvrm_library_version
+returns the library API version, currently
+.Li 1.1.0 .
+.Fn nvrm_symbol_version
+returns the library symbol version, currently the string
+.Li NVRM_1.1
+with integer parts 1 and 1.
+.Fn nvrm_schema_version
+returns the JSON schema version, currently
+.Li 1.1
+with integer parts 1 and 1.
+The built-for, library, symbol and schema versions have source
+.Li derived .
+The schema version is also the
+.Li versions.schema
+object in JSON output.
+The context-owned pointers remain valid until
+.Fn nvrm_close ;
+the other three point to process-lifetime values initialized once.
+.Pp
 .Fn nvrm_strerror
 and
 .Fn nvrm_error_id
@@ -226,6 +319,100 @@ write the records of the line stream.
 writes the JSON Schema of all of them; it is generated from the same table as
 the output.
 Each returns 0, or \-1 if writing failed.
+.Pp
+Document and header records contain a top-level
+.Li versions
+object with
+.Li driver ,
+.Li rm_api ,
+.Li built_for ,
+.Li library ,
+.Li library_symbols
+and
+.Li schema
+members.
+An available member has this shape (the suffix member is omitted when empty):
+.Bd -literal -offset indent
+{"available":true,"string":"580.178.04","major":580,
+ "minor":178,"patch":4,"parts":[580,178,4],"source":"os"}
+.Ed
+.Pp
+An unavailable member retains its raw or empty string and has no numeric parts:
+.Bd -literal -offset indent
+{"available":false,"string":"N/A","reason_id":"version_unparsed",
+ "reason":"the version string has no readable numeric scheme","source":"os"}
+.Ed
+.Pp
+The legacy
+.Li built_for_rm_version
+and
+.Li running_rm_version
+members retain their original shapes.
+.Ss Version parsing
+The freestanding header
+.In nvrm/nvrm_version.h
+defines
+.Vt nvrm_version
+and the static inline functions
+.Fn nvrm_version_parse ,
+.Fn nvrm_version_find
+and
+.Fn nvrm_version_format .
+They perform no allocation, stdio or libc calls.
+The type preserves the source in
+.Va string ,
+exposes up to six integer
+.Va parts ,
+their digit
+.Va width
+and count
+.Va nparts ,
+and any
+.Va suffix .
+.Va available
+selects between those values and the string
+.Va reason .
+.Pp
+.Fn nvrm_version_parse
+accepts base 10 or 16, an input string of at most 255 bytes, at most six parts,
+and parts that fit in
+.Vt uint32_t .
+Leading zeroes affect only the preserved width, so
+.Li 04
+is integer 4.
+Missing fixed parts read as zero, while
+.Va nparts
+records how many were present.
+A suffix starts at
+.Ql -
+or
+.Ql +
+and is retained with that delimiter, up to 63 bytes.
+For example,
+.Li 1.2.3-rc1
+has parts 1, 2 and 3 and suffix
+.Li -rc1 .
+Empty, non-numeric, malformed, overlong or overflowing input is unavailable
+with reason
+.Li version_unparsed ;
+its source string is retained as far as the bounded string allows.
+.Pp
+.Fn nvrm_version_find
+scans a banner from left to right and returns the first whitespace-separated
+token that starts with a digit and parses in base 10 with at least two parts.
+It returns unavailable with
+.Li version_unparsed
+when the banner has no such token.
+.Pp
+.Fn nvrm_version_format
+preserves every accepted parsed string exactly.
+For a caller-built available value whose
+.Va string
+is empty, it reconstructs the string from the parts, widths and suffix.
+Formatting therefore round-trips parsed input, and parsing a formatted
+caller-built value returns the same parts.
+Parse and find return 0 for an available version and \-1 otherwise.
+Format returns 0 on success and \-1 for an invalid value or insufficient buffer.
 .Sh RETURN VALUES
 .Fn nvrm_enumerate
 returns 0 or one of
@@ -287,9 +474,11 @@ or must
 first, which closes the descriptor.
 .Sh STABILITY
 This interface is provisional.
-The symbol version
+The symbol versions
 .Li NVRM_1.0
-and the structures behind it are frozen at the first package release and not
+and its additive successor
+.Li NVRM_1.1 ,
+and the structures behind them, are frozen at the first package release and not
 before; a future version may still reshape them.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
@@ -301,6 +490,7 @@ or
 Comma list of fake GPUs:
 .Dq discrete ,
 .Dq unified ,
+.Dq alias ,
 .Dq unknown ,
 .Dq sparse .
 .It Ev NVRM_FAKE_FAIL

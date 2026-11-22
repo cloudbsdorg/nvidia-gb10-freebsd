@@ -300,3 +300,78 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
 
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
+
+## 2026-11-22 (nvrm-info boot fixes and version sysctls, #2378 libnvrm, #2362 kit): PAUSED for a test boot
+Worktree /home/mlapointe/work/gb10/wt-2378-versions, branch agent/2378-version-numbers, cut from origin/main 8702134.
+No code is written yet, and no opencode round has started. Baseline: tests/libnvrm_test.sh 412 ok, 0 FAILED on 8702134.
+
+Findings so far (evidence ~/work/gb10/logs/native-tools-testboot/20261122T095018Z/nvrm-info):
+- sm_version 10.4: libnvrm splits NV2080_CTRL_GR_INFO_INDEX_SM_VERSION (raw 0x0A04) into major and minor.
+  ctrl2080gr.h of ogkm 580.178.04 (MIT): 0x0A04 is SM_VERSION_10_04, the older name kept until 12_* is
+  validated; 12_00 is 0x0C00 and 12_01 is 0x0C01. ctrl2080mc.h: ARCHITECTURE_GB200 0x1B0, IMPLEMENTATION
+  GB202 2, GB203 3, GB205 5, GB206 6, GB207 7, GB20B 0xB, GB20C 0xC. Plan: new fields compute_capability_major and
+  compute_capability_minor (source derived), from an (architecture, implementation) table: TU10x 7.5, GA100 8.0,
+  GA10x 8.6, GA10B 8.7, AD10x 8.9, GH100 9.0, GB100 10.0, GB202..GB207 12.0, GB20B 12.1. With no row: the RM
+  code through an alias list (0x0A04 is 12.0), else the code as major<<8|minor. New raw field rm_sm_version
+  (source rm). Keep sm_version_major and sm_version_minor unchanged (additive minor bump) and document them as
+  the RM internal numbering. Fake profiles: discrete becomes raw 0x0A04 (what the board reports), arch 0x1B0
+  impl 6, expect 12.0; unified stays arch 0x1B0 impl 0xB, expect 12.1. Mutants on the table and the alias.
+- running_rm_version unavailable: hw.nvidia.version DOES exist (sysctl.txt line 1), but it holds the whole banner
+  (about 100 bytes) and nvrm_rm.c read_sysctls() reads it into nvrm_str (NVRM_STR_MAX): the read fails on a short
+  buffer and the code turns that into os_not_reported. Red test: a scripted sysctl that returns the real banner.
+- UUID check: hw.nvidia.gpus.N.uuid EXISTS, N is the device unit (1 on amp001, /dev/nvidia1). The kit indexed it
+  with the libnvrm index 0. Fix in the kit: match the GPU by PCI location (new dev.nvidia.N.pci_bus_id, falling
+  back to dev.nvidia.N.%location dbsf=pciD:B:S:F), then compare dev.nvidia.N.uuid and hw.nvidia.gpus.N.uuid;
+  boot_nvrm_info.sh must also capture sysctl dev.nvidia.
+- VRAM: BOOT_EXPECT_VRAM_BYTES stays the nominal board size; pass when nominal minus a stated reserve maximum is at
+  most the reported size, and the reported size is at most nominal (the boot: 17179869184 - 17103323136 = 73 MiB).
+
+Decisions to carry (report them to the orchestrator):
+- hw.nvidia.version is an existing upstream sysctl holding the banner: keep it unchanged. New sysctls follow Mark
+  pattern NAME plus NAME_major, NAME_minor, NAME_patch: hw.nvidia.driver_version (string 580.178.04) and its three
+  integers; per GPU dev.nvidia.N.uuid, dev.nvidia.N.pci_bus_id, dev.nvidia.N.vbios_version (hex parts, _major,
+  _minor, _patch, _part4, _part5) and dev.nvidia.N.gsp_firmware_version; hw.nvidiamodeset.driver_version in
+  nvidia-modeset.ko (like hw.nvidiadrm). An integer part that cannot be parsed or is missing reads -1; the string
+  keeps the raw text. Handlers reuse the upstream rm_get_vbios_version, rm_get_firmware_version, rm_get_gpu_uuid
+  calls that hw.nvidia.gpus.N already makes at read time.
+- One parser and one formatter: a freestanding header lib/libnvrm/include/nvrm/nvrm_version.h (no libc), used by
+  libnvrm and copied into the nvidia build tree by scripts/prepare-tree.sh for the BSD-C OS-layer file (new
+  src/gb10-version/nv_version_sysctl.c plus small hook hunks in patches/ for nvidia_sysctl.c nv_sysctl_init and
+  the modeset load). The kernel branch therefore stacks on the libnvrm branch.
+- JSON: every version is an object {available, string, major, minor, patch, parts, suffix, source}; unparsed: string
+  kept, parsed false, reason_id version_unparsed, no numbers. Existing keys kept; new top-level versions object
+  (driver from sysctl, rm_api from NV_RM_API_VERSION_CMD_QUERY reply, libnvrm, libnvrm symbol level NVRM_1.1,
+  schema) and per GPU vbios and gsp_firmware (NV2080_CTRL_CMD_BIOS_GET_INFO_V2, NV2080_CTRL_CMD_GSP_GET_FEATURES).
+  Schema minor bump. New API symbols go in NVRM_1.1 in Version.map. uvm-bsd version: note only, out of scope.
+
+RESUME here:
+1. Kimi round 1 (opencode run -m dgx-mlapointe/kimi-k3.1-pro via ocrun.sh with round-watchdog.sh; fall back to
+   kimi-k3, then kimi-k2.7-code; then a Sonnet agent): libnvrm parser/formatter, compute capability, running
+   version read, versions object, schema, man pages nvrm(3) nvrm-info(8), tests and mutants. Gate 2 rounds, commit.
+2. Kernel branch agent/2378-nvidia-version-sysctls stacked on 1: OS-layer sysctls, nvidia(4) (man/nvidia.4), build
+   nvidia.ko with base LLD using the recipe in ~/work/gb10/work-native-a682522/build.sh (check Linker: LLD).
+3. Kit branch from agent/native-tools-testboot f3286e3: boot_nvrm_info.sh fixes plus the fixture test from this
+   boot, staged build, new dry-run BE, check-be; hand back the arm command, never arm.
+4. Track comments #2378 and #2362, STATUS.md, PRs.
+
+## 2026-11-22 13:35Z resume after the amp001 ZFS panic (about 13:24Z)
+- Worktrees wt-2378-versions (libnvrm) and wt-2378-sysctl (kernel) checked: nothing half-written; a stray build
+  object nvrm-info.pieo had been staged by an orchestrator build in the source dir and was removed from the index.
+- libnvrm_test 456 ok 0 FAILED; version_sysctl_test PASS (3 mutants killed); prepare-tree_test 15/0.
+- All code so far by opencode Kimi kimi-k3.1-pro (round A passes 1-5, round B passes 1-3). Rounds use a private
+  XDG_DATA_HOME because the shared opencode.db locked and killed two rounds.
+- Gate round 1 for the libnvrm commit restarted (the first attempt was cut by the scanners, the second by the panic:
+  no receipt, not counted).
+- Next: gate 2 rounds libnvrm, commit, push; rebase the kernel branch on it, gate 2 rounds, commit, push; kit round C.
+
+## 2026-11-22 13:50Z sysctl names (supersedes "Decisions to carry" of the PAUSED entry above)
+- Mark: hw.nvidia.version already exists, so it stays exactly as it is (the banner, legacy). Its parts are added as
+  siblings: hw.nvidia.version_string ("580.178.04"), version_major, version_minor, version_patch (int),
+  version_suffix (string, empty when none), version_available (1 or 0). There is NO hw.nvidia.driver_version.
+- A part the scheme does not have reads 0 (not -1); version_available 0 means unreadable and every part reads 0
+  (skill versions-as-numbers, skills main cb09bf7). Per GPU: hw.nvidia.gpus.N.vbios and .firmware stay, with
+  vbios_major/_minor/_patch/_build/_revision/_available/_suffix (hex) and firmware_major/_minor/_patch/_available/
+  _suffix siblings; new dev.nvidia.N.uuid and dev.nvidia.N.pci_bus_id; hw.nvidiamodeset.version and siblings.
+- The PAUSED entry above was written before any code; the code in this commit implements RESUME step 1.
+- Gate round 1 of the libnvrm commit: receipt 215f871d (5 Opus voices, FINDINGS). Answers in the round-2 answers
+  file; fixes by Kimi pass 6.

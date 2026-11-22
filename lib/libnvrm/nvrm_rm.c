@@ -45,10 +45,12 @@
 #include <class/cl2080.h>
 #include <ctrl/ctrl0000/ctrl0000gpu.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
+#include <ctrl/ctrl2080/ctrl2080bios.h>
 #include <ctrl/ctrl2080/ctrl2080bus.h>
 #include <ctrl/ctrl2080/ctrl2080fb.h>
 #include <ctrl/ctrl2080/ctrl2080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080gr.h>
+#include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_internal.h"
@@ -152,6 +154,7 @@ struct nvrm_backend {
 	uint32_t		next_handle;
 	nv_ioctl_card_info_t	cards[NV_MAX_DEVICES];
 	nvrm_str		running;
+	nvrm_version		driver, rm_api;
 	int			wc, wc_reason;
 };
 
@@ -239,31 +242,150 @@ rm_probe(void)
 	return (sys->access(NVRM_CTL_PATH) == 0);
 }
 
+static int
+read_int_sysctl(const char *name, int *value)
+{
+	size_t len = sizeof(*value);
+
+	if (sys->sysctlbyname(name, value, &len) != 0)
+		return (-1);
+	return (len == sizeof(*value) ? 0 : -1);
+}
+
+static int
+read_text_sysctl(const char *name, char *value, size_t size)
+{
+	size_t len = size;
+
+	memset(value, 0, size);
+	if (sys->sysctlbyname(name, value, &len) != 0)
+		return (-1);
+	value[size - 1] = '\0';
+	return (0);
+}
+
+static void
+sync_running_version(nvrm_backend *be)
+{
+	be->running.source = NVRM_S_OS;
+	snprintf(be->running.value, sizeof(be->running.value), "%s",
+	    be->driver.string);
+	if (be->driver.available)
+		be->running.reason = NVRM_R_NONE;
+	else if (strcmp(be->driver.reason,
+	    nvrm_reason_id(NVRM_R_VERSION_UNPARSED)) == 0)
+		be->running.reason = NVRM_R_VERSION_UNPARSED;
+	else if (strcmp(be->driver.reason,
+	    nvrm_reason_id(NVRM_R_VERSION_INCONSISTENT)) == 0)
+		be->running.reason = NVRM_R_VERSION_INCONSISTENT;
+	else
+		be->running.reason = NVRM_R_OS_NOT_REPORTED;
+}
+
+/* Return 1 when the complete set of numeric version sysctls was read. */
+static int
+read_version_sysctls(nvrm_backend *be)
+{
+	char string[NVRM_VERSION_STRING_MAX + 1];
+	char suffix[NVRM_VERSION_SUFFIX_MAX + 1];
+	int major, minor, patch, available;
+	int ok;
+
+	ok = read_text_sysctl("hw.nvidia.version_string", string,
+	    sizeof(string)) == 0;
+	if (read_int_sysctl("hw.nvidia.version_major", &major) != 0)
+		ok = 0;
+	if (read_int_sysctl("hw.nvidia.version_minor", &minor) != 0)
+		ok = 0;
+	if (read_int_sysctl("hw.nvidia.version_patch", &patch) != 0)
+		ok = 0;
+	if (read_text_sysctl("hw.nvidia.version_suffix", suffix,
+	    sizeof(suffix)) != 0)
+		ok = 0;
+	if (read_int_sysctl("hw.nvidia.version_available", &available) != 0)
+		ok = 0;
+	if (!ok)
+		return (0);
+	if (!available) {
+		memset(&be->driver, 0, sizeof(be->driver));
+		snprintf(be->driver.string, sizeof(be->driver.string), "%s", string);
+		snprintf(be->driver.suffix, sizeof(be->driver.suffix), "%s", suffix);
+		be->driver.reason = nvrm_reason_id(NVRM_R_VERSION_UNPARSED);
+		return (1);
+	}
+	if (nvrm_version_parse(string, 10, &be->driver) != 0)
+		return (1);
+	if ((uint32_t)major != be->driver.parts[0] ||
+	    (uint32_t)minor != be->driver.parts[1] ||
+	    (uint32_t)patch != be->driver.parts[2] ||
+	    strcmp(be->driver.suffix, suffix) != 0) {
+		(void)nvrm_version__unparsed(&be->driver);
+		be->driver.reason =
+		    nvrm_reason_id(NVRM_R_VERSION_INCONSISTENT);
+	}
+	return (1);
+}
+
+static void
+read_banner_version(nvrm_backend *be)
+{
+	char banner[64 * 1024];
+	size_t len = 0;
+
+	memset(&be->driver, 0, sizeof(be->driver));
+	if (sys->sysctlbyname(NVRM_SYSCTL_VERSION, NULL, &len) != 0) {
+		be->driver.reason = nvrm_reason_id(NVRM_R_OS_NOT_REPORTED);
+		return;
+	}
+	if (len == 0 || len > sizeof(banner)) {
+		be->driver.reason = nvrm_reason_id(NVRM_R_VERSION_UNPARSED);
+		return;
+	}
+	if (read_text_sysctl(NVRM_SYSCTL_VERSION, banner, len) != 0) {
+		be->driver.reason = nvrm_reason_id(NVRM_R_OS_NOT_REPORTED);
+		return;
+	}
+	if (nvrm_version_find(banner, &be->driver) != 0)
+		be->driver.reason = nvrm_reason_id(NVRM_R_VERSION_UNPARSED);
+}
+
 static void
 read_sysctls(nvrm_backend *be)
 {
-	size_t len;
 	int wc;
 
-	len = sizeof(be->running.value);
-	be->running.source = NVRM_S_OS;
-	if (sys->sysctlbyname(NVRM_SYSCTL_VERSION, be->running.value,
-	    &len) == 0) {
-		be->running.value[sizeof(be->running.value) - 1] = '\0';
-		be->running.reason = NVRM_R_NONE;
+	if (read_version_sysctls(be)) {
+		sync_running_version(be);
 	} else {
-		be->running.value[0] = '\0';
-		be->running.reason = NVRM_R_OS_NOT_REPORTED;
+		read_banner_version(be);
+		sync_running_version(be);
 	}
-	len = sizeof(wc);
-	if (sys->sysctlbyname(NVRM_SYSCTL_WC, &wc, &len) == 0 &&
-	    len == sizeof(wc)) {
+	if (read_int_sysctl(NVRM_SYSCTL_WC, &wc) == 0) {
 		be->wc = wc != 0;
 		be->wc_reason = NVRM_R_NONE;
 	} else {
 		be->wc = 0;
 		be->wc_reason = NVRM_R_OS_NOT_REPORTED;
 	}
+}
+
+static void
+read_rm_api_version(nvrm_backend *be)
+{
+	nv_ioctl_rm_api_version_t v;
+
+	memset(&v, 0, sizeof(v));
+	v.cmd = NV_RM_API_VERSION_CMD_QUERY;
+	if (sys->ioctl(be->fd, IOC_CHECK_VERSION, &v) != 0) {
+		be->rm_api.reason = nvrm_reason_id(NVRM_R_OS_CALL_FAILED);
+		return;
+	}
+	v.versionString[sizeof(v.versionString) - 1] = '\0';
+	if (v.reply != NV_RM_API_VERSION_REPLY_RECOGNIZED) {
+		be->rm_api.reason = nvrm_reason_id(NVRM_R_RM_UNSUPPORTED);
+		return;
+	}
+	(void)nvrm_version_parse(v.versionString, 10, &be->rm_api);
 }
 
 static int
@@ -324,6 +446,7 @@ rm_open(nvrm_backend **bep, char *err, size_t errlen)
 		free(be);
 		return (NVRM_E_VERSION);
 	}
+	read_rm_api_version(be);
 	/* The RM client of this process: one per enumerate. */
 	st = rm_alloc(be, 0, &client, NV01_ROOT, NULL, 0);
 	if (st != NV_OK) {
@@ -366,6 +489,18 @@ static void
 rm_running_version(nvrm_backend *be, nvrm_str *out)
 {
 	*out = be->running;
+}
+
+static void
+rm_driver_version(nvrm_backend *be, nvrm_version *out)
+{
+	*out = be->driver;
+}
+
+static void
+rm_api_version(nvrm_backend *be, nvrm_version *out)
+{
+	*out = be->rm_api;
 }
 
 static int
@@ -550,6 +685,15 @@ info_one_fb(nvrm_gpu *g, NvU32 index, uint64_t *out)
 
 	return (info_one(g, NV2080_CTRL_CMD_FB_GET_INFO_V2, &p, sizeof(p),
 	    &p.fbInfoListSize, &p.fbInfoList[0], index, out));
+}
+
+static int
+info_one_bios(nvrm_gpu *g, NvU32 index, uint64_t *out)
+{
+	NV2080_CTRL_BIOS_GET_INFO_V2_PARAMS p;
+
+	return (info_one(g, NV2080_CTRL_CMD_BIOS_GET_INFO_V2, &p, sizeof(p),
+	    &p.biosInfoListSize, &p.biosInfoList[0], index, out));
 }
 
 static int
@@ -770,18 +914,61 @@ rm_gpu_u64(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 }
 
 static int
+rm_gpu_vbios(nvrm_gpu *g, char *buf, size_t len)
+{
+	uint64_t revision, oem;
+	int r;
+
+	r = info_one_bios(g, NV2080_CTRL_BIOS_INFO_INDEX_REVISION, &revision);
+	if (r != 0)
+		return (r);
+	r = info_one_bios(g, NV2080_CTRL_BIOS_INFO_INDEX_OEM_REVISION, &oem);
+	if (r != 0)
+		return (r);
+	snprintf(buf, len, "%02x.%02x.%02x.%02x.%02x",
+	    (unsigned)((revision >> 24) & 0xff),
+	    (unsigned)((revision >> 16) & 0xff),
+	    (unsigned)((revision >> 8) & 0xff),
+	    (unsigned)(revision & 0xff), (unsigned)(oem & 0xff));
+	return (0);
+}
+
+static int
+rm_gpu_gsp(nvrm_gpu *g, char *buf, size_t len)
+{
+	NV2080_CTRL_GSP_GET_FEATURES_PARAMS gsp;
+	NvU32 st;
+
+	memset(&gsp, 0, sizeof(gsp));
+	st = rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_GSP_GET_FEATURES,
+	    &gsp, sizeof(gsp));
+	if (st != NV_OK)
+		return (status_reason(st));
+	if (!gsp.bValid)
+		return (NVRM_R_RM_UNSUPPORTED);
+	gsp.firmwareVersion[sizeof(gsp.firmwareVersion) - 1] = 0;
+	snprintf(buf, len, "%s", (const char *)gsp.firmwareVersion);
+	return (0);
+}
+
+static int
 rm_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 {
 	NV2080_CTRL_GPU_GET_GID_INFO_PARAMS gid;
 	NvU32 st;
 
-	(void)p;
+	buf[0] = '\0';
+	if (p == NVRM_SP_VBIOS)
+		return (rm_gpu_vbios(g, buf, len));
+	if (p == NVRM_SP_GSP_FIRMWARE)
+		return (rm_gpu_gsp(g, buf, len));
+	if (p != NVRM_SP_UUID)
+		return (NVRM_R_BACKEND_NONE);
 	memset(&gid, 0, sizeof(gid));
 	gid.flags = DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _FORMAT, _ASCII) |
 	    DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _TYPE, _SHA1);
 	st = rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_GPU_GET_GID_INFO,
 	    &gid, sizeof(gid));
-	buf[0] = '\0';
 	if (st != NV_OK)
 		return (status_reason(st));
 	gid.data[sizeof(gid.data) - 1] = 0;
@@ -835,6 +1022,8 @@ const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.open = rm_open,
 	.close = rm_close,
 	.running_version = rm_running_version,
+	.driver_version = rm_driver_version,
+	.rm_api_version = rm_api_version,
 	.list_gpus = rm_list_gpus,
 	.gpu_open = rm_gpu_open,
 	.gpu_close = rm_gpu_close,

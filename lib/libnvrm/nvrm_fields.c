@@ -33,8 +33,13 @@ const nvrm_field nvrm_fields[] = {
 	FH("gpu", architecture, NVRM_K_U64, "RM architecture id"),
 	FH("gpu", implementation, NVRM_K_U64, "RM implementation id"),
 	FH("gpu", chip_id, NVRM_K_U64, "architecture plus implementation"),
-	F("gpu", sm_version_major, NVRM_K_U64, "SM version, major"),
-	F("gpu", sm_version_minor, NVRM_K_U64, "SM version, minor"),
+	F("gpu", sm_version_major, NVRM_K_U64, "RM SM version, major"),
+	F("gpu", sm_version_minor, NVRM_K_U64, "RM SM version, minor"),
+	FH("gpu", rm_sm_version, NVRM_K_U64, "raw RM SM version code"),
+	F("gpu", compute_capability_major, NVRM_K_U64,
+	    "CUDA compute capability, major"),
+	F("gpu", compute_capability_minor, NVRM_K_U64,
+	    "CUDA compute capability, minor"),
 	F("gpu", gpc_count, NVRM_K_U64, "enabled GPCs"),
 	F("gpu", tpc_count, NVRM_K_U64, "enabled TPCs"),
 	F("gpu", sm_count, NVRM_K_U64, "enabled SMs"),
@@ -51,13 +56,17 @@ const nvrm_field nvrm_fields[] = {
 	    "largest page size the GPU MMU supports here, in bytes"),
 	F("memory", numa_node, NVRM_K_U64, "NUMA node of the GPU"),
 	F("memory", page_sizes, NVRM_K_LIST, "page sizes in bytes"),
+	F("versions", vbios, NVRM_K_VERSION, "VBIOS version"),
+	F("versions", gsp_firmware, NVRM_K_VERSION, "GSP firmware version"),
 };
 
 /* CPD-ON */
 
 const unsigned nvrm_nfields = sizeof(nvrm_fields) / sizeof(nvrm_fields[0]);
 
-const char *const nvrm_group_names[] = { "identity", "gpu", "memory" };
+const char *const nvrm_group_names[] = {
+	"identity", "gpu", "memory", "versions"
+};
 const unsigned nvrm_ngroups =
     sizeof(nvrm_group_names) / sizeof(nvrm_group_names[0]);
 

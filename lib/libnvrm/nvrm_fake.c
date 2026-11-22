@@ -9,7 +9,7 @@
  *
  * Environment:
  *   NVRM_FAKE_PROFILE  comma list of profiles, one GPU each (default
- *                      "discrete"): discrete, unified, unknown, sparse
+ *                      "discrete"): discrete, unified, alias, unknown, sparse
  *   NVRM_FAKE_FAIL     open, version, list, gpu_open, limit: make that step
  *                      fail, so callers' error paths run without hardware;
  *                      nogpu: list no GPU (a success with zero devices).
@@ -39,6 +39,9 @@ typedef struct fake_profile {
 	uint64_t	tpc_mask[NVRM_MAX_GPCS];
 	int		fail[NVRM_P_COUNT];	/* reason, or 0 */
 	const char	*uuid;
+	const char	*vbios;
+	const char	*gsp_firmware;
+	int		sfail[NVRM_SP_COUNT];
 	const uint32_t	*classes;
 	unsigned	nclasses;
 	int		classes_fail;
@@ -63,7 +66,7 @@ static fake_profile profiles[] = {
 			PCI(0, 13, 0, 0x10de, 0x2d04, 0x1462, 0x5351, 0xa1),
 			[NVRM_P_ARCHITECTURE] = 0x1b0,
 			[NVRM_P_IMPLEMENTATION] = 6,
-			[NVRM_P_SM_VERSION] = 0x0c00,
+			[NVRM_P_SM_VERSION] = 0x0a04,
 			[NVRM_P_SM_PER_TPC] = 2,
 			[NVRM_P_GPC_MASK] = 0x7,
 			[NVRM_P_VRAM_KB] = 16ULL * 1024 * 1024,
@@ -76,6 +79,8 @@ static fake_profile profiles[] = {
 		.fail = { [NVRM_P_NUMA_NODE] = NVRM_R_NO_NUMA,
 		    [NVRM_P_CAP_OS_DEVICE_WC] = NVRM_R_OS_NOT_REPORTED },
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000a1",
+		.vbios = "96.06.1e.00.4a",
+		.gsp_firmware = "580.178.04",
 		.classes = classes_b,
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
 	},
@@ -99,6 +104,25 @@ static fake_profile profiles[] = {
 		},
 		.tpc_mask = { 0x1ff, 0xff },
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000b2",
+		.vbios = "97.06.1e.00.4a",
+		.gsp_firmware = "580.178.04",
+		.classes = classes_b,
+		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
+	},
+	{
+		/* GB20C has no compute table row; its raw code uses the alias. */
+		.name = "alias",
+		.val = {
+			PCI(0, 2, 0, 0x10de, 0x2e13, 0x10de, 0x0000, 0xa1),
+			[NVRM_P_ARCHITECTURE] = 0x1b0,
+			[NVRM_P_IMPLEMENTATION] = 0xc,
+			[NVRM_P_SM_VERSION] = 0x0a04,
+			[NVRM_P_SM_PER_TPC] = 2,
+			[NVRM_P_GPC_MASK] = 0x1,
+			[NVRM_P_MAX_PAGE_SIZE] = 2ULL << 20,
+		},
+		.tpc_mask = { 0x1 },
+		.uuid = "GPU-00000000-0000-4000-8000-0000000000c2",
 		.classes = classes_b,
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
 	},
@@ -109,7 +133,7 @@ static fake_profile profiles[] = {
 			PCI(0, 14, 0, 0x10de, 0x9999, 0x10de, 0x0001, 0x01),
 			[NVRM_P_ARCHITECTURE] = 0xfff0,
 			[NVRM_P_IMPLEMENTATION] = 1,
-			[NVRM_P_SM_VERSION] = 0,
+			[NVRM_P_SM_VERSION] = 0x0d02,
 			[NVRM_P_SM_PER_TPC] = 1,
 			[NVRM_P_GPC_MASK] = 0x1,
 			[NVRM_P_VRAM_KB] = 1024,
@@ -154,6 +178,9 @@ static fake_profile profiles[] = {
 			[NVRM_P_CAP_OS_DEVICE_WC] = NVRM_R_BACKEND_NONE,
 		},
 		.uuid = NULL,
+		.sfail = {
+			[NVRM_SP_GSP_FIRMWARE] = NVRM_R_RM_UNSUPPORTED,
+		},
 		.classes = NULL, .nclasses = 0,
 		.classes_fail = NVRM_R_RM_FAILED,
 	},
@@ -165,6 +192,7 @@ static fake_profile profiles[] = {
 static int inject_fail[NVRM_P_COUNT];
 static int inject_tpc_fail_gpc = -1;
 static int inject_uuid_fail;
+static int inject_str_fail[NVRM_SP_COUNT];
 static int inject_has_val[NVRM_P_COUNT];
 static uint64_t inject_val[NVRM_P_COUNT];
 static int last_fd = -1;
@@ -198,6 +226,12 @@ nvrm_fake_inject_uuid_fail(int reason)
 }
 
 void
+nvrm_fake_inject_str_fail(int prop, int reason)
+{
+	inject_str_fail[prop] = reason;
+}
+
+void
 nvrm_fake_inject_classes(const uint32_t *list, unsigned n)
 {
 	inject_classes = list;
@@ -220,6 +254,7 @@ nvrm_fake_inject_clear(void)
 	memset(inject_has_val, 0, sizeof(inject_has_val));
 	inject_tpc_fail_gpc = -1;
 	inject_uuid_fail = 0;
+	memset(inject_str_fail, 0, sizeof(inject_str_fail));
 }
 
 int
@@ -288,7 +323,7 @@ fake_open(nvrm_backend **bep, char *err, size_t errlen)
 		if (i == NPROFILES) {
 			snprintf(err, errlen, "fake backend: unknown profile "
 			    "\"%.*s\" in NVRM_FAKE_PROFILE (known: discrete, "
-			    "unified, unknown, sparse)", (int)len, p);
+			    "unified, alias, unknown, sparse)", (int)len, p);
 			free(be);
 			return (NVRM_E_INVAL);
 		}
@@ -330,6 +365,13 @@ fake_running_version(nvrm_backend *be, nvrm_str *out)
 	snprintf(out->value, sizeof(out->value), "%s", NVRM_RM_VERSION);
 	out->reason = NVRM_R_NONE;
 	out->source = NVRM_S_OS;
+}
+
+static void
+fake_parsed_version(nvrm_backend *be, nvrm_version *out)
+{
+	(void)be;
+	(void)nvrm_version_parse(NVRM_RM_VERSION, 10, out);
 }
 
 static int
@@ -416,16 +458,24 @@ fake_gpu_u64(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 static int
 fake_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 {
-	(void)p;
+	const char *value;
+
+	buf[0] = '\0';
 	if (roundtrip(g) != 0)
 		return (NVRM_R_OS_CALL_FAILED);
-	if (inject_uuid_fail != 0)
+	if ((unsigned)p >= NVRM_SP_COUNT)
+		return (NVRM_R_BACKEND_NONE);
+	if (p == NVRM_SP_UUID && inject_uuid_fail != 0)
 		return (inject_uuid_fail);
-	if (g->p->uuid == NULL) {
-		buf[0] = '\0';
+	if (inject_str_fail[p] != 0)
+		return (inject_str_fail[p]);
+	if (g->p->sfail[p] != 0)
+		return (g->p->sfail[p]);
+	value = p == NVRM_SP_UUID ? g->p->uuid :
+	    p == NVRM_SP_VBIOS ? g->p->vbios : g->p->gsp_firmware;
+	if (value == NULL)
 		return (NVRM_R_RM_FAILED);
-	}
-	snprintf(buf, len, "%s", g->p->uuid);
+	snprintf(buf, len, "%s", value);
 	return (0);
 }
 
@@ -466,6 +516,8 @@ const nvrm_backend_ops nvrm_backend_fake_ops = {
 	.open = fake_open,
 	.close = fake_close,
 	.running_version = fake_running_version,
+	.driver_version = fake_parsed_version,
+	.rm_api_version = fake_parsed_version,
 	.list_gpus = fake_list_gpus,
 	.gpu_open = fake_gpu_open,
 	.gpu_close = fake_gpu_close,

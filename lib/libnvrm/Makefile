@@ -30,10 +30,12 @@ VERSION_MAP=	${.CURDIR}/Version.map
 SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fields.c nvrm_json.c \
 		nvrm_names.c nvrm_rm.c nvrm_table.c
 INCSDIR=	${INCLUDEDIR}/nvrm
-INCS=		include/nvrm/nvrm.h
+INCS=		include/nvrm/nvrm.h include/nvrm/nvrm_version.h
 MAN=		man/nvrm.3 man/nvrm.7
 NVRM_FUNCS=	nvrm_enumerate nvrm_close nvrm_backend_name \
-		nvrm_rm_running_version nvrm_device_count nvrm_device_get \
+		nvrm_rm_running_version nvrm_driver_version nvrm_rm_api_version \
+		nvrm_built_for_version nvrm_library_version nvrm_symbol_version \
+		nvrm_schema_version nvrm_device_count nvrm_device_get \
 		nvrm_device_info_get nvrm_device_refresh nvrm_strerror \
 		nvrm_error_id nvrm_reason_id nvrm_reason_text \
 		nvrm_source_name nvrm_cap_name nvrm_info_nfields \

@@ -27,6 +27,7 @@ REPO=$(CDPATH= cd -- "$HERE/.." && pwd)
 GB10=${GB10_WORK:-$HOME/work/gb10}
 TAG=$(awk '$1 == "ogkm_tag" { print $2 }' "$REPO/SOURCES")
 OGKM=${OGKM:-$GB10/sources/open-gpu-kernel-modules-$TAG}
+SYSDIR=${SYSDIR:-/usr/src/sys}
 mkdir -p "$GB10/tmp" || exit 1
 W=$(mktemp -d "$GB10/tmp/libnvrm-test.XXXXXXXX") || exit 1
 trap 'rm -rf "$W"' EXIT INT TERM
@@ -45,6 +46,10 @@ expect_rc() {
 	echo "libnvrm_test: NVIDIA headers not found at $OGKM (run scripts/fetch-sources.sh)" >&2
 	exit 99
 }
+if [ ! -f "$SYSDIR/sys/param.h" ]; then
+	bad "kernel header check: $SYSDIR is not a FreeBSD sys tree; set SYSDIR=..."
+	exit 1
+fi
 
 # ---- fresh copy ----------------------------------------------------------
 SRC=$W/src
@@ -110,16 +115,99 @@ expect_rc "rm_test compiles" $rc 0
 cc $CINC -o "$W/cov/cap_test" "$T/cap_test.c" $LIBSRC >"$W/cc3.log" 2>&1
 rc=$?
 expect_rc "cap_test compiles" $rc 0
+cc $CINC -o "$W/cov/version_test" "$T/version_test.c" >"$W/cc-version.log" 2>&1
+rc=$?
+expect_rc "version_test compiles" $rc 0
+mkdir -p "$W/kernel-include"
+ln -s "$SYSDIR/$(uname -m)/include" "$W/kernel-include/machine"
+ln -s "$SYSDIR/x86/include" "$W/kernel-include/x86"
+printf '%s\n' '#include <nvrm/nvrm_version.h>' | cc -D_KERNEL -nostdinc -I"$W/kernel-include" -I"$SYSDIR" -I"$L/include" -fsyntax-only -x c - >"$W/cc-version-kernel.log" 2>&1
+rc=$?
+expect_rc "version header compiles alone for the kernel" $rc 0
+[ $rc -eq 0 ] || cat "$W/cc-version-kernel.log"
+printf '%s\n' '#include <nvrm/nvrm_version.h>' | cc -I"$L/include" -fsyntax-only -x c - >"$W/cc-version-user.log" 2>&1
+rc=$?
+expect_rc "version header compiles alone for user space" $rc 0
 
-(cd "$W/cov" && LLVM_PROFILE_FILE=core.%p.profraw ./core_test)
+(cd "$W/cov" && LLVM_PROFILE_FILE=core.%m.profraw ./core_test)
 rc=$?
 expect_rc "core_test (registry, enumeration, model, decorators, JSON, fake)" $rc 0
-(cd "$W/cov" && LLVM_PROFILE_FILE=rm.%p.profraw ./rm_test)
+(cd "$W/cov" && LLVM_PROFILE_FILE=rm.%m.profraw ./rm_test)
 rc=$?
 expect_rc "rm_test (RM backend against the scripted kernel)" $rc 0
 (cd "$W/cov" && ./cap_test)
 rc=$?
 expect_rc "cap_test (works in Capsicum capability mode, fake and rm)" $rc 0
+(cd "$W/cov" && ./version_test)
+rc=$?
+expect_rc "version_test (parser, banner finder and formatter)" $rc 0
+
+cc $CINC -o "$W/cov/info_test" "$T/info_test.c" $LIBSRC >"$W/cc-info.log" 2>&1
+rc=$?
+expect_rc "scripted nvrm-info test compiles" $rc 0
+[ $rc -eq 0 ] || cat "$W/cc-info.log"
+"$W/cov/info_test" query-fail >"$W/info-query-fail.txt"
+rc=$?
+expect_rc "scripted nvrm-info runs with a failed RM version query" $rc 0
+grep -Fq 'RM API version unknown (the system call to the driver failed)' "$W/info-query-fail.txt"
+rc=$?
+expect_rc "text mode explains an unavailable RM API version" $rc 0
+"$W/cov/info_test" inconsistent >"$W/info-inconsistent.txt"
+rc=$?
+expect_rc "scripted nvrm-info runs with inconsistent version sysctls" $rc 0
+grep -Fq 'running RM unknown (the kernel module version sysctls disagree with its version string)' "$W/info-inconsistent.txt"
+rc=$?
+expect_rc "text mode explains the inconsistent running version" $rc 0
+"$W/cov/info_test" sparse >"$W/info-sparse.txt"
+rc=$?
+expect_rc "scripted nvrm-info runs with unavailable per-GPU versions" $rc 0
+grep -Eq 'vbios +unknown \(the RM control returned an error\)' "$W/info-sparse.txt" && grep -Eq 'gsp_firmware +unknown \(the RM reports the control is not supported on this GPU\)' "$W/info-sparse.txt"
+rc=$?
+expect_rc "text mode explains unavailable per-GPU versions with reason text" $rc 0
+"$W/cov/info_test" default --json >"$W/info-scripted.json"
+"$W/cov/info_test" default >"$W/info-scripted.txt"
+python3 -I - "$W/info-scripted.json" "$W/info-scripted.txt" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+line = "schema version " + doc["versions"]["schema"]["string"]
+assert line in open(sys.argv[2]).read().splitlines(), line
+PY
+rc=$?
+expect_rc "text schema version equals versions.schema.string" $rc 0
+MD=$W/mutsrc.schema-text-source
+mkdir -p "$MD"
+cp "$L"/*.c "$L"/*.h "$MD"/
+cp -R "$L/include" "$MD/include"
+cp "$L/nvrm-info/nvrm-info.c" "$MD/nvrm-info.c"
+sed -i '' 's/text_version(nvrm_schema_version());/printf("0.0");/' "$MD/nvrm-info.c"
+if cmp -s "$MD/nvrm-info.c" "$L/nvrm-info/nvrm-info.c"; then
+	bad "mutant schema-text-source: the edit did not apply"
+else
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c"
+	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		bad "mutant schema-text-source: does not compile"
+	else
+		"$MD/t" default --json >"$MD/out.json"
+		"$MD/t" default >"$MD/out.txt"
+		python3 -I - "$MD/out.json" "$MD/out.txt" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+line = "schema version " + doc["versions"]["schema"]["string"]
+assert line in open(sys.argv[2]).read().splitlines(), line
+PY
+		rc=$?
+		if [ $rc -ne 0 ]; then ok "mutant killed: schema-text-source"; else bad "mutant SURVIVED: schema-text-source"; fi
+	fi
+fi
+
+SYSDIR="$W/no-such-sys" sh "$SRC/tests/libnvrm_test.sh" >"$W/invalid-sysdir.log" 2>&1
+rc=$?
+expect_rc "an invalid SYSDIR fails the kernel header check" $rc 1
+grep -Fq "FAIL kernel header check: $W/no-such-sys is not a FreeBSD sys tree; set SYSDIR=..." "$W/invalid-sysdir.log"
+rc=$?
+expect_rc "an invalid SYSDIR diagnostic says how to set the sys tree" $rc 0
 
 (cd "$W/cov" && llvm-profdata merge -o core.profdata core.*.profraw && llvm-profdata merge -o rm.profdata rm.*.profraw)
 GATED="nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fields.c nvrm_json.c nvrm_names.c"
@@ -131,22 +219,34 @@ rc=$?
 expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc 0
 
 # gate plant: a skipped test group must drop coverage and fail the gate
-(cd "$W/cov" && NVRM_TEST_SKIP=decorators LLVM_PROFILE_FILE=skip.profraw ./core_test >/dev/null && llvm-profdata merge -o skip.profdata skip.profraw && llvm-cov export ./core_test -instr-profile=skip.profdata --summary-only $L/nvrm.c | python3 -I "$T/coverage_gate.py" nvrm.c >"$W/plant.out" 2>&1)
+(cd "$W/cov" && NVRM_TEST_SKIP=decorators LLVM_PROFILE_FILE=skip.%m.profraw ./core_test >/dev/null && llvm-profdata merge -o skip.profdata skip.*.profraw && llvm-cov export ./core_test -instr-profile=skip.profdata --summary-only $L/nvrm.c | python3 -I "$T/coverage_gate.py" nvrm.c >"$W/plant.out" 2>&1)
 rc=$?
 if [ $rc -eq 1 ] && grep -q 'BELOW 100%' "$W/plant.out"; then ok "coverage gate plant: skipping the decorator tests fails the gate (BELOW 100%)"; else bad "coverage gate plant: not the gate's verdict (rc=$rc): $(cat "$W/plant.out")"; fi
 
 # ---- source mutants: a wrong core must make a test fail ----------------------
-mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test)
+mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	MD=$W/mutsrc.$1
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" "$MD"/nvrm.c "$MD"/nvrm_cap.c "$MD"/nvrm_fake.c "$MD"/nvrm_fields.c "$MD"/nvrm_json.c "$MD"/nvrm_names.c "$MD"/nvrm_table.c "$MD"/nvrm_rm.c >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c"
+	if [ "$4" = version_test ]; then MUTSRC=; fi
+	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
 	if [ $? -ne 0 ]; then ok "mutant killed: $1"; else bad "mutant SURVIVED: $1"; fi
 }
 mutant sm-shift nvrm.c 's/>>= 8;/>>= 7;/' core_test
 mutant sm-mask nvrm.c 's/&= 0xff;/\&= 0x7f;/' core_test
+mutant compute-table-minor nvrm_table.c 's/{ 0x1b0, 0x06, 12, 0 }/{ 0x1b0, 0x06, 12, 1 }/' core_test
+mutant compute-raw-fallback nvrm.c 's/unavail(&info->compute_capability_minor, reason, NVRM_S_DERIVED);/if (reason == NVRM_R_FAMILY_UNKNOWN) { avail(\&info->compute_capability_major, raw_sm.value >> 8, NVRM_S_DERIVED); avail(\&info->compute_capability_minor, raw_sm.value \& 0xff, NVRM_S_DERIVED); } else unavail(\&info->compute_capability_minor, reason, NVRM_S_DERIVED);/' core_test
+mutant version-overflow include/nvrm/nvrm_version.h 's/value > (UINT32_MAX - (uint32_t)d) \/ base/0/' version_test
+mutant version-width include/nvrm/nvrm_version.h 's/out->width\[out->nparts\] = (uint8_t)width/out->width[out->nparts] = 1/' version_test
+mutant version-suffix include/nvrm/nvrm_version.h 's/if (\*p == .-. || \*p == .+.) {/if (0) {/' version_test
+mutant version-banner-parts include/nvrm/nvrm_version.h 's/out->nparts >= 2/out->nparts >= 1/' version_test
+mutant version-long-input include/nvrm/nvrm_version.h 's/if (s\[i\] != .\\0. || (base != 10/if (0 || (base != 10/' version_test
+mutant vbios-byte-order nvrm_rm.c 's/(revision >> 24) & 0xff/revision \& 0xff/' rm_test
+mutant vbios-base10 nvrm.c 's/NVRM_SP_VBIOS, 16/NVRM_SP_VBIOS, 10/' core_test
+mutant gsp-bvalid nvrm_rm.c 's/if (!gsp.bValid)/if (0)/' rm_test
 mutant vram-scale nvrm.c 's/NVRM_P_VRAM_KB, 0, 1024)/NVRM_P_VRAM_KB, 0, 1000)/' core_test
 mutant chip-id nvrm.c 's/info->architecture.value +/info->architecture.value |/' core_test
 mutant sm-count nvrm.c 's/tpcs \* per_tpc/tpcs + per_tpc/' core_test
@@ -287,6 +387,8 @@ m = copy.deepcopy(good); m["devices"][0]["gpu"]["sm_count"]["value"] = "36"; dum
 m = copy.deepcopy(good); m["devices"][0]["memory"]["numa_node"]["reason_id"] = "made_up"; dump("reason", m)
 m = copy.deepcopy(good); m["schema"] = "nvrm-info/2"; dump("schema", m)
 m = copy.deepcopy(good); m["devices"][0]["gpu"]["sm_count"]["value"] = -1; dump("negative", m)
+m = copy.deepcopy(good); m["versions"]["driver"]["major"] = 4294967295; dump("max-boundary", m)
+m = copy.deepcopy(good); m["versions"]["driver"]["major"] = 4294967296; dump("maximum", m)
 m = copy.deepcopy(good); m["devices"][0]["capabilities"].pop(); dump("caps", m)
 m = copy.deepcopy(good); m["devices"][0]["gpu"]["classes"]["value"] = ["x"]; dump("list", m)
 m = copy.deepcopy(good); m["devices"][0]["memory"]["numa_node"] = {"available": True, "reason": "x"}; dump("both", m)
@@ -303,11 +405,14 @@ NCAP=$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["d
 i=0; while [ "$i" -lt "$NCAP" ]; do CAPMUT="$CAPMUT capname$i capindex$i"; i=$((i + 1)); done
 [ "$NCAP" -ge 7 ]; rc=$?
 expect_rc "validator mutants: one rename and one reindex for each of the $NCAP capability flags" $rc 0
-for m in missing extra type reason schema negative caps list both kind $CAPMUT capswap capmore; do
+for m in missing extra type reason schema negative maximum caps list both kind $CAPMUT capswap capmore; do
 	$VAL "$W/mut-$m.json" >/dev/null
 	rc=$?
 	if [ $rc -eq 1 ]; then ok "validator mutant refused: $m"; else bad "validator accepted mutant $m (rc=$rc)"; fi
 done
+$VAL "$W/mut-max-boundary.json" >/dev/null
+rc=$?
+expect_rc "validator accepts the exact uint32 maximum" $rc 0
 
 # ---- frozen identifiers: reason ids, error codes, sources, capability names ----
 # The baseline file lists them; the schema may add but never remove, rename or
@@ -395,23 +500,23 @@ mod("cap-unpinned", lambda x: x["$defs"]["device"]["properties"]["capabilities"]
 base = open(sys.argv[2]).read().splitlines()
 open(w + "/ids-empty.txt", "w").write("# nothing\n")
 open(w + "/ids-nocap.txt", "w").write("\n".join(l for l in base if not l.startswith("capability ")) + "\n")
-open(w + "/ids-extra.txt", "w").write("\n".join(base + ["reason 13 never_existed 0"]) + "\n")
-open(w + "/ids-new-m0.txt", "w").write("\n".join(base + ["reason 13 a_new_reason 0"]) + "\n")
-open(w + "/ids-new-m1.txt", "w").write("\n".join(base + ["reason 13 a_new_reason 1"]) + "\n")
+open(w + "/ids-extra.txt", "w").write("\n".join(base + ["reason 15 never_existed 0"]) + "\n")
+open(w + "/ids-new-m1.txt", "w").write("\n".join(base + ["reason 15 a_new_reason 1"]) + "\n")
+open(w + "/ids-new-m2.txt", "w").write("\n".join(base + ["reason 15 a_new_reason 2"]) + "\n")
 open(w + "/ids-renamed.txt", "w").write("\n".join(l.replace("family_unknown", "no_family_entry") for l in base) + "\n")
 def bump(x):
     add_reason(x)
     def walk(o):
         if isinstance(o, dict):
             if "schema_minor" in o and isinstance(o["schema_minor"], dict):
-                o["schema_minor"]["const"] = 1
+                o["schema_minor"]["const"] = 2
             for v in o.values():
                 walk(v)
         elif isinstance(o, list):
             for v in o:
                 walk(v)
     walk(x)
-mod("add-reason-m1", bump)
+mod("add-reason-m2", bump)
 open(w + "/ids-garbage.txt", "w").write("\n".join(base + ["reason x"]) + "\n")
 open(w + "/ids-gap.txt", "w").write("\n".join(l for l in base if not l.startswith("reason 5 ")) + "\n")
 open(w + "/ids-dup.txt", "w").write("\n".join(base + ["reason 5 family_unknown 0"]) + "\n")
@@ -450,18 +555,18 @@ if [ $rc -eq 1 ]; then ok "identifiers: an id added to the schema must be append
 $IDCHK 2>&1 >/dev/null | grep -q '^usage: ids_check.py'; rc=$?
 expect_rc "identifiers: the usage message is printed (not None)" $rc 0
 $IDCHK "$SCHEMA" "$W/ids-extra.txt" >"$W/ids-extra.out" 2>&1; rc=$?
-if [ $rc -eq 1 ] && grep -q 'never_existed (number 13) is gone' "$W/ids-extra.out"; then ok "identifiers: a baseline id the schema lacks FAILs (and the check that says so is compare, not the gap check)"; else bad "identifiers: extra baseline id gave rc=$rc"; fi
+if [ $rc -eq 1 ] && grep -q 'never_existed (number 15) is gone' "$W/ids-extra.out"; then ok "identifiers: a baseline id the schema lacks FAILs (and the check that says so is compare, not the gap check)"; else bad "identifiers: extra baseline id gave rc=$rc"; fi
 # the minor of each id: a line cannot name a minor above the schema's, and an id
 # added since the parent commit must raise it
-$IDCHK --strict "$W/ids-add-reason.json" "$W/ids-new-m1.txt" >"$W/ids-m1.out" 2>&1; rc=$?
-if [ $rc -eq 1 ] && grep -q "names minor 1, above the schema's 0" "$W/ids-m1.out"; then ok "identifiers: a line naming a minor above the schema's is refused (strict)"; else bad "identifiers: minor above the schema gave rc=$rc"; fi
-$IDCHK --strict "$W/ids-add-reason-m1.json" "$W/ids-new-m1.txt" >/dev/null 2>&1; rc=$?
+$IDCHK --strict "$W/ids-add-reason.json" "$W/ids-new-m2.txt" >"$W/ids-m2.out" 2>&1; rc=$?
+if [ $rc -eq 1 ] && grep -q "names minor 2, above the schema's 1" "$W/ids-m2.out"; then ok "identifiers: a line naming a minor above the schema's is refused (strict)"; else bad "identifiers: minor above the schema gave rc=$rc"; fi
+$IDCHK --strict "$W/ids-add-reason-m2.json" "$W/ids-new-m2.txt" >/dev/null 2>&1; rc=$?
 expect_rc "identifiers: an id added with the minor raised everywhere is accepted (strict)" $rc 0
-$IDCHK --frozen "$IDS" "$W/ids-new-m1.txt" "$W/ids-add-reason-m1.json" >/dev/null 2>&1; rc=$?
+$IDCHK --frozen "$IDS" "$W/ids-new-m2.txt" "$W/ids-add-reason-m2.json" >/dev/null 2>&1; rc=$?
 expect_rc "identifiers (frozen): an added id that raises the minor is accepted" $rc 0
-$IDCHK --frozen "$IDS" "$W/ids-new-m0.txt" "$W/ids-add-reason-m1.json" >"$W/ids-fz0.out" 2>&1; rc=$?
-if [ $rc -eq 1 ] && grep -q 'an added identifier raises the minor' "$W/ids-fz0.out"; then ok "identifiers (frozen): an id added without raising the minor is refused"; else bad "identifiers (frozen): add at the same minor gave rc=$rc"; fi
-$IDCHK --frozen "$IDS" "$W/ids-new-m1.txt" "$SCHEMA" >/dev/null 2>&1; rc=$?
+$IDCHK --frozen "$IDS" "$W/ids-new-m1.txt" "$W/ids-add-reason-m2.json" >"$W/ids-fz1.out" 2>&1; rc=$?
+if [ $rc -eq 1 ] && grep -q 'an added identifier raises the minor' "$W/ids-fz1.out"; then ok "identifiers (frozen): an id added without raising the minor is refused"; else bad "identifiers (frozen): add at the same minor gave rc=$rc"; fi
+$IDCHK --frozen "$IDS" "$W/ids-new-m2.txt" "$SCHEMA" >/dev/null 2>&1; rc=$?
 if [ $rc -eq 1 ]; then ok "identifiers (frozen): an added id with the schema minor unchanged is refused"; else bad "identifiers (frozen): add with the schema minor unchanged gave rc=$rc"; fi
 $IDCHK --frozen "$IDS" "$W/ids-renamed.txt" "$SCHEMA" >"$W/ids-fzr.out" 2>&1; rc=$?
 if [ $rc -eq 1 ] && grep -q 'a frozen line never changes' "$W/ids-fzr.out"; then ok "identifiers (frozen): a renamed line of the baseline itself is refused"; else bad "identifiers (frozen): renamed baseline line gave rc=$rc"; fi
@@ -635,14 +740,14 @@ expect_rc "frozen selection: no commit yet means no base (the check is skipped, 
 # setting NVRM_IDS_BASE_REF, as the FAIL message advises, must not break the self-tests above
 unset NVRM_IDS_BASE_REF
 # --emit and the baseline agree (the baseline is what --emit writes)
-$IDCHK --emit "$SCHEMA" >"$W/emitted.ids"
+$IDCHK --emit "$SCHEMA" "$IDS" >"$W/emitted.ids"
 grep -v '^#' "$IDS" | cmp -s - "$W/emitted.ids"; rc=$?
 expect_rc "identifiers: --emit writes exactly the baseline (minors included)" $rc 0
-$IDCHK --emit "$W/ids-add-reason-m1.json" "$IDS" >"$W/emitted-m1.ids"; rc=$?
+$IDCHK --emit "$W/ids-add-reason-m2.json" "$IDS" >"$W/emitted-m2.ids"; rc=$?
 expect_rc "identifiers: --emit with the old baseline runs" $rc 0
-grep -q '^reason 13 a_new_reason 1$' "$W/emitted-m1.ids" && grep -q '^reason 5 family_unknown 0$' "$W/emitted-m1.ids"; rc=$?
+grep -q '^reason 15 a_new_reason 2$' "$W/emitted-m2.ids" && grep -q '^reason 5 family_unknown 0$' "$W/emitted-m2.ids"; rc=$?
 expect_rc "identifiers: --emit keeps the old lines at their minor and gives the new id the schema minor" $rc 0
-$IDCHK --frozen "$IDS" "$W/emitted-m1.ids" "$W/ids-add-reason-m1.json" >/dev/null 2>&1; rc=$?
+$IDCHK --frozen "$IDS" "$W/emitted-m2.ids" "$W/ids-add-reason-m2.json" >/dev/null 2>&1; rc=$?
 expect_rc "identifiers: a baseline regenerated with --emit and the old baseline passes --frozen" $rc 0
 cut -d' ' -f1-3 "$W/emitted.ids" >"$W/ids-3field.txt"
 $IDCHK "$SCHEMA" "$W/ids-3field.txt" >/dev/null 2>&1; rc=$?
@@ -689,6 +794,16 @@ rc=$?
 expect_rc "text mode shows the values" $rc 0
 grep -q 'built for RM 580.178.04, running RM 580.178.04' "$W/text.out"; rc=$?
 expect_rc "text mode shows the built-for and the running RM version" $rc 0
+for v in 'RM API version 580.178.04' 'library version 1.1.0' 'library symbol version NVRM_1.1' 'schema version 1.1'; do
+	grep -Fqx "$v" "$W/text.out"; rc=$?
+	expect_rc "text mode shows the version string: $v" $rc 0
+done
+grep -q 'vbios  *96\.06\.1e\.00\.4a (rm)' "$W/text.out" && grep -q 'gsp_firmware  *580\.178\.04 (rm)' "$W/text.out"; rc=$?
+expect_rc "text mode shows the VBIOS and GSP firmware version strings" $rc 0
+$INFO --help >"$W/help.out"
+grep -Fq '  --json      one JSON document (schema nvrm-info/1); versions are' "$W/help.out" && grep -Fqx '              strings plus integer parts' "$W/help.out" && grep -Fq '  --jsonl     JSON Lines: header, one record per GPU, end record;' "$W/help.out" && grep -Fqx '              versions are strings plus integer parts' "$W/help.out"
+rc=$?
+expect_rc "--help folds version strings and integer parts into both JSON descriptions" $rc 0
 grep -q 'pci_bus  *13 ' "$W/text.out"; rc=$?
 expect_rc "text mode prints the PCI location in decimal like pciconf" $rc 0
 # the text view lists every field of the table (it walks the same table)
@@ -696,7 +811,7 @@ python3 -I - "$W/out.json" "$W/text.out" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1]))["devices"][0]
 text = open(sys.argv[2]).read()
-names = [k for g in ("identity", "gpu", "memory") for k in doc[g]]
+names = [k for g in ("identity", "gpu", "memory", "versions") for k in doc[g]]
 missing = [n for n in names if (" " + n + " ") not in text]
 assert not missing, missing
 PY
@@ -919,7 +1034,8 @@ bootrun() {
 	    sh "$T/boot_nvrm_info.sh" "$_d" "$_i" "$SCHEMA" >/dev/null 2>&1
 }
 line() { grep -q "$2" "$1/results.txt"; }
-EXP="BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_SM=12.0"
+# BOOT_EXPECT_SM is raw RM numbering (10.4), not compute capability (12.0).
+EXP="BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_SM=10.4"
 # the true values: each of VRAM, SM and BAR1 has a PASS and no FAIL
 bootrun "$W/ba" "$INFO" $EXP
 line "$W/ba" '^PASS GPU 0 vram_size '; rc=$?
@@ -1061,9 +1177,15 @@ grep -oE '\bnvrm_[a-z_0-9]+\(' "$L/include/nvrm/nvrm.h" | tr -d '(' | sort -u >"
 cmp -s "$W/exported.txt" "$W/declared.txt"; rc=$?
 expect_rc "the library exports exactly the functions nvrm.h declares" $rc 0
 [ $rc -eq 0 ] || diff "$W/exported.txt" "$W/declared.txt"
-objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q 'NVRM_1.0' || readelf -V "$O/lib/libnvrm.so.1" | grep -q NVRM_1.0
-rc=$?
-expect_rc "symbols carry the version NVRM_1.0" $rc 0
+for v in NVRM_1.0 NVRM_1.1; do
+	objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q "$v" || readelf -V "$O/lib/libnvrm.so.1" | grep -q "$v"
+	rc=$?
+	expect_rc "symbols carry the version $v" $rc 0
+done
+for f in nvrm_driver_version nvrm_rm_api_version nvrm_built_for_version nvrm_library_version nvrm_symbol_version nvrm_schema_version; do
+	readelf -Ws "$O/lib/libnvrm.so.1" | grep -Eq "$f@+NVRM_1[.]1([[:space:]]|$)"; rc=$?
+	expect_rc "$f is exported at NVRM_1.1" $rc 0
+done
 
 # ---- man pages ---------------------------------------------------------------
 for m in "$L/man/nvrm.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
@@ -1077,7 +1199,7 @@ for code in $(grep -oE 'NVRM_E_[A-Z]+' "$L/include/nvrm/nvrm.h" | sort -u | grep
 	grep -q "$code" "$L/man/nvrm.3"; rc=$?
 	expect_rc "nvrm(3) documents $code" $rc 0
 done
-for r in not_queried rm_control_failed rm_not_supported os_not_reported family_unknown family_has_no_class input_unavailable no_numa_node backend_does_not_provide class_absent os_call_failed value_unusable; do
+for r in not_queried rm_control_failed rm_not_supported os_not_reported family_unknown family_has_no_class input_unavailable no_numa_node backend_does_not_provide class_absent os_call_failed value_unusable version_unparsed version_inconsistent; do
 	grep -q "$r" "$L/man/nvrm.7"; rc=$?
 	expect_rc "nvrm(7) documents reason $r" $rc 0
 done
@@ -1103,6 +1225,20 @@ expect_rc "the Makefile man links cover every exported function" $rc 0
 grep -q 'nvrm_enumerate' "$L/man/nvrm.3" && grep -q 'nvrm_json_schema' "$L/man/nvrm.3" && grep -q -- '--jsonl' "$L/nvrm-info/nvrm-info.8"
 rc=$?
 expect_rc "man pages cover the calls and every nvrm-info option" $rc 0
+for f in nvrm_version nvrm_version_parse nvrm_version_find nvrm_version_format; do
+	grep -q "$f" "$L/man/nvrm.3"; rc=$?
+	expect_rc "nvrm(3) documents $f" $rc 0
+done
+grep -q 'versions' "$L/man/nvrm.3" && grep -q 'parts' "$L/man/nvrm.3" && grep -q 'source' "$L/man/nvrm.3"; rc=$?
+expect_rc "nvrm(3) documents the JSON version object and its integer parts" $rc 0
+grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 1;' "$L/man/nvrm.7"; rc=$?
+expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 1" $rc 0
+for s in version_string version_major version_minor version_patch version_suffix version_available; do
+	grep -q "hw.nvidia.$s" "$L/nvrm-info/nvrm-info.8"; rc=$?
+	expect_rc "nvrm-info(8) documents hw.nvidia.$s" $rc 0
+done
+grep -q 'versions' "$L/nvrm-info/nvrm-info.8" && grep -q 'compute_capability' "$L/nvrm-info/nvrm-info.8" && grep -q 'sm_version' "$L/nvrm-info/nvrm-info.8"; rc=$?
+expect_rc "nvrm-info(8) documents the versions object and compute versus RM SM versions" $rc 0
 
 # ---- what the docs promise is what the code does ---------------------------------
 # doc_checks LIBDIR README: prints one line per broken promise, returns their count.
@@ -1178,7 +1314,7 @@ expect_rc "libnvrm installs" $rc 0
 (cd "$L/nvrm-info" && MAKEOBJDIR=$O/info LIBNVRM_OBJ=$O/lib make install DESTDIR=$D $OWN >"$W/inst2.log" 2>&1)
 rc=$?
 expect_rc "nvrm-info installs" $rc 0
-for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
+for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/include/nvrm/nvrm_version.h usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
 	[ -f "$D/$f" ]; rc=$?
 	expect_rc "installed: $f" $rc 0
 done
