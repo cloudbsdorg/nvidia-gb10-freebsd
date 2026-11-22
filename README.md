@@ -329,6 +329,10 @@ The GPU is initialised, and GSP booted, on the first open of `/dev/nvidia0`; it 
 again when the last open closes. `sysctl hw.nvidia.gpus.0` shows the firmware and VBIOS
 versions while something holds the device open.
 
+If that first open fails (`nvidia0: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
+program gets `EIO`), the driver frees what the open took and the open can be tried again. See
+`man/nvidia.4`.
+
 `nvidia-drm.ko` goes last: it drives the DRM/KMS side of the card and needs the modeset
 module loaded before it.
 
