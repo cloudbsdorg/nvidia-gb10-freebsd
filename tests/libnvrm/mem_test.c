@@ -369,6 +369,51 @@ expect_clean(const char *what)
 /* ---- the client ---------------------------------------------------------- */
 
 static void
+test_client_open_failures(nvrm_device *d)
+{
+	nvrm_open_opts o;
+	nvrm_client *cl;
+	char err[200];
+	int n;
+
+	/* each injected failure of the open leaves nothing behind */
+	for (n = NVRM_FAKE_OP_CLIENT_OPEN; n <= NVRM_FAKE_OP_DESC; n++) {
+		nvrm_fake_mem_fail(n, 1);
+		cl = NULL;
+		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
+		CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
+		CHECK(cl == NULL);
+		CHECK(strstr(err, "injected") != NULL);
+		expect_clean("injected open");
+	}
+	/* the export descriptors fail after the mapping ones: both pools unwind */
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_DESC, 3);
+	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
+	expect_clean("late injected");
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_LIMIT, 1);
+	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_CAPSICUM);
+	expect_clean("limit failed");
+	nvrm_fake_mem_fail_clear();
+
+	/* allocation failures: every nth allocation in turn */
+	for (n = 1; n < 60; n++) {
+		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 9, 1 };
+		cl = NULL;
+		fail_calloc_at(n);
+		if (nvrm_client_open(d, &o, &cl, err, sizeof(err)) == NVRM_OK) {
+			fail_calloc_at(0);
+			nvrm_client_close(cl);
+			break;
+		}
+		fail_calloc_at(0);
+		CHECK(cl == NULL);
+		expect_clean("oom open");
+	}
+	CHECK(n > 5 && n < 60);
+}
+
+static void
 test_client_open(void)
 {
 	nvrm_open_opts o;
@@ -377,7 +422,6 @@ test_client_open(void)
 	nvrm_vaspace_info vi;
 	char err[200];
 	nvrm_device *d;
-	int n;
 
 	setup("discrete", NULL);
 	d = nvrm_device_get(ctx, 0);
@@ -445,41 +489,7 @@ test_client_open(void)
 	CHECK_EQ(nvrm_client_open(d, NULL, &cl, NULL, 0), NVRM_OK);
 	nvrm_client_close(cl);
 
-	/* each injected failure of the open leaves nothing behind */
-	for (n = NVRM_FAKE_OP_CLIENT_OPEN; n <= NVRM_FAKE_OP_DESC; n++) {
-		nvrm_fake_mem_fail(n, 1);
-		cl = NULL;
-		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
-		CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
-		CHECK(cl == NULL);
-		CHECK(strstr(err, "injected") != NULL);
-		expect_clean("injected open");
-	}
-	/* the export descriptors fail after the mapping ones: both pools unwind */
-	nvrm_fake_mem_fail(NVRM_FAKE_OP_DESC, 3);
-	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 2, 2 };
-	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_RM);
-	expect_clean("late injected");
-	nvrm_fake_mem_fail(NVRM_FAKE_OP_LIMIT, 1);
-	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_E_CAPSICUM);
-	expect_clean("limit failed");
-	nvrm_fake_mem_fail_clear();
-
-	/* allocation failures: every nth allocation in turn */
-	for (n = 1; n < 60; n++) {
-		o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 9, 1 };
-		cl = NULL;
-		fail_calloc_at(n);
-		if (nvrm_client_open(d, &o, &cl, err, sizeof(err)) == NVRM_OK) {
-			fail_calloc_at(0);
-			nvrm_client_close(cl);
-			break;
-		}
-		fail_calloc_at(0);
-		CHECK(cl == NULL);
-		expect_clean("oom open");
-	}
-	CHECK(n > 5 && n < 60);
+	test_client_open_failures(d);
 	teardown();
 }
 
@@ -549,6 +559,33 @@ test_client_independent(void)
 }
 
 /* ---- VA reservations ----------------------------------------------------- */
+
+static void
+test_reserve_release_oom(nvrm_client *cl, uint64_t va2)
+{
+	uint64_t ra, rb, rc2;
+	nvrm_va_params q;
+
+	/* a release whose free-list node cannot be had: the RM side is
+	 * released, and the addresses are lost to the allocator for good (never
+	 * handed out twice), which the message says */
+	q = (nvrm_va_params){ 0, 0, 4096, 0, va2 + 1 * MiB };
+	CHECK_EQ(nvrm_va_reserve(cl, &q, &ra), NVRM_OK);
+	q.fixed = va2 + 1 * MiB + 4096;
+	CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_OK);
+	q.fixed = va2 + 1 * MiB + 8192;
+	CHECK_EQ(nvrm_va_reserve(cl, &q, &rc2), NVRM_OK);
+	fail_calloc_at(1);
+	CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_NOMEM);
+	fail_calloc_at(0);
+	CHECK(strstr(nvrm_client_errmsg(cl), "lost to the allocator") != NULL);
+	CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);	/* q.fixed: rc2 */
+	q.fixed = rb;
+	CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);
+	CHECK_EQ(nvrm_va_release(cl, ra), NVRM_OK);
+	CHECK_EQ(nvrm_va_release(cl, rc2), NVRM_OK);
+}
 
 static void
 test_reserve(void)
@@ -630,30 +667,7 @@ test_reserve(void)
 	fail_calloc_at(1);
 	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_NOMEM);
 	fail_calloc_at(0);
-	/* a release whose free-list node cannot be had: the RM side is
-	 * released, and the addresses are lost to the allocator for good (never
-	 * handed out twice), which the message says */
-	{
-		uint64_t ra, rb, rc2;
-		nvrm_va_params q;
-
-		q = (nvrm_va_params){ 0, 0, 4096, 0, va2 + 1 * MiB };
-		CHECK_EQ(nvrm_va_reserve(cl, &q, &ra), NVRM_OK);
-		q.fixed = va2 + 1 * MiB + 4096;
-		CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_OK);
-		q.fixed = va2 + 1 * MiB + 8192;
-		CHECK_EQ(nvrm_va_reserve(cl, &q, &rc2), NVRM_OK);
-		fail_calloc_at(1);
-		CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_NOMEM);
-		fail_calloc_at(0);
-		CHECK(strstr(nvrm_client_errmsg(cl), "lost to the allocator") != NULL);
-		CHECK_EQ(nvrm_va_release(cl, rb), NVRM_E_INVAL);
-		CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);	/* q.fixed: rc2 */
-		q.fixed = rb;
-		CHECK_EQ(nvrm_va_reserve(cl, &q, &rb), NVRM_E_RANGE);
-		CHECK_EQ(nvrm_va_release(cl, ra), NVRM_OK);
-		CHECK_EQ(nvrm_va_release(cl, rc2), NVRM_OK);
-	}
+	test_reserve_release_oom(cl, va2);
 	nvrm_client_close(cl);
 	expect_clean("reserve");
 	teardown();
@@ -2086,6 +2100,113 @@ test_spare_rights(void)
 	teardown();
 }
 
+/* ---- fork children ------------------------------------------------------- */
+
+static pid_t
+other_pid(void)
+{
+	return (getpid() + 1);
+}
+
+static pid_t
+this_pid(void)
+{
+	return (getpid());
+}
+
+static void
+test_fork_child(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m, *unmapped, *x = NULL;
+	nvrm_va_params vp = { 0, 0, 1 * MiB, 0, 0 };
+	nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 4096, 0, 0 };
+	nvrm_gpu_map_params gp;
+	nvrm_client_stats st = { 0 };
+	nvrm_fake_mem_stats before;
+	static char pages[65536] __attribute__((aligned(65536)));
+	uint64_t va, va2, spare;
+	unsigned char back[4];
+	int fd, fd2;
+	void *p;
+
+	setup("discrete", "amd64");
+	cl = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
+	va = reserve(cl, 2 * MiB, 0, 0);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 64 * KiB, 0);
+	CHECK_EQ(map_gpu(m, va, 0, 0, 0), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p), NVRM_OK);
+	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_OK);
+	/* An unmapped object keeps the child free check independent of the
+	 * fake backend's rule that a live GPU mapping holds its object. */
+	unmapped = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
+	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
+	spare = st.spare_descriptors;
+	before = bstats();
+	nvrm_getpid_hook = other_pid;
+#define CHILD_DENIED(call) do { \
+	CHECK_EQ((call), NVRM_E_DENIED); \
+	CHECK(strstr(nvrm_client_errmsg(cl), "fork() child") != NULL); \
+	CHECK(strstr(nvrm_client_errmsg(cl), "release") != NULL); \
+} while (0)
+	CHILD_DENIED(nvrm_va_reserve(cl, &vp, &va2));
+	CHILD_DENIED(nvrm_mem_alloc(cl, &mp, &x));
+	CHILD_DENIED(nvrm_mem_register_user(cl, pages, 65536, &x));
+	gp = (nvrm_gpu_map_params){ 0, 0, va + 1 * MiB, 0, 0 };
+	CHILD_DENIED(nvrm_mem_map_gpu(m, &gp));
+	CHILD_DENIED(nvrm_mem_export_fd(m, &fd2));
+	CHILD_DENIED(nvrm_mem_import_fd(cl, fd, &x));
+	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
+	CHECK_EQ(st.spare_descriptors, spare);
+	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+	CHILD_DENIED(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p));
+#undef CHILD_DENIED
+	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_OK);
+	nvrm_mem_free(m);
+	nvrm_mem_free(unmapped);
+	CHECK_EQ(nvrm_va_release(cl, va), NVRM_OK);
+	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
+	CHECK_EQ(st.live_mem, 0);
+	CHECK_EQ(st.live_reservations, 0);
+	CHECK_EQ(st.live_gpu_maps, 0);
+	CHECK_EQ(st.live_cpu_maps, 0);
+	CHECK_EQ(st.failed_releases, 0);
+	/* Child releases free only their own backend records: the parent's fake
+	 * GPU objects, including the still-valid GPU mapping, are untouched. */
+	CHECK_EQ(bstats().clients, before.clients);
+	CHECK_EQ(bstats().objects, before.objects);
+	CHECK_EQ(bstats().reservations, before.reservations);
+	CHECK_EQ(bstats().gpu_maps, before.gpu_maps);
+	CHECK_EQ(nvrm_fake_gpu_access(cl, va, back, sizeof(back), 0), 0);
+	close(fd);
+	nvrm_getpid_hook = NULL;
+	nvrm_client_close(cl);
+	teardown();
+	expect_clean("fork child");
+}
+
+static void
+test_fork_generation(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m = NULL;
+	nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 4096, 0, 0 };
+
+	setup("discrete", NULL);
+	cl = open_client(0, 0, 0);
+	(void)reserve(cl, 1 * MiB, 0, 0);	/* close drops this child record */
+	nvrm_getpid_hook = this_pid;
+	nvrm_owner_fork_seam();
+	CHECK_EQ(nvrm_mem_alloc(cl, &mp, &m), NVRM_E_DENIED);
+	CHECK(strstr(nvrm_client_errmsg(cl), "fork() child") != NULL);
+	nvrm_getpid_hook = NULL;
+	if (m != NULL)
+		nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	teardown();
+	expect_clean("fork generation");
+}
+
 #define RUN(group, fn) do { \
 	const char *skip = getenv("NVRM_TEST_SKIP"); \
 	if (skip == NULL || strcmp(skip, group) != 0) \
@@ -2123,5 +2244,7 @@ main(void)
 	RUN("alloc", test_default_page);
 	RUN("share", test_import_unexported);
 	RUN("client", test_spare_rights);
+	RUN("fork", test_fork_child);
+	RUN("fork", test_fork_generation);
 	return (t_done("mem_test"));
 }

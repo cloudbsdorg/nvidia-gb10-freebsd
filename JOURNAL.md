@@ -598,3 +598,13 @@ STATUS, hand back.
   (guard_layer_name) for files, records and dependencies, now with drm, dmabuf, ttm, amdgpu, radeonkms and i915kms;
   guard_env prints the kernel records on a records line (no globals); kldxref positive control is the module
   record; the record-inside-another-file branch is tested. Kit test 174/0.
+## 2026-11-22T11:45Z libnvrm S3 (Track 2437, branch agent/2437-libnvrm-s3)
+- Main sync: fast-forwarded to origin/main 4a745c7. A --no-ff merge was refused by merge-proof (MERGE_HEAD brings the GitHub merge commit 4a745c7 with no per-commit receipt); b98157c is an ancestor of main, so the fast-forward carries no branch content.
+- Baseline tests/libnvrm_test.sh: 478 ok, 0 failed.
+- Spike answer (MIT RM source, src/nvidia/src/kernel/gpu/fifo/channel_descendant.c): a copy-class object allocated on a channel whose engine type is GR is bound to the partner copy engine of that GR engine for the channel runqueue (kfifoGetEnginePartnerList, exactly one partner, else NV_ERR_INVALID_STATE). So a graphics-runlist channel can host the copy class (GRCE); the test boot probe proves it on the RTX 5060 Ti.
+- clc86f.h in open-gpu-kernel-modules defines PAYLOAD_SIZE 24:24 with only _32BIT 0; 64-bit is 1 (Mesa clc86f.h). The SEM_EXECUTE word: RELEASE 1, RELEASE_WFI 20:20, PAYLOAD_SIZE 24:24. The open-gpu-kernel-modules clcab5.h is trimmed; the Mesa (MIT) clcab5.h has the full copy class.
+- opencode rounds run with a private XDG_DATA_HOME (tmp/libnvrm-s3/ocdata): the shared opencode.db was locked by about 15 parallel runs and the first round A attempt died on SQLITE_BUSY.
+- Round A (Kimi k3.1-pro): S2 DEFECTs correctness.N1 (owner check into the core) and falsification.N1 (DEFAULT page-size write-back). Round B brief written: slice 1 (nvrm_chan API, ring rules, fake GPFIFO).
+- Resume: check round A (tmp/libnvrm-s3/rounds/A-s2defects), review, suite, gate 2 rounds, commit, push; then run round B.
+- 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
+- Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
