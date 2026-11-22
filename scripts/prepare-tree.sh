@@ -56,7 +56,10 @@
 # nvidia.ko and nvidia-drm.ko both find through -I../common/inc.
 # src/gb10-client-owner/nv_client_owner.h and nvco_glue.h (the RM client
 # ownership table and its kernel glue for nvidia-uvm.ko, Track #2373) to
-# TREE/nvidia/.
+# TREE/nvidia/. The version sysctl source/header and the shared freestanding
+# nvrm_version.h parser go to both TREE/nvidia/ and TREE/nvidia-modeset/; each
+# of those copies has its own manifest line with a third column, the
+# destination relative to TREE, so a stale copy is named by the freshness check.
 # Nothing is written outside TREE and /tmp is never used.
 
 set -eu
@@ -173,6 +176,20 @@ copy_repo_src() {
 		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
 		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
 		    >> "$TREE/.prepared.patches"
+	done
+	# Version and identity sysctls: our own source and the single shared
+	# nvrm_version parser are compiled into both kernel modules. Record one
+	# manifest entry per copy: source path, sha256 and the copy's destination
+	# relative to TREE (the lib/ source path for the parser).
+	mkdir -p "$TREE/nvidia-modeset"
+	for _f in src/gb10-version/nv_version_sysctl.c \
+	    src/gb10-version/nv_version_sysctl.h \
+	    lib/libnvrm/include/nvrm/nvrm_version.h; do
+		for _module in nvidia nvidia-modeset; do
+			cp "$REPO/$_f" "$TREE/$_module/$(basename "$_f")"
+			printf '%s  %s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
+			    "$_module/$(basename "$_f")" >> "$TREE/.prepared.patches"
+		done
 	done
 	for _f in src/nvidia/interface/nv_uvm_types.h \
 	    src/nvidia/interface/nv_uvm_user_types.h \
