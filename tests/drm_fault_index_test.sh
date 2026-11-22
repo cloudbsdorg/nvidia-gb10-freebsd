@@ -51,15 +51,20 @@ ok() { echo "PASS: $1"; passed=$((passed + 1)); }
 bad() { echo "FAIL: $1"; failed=$((failed + 1)); }
 
 # body <file> <function> <out>: the FreeBSD (NV_LINUX undefined) text of one
-# function, from its name line to the first line that is just "}".
+# function, from its name line to the first line that is just "}". A
+# forward declaration of the function (its name line followed by a line
+# ending in ";" before any "{") is skipped, so the definition is extracted
+# even when a prototype precedes it (__nv_drm_gem_nvkms_map has one).
 body() {
 	unifdef -UNV_LINUX -o "$TMPD/unifdef.c" "$1"
 	# unifdef exits 1 when it changed something, 0 when not, 2 on error.
 	[ $? -le 1 ] || return 1
 	awk -v f="$2" '
-		!on && (index($0, f "(") == 1 || ($1 == "static" && index($0, " " f "(") > 0)) { on = 1 }
-		on { print }
-		on && /^}$/ { exit }
+		!on && (index($0, f "(") == 1 || ($1 == "static" && index($0, " " f "(") > 0)) { on = 1; n = 0 }
+		on { buf[n++] = $0 }
+		on && !def && /;[[:space:]]*$/ { on = 0; n = 0; next }
+		on && !def && /\{[[:space:]]*$/ { def = 1 }
+		def && /^}$/ { for (i = 0; i < n; i++) print buf[i]; exit }
 	' "$TMPD/unifdef.c" > "$3"
 	[ -s "$3" ]
 }
@@ -122,6 +127,109 @@ case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-b
     || bad "control: pristine mmap passed - the check cannot see the defect"
 r=$(wc_check "$TREE/$NVKMS")
 [ -z "$r" ] && ok "nvkms mmap: video memory mapped write-combining" || bad "nvkms mmap: $r"
+
+# (f) the video memory a user maps must have vm_pages: linuxkpi's
+# vmf_insert_pfn() looks the pfn up with PHYS_TO_VM_PAGE() and returns
+# VM_FAULT_SIGBUS when there is none, which the VM turns into a zero-filled
+# RAM page in the mapping (amp001, 2026-11-19, DTrace: every insert returned
+# 2, every fault was satisfied with RAM; the monitor stayed black). A PCIe
+# BAR has vm_pages only while a fictitious range is registered for it. The
+# FreeBSD text must therefore:
+#   (f1) register the mapped window when the object is physically mapped
+#        (__nv_drm_gem_nvkms_map calls a helper that calls
+#        vm_phys_fictitious_reg_range);
+#   (f2) unregister it in __nv_drm_gem_nvkms_memory_free BEFORE the
+#        nvKms->unmapMemory() call, through a helper that calls
+#        vm_phys_fictitious_unreg_range;
+#   (f3) never unregister pages another object still has in a VM object
+#        (the helper checks m->object before unregistering);
+#   (f4) probe the window for PG_FICTITIOUS pages BEFORE calling
+#        vm_phys_fictitious_reg_range: the kernel does not report an
+#        overlap (its tree comparator panics on one; on amd64 a window
+#        inside vm_page_array is re-initialised in place), so the probe
+#        is the only overlap check there is (review finding, 2026-11-19).
+pages_check() {
+	body "$1" __nv_drm_gem_nvkms_map "$TMPD/map.c" || { echo "cannot extract __nv_drm_gem_nvkms_map"; return; }
+	body "$1" __nv_drm_gem_nvkms_memory_free "$TMPD/free.c" || { echo "cannot extract __nv_drm_gem_nvkms_memory_free"; return; }
+	grep -Eq '__nv_drm_gem_nvkms_bsd_pages_register\(' "$TMPD/map.c" \
+	    || { echo "__nv_drm_gem_nvkms_map: does not register vm_pages for the mapped video memory"; return; }
+	body "$1" __nv_drm_gem_nvkms_bsd_pages_register "$TMPD/reg.c" || { echo "no __nv_drm_gem_nvkms_bsd_pages_register"; return; }
+	grep -Eq 'vm_phys_fictitious_reg_range\(' "$TMPD/reg.c" \
+	    || { echo "__nv_drm_gem_nvkms_bsd_pages_register: no vm_phys_fictitious_reg_range call"; return; }
+	# (f4) the PG_FICTITIOUS probe comes before the registration, and it
+	# also compares the page's physical address: an amd64 vm_page_array
+	# entry for a hole is never initialised, so a flag bit alone is garbage
+	probe=$(grep -n 'PG_FICTITIOUS' "$TMPD/reg.c" | head -1 | cut -d: -f1)
+	regl=$(grep -n 'vm_phys_fictitious_reg_range(' "$TMPD/reg.c" | head -1 | cut -d: -f1)
+	[ -n "$probe" ] && [ "$probe" -lt "$regl" ] \
+	    || { echo "__nv_drm_gem_nvkms_bsd_pages_register: no PG_FICTITIOUS probe before registering (overlap would panic)"; return; }
+	grep -Eq 'VM_PAGE_TO_PHYS\(m\) == pa' "$TMPD/reg.c" \
+	    || { echo "__nv_drm_gem_nvkms_bsd_pages_register: probe does not compare the page's physical address (uninitialised amd64 array entries)"; return; }
+	# (f5) nvidia-drm is built against linuxkpi, whose page.h redefines
+	# PAGE_MASK the Linux way, ~(PAGE_SIZE - 1): "x & PAGE_MASK" is the page
+	# address, not the offset, so an alignment test written with it refuses
+	# every window (test boot 4, 2026-11-19: "is not page aligned" for
+	# 0x3000101b0000, and the dumb buffer create failed with EINVAL)
+	if grep -Eq '&[[:space:](]*PAGE_MASK' "$TMPD/reg.c"; then
+		echo "__nv_drm_gem_nvkms_bsd_pages_register: tests alignment with PAGE_MASK, which linuxkpi defines as ~(PAGE_SIZE - 1)"
+		return
+	fi
+	if grep -q 'EEXIST' "$TMPD/reg.c"; then
+		echo "__nv_drm_gem_nvkms_bsd_pages_register: handles EEXIST, which vm_phys_fictitious_reg_range never returns"
+		return
+	fi
+	# (f2) the unregister call comes before unmapMemory in free
+	unreg=$(grep -n '__nv_drm_gem_nvkms_bsd_pages_unregister(' "$TMPD/free.c" | head -1 | cut -d: -f1)
+	unmap=$(grep -n 'unmapMemory(' "$TMPD/free.c" | head -1 | cut -d: -f1)
+	[ -n "$unreg" ] || { echo "__nv_drm_gem_nvkms_memory_free: does not unregister the vm_pages"; return; }
+	[ -n "$unmap" ] || { echo "__nv_drm_gem_nvkms_memory_free: no unmapMemory call (extractor?)"; return; }
+	[ "$unreg" -lt "$unmap" ] || { echo "__nv_drm_gem_nvkms_memory_free: unregisters after unmapMemory"; return; }
+	body "$1" __nv_drm_gem_nvkms_bsd_pages_unregister "$TMPD/unreg.c" || { echo "no __nv_drm_gem_nvkms_bsd_pages_unregister"; return; }
+	grep -Eq 'vm_phys_fictitious_unreg_range\(' "$TMPD/unreg.c" \
+	    || { echo "__nv_drm_gem_nvkms_bsd_pages_unregister: no vm_phys_fictitious_unreg_range call"; return; }
+	# (f3) the pages-in-use check precedes the unregistration
+	inuse=$(grep -n 'object != NULL' "$TMPD/unreg.c" | head -1 | cut -d: -f1)
+	unregl=$(grep -n 'vm_phys_fictitious_unreg_range(' "$TMPD/unreg.c" | head -1 | cut -d: -f1)
+	[ -n "$inuse" ] && [ "$inuse" -lt "$unregl" ] \
+	    || { echo "__nv_drm_gem_nvkms_bsd_pages_unregister: no in-use check before unregistering"; return; }
+}
+r=$(pages_check "$PRISTINE/$NVKMS")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: pristine source has no vm_pages for video memory ($r)" \
+    || bad "control: pristine source passed - the check cannot see the defect"
+# mutant: the prepared source without the unregistration in free
+sed '/__nv_drm_gem_nvkms_bsd_pages_unregister(nv_nvkms_memory);/d' "$TREE/$NVKMS" > "$TMPD/mutant.c"
+r=$(pages_check "$TMPD/mutant.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant without the unregistration is flagged ($r)" \
+    || bad "control: mutant without the unregistration passed"
+# mutant: the prepared source without the overlap probe (registers blind)
+sed '/(m->flags & PG_FICTITIOUS) != 0/d; /VM_PAGE_TO_PHYS(m) == pa/d' "$TREE/$NVKMS" > "$TMPD/mutant2.c"
+r=$(pages_check "$TMPD/mutant2.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant without the overlap probe is flagged ($r)" \
+    || bad "control: mutant without the overlap probe passed"
+# mutant: the probe trusts the flag bit alone (no physical-address check)
+sed '/(m->flags & PG_FICTITIOUS) != 0 &&$/{N;s/ &&\n            VM_PAGE_TO_PHYS(m) == pa) {/) {/;}' "$TREE/$NVKMS" > "$TMPD/mutant3.c"
+r=$(pages_check "$TMPD/mutant3.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant trusting PG_FICTITIOUS alone is flagged ($r)" \
+    || bad "control: mutant trusting PG_FICTITIOUS alone passed"
+# mutant: the alignment test written with linuxkpi's PAGE_MASK (test boot 4)
+sed 's/(start \& (PAGE_SIZE - 1)) != 0/(start \& PAGE_MASK) != 0/' "$TREE/$NVKMS" > "$TMPD/mutant4.c"
+r=$(pages_check "$TMPD/mutant4.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant testing alignment with PAGE_MASK is flagged ($r)" \
+    || bad "control: mutant testing alignment with PAGE_MASK passed"
+# mutant: the same, parenthesised
+sed 's/(start \& (PAGE_SIZE - 1)) != 0/(start \& (PAGE_MASK)) != 0/' "$TREE/$NVKMS" > "$TMPD/mutant5.c"
+r=$(pages_check "$TMPD/mutant5.c")
+case $r in *cannot\ extract*) bad "control: extractor broken: $r"; r=extractor-broken ;; esac
+[ -n "$r" ] && ok "control: mutant with a parenthesised PAGE_MASK is flagged ($r)" \
+    || bad "control: mutant with a parenthesised PAGE_MASK passed"
+r=$(pages_check "$TREE/$NVKMS")
+[ -z "$r" ] && ok "nvkms map/free: video memory registered as vm_pages, unregistered before unmap, in-use check" \
+    || bad "nvkms map/free: $r"
 
 echo "passed: $passed failed: $failed"
 [ "$failed" -eq 0 ]

@@ -1,0 +1,340 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 20, 2026
+.Dt NVIDIA_DRM_RENDER 4
+.Os
+.Sh NAME
+.Nm nvidia_drm_render
+.Nd render interface of the nvidia-drm driver
+.Sh SYNOPSIS
+.In nvidia-drm-render.h
+.Pp
+.Ft int
+.Fn ioctl "int fd" "unsigned long request" "void *arg"
+.Sh DESCRIPTION
+The render interface (NVR) lets a user-space graphics driver use the GPU
+through the DRM
+device that
+.Nm nvidia-drm
+creates.
+It is shaped like the render interface of the nouveau driver, so that a
+Vulkan driver written for that model needs only a small backend.
+The numbers and the semantics are the driver's own.
+The interface is available on both the render node and the card node, needs no
+.Dv DRM_MASTER ,
+and is safe to call from any number of threads on one descriptor.
+.Pp
+A descriptor is one client.
+It owns one GPU virtual address space, created by
+.Dv DRM_IOCTL_NVR_VM_INIT ,
+a set of buffer objects named by GEM handles, and a set of channels.
+A channel is an in-order queue on one GPU engine.
+Buffers are memory only: they get a GPU address when
+.Dv DRM_IOCTL_NVR_VM_BIND
+maps them.
+Jobs are ordered with DRM syncobjs, which are created and passed by the core
+DRM ioctls, not by this interface.
+.Pp
+The header defines the version in
+.Dv NVR_UAPI_VERSION_MAJOR
+and
+.Dv NVR_UAPI_VERSION_MINOR .
+The major version is 1.
+A caller must refuse a major version it does not know.
+A larger minor version only adds
+.Dv GETPARAM
+values, flag bits that older callers leave zero, and ioctls.
+.Pp
+Every structure uses fixed-width types and no pointers, a user pointer being a
+.Vt uint64_t .
+There is no implicit padding, every 64-bit member sits at a multiple of 8, and
+every structure size is a multiple of 8, so 32-bit and 64-bit callers see the
+same layout.
+Padding, reserved members and unknown flag bits must be zero, or the call
+fails with
+.Er EINVAL .
+A call that fails changes nothing.
+.Sh IOCTLS
+Command numbers are relative to
+.Dv DRM_COMMAND_BASE .
+They are in the range 0x45 to 0x5f, above the numbers of the
+.Dv DRM_NVIDIA_*
+ioctls of the same driver and of the nouveau driver's ioctls.
+.Bl -tag -width Ds
+.It Dv DRM_IOCTL_NVR_GETPARAM Pq 0x45, Vt struct drm_nvr_getparam
+Return one parameter.
+.Va param
+is an
+.Dv NVR_PARAM_*
+value and
+.Va value
+the result.
+The parameters are the interface version, PCI device, the limits (pushes per
+exec, channels, bind operations, synchronisation entries), video memory size,
+BAR size,
+the video memory this descriptor holds and the free video memory
+(rounded down to a multiple of 16 MiB), the GPU timer in nanoseconds,
+the GPC and TPC counts, the
+virtual address width and limit, the smallest kernel range for
+.Dv DRM_IOCTL_NVR_VM_INIT ,
+the GPU page sizes and the feature flags.
+An unknown parameter is
+.Er EINVAL .
+.It Dv DRM_IOCTL_NVR_GETINFO Pq 0x46, Vt struct drm_nvr_getinfo
+Return the device identity, chip, compute topology, memory sizes, limits, a
+name and the list of GPU classes.
+The class list is written to the array at
+.Va classes_ptr ,
+at most
+.Va classes_cap
+entries; the full count is returned in
+.Va classes_count .
+.Va classes_ptr
+must be 0 when
+.Va classes_cap
+is 0 and non-zero otherwise, so call once with both 0 to get the count.
+.Va flags
+reports
+.Dv NVR_INFO_FLAG_NO_VRAM
+(unified memory, no video memory),
+.Dv NVR_INFO_FLAG_CPU_COHERENT ,
+.Dv NVR_INFO_FLAG_BAR_DEVICE_MEM
+and
+.Dv NVR_INFO_FLAG_COMPRESSION .
+.It Dv DRM_IOCTL_NVR_CHANNEL_ALLOC Pq 0x47, Vt struct drm_nvr_channel_alloc
+Create a channel on an engine
+.Pq Dv NVR_ENGINE_GR , NVR_ENGINE_CE , NVR_ENGINE_NVDEC , NVR_ENGINE_NVENC .
+.Va engine_instance
+for
+.Dv NVR_ENGINE_CE
+is 0 to let the driver choose, or 1 to the
+.Va ce_count
+returned by
+.Dv DRM_IOCTL_NVR_GETINFO
+to select that copy engine; the numbering is 1-based.
+For every other engine it must be 0.
+The driver creates the engine objects and returns them, with their
+subchannels, in
+.Va objs .
+A graphics channel gets the 3D, compute, copy, inline-to-memory and 2D
+objects (the copy object because graphics work writes copy methods into the
+graphics push); a copy channel gets one copy object.
+Needs
+.Dv DRM_IOCTL_NVR_VM_INIT
+first.
+Channel numbers are never reused within one descriptor.
+.It Dv DRM_IOCTL_NVR_CHANNEL_FREE Pq 0x48, Vt struct drm_nvr_channel_free
+Invalidate a channel number at once.
+Running jobs finish, fail or time out; every job not yet handed to the
+hardware, whether it waits for a fence or only for the jobs ahead of it, is
+cancelled with
+.Er ECANCELED
+on its signal fences.
+The driver then destroys the channel in the GPU's resource manager and only
+then releases its memory.
+.It Dv DRM_IOCTL_NVR_GEM_NEW Pq 0x49, Vt struct drm_nvr_gem_new
+Create a buffer object.
+.Va domain
+is a mask of
+.Dv NVR_GEM_DOMAIN_VRAM ,
+.Dv NVR_GEM_DOMAIN_GART ,
+.Dv NVR_GEM_DOMAIN_MAPPABLE ,
+.Dv NVR_GEM_DOMAIN_COHERENT
+and
+.Dv NVR_GEM_DOMAIN_NO_SHARE ;
+at least one of the first two is required.
+The returned
+.Va domain
+tells where the memory was placed, and the placement never changes.
+On a device without video memory a video memory request is placed in coherent
+system memory.
+.Va pte_kind
+is checked against the device and
+.Va tile_mode
+is stored without interpretation.
+A call with neither
+.Dv NVR_GEM_DOMAIN_VRAM
+nor
+.Dv NVR_GEM_DOMAIN_GART ,
+or with
+.Dv NVR_GEM_DOMAIN_COHERENT
+and video memory only on a device that has video memory, fails with
+.Er EINVAL .
+A buffer with
+.Dv NVR_GEM_DOMAIN_NO_SHARE
+cannot be exported, by PRIME or by flink: the call fails with
+.Er EPERM .
+.Va map_handle
+is the offset to pass to
+.Xr mmap 2
+on the descriptor.
+.It Dv DRM_IOCTL_NVR_GEM_INFO Pq 0x4a, Vt struct drm_nvr_gem_info
+Return the same information for an existing handle.
+.Va flags
+and
+.Va pad
+must be zero.
+.It Dv DRM_IOCTL_NVR_GEM_CPU_PREP Pq 0x4b, Vt struct drm_nvr_gem_cpu_prep
+Wait until the GPU has finished with the buffer for the kind of CPU access
+requested
+.Pq Dv NVR_GEM_CPU_PREP_WRITE ,
+or fail with
+.Er EBUSY
+when
+.Dv NVR_GEM_CPU_PREP_NOWAIT
+is set.
+If a job that the call waited for faulted, the call fails with
+.Er ENODEV :
+the GPU is finished with the buffer but its contents are unspecified, so
+rewrite or discard them.
+The job's own signal fences report the fault too.
+.It Dv DRM_IOCTL_NVR_GEM_CPU_FINI Pq 0x4c, Vt struct drm_nvr_gem_cpu_fini
+End a CPU access window.
+.It Dv DRM_IOCTL_NVR_VM_INIT Pq 0x4d, Vt struct drm_nvr_vm_init
+Choose the part of the GPU address space the kernel keeps for itself (at least
+the
+.Dv NVR_PARAM_KERNEL_VA_MIN_SIZE
+value, never below 16 MiB, 2 MiB aligned, inside the address space).
+The rest is the caller's.
+Call it once, before the first channel or bind.
+.It Dv DRM_IOCTL_NVR_VM_BIND Pq 0x4e, Vt struct drm_nvr_vm_bind
+Apply a list of map and unmap operations
+.Pq Va op_ptr , op_count .
+A map places a range of a buffer at a GPU address.
+A map with
+.Dv NVR_VM_BIND_SPARSE
+makes a sparse region where reads return zero and writes are dropped.
+An unmap may cut a mapping; inside a sparse region the cut part becomes sparse
+again.
+All operations of one call are validated in order and applied together, or not
+at all.
+Without
+.Dv NVR_VM_BIND_RUN_ASYNC
+the call returns when the page tables are updated.
+With it the bind is queued on the descriptor's bind queue, which runs in
+order, waits for all entries of
+.Va wait_ptr
+and signals all entries of
+.Va sig_ptr
+when done.
+Memory needed for the update is reserved when the call is accepted.
+.It Dv DRM_IOCTL_NVR_EXEC Pq 0x4f, Vt struct drm_nvr_exec
+Submit one job to a channel: a list of push buffer ranges in the GPU address
+space (each at most
+.Dv NVR_EXEC_PUSH_LEN_MAX
+bytes, 8 MiB less 4), with wait and signal syncobjs.
+A waiting syncobj must already hold a fence.
+Jobs on one channel run in order.
+It does not wait for earlier asynchronous binds unless a syncobj says so.
+It sleeps when the channel's ring is full.
+A call with no pushes, waits or signals is a liveness probe.
+.El
+.Sh CPU MAPPINGS
+A mapped buffer gets its attribute from where its memory is, not from what the
+caller asks for.
+Video memory is reached through a PCIe BAR and is never cacheable.
+On Ampere Altra systems it is mapped Device-nGnRE, and
+.Dv NVR_INFO_FLAG_BAR_DEVICE_MEM
+is set: the caller must then use naturally aligned accesses and no atomic
+operations on it.
+System memory is mapped Normal write-back for a coherent buffer on a device
+with
+.Dv NVR_INFO_FLAG_CPU_COHERENT ,
+and Normal non-cacheable otherwise.
+A device attribute is never put on RAM, and a RAM attribute never on a BAR.
+Do not use
+.Xr memcpy 3
+or
+.Xr memset 3
+on a mapping with
+.Dv NVR_INFO_FLAG_BAR_DEVICE_MEM :
+copy with aligned 4-byte or 8-byte loads and stores, or stage the data in a
+system memory buffer.
+A mapping may not extend past its buffer, and only a descriptor that holds a
+handle to the buffer can map it: on any other descriptor
+.Xr mmap 2
+fails with
+.Er EACCES ,
+so import the buffer with PRIME first.
+.Dv DRM_IOCTL_NVR_EXEC
+issues a store barrier before it publishes work.
+.Sh ERRORS
+Each ioctl returns 0 on success and \-1 with
+.Va errno
+set on failure.
+The errors are:
+.Bl -tag -width Er
+.It Er EINVAL
+A value, flag, alignment or range rule was broken, a reserved bit was set, or
+the call came in the wrong state, for example
+.Dv DRM_IOCTL_NVR_CHANNEL_ALLOC
+or
+.Dv DRM_IOCTL_NVR_VM_BIND
+before
+.Dv DRM_IOCTL_NVR_VM_INIT .
+.It Er E2BIG
+A count is above its limit.
+.It Er EFAULT
+A user pointer cannot be read or written.
+.It Er ENOENT
+The handle, channel or mapping does not exist.
+.It Er EEXIST
+A map overlaps an existing mapping.
+.It Er EBUSY
+.Dv DRM_IOCTL_NVR_VM_INIT
+was already called on this descriptor, a sparse region still has mappings, or
+.Dv NVR_GEM_CPU_PREP_NOWAIT
+was given and the buffer is busy; retry without the flag to wait.
+.It Er ENOMEM
+Memory is exhausted.
+For a buffer with
+.Dv NVR_GEM_DOMAIN_VRAM
+and
+.Dv NVR_GEM_DOMAIN_MAPPABLE
+it can mean that the CPU-visible part of video memory is used up: allocate
+without
+.Dv NVR_GEM_DOMAIN_MAPPABLE
+and copy, or use
+.Dv NVR_GEM_DOMAIN_GART .
+A buffer with a compressed
+.Va pte_kind
+never falls back to system memory.
+.It Er ENOSPC
+The per-descriptor channel limit is reached (channels that were freed but are
+still draining count against it), or the limit of queued binds and jobs that
+have not started, or of the page-table memory they reserve, is reached.
+Wait for draining channels or queued work to start or finish, and retry.
+If no channel is draining, the descriptor has used up its channel numbers or
+its kernel range: open the device again.
+.It Er EPERM
+The buffer cannot be shared.
+.It Er ENODEV
+The channel or the GPU is lost.
+A channel that faults, or runs past the job timeout, is lost: the failing
+job and every job behind it complete with this error, later calls on the
+channel return it, and other channels and descriptors are not affected.
+Free the channel with
+.Dv DRM_IOCTL_NVR_CHANNEL_FREE
+and create a new one.
+When the whole GPU is lost, creating channels and
+.Dv DRM_IOCTL_NVR_VM_BIND
+return it as well, and the descriptor must be closed and opened again.
+.It Er EINTR
+A sleep was interrupted; nothing was changed.
+Retry the call.
+.El
+.Sh SEE ALSO
+.Xr ioctl 2 ,
+.Xr mmap 2 ,
+.Xr memcpy 3
+.Pp
+.Pa docs/RENDER-UAPI.md
+in the nvidia-gb10-freebsd repository
+.Pq github.com/cloudbsdorg/nvidia-gb10-freebsd ,
+for every argument, ordering rule and limit, and
+.Pa src/nvidia-drm-render/nvidia-drm-render.h
+for the structures.
+.Sh HISTORY
+The render interface first appeared in the CloudBSD build of nvidia-drm in
+2026.

@@ -160,9 +160,34 @@ cat >> "$SRC/src/nvidia/Makefile" <<'MKEOF'
 
 .PHONY: clean
 MKEOF
+# The repo's other ogkm patches (the cross-GPU import, Track #2228) patch
+# source files that the fake checkout does not have.  Give it, for each, a
+# pre-image rebuilt from the patch itself: the lines each hunk expects, at
+# the line each hunk starts on (filler lines in between; patch(1) ignores a
+# hunk that starts past the end of the file).  The success cases then apply
+# every real patch in patches/ogkm, as they always did.
+EXTRA=
+for _p in "$TESTSDIR"/../patches/ogkm/patch-*; do
+	case $_p in */patch-src_nvidia_Makefile) continue ;; esac
+	_rel=$(sed -n '1s/^--- \([^[:space:]]*\)\.orig.*/\1/p' "$_p")
+	[ -n "$_rel" ] || { echo "cannot read the target of $_p"; exit 1; }
+	mkdir -p "$SRC/$(dirname "$_rel")"
+	awk '
+		/^@@ / {
+			split($2, a, ","); start = substr(a[1], 2) + 0
+			while (n < start - 1) { n++; printf "/* filler %d */\n", n }
+			next
+		}
+		/^--- / || /^\+\+\+ / { next }
+		/^-/ || /^ / { print substr($0, 2); n++ }
+	' "$_p" > "$SRC/$_rel"
+	EXTRA="$EXTRA $_rel"
+done
 git -C "$SRC" init -q
 git -C "$SRC" add src/nvidia/dummy.c src/nvidia/Makefile \
 	src/nvidia-modeset/dummy.c src/nvidia-modeset/Makefile
+# shellcheck disable=SC2086
+[ -z "$EXTRA" ] || (cd "$SRC" && git add $EXTRA)
 git -C "$SRC" -c core.hooksPath="$TESTROOT/hooks-empty" \
 	-c user.email=test@example.invalid -c user.name=test \
 	commit -q --no-verify -m "fake ogkm"

@@ -1,0 +1,118 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 20, 2026
+.Dt PRIME_IMPORT_PROBE 8
+.Os
+.Sh NAME
+.Nm prime_import_probe
+.Nd test cross-GPU buffer import between two DRM devices
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json | Fl -jsonl
+.Op Fl s Ar WxH
+.Ar src
+.Ar dst
+.Nm
+.Fl -help
+.Sh DESCRIPTION
+The
+.Nm
+utility creates a dumb buffer on the DRM device
+.Ar src ,
+fills it with a pattern, exports it as a dma-buf, imports it on the DRM
+device
+.Ar dst
+and adds a framebuffer for the imported handle.
+It reports the result of every step.
+It never sets a mode and never changes a CRTC, so it does not disturb a
+running display.
+.Pp
+It is the probe behind section 5.2 of the cross-GPU import design
+.Pq Pa docs/PRIME-IMPORT.md
+in the nvidia-gb10-freebsd tree: with
+.Ar src
+an amdgpu device and
+.Ar dst
+an nvidia-drm device, a system-memory buffer must import and
+.Dq Fn drmModeAddFB2
+must return, either with success or with a clean errno.
+A kernel panic, a hang or a signal is the failure.
+Run it a second time with the two arguments swapped to see the other
+direction.
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl -json
+Write one JSON document, an object with a
+.Li rows
+array, to standard output.
+.It Fl -jsonl
+Write one JSON object per buffer size, one per line, each flushed as it is
+produced.
+This is also the default.
+.It Fl s Ar WxH
+Test a dumb buffer of
+.Ar W
+by
+.Ar H
+pixels, 32 bits per pixel, each from 1 to 16384.
+The option may be repeated, up to 16 times.
+The default is 64x64 and 1920x1080.
+.It Fl -help
+Print a usage message and exit.
+.El
+.Pp
+Every object names its schema,
+.Li prime-import-probe/1 ,
+which is
+.Pa tests/prime-import-testboot/prime-import-probe.schema.json
+in the source tree.
+The fields
+.Li create ,
+.Li map ,
+.Li fill ,
+.Li export ,
+.Li import
+and
+.Li addfb
+are 0 when the step succeeded and \-1 when it failed or was not tried.
+.Li stage
+is the step the probe stopped in,
+.Li done
+when every step ran, and
+.Li errno
+and
+.Li error
+describe the first failure.
+.Sh EXIT STATUS
+.Ex -std
+In detail: 0 when every step returned, whether with success or an errno;
+2 on a usage error;
+3 when a device cannot be opened.
+.Sh SYSCTL VARIABLES
+After a run, two read-only variables of the NVIDIA kernel module describe
+the release path of imported buffers (section 7.6 of
+docs/PRIME-IMPORT.md):
+.Bl -tag -width indent
+.It Va hw.nvidia_unlock_dirty_refused
+Pages with a VM object that were not all valid when the RM unpinned them,
+and so were not marked dirty.
+Not expected for an imported buffer; the boot kit fails the run when it
+is nonzero.
+The RM's own pinned user memory can raise it legitimately, for example
+when a file is truncated while its pages are pinned.
+.It Va hw.nvidia_unlock_dirty_busy_fallback
+Pages the RM unpinned while their busy lock stayed held for about a
+millisecond of waiting; they were marked dirty without the lock.
+Reported by the boot kit as information.
+.El
+.Sh EXAMPLES
+Import a buffer from the first card on the second one, for two sizes:
+.Bd -literal -offset indent
+prime_import_probe --jsonl -s 256x256 -s 1920x1080 \e
+    /dev/dri/card0 /dev/dri/card1
+.Ed
+.Sh HISTORY
+The
+.Nm
+utility was written for Track #2228 in 2026.
