@@ -39,7 +39,7 @@
 # Usage: sh tests/open_dev_failure_test.sh
 #   The tree under test is prepared here from the repository's own patches
 #   (scripts/prepare-tree.sh) into a scratch tree under
-#   ${GB10_WORK:-$HOME/work/gb10}/build and removed on exit; it needs the
+#   ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build and removed on exit; it needs the
 #   pristine sources (scripts/fetch-sources.sh) and a C compiler.
 # Exit: 0 every case passes, 1 otherwise.
 
@@ -50,7 +50,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOURCES"; exit 1; }
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src
 OGKM=$WORK/sources/open-gpu-kernel-modules-$ver

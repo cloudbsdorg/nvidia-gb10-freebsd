@@ -46,9 +46,10 @@ E2E_ARCH = aarch64
 E2E_BACKEND = vmm
 E2E_SSH =
 JSON = 0
+JSONL = 0
 
 DRIVER = sh scripts/make.sh
-DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_BSDSRCTOP="$(BSDSRCTOP)" MK_DRMKMODDIR="$(DRMKMODDIR)" MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_JSON="$(JSON)" MK_PURPOSE="$(REPO_PURPOSE)" MK_ACCEPT_NVIDIA_LICENSE="$(ACCEPT_NVIDIA_LICENSE)" MK_ACCEPT_ALL_LICENSES="$(ACCEPT_ALL_LICENSES)" MK_E2E_REPO_URL="$(E2E_REPO_URL)" MK_E2E_REF="$(E2E_REF)" MK_E2E_OS="$(E2E_OS)" MK_E2E_ARCH="$(E2E_ARCH)" MK_E2E_BACKEND="$(E2E_BACKEND)" MK_E2E_SSH="$(E2E_SSH)"
+DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_BSDSRCTOP="$(BSDSRCTOP)" MK_DRMKMODDIR="$(DRMKMODDIR)" MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_JSON="$(JSON)" MK_JSONL="$(JSONL)" MK_PURPOSE="$(REPO_PURPOSE)" MK_ACCEPT_NVIDIA_LICENSE="$(ACCEPT_NVIDIA_LICENSE)" MK_ACCEPT_ALL_LICENSES="$(ACCEPT_ALL_LICENSES)" MK_E2E_REPO_URL="$(E2E_REPO_URL)" MK_E2E_REF="$(E2E_REF)" MK_E2E_OS="$(E2E_OS)" MK_E2E_ARCH="$(E2E_ARCH)" MK_E2E_BACKEND="$(E2E_BACKEND)" MK_E2E_SSH="$(E2E_SSH)"
 
 help:
 	@printf '%s\n' \
@@ -67,7 +68,7 @@ help:
 		"                        shows the change, backs up, asks" \
 		"  make build            every module, drm.ko, libnvrm, nvrm-info" \
 		"  make test             the repository unit tests" \
-		"  make install          build if needed, then install (asks)" \
+		"  make install          prerequisites, build if needed, then install" \
 		"  make deinstall        remove what install and configure wrote" \
 		"                        (uninstall: the same)" \
 		"  make test-install     the stock-install test in fresh VMs" \
@@ -80,7 +81,12 @@ help:
 		"                        (its terms ask for that before install)" \
 		"  ACCEPT_ALL_LICENSES=1    accept every licence the install" \
 		"                        meets, and never ask" \
-		"  JSON=1                preflight prints JSON" \
+		"  JSON=1                preflight or install prints one JSON object" \
+		"  JSONL=1               install prints progress objects, then a summary" \
+		"                        (JSONL=1 wins when JSON=1 is also given;" \
+		"                        a note on stderr says JSON=1 is ignored)" \
+		"                        (the driver gives clean JSON on failure;" \
+		"                        BSD make adds its own failure diagnostics)" \
 		"  WORK=DIR              downloads and build (default ./work)" \
 		"  PREFIX=DIR            install root (default $(PREFIX));" \
 		"                        modules go to /boot/modules" \

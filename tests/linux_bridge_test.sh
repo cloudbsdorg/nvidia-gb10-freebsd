@@ -9,7 +9,7 @@
 #
 # Usage: tests/linux_bridge_test.sh [TREE]
 #   TREE  prepared and built working tree; default
-#         ${GB10_WORK:-$HOME/work/gb10}/build/tree-2363
+#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree-2363
 #   LINUX_BRIDGE_SKIP_FUZZ=1 skips the fresh-archive fuzz 0 apply (slow);
 #   LINUX_BRIDGE_SKIP_AMD64=1 skips the amd64 cross-build (k). A skip is not a
 #   pass: with nothing failed and something skipped the exit status is 2.
@@ -49,7 +49,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 NVPIN=580.178.04	# the pinned NVIDIA release every source path below names
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)

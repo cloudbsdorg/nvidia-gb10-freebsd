@@ -8,7 +8,7 @@
 # stand-in nvidia-smi and libnvidia-ml.so.<version> - and fetch(1) is replaced
 # through the FETCH test hook, SOURCES through the SOURCES hook (both honoured
 # only with GB10_TEST_HOOKS=1); nothing touches the network.  Scratch files
-# live in a mktemp(1) directory under $HOME/work/gb10/tmp, never /tmp.
+# live in a mktemp(1) directory under $(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp, never /tmp.
 #
 # Usage: sh tests/fetch-nvidia-smi_test.sh
 # Exit:  0 when every case passes, 1 otherwise; each case prints PASS/FAIL.
@@ -22,7 +22,7 @@ export PATH LC_ALL
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 script=$repo/scripts/fetch-nvidia-smi.sh
 
-test_dir=$(mktemp -d "$HOME/work/gb10/tmp/fetch-smi-test.XXXXXXXX") || exit 1
+test_dir=$(mktemp -d "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp/fetch-smi-test.XXXXXXXX") || exit 1
 trap 'rm -rf "$test_dir"' EXIT INT TERM
 chmod 700 "$test_dir"
 

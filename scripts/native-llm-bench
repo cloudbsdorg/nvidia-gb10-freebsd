@@ -58,7 +58,7 @@ HELP_LINES = (
     "  --gpu nvidia|radeon   select the GPU vendor (required)",
     "  --build DIR           read DIR/bin/llama-bench",
     "  --build-tag TAG       prefix the recorded build description",
-    "  --models DIR          read the two GGUF models (default: ~/work/models)",
+    "  --models DIR          read the two GGUF models (default: <repo>/work/models)",
     "  --out RUNDIR          new or empty output directory",
     "  --threads N           benchmark threads (default: 8)",
     "  --device BUS          PCI selector when several devices are eligible",
@@ -124,10 +124,11 @@ def parse_cli(argv):
         raise ToolError("--threads must be a positive integer", "error", 2, show_usage=True)
     if opts["threads"] < 1:
         raise ToolError("--threads must be a positive integer", "error", 2, show_usage=True)
-    work = os.path.abspath(os.path.expanduser(os.environ.get("GB10_WORK", "~/work/gb10")))
+    work = os.path.abspath(os.path.expanduser(
+        os.environ.get("GB10_WORK", os.path.join(HERE, "..", "work"))))
     opts["build"] = os.path.abspath(os.path.expanduser(
         opts.get("build", os.path.join(work, "llm", "b12627", "build-vulkan"))))
-    opts["models"] = os.path.abspath(os.path.expanduser(opts.get("models", "~/work/models")))
+    opts["models"] = os.path.abspath(os.path.expanduser(opts.get("models", os.path.join(work, "models"))))
     if not opts.get("out"):
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         opts["out"] = os.path.join(work, "llm", "history", "runs", "%s-native-%s-%s" %

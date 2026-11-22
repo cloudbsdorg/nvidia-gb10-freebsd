@@ -11,7 +11,7 @@
 #        llama-bench, llama-cli or llama-server.
 #
 # Environment:
-#   GB10_WORK  work root (default $HOME/work/gb10)
+#   GB10_WORK  work root (default <repo>/work)
 #   LL         llama.cpp CUDA release directory, with the cudart and cuBLAS
 #              libraries merged in (default $GB10_WORK/llm/cuda/llama-b12531-cuda/llama-b12531)
 #   SHIMDIR    directory holding shim.so (default $GB10_WORK/build/linux-cuda)
@@ -29,11 +29,7 @@ case "${1:-}" in
 	exit 2
 	;;
 esac
-if [ -z "${GB10_WORK:-}" ] && [ -z "${HOME:-}" ]; then
-	echo "run-cuda-llama: HOME is not set and GB10_WORK is not set" >&2
-	exit 2
-fi
-W=${GB10_WORK:-$HOME/work/gb10}
+W=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 R=$W/linuxroot
 LL=${LL:-$W/llm/cuda/llama-b12531-cuda/llama-b12531}
 SHIMDIR=${SHIMDIR:-$W/build/linux-cuda}

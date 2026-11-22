@@ -36,7 +36,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/prime-import-testboot
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/prime-kit-test.XXXXXXXX") || exit 1
 trap 'rm -rf -- "${TMPD:?}"' EXIT INT TERM
@@ -605,10 +605,10 @@ if sh -n "$KIT/prime_import_testboot" 2> "$TMPD/rcsyn.err"; then
 else
 	bad "(f) rc syntax: $(cat "$TMPD/rcsyn.err")"
 fi
-if grep -Eq '^: "\$\{prime_import_testboot_logroot:=/home/mlapointe/work/gb10/logs\}"$' "$KIT/prime_import_testboot" \
+if grep -Eq '^: "\$\{prime_import_testboot_logroot:=.*/logs\}"$' "$KIT/prime_import_testboot" \
     && grep -Eq '^LOGROOT=\$prime_import_testboot_logroot$' "$KIT/prime_import_testboot" \
     && grep -Eq '^OUT=\$LOGROOT/prime-import-\$STAMP$' "$KIT/prime_import_testboot"; then
-	ok "(f) results land under ~/work/gb10/logs/prime-import-<stamp>"
+	ok "(f) results land under the configured log root's prime-import-<stamp>"
 else
 	bad "(f) the rc script records elsewhere"
 fi
