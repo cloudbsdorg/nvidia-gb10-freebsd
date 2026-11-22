@@ -298,6 +298,21 @@ Gate: round 1 receipt 540b18e5 (24 findings, 23 accepted, quality.7 rejected wit
 ## 2026-11-22 merge of a2e0546 (1452fc1) and the README Installation steps 4-6 (Track #2363)
 Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed the both-sides overlap (JOURNAL.md, README.md), receipt d2183dcf93943be2d97aa75c0d874665adfe9f930412bda22fd172ed43ae3142. The commit after it corrects Installation steps 4-6: nvidia.ko no longer loads linux64; the two providers and rc.d/nvidia_linux are installed for nvidia-smi and Linux CUDA/Vulkan; nvidia_linux_mode is set. linux_bridge_test (j) has the Opus B grep test: no 'also loads linux64' or 'plus linux64, linux_common', and the Installation section names nvidia_linux.ko, nvidia_modeset_linux.ko, rc.d/nvidia_linux and nvidia_linux_mode, with two plants.
 
+## 2026-11-22 Track 2440: make install on a stock FreeBSD arm64, and the stock-install harness
+- Root Makefile on main: merge d01503806c665d6fca95a8e993f5c906317c3e4f (PR 7, commit 23c18da).
+- This commit: scripts/fetch-trees.sh (the running kernel's source and the pinned drm-kmod), drm.ko and dmabuf.ko
+  built from drm-kmod (the FreeBSD packages are amd64-only), the NVIDIA licence acceptance (ACCEPT_NVIDIA_LICENSE=1,
+  ACCEPT_ALL_LICENSES=1, or a terminal answer; YES=1 alone never accepts), make configure (loader.conf, rc.conf, with
+  an exact undo), devd/nvidia_gb10.conf, the kernel-patch warnings in preflight, install hardening, the schemas and
+  the harness tests/install-e2e (guest.sh, run.sh, README.md, expected.manifest).
+- Proof: every module, drm.ko and dmabuf.ko build natively on amp001 against the stock 16.0-CURRENT snapshot source
+  main-n291235-611046b15dbb with drm_v6.12.110_1, linked by LLD, all module dependencies resolved.
+- Open:
+  1. The aarch64 vmm backend: amp001 is not a cloudbsd-vmm worker yet (#2163: the arm64 bhyve branches are unmerged,
+     cloudbsd-vmd needs console= passthrough, no arm64 package yet). run.sh reports it as blocked (exit 3).
+  2. run.sh vmm: vm.create with cloud-init user data, and the result read-back, are not wired.
+  3. The guest clones from a read-only mirror amp001 serves on the VM network (Mark: no keys, no GitHub in the VM).
+  4. uvm-bsd: install and deinstall targets, the stock source fetch, a harness run.
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
 # Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain

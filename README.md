@@ -13,26 +13,103 @@ small source files of our own, and the tests.
 
 ## Installation
 
-### With make (root Makefile)
+### On a stock FreeBSD install (any user, the supported way)
 
-As a normal user, from the top of the checkout (BSD make or GNU make):
+This is meant for a fresh FreeBSD arm64 install from the FreeBSD project (a 16.0-CURRENT
+snapshot, or 15.1-RELEASE and later): nothing is assumed beyond the base system.
+`make test-install` checks it in a fresh VM (see `tests/install-e2e/README.md`; the first VM
+run is still to come). Every command below is run as a normal user who can become root with
+`doas` or `sudo` (or `su`, as a member of `wheel`, on a terminal). On a fresh install, once,
+as root, with your own user name in place of `alice`:
 
 ```sh
-make                       # help: purpose, targets and switches
-make preflight             # what is missing; JSON=1 for JSON
-make install-prereqs YES=1 # packages (doas or sudo for root) and the NVIDIA sources, into ./work
-make install               # builds when needed, asks, installs as root; YES=1 does not ask
-make deinstall             # removes exactly the files make install wrote
+pkg install -y doas git
+echo 'permit alice' > /usr/local/etc/doas.conf
 ```
 
-`sh scripts/make.sh preflight --json` prints the same JSON as `make preflight JSON=1`
-without the `*** Error code 1` lines BSD make adds to its output when something is missing.
-`make install` puts the modules in `/boot/modules` (then runs `kldxref`), and the rc.d
-script, the manual pages, libnvrm and nvrm-info under `PREFIX` (`/usr/local`). It records each
-file (path, mode, owner, sha256) in `PREFIX/share/nvidia-gb10-freebsd/installed.manifest`,
-and refuses to replace a file it did not write. `WORK=`, `PREFIX=`, `DESTDIR=`, `SYSDIR=`,
-`BSDSRCTOP=` and `DRMKMODDIR=` override the defaults. The steps below are what `make build`
-runs, one by one.
+Then, as that user:
+
+```sh
+git clone https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git
+cd nvidia-gb10-freebsd
+make preflight                # what is missing; it exits 1 until install-prereqs has run
+make install-prereqs YES=1 ACCEPT_NVIDIA_LICENSE=1   # see below (the licence)
+make install YES=1            # builds (about 15 minutes), then installs as root
+make configure YES=1          # optional: load the driver at boot (see below)
+```
+
+What `make install-prereqs` does, so nothing is a manual step:
+
+- installs the packages the build needs with `pkg` (`git` and `gmake`; on a system
+  where pkg is not set up yet it bootstraps pkg first). The compiler and linker are the base
+  system's `cc` and `ld.lld`; `/usr/bin` comes first on `PATH`, so a GNU `ld` from ports is never
+  used, and the build refuses a module that LLD did not link.
+- fetches NVIDIA's FreeBSD driver tarball and `open-gpu-kernel-modules` 580.178.04, checked
+  against the pins in `SOURCES`. The GSP firmware comes from that tarball; it is not shipped
+  in this repository (its licence limits it to NVIDIA hardware), it is fetched on your machine.
+- asks you to accept NVIDIA's driver licence (the tarball's `doc/license.txt`). NVIDIA's terms
+  ask everyone who installs the driver to read and agree to them first, so we cannot accept
+  them for you, and `YES=1` alone does not: it stops and says which setting to add. Accept
+  with `ACCEPT_NVIDIA_LICENSE=1` (this licence), or `ACCEPT_ALL_LICENSES=1` (every licence the
+  install meets; today this is the only one), or run `make install-prereqs` on a terminal
+  without `YES=1`, read the licence and type `yes`. The acceptance is recorded with the
+  licence's sha256 in `work/sources/nvidia-licence.accepted`; a changed licence asks again.
+  `make preflight` reports it as the `licence` item.
+- fetches the FreeBSD source of the kernel you are running into `./work/src`: for a RELEASE,
+  that release's `src.txz`, checked against its `MANIFEST`; for a CURRENT, STABLE, BETA or RC
+  kernel, the exact git commit `uname -v` names (`main-n291235-611046b15dbb`), from
+  git.freebsd.org. A stock install usually has no `/usr/src`; a matching `/usr/src` is used
+  when there is one. A kernel you built from your own tree names no commit: then set
+  `SYSDIR=/path/to/that/tree/sys`.
+- fetches drm-kmod at the tag pinned in `SOURCES` for your kernel (drm_v6.12.110_1 for
+  16.0-CURRENT and 15.1). FreeBSD's drm-kmod packages are amd64-only, so on arm64 `make build`
+  builds `drm.ko` and `dmabuf.ko` from that tree and `make install` installs them, unless a
+  `drm.ko` from somewhere else is already in `/boot/modules` (then nvidia-drm is built against
+  `DRMKMODDIR=`, which must be that drm.ko's source).
+
+What `make install` writes (listed with mode, owner and sha256 in
+`/var/db/nvidia-gb10-freebsd/installed.manifest`; it never replaces a file it did not write,
+or one that changed since it wrote it):
+
+- `/boot/modules`: `nvidia_gsp_ga10x_fw.ko` (the GSP firmware), `nvidia.ko`,
+  `nvidia-modeset.ko`, `nvidia-drm.ko`, `nvidia_linux.ko`, `nvidia_modeset_linux.ko`, and
+  `drm.ko`, `dmabuf.ko`; then `kldxref /boot/modules`, so the stock loader and `kldload` find
+  them and their dependencies by name.
+- under `/usr/local`: `etc/rc.d/nvidia_linux`, `etc/devd/nvidia_gb10.conf`, the manual pages
+  nvidia(4), nvidia_drm_render(4), nvidia_linux(4), nvrm(3), nvrm(7), nvrm-info(8), `lib/libnvrm`,
+  `include/nvrm/nvrm.h`, `sbin/nvrm-info` and its JSON schema, and the licences in
+  `share/licenses/nvidia-gb10-freebsd`.
+
+`make configure` shows the change, backs up each file next to itself (`.bak-<UTC time>`), and
+asks (`YES=1` does not ask):
+
+- `/boot/loader.conf`: `hw.nvidia.registry.EnableGpuFirmware="1"` (the open RM core runs the
+  GPU through its GSP firmware);
+- `/etc/rc.conf`: `nvidia_gb10_autoload="YES"`: the installed devd rule then runs
+  `kldload nvidia-drm` when vgapci(4) attaches to an NVIDIA display device; nvidia-drm pulls in
+  nvidia-modeset, nvidia, drm and dmabuf, and nvidia loads its firmware module.
+
+Without `make configure`, load by hand: `doas kenv hw.nvidia.registry.EnableGpuFirmware=1`,
+then `doas kldload nvidia-drm`.
+
+`make deinstall YES=1` removes every file `make install` wrote and the directories it created,
+and takes out what `make configure` set (restoring the earlier values and removing the
+backups). A file changed since install is kept, listed, and deinstall exits 1. It refuses
+while a module is loaded.
+
+Kernel changes: `make install` never patches or rebuilds your kernel. `make preflight` reports
+whether the running kernel has the changes in `kernel-patches/` (see
+`kernel-patches/README.md`): the LinuxKPI arm64 write-combining change
+(`compat.linuxkpi.altra_82288`), needed on any arm64 for drm-kmod write-combining mappings, and,
+on an Ampere Altra only (found by its ACPI MCFG table), the PCIe ECAM quirk and the alignment
+fixup (`machdep.kern_align_fixup`). They are reported as `warn`: the build and install work
+without them.
+
+For machines, `sh scripts/make.sh preflight --json` prints the same JSON as
+`make preflight JSON=1` without the `*** Error code 1` lines BSD make adds to its output when
+something is missing. Without a GPU, preflight reports `"device": "no NVIDIA device"`. `WORK=`,
+`PREFIX=`, `DESTDIR=`, `SYSDIR=`, `BSDSRCTOP=` and `DRMKMODDIR=` override the defaults; `make`
+alone lists the targets. The numbered steps below are what `make build` runs, one by one.
 
 ### 1. What you need
 

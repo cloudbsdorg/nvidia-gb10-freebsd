@@ -449,3 +449,23 @@ log_path_safe() {
 	esac
 	return 0
 }
+
+# tree_version TREE: __FreeBSD_version from TREE/sys/param.h (TREE is a
+# kernel sys/ directory), or nothing when there is none.
+# Time: O(n) in the lines of param.h.  Space: O(1).
+tree_version() {
+	[ -f "$1/sys/param.h" ] || return 0
+	sed -n 's/^#define[[:space:]]*__FreeBSD_version[[:space:]]*\([0-9]*\).*/\1/p' "$1/sys/param.h"
+}
+
+# tree_fits_osrel TREE OSRELDATE: the one version rule for the kernel source
+# a module is built against (scripts/make.sh and scripts/fetch-trees.sh both
+# use it): the tree's __FreeBSD_version has the same major as OSRELDATE
+# (the value divided by 100000) and is not newer, because a module records
+# the version it was built with as the oldest kernel it loads on.
+# Time: O(1) beyond tree_version.  Space: O(1).
+tree_fits_osrel() {
+	_tf_v=$(tree_version "$1")
+	_tf_r=$2
+	[ -n "$_tf_v" ] && [ -n "$_tf_r" ] && [ $((_tf_v / 100000)) = $((_tf_r / 100000)) ] && [ "$_tf_v" -le "$_tf_r" ]
+}

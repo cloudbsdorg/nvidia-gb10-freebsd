@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:stock-install-summary:1.0",
+  "version": "1.0",
+  "title": "Result of one stock-install test run (guest.sh summary, or run.sh summary with the backend and a blocked reason)",
+  "type": "object",
+  "required": ["schema", "pass"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "stock-install-summary/1"},
+    "pass": {"type": "boolean"},
+    "steps": {"type": "integer", "minimum": 0},
+    "failed": {"type": "integer", "minimum": 0},
+    "os": {"type": "string"},
+    "arch": {"type": "string"},
+    "osreldate": {"type": "integer"},
+    "repo_url": {"type": "string"},
+    "ref": {"type": "string"},
+    "commit": {"type": "string"},
+    "backend": {"enum": ["vmm", "ssh"]},
+    "blocked": {"type": "string"},
+    "results": {"type": "string"}
+  }
+}
