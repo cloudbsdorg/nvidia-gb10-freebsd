@@ -84,13 +84,67 @@ Done:
   $W/STATUS.md (#2440). The branch had no commits yet, so it was
   fast-forwarded to origin/main d015038; the design commit sits on top.
 
+- Log: 2026-11-22 Mark answered section 0: our own fork (Track #2379,
+  comment 16854; memory mesa-own-fork). Agents write src/nouveau in the
+  private fork; Mesa AGENTS.md and CLAUDE.md unedited; FORK-NOTES.md added;
+  no Generated-by trailers.
+- Who writes code (the one place this is recorded): opencode Kimi rounds
+  (dgx-mlapointe/kimi-k3.1-pro; on a quota error kimi-k3, then
+  kimi-k2.7-code). When opencode cannot do it, a Sonnet or Haiku sub-agent.
+  Never the Opus orchestrator, which briefs, reviews, tests and gates.
+  Exception on record: the first version of the stub (nvkmd nvrm backend,
+  enumerate hook, probe, Makefile, cloudbsd/) was written by the Opus
+  orchestrator under the earlier "or write directly" instruction, before
+  this rule arrived. It is disclosed on Track (comment 16858) and in the
+  fork commit message.
+- Fork: private repo cloudbsdorg/mesa-cloudbsd. upstream/26.3.1 and tag
+  mesa-26.3.1 pushed unchanged (fec8830e9c9). Worktree
+  $W/mesa-fork/mesa-cloudbsd, branch cloudbsd/26.3. Build area
+  $W/build/nvk-nvrm (fork-build, rounds/).
+- The old open items, now settled:
+  - Single source of the stub message: done. nvkmd_nvrm_msg.h is the only
+    copy; the backend logs it, and the probe includes it and prints it.
+    make test takes the expected text from the probe output.
+  - Privilege split: done in make.sh of the fork (only install-deps needs
+    root; build, test and clean refuse root; the clean path is guarded).
+  - mesa/nvk-nvrm/SOURCES: superseded. The pin is the upstream/26.3.1
+    branch and mesa-26.3.1 tag of the fork.
+  - Fake-backend CI: make test in the fork does it. Wiring it into a
+    Jenkins job is still open (Next 2).
+- make build test passes 21 checks on the fake backend. vulkaninfo --summary
+  creates a device before printing, so on the stub it stops at the refusal;
+  the probe prints the summary fields instead.
+- Fork commit 01f36b0a84f on cloudbsd/26.3, pushed to the private repo
+  (visibility checked: PRIVATE).
+  - Gate round 1: lizard blocked (fill_dev_info CCN 35, the upstream create
+    function, the probe main length).
+  - Kimi r1 declined because of the Mesa AGENTS.md. Kimi r2, with the
+    FORK-NOTES context, split the probe main and declined src/nouveau.
+  - A Sonnet sub-agent split nvkmd_nvrm_fill_dev_info and added one lizard
+    suppression. Its scope is nvk_create_physical_device_for_nvkmd only:
+    the upstream NVK body, renamed and not otherwise changed. No suppression
+    covers our own code.
+  - Gate round 2 (the second and last round for this commit): all voices
+    reached, receipt on the exact diff. Committed, with the findings deferred
+    to a follow-up commit and listed here (Next 1) and in the commit message.
+  - make build test passes 21/21; the probe output is byte-identical across
+    the refactor.
+
 Next (open work only):
-1. Wait for the answer of Mark on DESIGN.md section 0, on Track #2379
-   (`section 0: (a)` or `(b)`). Until then no Mesa patch is written by an
-   agent.
-2. Not policy-bound, can be done directly: mesa/nvk-nvrm/SOURCES, the
-   Makefile with the targets and privilege split of DESIGN.md section 7, and
-   the fake-backend CI target.
+1. Follow-up fork commit for the gate round 2 findings (Kimi for the
+   cloudbsd/ files, Sonnet for src/nouveau; two review rounds):
+   - make.sh: the vulkaninfo crash check cannot fail. The host-visible VRAM
+     check matches one exact value instead of the flag bits. do_clean
+     compares strings, not resolved directories. A relative WORK breaks the
+     build. build_mesa ignores changed options after the first meson setup.
+     The die "run make build first" ignores WORK.
+   - nvkmd_nvrm_pdev.c: the smem memcpy size comes from the destination.
+     libnvrm values are narrowed without bounds checks. caps[4] and caps[6]
+     are magic indices. An enumeration failure looks the same as no GPU.
+   - The lizard marker wording. The README probe command. preflight versus
+     install-deps (the tool lists differ). The stub message accuracy. The
+     meson error text. The help text.
+2. Wire the fork make test into a Jenkins job (arm64 builder).
 3. When #2419 is committed, re-pin S2 in DESIGN.md section 1 and re-check the
    S2 rows of section 3.
 4. Open review findings carried to the next design revision (gate round 5,
@@ -98,5 +152,4 @@ Next (open work only):
    traceable (sync id, peer pid where known); give the Makefile root refusal
    an exact message; say what an operator can report on device loss (Xid,
    channel, devd event); state the wait and device-loss rules once and refer
-   to them; confirm that the stub message macro is the only source the probe
-   and CI read.
+   to them.

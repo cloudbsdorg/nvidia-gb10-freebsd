@@ -30,13 +30,26 @@ Terms used below:
 - **Test-boot kit**: the self-recording one-shot boot environment that runs
   rows with the nvidia driver loaded.
 
-## 0. Blocker: the AI policy of Mesa and nouveau on src/nouveau
+## 0. The AI policy of Mesa and nouveau on src/nouveau (answered)
 
-**Decision needed from Mark by about 2026-12-10.** Each week later moves the
-first native number by about a week. That number is the first llama.cpp
-Vulkan benchmark on the RTX 5060 Ti through this backend (section 10).
-Recommended: option (a). Answer on Track #2379 with `section 0: (a)` or
-`section 0: (b)`; the journal records it.
+**Answered 2026-11-22 by Mark (Track #2379, comment 16854): our own fork.**
+Mesa is MIT. CloudBSD keeps a private fork, `cloudbsdorg/mesa-cloudbsd`
+(branch `cloudbsd/26.3` on top of the unchanged `upstream/26.3.1`), and never
+submits it upstream. Mesa's `AGENTS.md` governs contributions to the Mesa
+project, not this fork. In the fork, agents write the nvkmd nvrm backend and
+any `src/nouveau` change, including the `graphics/mesa-devel` patches (#2309)
+and the NAK work for native CUDA. Mesa's `AGENTS.md` and `CLAUDE.md` stay
+unedited, and the fork's `FORK-NOTES.md` records the policy and why. No
+`Generated-by` trailers are added: our no-tool-trailers rule stands. Who
+writes the code (which models, and the fallback) is recorded once, in
+`JOURNAL.md`.
+
+The analysis below is kept for the record. It recommended option (a), a
+person writing the `src/nouveau` patches. Mark chose otherwise: agents write
+them in a private fork, which is option (b) without the trailer. Option (a)
+is not being pursued. The schedule that applies is "Under option (b)" in
+section 10. The first native number there means the first llama.cpp Vulkan
+benchmark on the RTX 5060 Ti through this backend.
 
 The Mesa 26.3.1 tarball ships an `AGENTS.md` (also as `CLAUDE.md`) at its root.
 It says that AI agents must not make changes in `src/nouveau`, and it refers to
@@ -621,9 +634,23 @@ Notes:
   the Neoverse N1 cores of the Altra. On a coherent GB10 path it is not used
   for correctness.
 
-## 7. Build layout in this repository (planned)
+## 7. Build layout (superseded by the fork)
 
-Only `DESIGN.md` and `JOURNAL.md` exist today. The planned layout:
+Since the section 0 answer, the code and its build live in the private fork
+`cloudbsdorg/mesa-cloudbsd`, branch `cloudbsd/26.3`:
+- the root `Makefile` (purpose fork) and `cloudbsd/make.sh`, with the
+  targets preflight, install-deps, configure, build, test and clean;
+- `cloudbsd/tests/nvk-nvrm-probe.c`;
+- the backend in `src/nouveau/vulkan/nvkmd/nvrm/`.
+
+`make build NVRM_SRC=<a checkout of this repository>` builds libnvrm from its
+`lib/libnvrm`, then NVK with `-Dnvk-kmd=nvrm`. With `NVRM_SRC` unset, the
+default is `$HOME/work/gb10/nvidia-gb10-freebsd`, and the build stops with
+"no libnvrm at ..." when that checkout has none. "Purpose fork" is the
+project-makefile-contract term for a thin wrapper around an upstream build.
+`make test` runs on the libnvrm fake backend.
+This directory keeps only `DESIGN.md` and `JOURNAL.md`. The layout below was
+the plan before the fork, kept for the record:
 
 ```
 mesa/nvk-nvrm/
@@ -737,13 +764,13 @@ review rounds and the gate included.
 | **Total** | **9.5** | of which 8.5 come before the first number |
 
 The two backend rows (2.5 pw) are Mesa patches under `src/nouveau`, and the
-bring-up row (1 pw) runs them on the card; together they are 3.5 pw. Who
-does them depends on the section 0 decision.
+bring-up row (1 pw) runs them on the card; together they are 3.5 pw.
 
-Recommended path, option (a): the first number around **2027-01-04** if the
-person writing the backend starts by about 2026-12-10.
+**The plan that applies is "Under option (b)" below** (section 0: agents
+write the backend in the private fork). The option (a) plan is kept for the
+record only.
 
-**Under option (a)** (recommended; a person writes the backend):
+**Under option (a)** (not taken; a person writes the backend):
 
 - The agent lanes do S2, S3, S4 and #2439: about 6 pw. With two implementers
   that is about 4 weeks, to about 2026-12-21.
