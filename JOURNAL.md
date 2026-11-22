@@ -300,3 +300,31 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
 
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
+# Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain
+
+## 2026-11-22T06:20Z start
+Mark card 2026-11-22: native CUDA runs in parallel with NVK. Order from docs/NATIVE-CUDA.md section 8: C1.1 (toolchain spike, deps none) is the first stage that needs no libnvrm S2; C1.2 (PTX front end) needs only C0 (done); C1.4 needs S5. Installed llvm23-23.1.5 from pkg (sudo pkg install llvm23); its NVPTX lists sm_120/120a/120f/121/121a/121f and ptx90-93. clang 23 detects a --cuda-path tree from include/, bin/, nvvm/libdevice/libdevice.10.bc and version.json; it defaults to --offload-new-driver. Header surface found by probing with empty files: cuda.h, host_defines.h, driver_types.h, host_config.h, cuda_runtime.h, crt/host_runtime.h, then execution-space macros.
+Round 1 (opencode MiniMax): brief ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md, report ~/work/gb10/tmp/2380-r1/ROUND-REPORT.md. Scope: lib/cuda-native SDK tree, mksdk.sh, test kernels, tests/cuda_native_toolchain_test.sh, root Makefile (contract), cuda-native-toolchain(7), README section.
+Next: review round 1, gate x2, commit, push; file C1.x work packages under #2380.
+
+## 2026-11-22T06:40Z PAUSE for a test boot (orchestrator). RESUME here.
+Brief in short: start native CUDA stage C1.1 (llvm23 toolchain, our own --cuda-path SDK tree, headers, PTX for sm_120/sm_121) in parallel with NVK; libnvrm S2 (wt-libnvrm-s2) is not touched; code by opencode rounds, strict gate (2 rounds per commit), push after each commit.
+Done:
+- llvm23-23.1.5 installed from pkg on amp001 (NVPTX sm_120/121 with a/f, ptx90-93).
+- Track: C1 work packages filed under #2380 (epic #2362): C1.1 #2425 (In progress), C1.2 #2426, C1.3 #2427, C1.4a #2428 (libcuda API surface, fake backend, no S2), C1.4b #2429 (on libnvrm, needs S2-S5), C1.5 #2430, C1.6 #2431, C1.7 #2432, C1.8 #2433, C1.9 #2434, C1.10 #2435, C1.11 #2436. C4 not filed yet (goes under #2362, relates #2382).
+- Round 1 brief written: ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md. Its run made no change: the round models were out of quota, and only free models answered (not to be used for this code).
+Next:
+1. Rerun round 1 from this worktree: ocrun.sh 5400 <model> ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md ~/work/gb10/tmp/2380-r1/round.log with the watchdog (empty round.status first). Model: the usual round model once its quota is back.
+2. Review the round (provenance: no toolkit text), gate round 1 and 2, commit, push, Track comment on #2425 and #2380.
+3. Then C1.1 round 2: libclc-based libdevice, nvptxas/nvfatbin stubs, stub libcudart link, offload-new-driver notes, mma.cuh PTX. Then C1.4a (libcuda headers + fake backend).
+Note: the repo has no root Makefile; makefile-check refuses any commit without one, so round 1 adds it (tell the merge agent).
+
+## 2026-11-22T07:10Z resumed after the test boot
+Orchestrator: MiniMax is out of quota, so C1.1 round 1 is implemented directly by the agent, not by a free model. Do not add a root Makefile: another agent lands it on main. Watch STATUS.md for "ROOT MAKEFILE ON MAIN <sha>", then merge main into this branch.
+Done: lib/cuda-native, with the SDK headers, the libdevice placeholder, mksdk.sh and the cuda-native-toolchain(7) man page; tests/cuda-native/{vector_add,builtins}.cu; tests/cuda_native_toolchain_test.sh. The test was red before staging (the fresh copy lacked the files) and is green after: 51 passed, 0 failed.
+Findings while doing it:
+- clang 23 takes the SDK version from CUDA_VERSION in include/cuda.h. It ignores version.json, and it needs bin/ to accept the tree.
+- libdevice.10.bc must carry the nvptx64 data layout of the same clang, so mksdk.sh takes the layout from clang.
+- atomicAdd lowers to atom.relaxed.sys, which is stronger than the gpu scope CUDA uses; to revisit in C1.2/C1.6.
+README section, layout row and PROVENANCE entry written.
+Next: gate round 1, then gate round 2, then wait for the root Makefile on main, merge main, commit, push, and comment on Track #2425.
