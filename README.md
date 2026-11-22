@@ -830,10 +830,25 @@ class list, VRAM, BAR1, page sizes, capability flags). Every value is available 
 reason; the layers are abstract device, class, family (a generation table keyed by class ids)
 and board decorators (none yet). Backends are providers: `rm` and `fake`
 (`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
-capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; this
-version has no call that maps device memory). No GPU is a success with zero devices. The interface is provisional
+capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; the
+enumeration descriptors never carry a mapping right). No GPU is a success with zero devices. The interface is provisional
 until the first package release. A context is not thread-safe, and a forked child must only
 `nvrm_close` it (see `nvrm(3)`). `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
 `lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
-the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
+the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm_mem(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
 the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.
+
+GPU memory (`nvrm_mem(3)`, API minor 1, symbol version `NVRM_1.1`) is what NVK and a native CUDA
+runtime build on. `nvrm_client_open()` makes a client for one GPU: its own RM session, its own GPU
+virtual address space (the library hands out the addresses), and every object made through it.
+On it: VA reservations (sparse or not), video and system memory with a chosen page size (4 KiB,
+64 KiB, 2 MiB, 512 MiB), registered user pages, GPU mappings at fixed addresses, CPU mappings,
+and sharing by descriptor (export, import). CPU mapping needs `NVRM_OPEN_ALLOW_MAP`: the client then
+opens spare descriptors of this GPU's own device node (`/dev/nvidiaN`, N reported by the driver), so
+it keeps working after `cap_enter()`; each CPU mapping or export uses one. The
+CPU attribute of a mapping follows the rule in `nvrm(7)` (on arm64, video memory is Device unless the
+OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()` obey it. A release the
+RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
+software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
+API is tested without hardware; the RM backend is tested against a scripted kernel
+(`tests/libnvrm/rm_mem_test.c`).
