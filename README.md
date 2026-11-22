@@ -457,6 +457,21 @@ sysctl hw.nvidia.altra_device_wc_active
 
 Forcing `0` on an Altra brings back the unsafe Normal accesses to BARs. Use it only to test.
 
+### Version and identity sysctls
+
+The driver exposes its version as integers, so a script never has to parse a version
+string, and the UUID and PCI location of each GPU:
+
+```sh
+sysctl hw.nvidia.version_major hw.nvidia.version_minor hw.nvidia.version_patch
+sysctl hw.nvidia.gpus.0.vbios_major hw.nvidia.gpus.0.firmware_major
+sysctl dev.nvidia.0.uuid dev.nvidia.0.pci_bus_id
+```
+
+`nvidia-modeset.ko` has the same `version_*` variables under `hw.nvidiamodeset`. The full
+list, the meaning of the `*_available` flags and what a read returns before the GPU is
+initialized are in `nvidia(4)`.
+
 ## The UVM interface in nvidia.ko
 
 CUDA needs `nvidia-uvm.ko`, a separate kernel module that is a client of the resource

@@ -1,12 +1,13 @@
 --- nvidia/Makefile.orig
 +++ nvidia/Makefile
-@@ -13,12 +13,74 @@
+@@ -13,12 +13,75 @@
  include nvidia-sources.mk
  
  SRCS=		${NVIDIA_SOURCES}
 +# Our own BSD-licensed FreeBSD side of the cross-GPU import (Track #2228),
 +# copied here by scripts/prepare-tree.sh, kept out of NVIDIA's files.
 +SRCS+=		gb10_pageimport_os.c
++SRCS+=		nv_version_sysctl.c
  SRCS+=		acpi_if.h bus_if.h device_if.h opt_acpi.h pci_if.h vnode_if.h
  CFLAGS+=	-I. -I../common/inc -DNV_VERSION_STRING=\"580.178.04\"
 -CFLAGS+=	-D__KERNEL__ -DNVRM -DFSP_DETACH_STRING_H  -Wno-unused-function -Wuninitialized -O2 -fno-strict-aliasing    -ffreestanding -mno-red-zone -mcmodel=kernel       -UDEBUG -U_DEBUG -DNDEBUG

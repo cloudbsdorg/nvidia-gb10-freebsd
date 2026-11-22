@@ -1,6 +1,14 @@
 --- nvidia-modeset/nvidia-modeset-freebsd.c.orig
 +++ nvidia-modeset/nvidia-modeset-freebsd.c
-@@ -55,4 +55,11 @@
+@@ -36,6 +36,7 @@
+ #include "nvkms.h"
+ #include "nv-modeset-interface.h"
+ #include "nv-kthread-q.h"
++#include "nv_version_sysctl.h"
+ 
+ #include "nv-retpoline.h"
+ 
+@@ -55,4 +56,11 @@
      #include "machine/../linux32/linux.h"
      #include "machine/../linux32/linux32_proto.h"
 +  #elif defined(NVCPU_AARCH64)
@@ -12,7 +20,25 @@
 +    #include <arm64/linux/linux_proto.h>
    #endif
    #include <compat/linux/linux_ioctl.h>
-@@ -1457,5 +1464,6 @@
+@@ -1353,7 +1361,8 @@
+ 
+         nvkms_linux_compat_load();
+ 
+-        return 0;
++        nv_version_sysctl_modeset_init(NV_VERSION_STRING);
++        return 0;
+ 
+     case MOD_QUIESCE:
+         if (!nvkms_module_loaded) {
+@@ -1436,6 +1445,7 @@
+         sx_destroy(&nvkms_lock);
+ 
+         nvkms_free_rm();
++        nv_version_sysctl_modeset_exit();
+         return 0;
+ 
+     default:
+@@ -1457,5 +1467,6 @@
                 SI_ORDER_ANY);               /* initialization order */
  
 -MODULE_VERSION(nvidia_modeset, 1);
@@ -20,7 +46,7 @@
 +MODULE_VERSION(nvidia_modeset, 3);
  
  MODULE_DEPEND(nvidia_modeset,               /* module name */
-@@ -1464,8 +1472,15 @@
+@@ -1464,8 +1475,15 @@
  
  #if defined(NVKMS_SUPPORT_LINUX_COMPAT)
 +#if defined(NVCPU_AARCH64)
