@@ -209,6 +209,7 @@ mutant fork-guard nvrm_rm.c 's/return (my_pid() == be->pid \&\& fork_generation 
 mutant fork-generation nvrm_rm.c 's/fork_generation++;/;/' rm_test
 mutant fork-pid-only nvrm_rm.c 's/ \&\& fork_generation == be->generation//' rm_test
 mutant fork-generation-open nvrm_rm.c 's/be->generation = fork_generation;/be->generation = fork_generation + 1;/' rm_test
+mutant fd-leak-version nvrm_rm.c '/NVRM_RM_VERSION, NVRM_RM_VERSION);/,/NVRM_E_VERSION/s/sys->close(be->fd);//' rm_test
 mutant fork-guard-gpu nvrm_rm.c 's/	if (rm_owner(g->be)) {/	if (1) {/' rm_test
 mutant fork-guard-pid nvrm_rm.c 's/be->pid = my_pid();/be->pid = 0;/' rm_test
 mutant nogpu-error nvrm.c 's|/\* No GPU is a result, not an error: the context holds zero devices. \*/|if (rc == NVRM_OK \&\& n == 0) rc = NVRM_E_NODEV;|' core_test
@@ -413,7 +414,7 @@ def bump(x):
 mod("add-reason-m1", bump)
 open(w + "/ids-garbage.txt", "w").write("\n".join(base + ["reason x"]) + "\n")
 open(w + "/ids-gap.txt", "w").write("\n".join(l for l in base if not l.startswith("reason 5 ")) + "\n")
-open(w + "/ids-dup.txt", "w").write("\n".join(base + ["reason 5 family_unknown"]) + "\n")
+open(w + "/ids-dup.txt", "w").write("\n".join(base + ["reason 5 family_unknown 0"]) + "\n")
 open(w + "/ids-trunc.txt", "w").write("\n".join(l for l in base if not (l.startswith("reason ") and int(l.split()[1]) >= 9)) + "\n")
 PY
 for m in rename-reason renumber-reason drop-reason rename-error rename-source rename-cap drop-cap cap-unpinned; do
@@ -431,9 +432,13 @@ done
 $IDCHK "$SCHEMA" "$W/no-such-baseline.ids" >"$W/ids-nobase.out" 2>&1; rc=$?
 if [ $rc -eq 1 ] && grep -q 'no baseline' "$W/ids-nobase.out"; then ok "identifiers: a missing baseline FAILs (never a pass for having nothing to compare)"; else bad "identifiers: missing baseline gave rc=$rc"; fi
 for b in empty nocap garbage gap dup; do
-	$IDCHK "$SCHEMA" "$W/ids-$b.txt" >/dev/null 2>&1; rc=$?
+	$IDCHK "$SCHEMA" "$W/ids-$b.txt" >"$W/ids-$b.out" 2>&1; rc=$?
 	if [ $rc -eq 1 ]; then ok "identifiers: an unusable baseline FAILs ($b)"; else bad "identifiers: baseline $b gave rc=$rc"; fi
 done
+# (the duplicate line has the fourth field, the minor, so that it parses and the
+# "repeats" branch is the one that refuses it; a three-field line is refused as malformed)
+grep -q 'repeats reason 5' "$W/ids-dup.out"; rc=$?
+expect_rc "identifiers: a repeated number is refused as a repeat, not as a malformed line" $rc 0
 # a baseline cut short passes the plain check (the cut ids are in the schema,
 # which is all it asks) and fails the strict one the suite runs on the tree
 $IDCHK "$SCHEMA" "$W/ids-trunc.txt" >/dev/null 2>&1; rc=$?
@@ -462,46 +467,131 @@ $IDCHK --frozen "$IDS" "$W/ids-renamed.txt" "$SCHEMA" >"$W/ids-fzr.out" 2>&1; rc
 if [ $rc -eq 1 ] && grep -q 'a frozen line never changes' "$W/ids-fzr.out"; then ok "identifiers (frozen): a renamed line of the baseline itself is refused"; else bad "identifiers (frozen): renamed baseline line gave rc=$rc"; fi
 $IDCHK --frozen "$IDS" "$IDS" "$SCHEMA" >/dev/null 2>&1; rc=$?
 expect_rc "identifiers (frozen): a baseline equal to its parent is accepted" $rc 0
-# The baseline of an earlier revision is the real freeze.  ids_base_ref names it:
-# $NVRM_IDS_BASE_REF if set (for example the merge base of a long branch); else
-# HEAD while the baseline has changes that are not committed, else HEAD^ (the
-# parent of the commit under test, so a clean checkout of a commit is checked
-# against its parent, not against itself); nothing when there is no history.
-ids_base_ref() {	# ids_base_ref GITDIR PATH
-	[ -z "$NVRM_IDS_BASE_REF" ] || { echo "$NVRM_IDS_BASE_REF"; return 0; }
-	git -C "$1" diff --quiet HEAD -- "$2" >/dev/null 2>&1; _r=$?
-	case $_r in 0) echo 'HEAD^' ;; 1) echo HEAD ;; *) echo '' ;; esac
+# The baseline of an earlier revision is the real freeze.  ids_base GITDIR PATH
+# prints "STATE REF":
+#   ok REF          the base revision has the file: compare with it
+#   absent REF      it resolves and has no such file, or HEAD is a root commit
+#                   (where the baseline first appears): the only case that skips
+#   nohistory -     the repository has no commit yet: skip
+#   unavailable REF the base cannot be fetched (shallow clone, wrong
+#                   NVRM_IDS_BASE_REF, or an explicit ref without the file): FAIL
+# The base is $NVRM_IDS_BASE_REF if set.  Else it is the merge base of HEAD with
+# origin/agent/2088-build-host, which checks the whole branch; but a merge base
+# that is HEAD itself (the branch was just pushed, or HEAD is behind it) would
+# compare the baseline with itself, and a merge base that lacks the file (the
+# baseline was born on this branch) would check nothing, so in both cases the
+# local rule applies: HEAD while the baseline has uncommitted changes, else HEAD^
+# (a clean checkout of a commit is checked against its parent).
+MBREF=origin/agent/2088-build-host
+ids_ref_local() {
+	if git -C "$1" diff --quiet HEAD -- "$2" >/dev/null 2>&1; then echo 'HEAD^'; else echo HEAD; fi
 }
+ids_has() {	# ids_has GITDIR REF PATH: the tree of REF lists PATH
+	[ -n "$(git -C "$1" ls-tree "$2" -- "$3" 2>/dev/null)" ]
+}
+ids_base() {
+	_g=$1; _p=$2
+	git -C "$_g" rev-parse -q --verify HEAD >/dev/null 2>&1 || { echo "nohistory -"; return 0; }
+	if [ -n "$NVRM_IDS_BASE_REF" ]; then
+		_ref=$NVRM_IDS_BASE_REF
+		git -C "$_g" rev-parse -q --verify "$_ref^{commit}" >/dev/null 2>&1 || { echo "unavailable $_ref"; return 0; }
+		if ids_has "$_g" "$_ref" "$_p"; then echo "ok $_ref"; else echo "unavailable $_ref"; fi
+		return 0
+	fi
+	_mb=$(git -C "$_g" merge-base HEAD "$MBREF" 2>/dev/null)
+	if [ -n "$_mb" ] && [ "$_mb" != "$(git -C "$_g" rev-parse HEAD)" ] && ids_has "$_g" "$_mb" "$_p"; then
+		echo "ok $_mb"; return 0
+	fi
+	_ref=$(ids_ref_local "$_g" "$_p")
+	if git -C "$_g" rev-parse -q --verify "$_ref^{commit}" >/dev/null 2>&1; then
+		if ids_has "$_g" "$_ref" "$_p"; then echo "ok $_ref"; else echo "absent $_ref"; fi
+	elif [ "$_ref" = 'HEAD^' ] && [ "$(git -C "$_g" rev-parse --is-shallow-repository 2>/dev/null)" = false ]; then
+		echo "absent HEAD^"	# a root commit: nothing came before it
+	else
+		echo "unavailable $_ref"
+	fi
+}
+base_state() { ids_base "$1" "$IDSREL" | cut -d' ' -f1; }
+base_ref() { ids_base "$1" "$IDSREL" | cut -d' ' -f2; }
 IDSREL=lib/libnvrm/schema/nvrm-info-1.ids
-BASEREF=$(ids_base_ref "$REPO" "$IDSREL")
-if [ -n "$BASEREF" ] && git -C "$REPO" show "$BASEREF:$IDSREL" >"$W/ids-head.ids" 2>/dev/null; then
+BSTATE=$(base_state "$REPO"); BASEREF=$(base_ref "$REPO")
+# the throwaway-repository tests below set the base themselves
+unset NVRM_IDS_BASE_REF
+case $BSTATE in
+ok)
+	git -C "$REPO" show "$BASEREF:$IDSREL" >"$W/ids-head.ids"; rc=$?
+	expect_rc "identifiers (frozen): the baseline of $BASEREF was read" $rc 0
 	$IDCHK --frozen "$W/ids-head.ids" "$IDS" "$SCHEMA"; rc=$?
-	expect_rc "identifiers (frozen): the baseline only adds to the one at $BASEREF, at a higher minor" $rc 0
-else
-	printf 'skip frozen baseline check: there is no earlier baseline to compare with (this is where it first appears)\n'
-fi
-# the selection itself, in throwaway repositories made with plumbing (no hooks):
-# a clean checkout of a commit that renamed a baseline line must be caught
-# against its parent; the same rename uncommitted must be caught against HEAD
+	expect_rc "identifiers (frozen): the baseline only adds to the one at $BASEREF, at a higher minor" $rc 0 ;;
+unavailable)
+	bad "identifiers (frozen): the base revision $BASEREF is not available (shallow clone, or a wrong NVRM_IDS_BASE_REF): fetch more history or set NVRM_IDS_BASE_REF" ;;
+*)
+	printf 'skip frozen baseline check (%s): there is no earlier baseline to compare with (this is where it first appears)\n' "$BSTATE" ;;
+esac
+# the selection itself, in throwaway repositories made with plumbing (no hooks)
 GE="GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t"
-mkgit() {	# mkgit DIR RENAME(yes|no|uncommitted)
-	rm -rf "$1"; mkdir -p "$1/lib/libnvrm/schema"
-	cp "$IDS" "$1/$IDSREL"
-	git -C "$1" init -q && git -C "$1" add -A || return 1
-	_t=$(git -C "$1" write-tree) && _c0=$(env $GE git -C "$1" -c commit.gpgsign=false commit-tree -m base "$_t") || return 1
-	git -C "$1" update-ref HEAD "$_c0" || return 1
-	if [ "$2" = yes ] || [ "$2" = uncommitted ]; then
-		sed -i '' 's/family_unknown/no_family_entry/' "$1/$IDSREL"
-	fi
-	if [ "$2" = yes ] || [ "$2" = no ]; then
-		git -C "$1" add -A && _t=$(git -C "$1" write-tree) && _c1=$(env $GE git -C "$1" -c commit.gpgsign=false commit-tree -p "$_c0" -m rename "$_t") || return 1
-		git -C "$1" update-ref HEAD "$_c1" || return 1
-	fi
+commit_tree() {	# commit_tree DIR PARENT-or-"" MSG: commits the index, prints the id
+	_t=$(git -C "$1" write-tree) || return 1
+	if [ -n "$2" ]; then env $GE git -C "$1" -c commit.gpgsign=false commit-tree -p "$2" -m "$3" "$_t"
+	else env $GE git -C "$1" -c commit.gpgsign=false commit-tree -m "$3" "$_t"; fi
 }
-for c in yes uncommitted no; do
+advance() {	# advance DIR PARENT MSG: commit the index on PARENT, move HEAD, print the id
+	_n=$(commit_tree "$1" "$2" "$3") || return 1
+	git -C "$1" update-ref HEAD "$_n" || return 1
+	echo "$_n"
+}
+rename_line() { sed -i '' 's/family_unknown/no_family_entry/' "$1/$IDSREL"; }
+# mkgit DIR KIND:
+#   yes          the rename is committed (HEAD^ has the old line)
+#   no           nothing changes
+#   uncommitted  the rename is in the tree only
+#   mb           rename, then an unrelated commit; the origin ref is at the base
+#   mbtip        rename committed; the origin ref is AT HEAD (just pushed)
+#   born         the file is added on the branch (the origin ref predates it), then renamed
+#   absent       the file first appears in the last commit
+#   root         one commit that adds the file
+mkgit() {
+	rm -rf "$1"; mkdir -p "$1/lib/libnvrm/schema"
+	git -C "$1" init -q || return 1
+	case $2 in
+	absent|born)
+		echo x >"$1/other"; git -C "$1" add -A || return 1
+		_c0=$(advance "$1" "" base) || return 1
+		cp "$IDS" "$1/$IDSREL"; git -C "$1" add -A || return 1
+		_c1=$(advance "$1" "$_c0" ids) || return 1
+		if [ "$2" = born ]; then
+			rename_line "$1"; git -C "$1" add -A || return 1
+			advance "$1" "$_c1" rename >/dev/null || return 1
+			git -C "$1" update-ref "refs/remotes/$MBREF" "$_c0" || return 1
+		fi
+		return 0 ;;
+	root)
+		cp "$IDS" "$1/$IDSREL"; git -C "$1" add -A || return 1
+		advance "$1" "" base >/dev/null; return $? ;;
+	esac
+	cp "$IDS" "$1/$IDSREL"; git -C "$1" add -A || return 1
+	_c0=$(advance "$1" "" base) || return 1
+	case $2 in yes|uncommitted|mb|mbtip) rename_line "$1" ;; esac
+	case $2 in yes|no|mb|mbtip)
+		git -C "$1" add -A || return 1
+		_c1=$(advance "$1" "$_c0" second) || return 1 ;;
+	esac
+	if [ "$2" = mb ]; then
+		echo y >"$1/unrelated"; git -C "$1" add -A || return 1
+		advance "$1" "$_c1" third >/dev/null || return 1
+		git -C "$1" update-ref "refs/remotes/$MBREF" "$_c0" || return 1
+	fi
+	if [ "$2" = mbtip ]; then
+		git -C "$1" update-ref "refs/remotes/$MBREF" "$_c1" || return 1
+	fi
+	return 0
+}
+for c in yes uncommitted no mb mbtip born; do
 	mkgit "$W/gitcase-$c" $c; rc=$?
 	expect_rc "frozen selection: the throwaway repository ($c) was built" $rc 0
-	_b=$(ids_base_ref "$W/gitcase-$c" "$IDSREL")
+	_st=$(base_state "$W/gitcase-$c"); _b=$(base_ref "$W/gitcase-$c")
+	[ "$_st" = ok ]; rc=$?
+	expect_rc "frozen selection ($c): the base resolves and has the baseline (base $_b)" $rc 0
 	git -C "$W/gitcase-$c" show "$_b:$IDSREL" >"$W/gitcase-$c.old" 2>/dev/null
 	$IDCHK --frozen "$W/gitcase-$c.old" "$W/gitcase-$c/$IDSREL" "$SCHEMA" >/dev/null 2>&1; rc=$?
 	case $c in
@@ -509,13 +599,41 @@ for c in yes uncommitted no; do
 	*) if [ $rc -eq 1 ]; then ok "frozen selection: a renamed baseline line is refused ($c, base $_b)"; else bad "frozen selection: rename ($c, base $_b) gave rc=$rc"; fi ;;
 	esac
 done
-[ "$(ids_base_ref "$W/gitcase-yes" "$IDSREL")" = 'HEAD^' ] && [ "$(ids_base_ref "$W/gitcase-uncommitted" "$IDSREL")" = HEAD ]; rc=$?
-expect_rc "frozen selection: a clean tree is compared with HEAD^, a changed baseline with HEAD" $rc 0
-[ "$(NVRM_IDS_BASE_REF=origin/x ids_base_ref "$W/gitcase-no" "$IDSREL")" = origin/x ]; rc=$?
-expect_rc "frozen selection: NVRM_IDS_BASE_REF names the base" $rc 0
+[ "$(base_ref "$W/gitcase-yes")" = 'HEAD^' ]; rc=$?
+expect_rc "frozen selection: a clean tree without an upstream is compared with HEAD^" $rc 0
+[ "$(base_ref "$W/gitcase-uncommitted")" = HEAD ]; rc=$?
+expect_rc "frozen selection: a changed baseline is compared with HEAD" $rc 0
+[ "$(base_ref "$W/gitcase-mb")" = "$(git -C "$W/gitcase-mb" rev-parse "refs/remotes/$MBREF")" ]; rc=$?
+expect_rc "frozen selection: the merge base with $MBREF is preferred (a rename two commits back is still caught)" $rc 0
+[ "$(base_ref "$W/gitcase-mbtip")" = 'HEAD^' ]; rc=$?
+expect_rc "frozen selection: a merge base that is HEAD itself (just pushed) falls back to HEAD^, not to a self-comparison" $rc 0
+[ "$(base_ref "$W/gitcase-born")" = 'HEAD^' ]; rc=$?
+expect_rc "frozen selection: a merge base that lacks the file (born on the branch) falls back to HEAD^" $rc 0
+mkgit "$W/gitcase-absent" absent; rc=$?
+expect_rc "frozen selection: the throwaway repository (absent) was built" $rc 0
+[ "$(base_state "$W/gitcase-absent")" = absent ]; rc=$?
+expect_rc "frozen selection: a base without the file is a skip (absent)" $rc 0
+mkgit "$W/gitcase-root" root; rc=$?
+expect_rc "frozen selection: the throwaway repository (root) was built" $rc 0
+[ "$(base_state "$W/gitcase-root")" = absent ]; rc=$?
+expect_rc "frozen selection: a root commit that adds the file is a skip, not a shallow-clone failure" $rc 0
+[ "$(NVRM_IDS_BASE_REF=HEAD^ base_state "$W/gitcase-absent")" = unavailable ]; rc=$?
+expect_rc "frozen selection: an explicit base without the file is not a skip (unavailable)" $rc 0
+[ "$(NVRM_IDS_BASE_REF=no/such base_state "$W/gitcase-yes")" = unavailable ]; rc=$?
+expect_rc "frozen selection: a wrong NVRM_IDS_BASE_REF is unavailable, so the suite FAILs (it was a skip)" $rc 0
+[ "$(NVRM_IDS_BASE_REF=origin/x base_state "$W/gitcase-no")" = unavailable ]; rc=$?
+expect_rc "frozen selection: an explicit base that does not resolve is unavailable" $rc 0
+[ "$(NVRM_IDS_BASE_REF=HEAD^ base_state "$W/gitcase-yes")" = ok ]; rc=$?
+expect_rc "frozen selection: an explicit base that has the file is used" $rc 0
+git clone -q --depth 1 "file://$W/gitcase-yes" "$W/gitcase-shallow" >/dev/null 2>&1; rc=$?
+expect_rc "frozen selection: the shallow clone was made" $rc 0
+[ "$(base_state "$W/gitcase-shallow")" = unavailable ]; rc=$?
+expect_rc "frozen selection: a shallow clone (no HEAD^) is unavailable, so the suite FAILs (it was a skip)" $rc 0
 mkdir -p "$W/nogit" && git -C "$W/nogit" init -q
-[ -z "$(ids_base_ref "$W/nogit" "$IDSREL")" ]; rc=$?
-expect_rc "frozen selection: no history means no base (the check is skipped, and says so)" $rc 0
+[ "$(base_state "$W/nogit")" = nohistory ]; rc=$?
+expect_rc "frozen selection: no commit yet means no base (the check is skipped, and says so)" $rc 0
+# setting NVRM_IDS_BASE_REF, as the FAIL message advises, must not break the self-tests above
+unset NVRM_IDS_BASE_REF
 # --emit and the baseline agree (the baseline is what --emit writes)
 $IDCHK --emit "$SCHEMA" >"$W/emitted.ids"
 grep -v '^#' "$IDS" | cmp -s - "$W/emitted.ids"; rc=$?

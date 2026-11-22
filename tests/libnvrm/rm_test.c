@@ -126,6 +126,7 @@ test_happy(void)
 	CHECK_EQ(K.bad, 0);
 	nvrm_close(ctx);
 	CHECK_EQ(K.nlive, 0);			/* nothing leaked in the RM */
+	CHECK_EQ(K.nfd, 0);			/* and no descriptor */
 	CHECK_EQ(K.nalloc, K.nfree);
 	CHECK_EQ(K.bad, 0);
 
@@ -220,9 +221,53 @@ test_fork_close(void)
 	fork_close_child(1);
 }
 
+/* A version mismatch closes the control descriptor it opened, and the scripted
+ * kernel's own count is not fooled by a failed open or a double close. */
+static void
+test_version_closes_fd(void)
+{
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	K.reply_unrecognized = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_E_VERSION);
+	CHECK(ctx == NULL);
+	CHECK_EQ(K.nfd, 0);
+	CHECK_EQ(K.bad, 0);
+	/* the counter counts results: -1 is closed with no effect and no leak */
+	CHECK_EQ(scripted.close(-1), -1);
+	CHECK_EQ(K.nfd, 0);
+	CHECK_EQ(K.bad, 0);
+	/* a descriptor closed twice is a bad call, not a negative leak */
+	reset_kernel();
+	rc = scripted.open("/dev/nvidiactl", O_RDWR);
+	CHECK(rc >= 0);
+	CHECK_EQ(K.nfd, 1);
+	CHECK_EQ(scripted.close(rc), 0);
+	CHECK_EQ(scripted.close(rc), -1);
+	CHECK_EQ(K.nfd, 0);
+	CHECK_EQ(K.bad, 0);
+	/* a failed open is not a descriptor */
+	reset_kernel();
+	K.fail_open = 1;
+	CHECK_EQ(scripted.open("/dev/nvidiactl", O_RDWR), -1);
+	CHECK_EQ(K.nfd, 0);
+	/* a close that really closes something not counted as open is reported */
+	reset_kernel();
+	rc = open("/dev/null", O_RDWR);
+	CHECK_EQ(scripted.close(rc), 0);
+	CHECK_EQ(K.nfd, -1);
+	CHECK_EQ(K.bad, 1);
+	reset_kernel();
+}
+
 static void
 test_open_failures(void)
 {
+
 	nvrm_ctx *ctx;
 	char err[300];
 	int rc;
@@ -672,6 +717,7 @@ main(void)
 	nvrm_rm_set_sys(&scripted);
 	test_happy();
 	test_fork_close();
+	test_version_closes_fd();
 	test_open_failures();
 	test_list_failures();
 	test_gpu_failures();

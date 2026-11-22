@@ -46,6 +46,7 @@ static struct {
 	int		use_pipe;	/* the control fd is a pipe */
 	int		real_errno;	/* errno of a refused real ioctl */
 	int		last_fd;	/* the control descriptor handed out */
+	int		nfd;		/* descriptors opened and not closed */
 	int		reply_unrecognized;	/* version check answers 0, not recognized */
 	int		bad_pci_vendor;	/* pciDeviceId vendor half differs from the card */
 	int		bad_pci_device;	/* pciDeviceId device half differs from the card */
@@ -80,6 +81,8 @@ reset_kernel(void)
 static int
 k_open(const char *path, int flags)
 {
+	int fd;
+
 	if (K.fail_open) {
 		errno = ENOENT;
 		return (-1);
@@ -95,15 +98,25 @@ k_open(const char *path, int flags)
 			return (-1);
 		close(pp[1]);
 		K.last_fd = pp[0];
+		K.nfd++;
 		return (pp[0]);
 	}
-	return (open("/dev/null", O_RDWR | O_CLOEXEC));
+	fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	if (fd >= 0)
+		K.nfd++;
+	return (fd);
 }
 
+/* Counts results, not calls: a failed open is no descriptor, and a close that
+ * fails (a double close, -1) neither frees one nor hides a leak. */
 static int
 k_close(int fd)
 {
-	return (close(fd));
+	int r = close(fd);
+
+	if (r == 0 && --K.nfd < 0)
+		bad("closed a descriptor that was not open");
+	return (r);
 }
 
 static int
