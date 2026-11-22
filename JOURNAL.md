@@ -416,3 +416,28 @@ Test: 161 passed, 0 failed, 0 skipped. Next: gate rounds 1 and 2, then commit.
 Both Kimi rounds died. Nothing was lost: the staged work of round B pass 4 is intact; items 1-10 were done and item 11 was half done (181 passed, 1 failed).
 Resumed with ~/work/gb10/briefs/2425-c1.1-r3e-resume.md (items 11-15). Commit 3b is still uncommitted. Its gate round 1 receipt fa052367 is spent; round 2 comes after this pass.
 C1.4a pass 3 is resumed in wt-cuda-c14a with ~/work/gb10/briefs/2428-c1.4a-r1d-resume.md. Its gate round 1 receipt 5ec434ec is spent.
+# Journal native CUDA C1.4a (Track #2428), branch agent/2428-libcuda-api, worktree wt-cuda-c14a
+
+## 2026-11-22T12:50Z round 1 (Kimi k3.1-pro in opencode)
+Branch cut from the C1.1 head ab2bc4e.
+Contents:
+- cuda.h Driver API subset;
+- lib/libcuda (libcuda.so.1, version node CUDA_1.0) with a provider registry and two providers, fake (profiles gb206 and gb10) and nvrm (a stub);
+- 16 calls, including cuGetProcAddress and CUDA_VISIBLE_DEVICES;
+- cuda-native-info with --json, --jsonl and --schema;
+- man pages libcuda(3) and cuda-native-info(1);
+- tests/libcuda_test.sh: 84 checks green, red first.
+Brief: ~/work/gb10/briefs/2428-c1.4a-r1-libcuda-api.md. Report: ~/work/gb10/tmp/2428-r1/ROUND-REPORT.md.
+Orchestrator finding: tests/libcuda/schema_validate.py duplicates tests/libnvrm/schema_validate.py; the brief said to reuse it.
+Next: gate rounds 1 and 2, commit, push.
+
+## 2026-11-22T14:50Z C1.4a pass 3 done (Kimi k3.1-pro; it was resumed twice, after the ZFS panic and after an opencode SQL error)
+The review fixes are in:
+- one pthread_once initialization;
+- cuGetProcAddress_v2, with the header mapping;
+- JSON that stays valid UTF-8;
+- the visibility cap;
+- better messages and tests.
+Test: 119 checks green, cpd clean (PMD language cpp).
+The orchestrator finding of the 12:50Z entry (the duplicate schema_validate.py) is resolved: the copy is deleted and tests use tests/libnvrm/schema_validate.py.
+Next: rebase onto main, then gate round 2, then commit, PR and merge.

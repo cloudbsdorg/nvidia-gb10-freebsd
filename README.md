@@ -953,3 +953,13 @@ emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` a
 The stub `ptxas`/`fatbinary` tools and `libcudart` let clang fully compile and link, but every launch returns `cudaErrorNotSupported` (801); the libdevice math library, real compiler and runtime, device execution and `libcuda` are not there yet.
 Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips
 without LLVM 23).
+
+## libcuda (native CUDA Driver API)
+
+`lib/libcuda/` builds `libcuda.so.1` from NVIDIA's public API documentation, with 16 device, context, error and entry-point calls.
+The default `nvrm` provider is a stub; `CUDA_NATIVE_BACKEND=fake` selects synthetic devices without hardware.
+`CUDA_NATIVE_FAKE_PROFILE=gb206,gb10` selects both fake profiles; `CUDA_VISIBLE_DEVICES` filters and reorders them.
+`cuda-native-info [--json | --jsonl | --schema]` reports versions and devices; its schema is under `lib/libcuda/schema/`.
+The C/C++ header is `lib/cuda-native/sdk/include/cuda.h`; manuals are `libcuda(3)` and `cuda-native-info(1)`.
+Tests run against the git index, not the working tree: run `git add` first.
+Run `TMPDIR=/path/to/existing/scratch sh tests/libcuda_test.sh`; the directory must already exist.

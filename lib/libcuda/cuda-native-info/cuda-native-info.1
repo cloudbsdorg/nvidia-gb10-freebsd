@@ -1,0 +1,109 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt CUDA-NATIVE-INFO 1
+.Os
+.Sh NAME
+.Nm cuda-native-info
+.Nd show native CUDA Driver API devices and versions
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json | Fl -jsonl | Fl -schema
+.Nm
+.Fl -help
+.Sh DESCRIPTION
+The
+.Nm
+utility initializes
+.Xr libcuda 3
+and prints its driver version, native library version, and visible devices.
+Text is the default output.
+Device memory is reported in bytes.
+The attribute names are stable JSON keys and are also used in the text view.
+No Linux compatibility layer is used.
+.Pp
+The default nvrm provider is a stub in this release and reports an error.
+Select the fake provider for a deterministic, hardware-free report.
+Fake device properties are synthetic test values.
+.Sh OPTIONS
+.Bl -tag -width ".Fl -schema"
+.It Fl -json
+Write one JSON document on one line.
+The document contains a device array and its count.
+.It Fl -jsonl
+Write JSON Lines: one header, one device record per visible device in
+enumeration order, and one end record containing the device count.
+.It Fl -schema
+Write the JSON Schema shared by both JSON modes without initializing the
+provider.
+The schema identifier in each output record is
+.Dq cuda-native-info/1 .
+.It Fl -help
+Print usage and exit successfully.
+.El
+.Pp
+The output-mode options exclude each other.
+Positional arguments and unknown options are usage errors.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev CUDA_VISIBLE_DEVICES"
+.It Ev CUDA_NATIVE_BACKEND
+Select
+.Dq fake
+or
+.Dq nvrm .
+The default is
+.Dq nvrm .
+.It Ev CUDA_NATIVE_FAKE_PROFILE
+Select the fake profile list; the default is
+.Dq gb206 .
+Use
+.Dq gb206,gb10
+for two devices.
+.It Ev CUDA_VISIBLE_DEVICES
+Filter and reorder devices by physical index or GPU UUID.
+See
+.Xr libcuda 3
+for the exact rules.
+.El
+.Sh OUTPUT SCHEMA
+The JSON document and JSON Lines header contain
+.Dv cuda_version
+and
+.Dv cuda_native_version
+objects.
+Each version has its canonical
+.Dv string
+and integer
+.Dv major ,
+.Dv minor ,
+and
+.Dv patch
+parts, so consumers do not need to parse the string for comparisons.
+Device records contain the ordinal, name, GPU UUID, total memory in bytes, and
+the attribute object.
+A query failure produces a JSON error record in either JSON mode and a diagnostic
+on standard error in text mode.
+The committed schema is installed as
+.Pa share/cuda-native/schema/cuda-native-info-1.schema.json .
+.Sh EXIT STATUS
+.Ex -std
+A successful empty device list is not an error.
+Exit status 1 indicates a provider, query, or output failure; status 2 indicates
+a usage error.
+.Sh EXAMPLES
+Print two synthetic devices as text:
+.Bd -literal -offset indent
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 cuda-native-info
+.Ed
+.Pp
+From a source checkout, validate a JSON Lines stream using the project's
+supported-keyword validator:
+.Bd -literal -offset indent
+env CUDA_NATIVE_BACKEND=fake cuda-native-info --jsonl |
+    python3 tests/libnvrm/schema_validate.py \
+    lib/libcuda/schema/cuda-native-info-1.schema.json
+.Ed
+.Sh SEE ALSO
+.Xr libcuda 3
+.Sh HISTORY
+The utility first appeared in cuda-native 0.1.0.

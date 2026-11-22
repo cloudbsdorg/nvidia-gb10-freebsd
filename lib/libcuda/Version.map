@@ -1,0 +1,28 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * PROVISIONAL: CUDA_1.0 is frozen at the first package release, not before.
+ */
+CUDA_1.0 {
+	global:
+		cuInit;
+		cuDriverGetVersion;
+		cuDeviceGetCount;
+		cuDeviceGet;
+		cuDeviceGetName;
+		cuDeviceGetUuid;
+		cuDeviceTotalMem;
+		cuDeviceGetAttribute;
+		cuDevicePrimaryCtxRetain;
+		cuDevicePrimaryCtxRelease;
+		cuCtxGetCurrent;
+		cuCtxSetCurrent;
+		cuCtxGetDevice;
+		cuGetErrorName;
+		cuGetErrorString;
+		cuGetProcAddress;
+		cuGetProcAddress_v2;
+	local:
+		*;
+};
