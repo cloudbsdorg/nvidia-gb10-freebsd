@@ -4,3 +4,4 @@ tmp/
 *.core
 .depend.*
 work/
+__pycache__/

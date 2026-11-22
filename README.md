@@ -307,6 +307,10 @@ sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "
 DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
 sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
 sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
+sh tests/pd_split_test.sh        # the prefill/decode split client, against two stub servers
+sh tests/bench_compare_test.sh   # the llama-bench comparison tables
+sh tests/run-nv-vulkan_test.sh   # the Vulkan launcher, without a GPU and without a Linux root
+sh tests/manpages_test.sh        # the man pages of the commands pass "mandoc -T lint -W warning"
 ```
 
 `build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
@@ -641,17 +645,23 @@ $R/noble/lib/ld-linux-aarch64.so.1 --library-path "$R/noble/lib/aarch64-linux-gn
 USERMODE register window (see [Memory attributes on arm64](#memory-attributes-on-arm64)). The
 ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
 
+[`scripts/run-nv-vulkan.sh`](scripts/run-nv-vulkan.sh) wraps all of this: it sets the two
+variables, runs the programs from the llama directory (so they find their backends, also under
+`daemon(8)`) and starts them through the Ubuntu root's own dynamic linker. It is described in
+[`docs/llm.md`](docs/llm.md#nvidia).
+
 ## Running LLMs
 
-How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured, and
-splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
+How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured,
+splitting prefill and decode between two servers, the NVIDIA Vulkan launcher and the llama-bench
+comparison tables): [`docs/llm.md`](docs/llm.md).
 
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `SOURCES` | pins for NVIDIA's sources |
-| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client of [`docs/llm.md`](docs/llm.md) |
+| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client, `bench_compare.py`, the llama-bench comparison tables, and `run-nv-vulkan.sh`, the Vulkan launcher of [`docs/llm.md`](docs/llm.md) |
 | `patches/` | one unified diff per changed file of NVIDIA's FreeBSD OS layer |
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
