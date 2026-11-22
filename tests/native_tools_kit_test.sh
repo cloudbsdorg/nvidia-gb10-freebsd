@@ -131,14 +131,25 @@ cp /bin/sh "$T/x y"; ktrace -i -t cn -f "$T/sp.kt" "$T/x y" -c 'kldload /nonexis
 grep -q 'x y' "$T/sp.kd" && ok "the trace names the process 'x y'" || no "the trace does not name 'x y'"
 guard_trace "$T/sp.kd" "$T/x y" "$T/x.rep" > /dev/null; _s=$?
 [ "$_s" != 0 ] && ok "guard_trace: a kldload by a process named with a space is caught (exit $_s)" || no "guard_trace: a process named 'x y' escapes the kldload check"
+{ cat "$T/good.kd"; echo ' 77777 sh       CALL  fexecve(0x3,0x4,0x5)'; echo ' 77777 sh       RET   fexecve JUSTRETURN'; } > "$T/fx.kd"
+guard_trace "$T/fx.kd" "$T/good.sh" "$T/x.rep" > /dev/null; expect 2 $? "guard_trace: an exec with no path in the trace (fexecve) is an error"
+{ cat "$T/good.kd"; echo ' 77777 sh       CALL  fexecve(0x3,0x4,0x5)'; echo ' 77777 sh       NAMI  "/libexec/ld-elf.so.1"'; echo ' 77777 sh       RET   fexecve JUSTRETURN'; } > "$T/fx2.kd"
+guard_trace "$T/fx2.kd" "$T/good.sh" "$T/x.rep" > /dev/null; expect 2 $? "guard_trace: an fexecve is an error even when its interpreter has a path"
+guard_plain_path /home/a/b > /dev/null; expect 0 $? "guard_plain_path: a plain path passes"
+for _bad in relative/x /a/b/ /a//b /a/./b /a/../b /a/b/.. '/a/*/b'; do
+	guard_plain_path "$_bad" > /dev/null; expect 1 $? "guard_plain_path: '$_bad' is refused"
+done
+guard_elf /bin/sh > /dev/null; expect 0 $? "guard_elf: /bin/sh passes"
+guard_elf "$T/s.sh" > /dev/null; expect 1 $? "guard_elf: a #! script is not an ELF"
 { cat "$T/good.kd"; echo 'garbage line'; } > "$T/gb.kd"
 guard_trace "$T/gb.kd" "$T/good.sh" "$T/x.rep" > /dev/null; expect 2 $? "guard_trace: a line of no known shape is an error"
 
 # (d) summarize.py
 SUMM="/usr/local/bin/python3 -I $KIT/summarize.py"
 VALID="/usr/local/bin/python3 -I $repo/tests/libnvrm/schema_validate.py $KIT/native-tools-summary.schema.json"
+rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 planned=$($SUMM --planned)
-[ "$(echo $planned | wc -w | tr -d ' ')" = 31 ] && ok "summarize --planned lists the 31 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
+[ "$(echo $planned | wc -w | tr -d ' ')" = 32 ] && ok "summarize --planned lists the 32 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
 mkrun() {	# mkrun <dir> <status of the static rows>
 	mkdir -p "$1"; : > "$1/results.jsonl"
 	for _r in $planned; do
@@ -157,11 +168,14 @@ oneline "$T/r1/summary.json" > "$T/r1.l"; $VALID "$T/r1.l" > /dev/null; expect 0
 /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); n=[r["name"] for r in d["rows"]]; sys.exit(0 if all(n.count(p) == 1 for p in d["planned"]) and d["planned"] == sys.argv[2].split() else 1)' "$T/r1/summary.json" "$planned" && ok "summarize: every planned row appears exactly once" || no "summarize: the planned rows are not each present once"
 grep -q '"native_verdict": "pass"' "$T/r1/summary.json" && ok "summarize: native_verdict is pass" || no "summarize: native_verdict is not pass"
 sed 's/"status": "needs-linux"/"status": "skipped"/' "$T/r1.l" > "$T/r1.bad"; $VALID "$T/r1.bad" > /dev/null 2>&1; expect 1 $? "schema: a wrong status is refused"
+mkrun "$T/r8" info; $SUMM "$T/r8" > /dev/null; expect 1 $? "summarize: a planned check that records info is not a pass"
+mkrun "$T/r9" pass; grep -v '"row":"env-after"' "$T/r9/results.jsonl" | sed 's/"row":"nvrm-info","status":"pass"/"row":"nvrm-info","status":"info"/' > "$T/r9/x"; mv "$T/r9/x" "$T/r9/results.jsonl"
+$SUMM "$T/r9" > /dev/null; [ "$(rowf "$T/r9/summary.json" env-after status)" = not-run ] && ok "summarize: a row missing after a planned info row (now an error) is not-run" || no "summarize: env-after is $(rowf "$T/r9/summary.json" env-after status)"
+mkrun "$T/r10" pass; chmod 0555 "$T/r10"; $SUMM "$T/r10" > /dev/null 2>&1; expect 4 $? "summarize: a run it cannot write summary.json into exits 4, not a verdict"; chmod 0755 "$T/r10"
 mkrun "$T/r2" pass; $SUMM "$T/r2" > /dev/null; expect 0 $? "summarize: a fully passing run is pass"
 mkrun "$T/r3" not-available; printf '{"row":"nvrm-info","status":"fail","detail":"x"}\n' >> "$T/r3/results.jsonl"; $SUMM "$T/r3" > /dev/null; expect 1 $? "summarize: a failed row is fail"
 mkrun "$T/r4" pass; grep -v '"row":"done"' "$T/r4/results.jsonl" > "$T/r4/x"; mv "$T/r4/x" "$T/r4/results.jsonl"; $SUMM "$T/r4" > /dev/null; expect 1 $? "summarize: a missing done row is fail"
 mkrun "$T/r5" pass; printf '{"row":"nvrm-info","status":"running","detail":"x"}\n' >> "$T/r5/results.jsonl"; $SUMM "$T/r5" > /dev/null; expect 1 $? "summarize: a row left running fails the run"
-rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 rowf "$T/r5/summary.json" nvrm-info detail | grep -q 'stopped in this step' && ok "summarize: the running row says the run stopped there" || no "summarize: the running row is not explained"
 mkdir -p "$T/r7"; printf '{"row":"deadman","status":"pass","detail":"d"}\n{"row":"preloaded","status":"fail","detail":"nvidia is loaded"}\n{"row":"done","status":"info","detail":"d"}\n' > "$T/r7/results.jsonl"
 $SUMM "$T/r7" > /dev/null; [ "$(rowf "$T/r7/summary.json" load-nvidia status)" = not-run ] && ok "summarize: after a failed row that is not planned (preloaded), a missing row is not-run" || no "summarize: load-nvidia is $(rowf "$T/r7/summary.json" load-nvidia status) after preloaded failed"
@@ -177,6 +191,7 @@ else
 		printf 'hostname="t"\nlinux_enable="YES"\nkld_list="filemon amdgpu /boot/kernel/linux64.ko"\nother_testboot_enable="YES"\n' > "$1/etc/rc.conf"
 		printf 'zfs_load="YES"\n' > "$1/boot/loader.conf"
 		cp /sbin/shutdown "$1/sbin/shutdown"
+		mkdir -p "$1/usr/local/bin"; printf '#!/bin/sh\n' > "$1/usr/local/bin/python3"; chmod 0755 "$1/usr/local/bin/python3"
 	}
 	cat > "$T/bectl" <<EOF
 #!/bin/sh
@@ -219,6 +234,13 @@ EOF
 	expect 2 $? "make-be.sh stops when bectl list fails"
 	grep -q 'bectl list failed' "$T/mb4.out" && ok "make-be.sh says bectl list failed" || no "make-be.sh: $(cat "$T/mb4.out" | head -2)"
 	MB -D 20990101 -m "$STAGE" > "$T/mb3.out" 2>&1; expect 2 $? "make-be.sh refuses an existing BE name"
+	MB -D 20990104 -m "$STAGE" -o "$WORK/logs/x/" > "$T/mb5.out" 2>&1; expect 2 $? "make-be.sh refuses a copy-out with a trailing /"
+	MB -D 20990104 -m "$STAGE" -o "$WORK/logs/../x" > "$T/mb6.out" 2>&1; expect 2 $? "make-be.sh refuses a copy-out with a .. component"
+	: > "$T/bectl.log"; mkclone "$T/clone4/root"
+	env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone4/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990105 -m "$STAGE" --activate > "$T/mb8.out" 2>&1
+	_s=$?; [ "$_s" = 1 ] && ! grep -q 'bectl activate' "$T/bectl.log" && grep -q 'NOT armed' "$T/mb8.out" && ok "make-be.sh --activate arms nothing when check-be.sh fails" || no "make-be.sh --activate: exit $_s, $(grep activate "$T/bectl.log")"
+	sh "$KIT/check-be.sh" -s > "$T/cb-s.out" 2>&1; grep -q -- '-s needs a value' "$T/cb-s.out" && ok "check-be.sh -s without a value says so" || no "check-be.sh -s: $(cat "$T/cb-s.out")"
+	MB -D 20990104 -m "$STAGE" --bogus > "$T/mb7.out" 2>&1; [ "$(wc -l < "$T/mb7.out" | tr -d ' ')" = 1 ] && ok "make-be.sh: a usage error is one line" || no "make-be.sh: a usage error prints $(wc -l < "$T/mb7.out") lines"
 	grep -q 'with -n 2' "$T/mb3.out" && ok "make-be.sh names the next free number" || no "make-be.sh: $(cat "$T/mb3.out")"
 	# an nm that fails, an nm that lists nothing, and a copy-out under a boot environment root of any name are not passes
 	mkdir -p "$T/nmstub"; printf '#!/bin/sh\nexit 1\n' > "$T/nmstub/nm"; chmod 0755 "$T/nmstub/nm"
@@ -232,6 +254,8 @@ EOF
 	guard_copyout_dataset /x tank/ROOT/x zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: another pool's ROOT is not a boot environment"
 	guard_copyout_dataset /x zroot/home/mlapointe zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: the home dataset passes"
 	guard_copyout_dataset /x zroot/home/mlapointe - > /dev/null; expect 2 $? "guard_copyout_dataset: no bootfs is an error"
+	guard_copyout_dataset /x tank/results - zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 0 $? "guard_copyout_dataset: a data pool without bootfs passes"
+	guard_copyout_dataset /x tank/ROOT/a zroot/ROOT/b tank/ROOT/c > /dev/null; expect 1 $? "guard_copyout_dataset: under the boot environment root of a second pool fails"
 	mkdir -p "$R/etc/rc.conf.d"; : > "$R/etc/rc.conf.d/linux"
 	TMPDIR=$T sh "$KIT/check-be.sh" -m "$R" -U -s "$STAGE/SHA256-native-a682522.txt" > "$T/cb-ov.out" 2>&1
 	grep -q '^FAIL etc/rc.conf.d/linux exists' "$T/cb-ov.out" && ! grep -q '^ok   no later rc.conf' "$T/cb-ov.out" && ok "check-be.sh: an rc.conf.d/linux override is a FAIL, with no ok after it" || no "check-be.sh: the rc.conf.d/linux override is not reported cleanly"
@@ -302,7 +326,7 @@ EOF
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:needs-linux render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:needs-linux render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
@@ -333,6 +357,18 @@ EOF
 		[ "$(st "$_r" "$RUN4")" = not-run ] || _bad="$_bad $_r=$(st "$_r" "$RUN4")"
 	done
 	[ -z "$_bad" ] && ok "rc one-shot: after a failed load every later row is not-run" || no "rc one-shot: after a failed load:$_bad"
+	# a dead-man timer that is not pending: nothing is loaded
+	mkdir -p "$T/dmfail"; printf '#!/bin/sh\nexit 1\n' > "$T/dmfail/pgrep"; chmod 0755 "$T/dmfail/pgrep"
+	echo > "$T/loaded"
+	RUN5=$(rcrun "$T/work5" "$T/copyout5" "$T/return" "$T/dmfail")
+	[ -z "$(tr -d '\n' < "$T/loaded")" ] && [ "$(st deadman "$RUN5")" = fail ] && [ "$(st load-nvidia "$RUN5")" = not-run ] && grep -q '"verdict": "fail"' "$RUN5/summary.json" \
+	    && ok "rc one-shot: without a pending dead-man timer nothing is loaded and the verdict is fail" || no "rc one-shot: dead-man not pending: loaded '$(tr '\n' ' ' < "$T/loaded")', deadman $(st deadman "$RUN5"), load-nvidia $(st load-nvidia "$RUN5")"
+	# an evidence file that claims pass is not trusted
+	cp "$T/kitroot/static-rows/render-uapi" "$T/render-uapi.save"; chmod u+w "$T/kitroot/static-rows/render-uapi"; printf 'pass\nplanted\n' > "$T/kitroot/static-rows/render-uapi"
+	echo > "$T/loaded"
+	RUN6=$(rcrun "$T/work6" "$T/copyout6" "$T/return")
+	cp "$T/render-uapi.save" "$T/kitroot/static-rows/render-uapi"
+	[ "$(st render-uapi "$RUN6")" = error ] && ok "rc one-shot: a static row whose evidence says pass is an error" || no "rc one-shot: render-uapi with a planted pass is $(st render-uapi "$RUN6")"
 	[ "$(st load-nvidia_gsp_ga10x_fw "$RUN4")" = fail ] && ok "rc one-shot: the failed load is a fail row" || no "rc one-shot: load-nvidia_gsp_ga10x_fw is $(st load-nvidia_gsp_ga10x_fw "$RUN4")"
 fi
 

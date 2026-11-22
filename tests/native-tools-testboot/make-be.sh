@@ -76,8 +76,9 @@ FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1
 FORBID_RE='(linux|^amdgpu|^radeonkms|^i915kms|^drm|^dmabuf|^nvidia|^lindebugfs)'
 BLOCK="amdgpu radeonkms i915kms drm dmabuf linuxkpi linuxkpi_video lindebugfs linux linux64 linux_common nvidia nvidia-modeset nvidia-drm nvidia_linux nvidia_modeset_linux"
 
-usage() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0" >&2; exit 2; }
-need() { [ "$2" -ge 2 ] || { echo "make-be.sh: $1 needs a value" >&2; usage; }; }
+help() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0"; exit 0; }
+usage() { echo "make-be.sh: $1 (make-be.sh -h shows every option)" >&2; exit 2; }
+need() { [ "$2" -ge 2 ] || usage "$1 needs a value"; }
 while [ $# -gt 0 ]; do
 	case $1 in
 	-N) need "$1" "$#"; NORMAL=$2; shift 2 ;;
@@ -93,8 +94,8 @@ while [ $# -gt 0 ]; do
 	-d) need "$1" "$#"; DRMKO=$2; shift 2 ;;
 	--dry-run) ACTIVATE=0; shift ;;
 	--activate) ACTIVATE=1; shift ;;
-	-h | --help) usage ;;
-	*) echo "make-be.sh: unknown argument: $1" >&2; usage ;;
+	-h | --help) help ;;
+	*) usage "unknown argument: $1" ;;
 	esac
 done
 [ -n "$BASE" ] || BASE=$NORMAL
@@ -104,8 +105,8 @@ case $SEQ in '' | *[!0-9]* | 0*) echo "make-be.sh: -n must be a positive number"
 case $VRAM in '' | *[!0-9]*) echo "make-be.sh: -V must be a number of bytes" >&2; exit 2 ;; esac
 case $SM in [0-9]*.[0-9]*) ;; *) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 case $SM in *[!0-9.]* | *.*.*) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
-case $COPYOUT in /*) ;; *) echo "make-be.sh: -o must be an absolute path" >&2; exit 2 ;; esac
-case $COPYOUT in *[!A-Za-z0-9/._-]*) echo "make-be.sh: -o may hold letters, digits, / . _ - only" >&2; exit 2 ;; esac
+. "$KITDIR/guard.sh"
+_l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit 2; }
 for _n in "$NORMAL" "$BASE"; do
 	case $_n in *[!A-Za-z0-9._-]* | -* | '') echo "make-be.sh: unusable boot environment name: $_n" >&2; exit 2 ;; esac
 done
@@ -189,14 +190,14 @@ for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	echo "native $_k: depends on $(printf '%s\n' "$_d" | tr '\n' ' ')"
 done
 for _f in nvrm-info libnvrm.so.1; do
-	_l=$(guard_brand "$STAGE/$_f") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
+	_l=$(guard_elf "$STAGE/$_f") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
 	echo "native $_f: ${_l#* }"
 done
 
 # 3. the rows that cannot run natively, with their evidence: first line the status, then the detail
 SR=$SCRATCH/static-rows
 rm -rf "$SR"; mkdir "$SR"
-classify() {	# classify <ko> <what it is for>: needs-linux, needs-linuxkpi or native, with the evidence
+classify() {	# classify <ko> <what it is for>: needs-linux, needs-linuxkpi or not-available (native but not loaded by this kit, or not inspectable), with the evidence
 	if [ ! -r "$1" ]; then printf 'not-available\ncould not inspect %s (%s): the file is missing or unreadable\n' "$1" "$2"; return; fi
 	_d=$(deps "$1") || { printf 'not-available\nkldxref could not read %s\n' "$1"; return; }
 	if [ -z "$_d" ]; then printf 'not-available\nkldxref reports no dependency for %s: it could not read it\n' "$1"; return; fi
@@ -339,10 +340,16 @@ printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_
 run $BECTL umount "$BE"
 BE_DONE=1
 if [ "$ACTIVATE" -eq 1 ]; then
+	# never arm a boot environment check-be.sh has not passed
+	if ! sh "$KITDIR/check-be.sh" -s "$SHAFILE" -c "$COMMIT" "$BE"; then
+		echo "make-be.sh: check-be.sh failed: $BE is built but NOT armed; see its FAIL lines" >&2
+		exit 1
+	fi
 	run $BECTL activate -t "$BE" || { echo "make-be.sh: $BE is built but NOT armed (bectl activate failed)" >&2; exit 1; }
 	echo "armed: $BE boots once and returns to $NORMAL by itself; results in $COPYOUT/<stamp>/summary.json and summary.txt"
 else
 	echo "built, NOT armed (dry run): $BE (commit $COMMIT); the base is $BASE, the host returns to $NORMAL"
-	echo "check it with: tests/native-tools-testboot/check-be.sh $BE"
-	echo "arm it with: bectl activate -t $BE   (only when no Fable agent runs on this host: the boot reboots it)"
+	echo "check it with: sh $KITDIR/check-be.sh -s $SHAFILE -c $COMMIT $BE"
+	echo "arm it with: bectl activate -t $BE   (only after check-be.sh passed and when no Fable agent runs on this host)"
+	echo "the test boot then starts at the next reboot (shutdown -r now); it returns to $NORMAL by itself"
 fi

@@ -94,6 +94,14 @@ guard_brand()
 }
 
 
+# guard_elf <path>: a FreeBSD-branded ELF only (the staged nvrm-info and libnvrm.so.1: a #! script is not one)
+guard_elf()
+{
+	if [ ! -r "$1" ]; then echo "error $1 cannot be read"; return 2; fi
+	[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] || { echo "fail $1 is not an ELF file"; return 1; }
+	guard_brand "$1"
+}
+
 # guard_trace <kdump text> <tool path> <report file>: every exec of the traced row.  kdump prints "pid comm EVENT ..."
 # and comm may hold spaces, so the event is found by its name, not by a field number; a line of no known shape is an
 # error.  The paths the kernel looked up between an execve call and its return (the image, a #! interpreter, the ELF
@@ -108,7 +116,7 @@ guard_trace()
 	: > "$_rep"
 	if [ ! -s "$_dump" ]; then echo "error the trace is empty: the row was not traced"; return 2; fi
 	awk '
-	function flush(p) { if (p in buf) { n = split(buf[p], a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") print "exec " a[i]; delete buf[p] } }
+	function flush(p) { if (buf[p] == "") print "unresolved " p; else { n = split(buf[p], a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") print "exec " a[i] } delete buf[p] }
 	{
 		pid = $1
 		if (!match($0, / (CALL|RET|NAMI) +/)) { print "unparsed " $0; next }
@@ -117,7 +125,8 @@ guard_trace()
 	}
 	ev == "CALL" && arg ~ /^kldload\(/ { print "kldload " arg }
 	ev == "CALL" && arg ~ /^kldunload/ { print "kldunload " arg }
-	ev == "CALL" && arg ~ /^(execve|fexecve)\(/ { inexec[pid] = 1; buf[pid] = ""; next }
+	ev == "CALL" && arg ~ /^fexecve\(/ { print "unresolved " pid; inexec[pid] = 1; buf[pid] = ""; next }
+	ev == "CALL" && arg ~ /^execve\(/ { inexec[pid] = 1; buf[pid] = ""; next }
 	ev == "CALL" { if (inexec[pid]) { flush(pid); inexec[pid] = 0 } next }
 	ev == "NAMI" && inexec[pid] { p = arg; sub(/^"/, "", p); sub(/"$/, "", p); buf[pid] = buf[pid] p "\n"; next }
 	ev == "RET" && arg ~ /^f?execve / {
@@ -129,6 +138,10 @@ guard_trace()
 	_rc=0; _err=0; _seen_tool=0; _n=0
 	if grep -q '^unparsed ' "$_rep.raw"; then
 		echo "error a trace line has no CALL, RET or NAMI: $(grep '^unparsed ' "$_rep.raw" | head -1 | cut -c10-90)" >> "$_rep"
+		_err=1
+	fi
+	if grep -q '^unresolved ' "$_rep.raw"; then
+		echo "error process $(grep '^unresolved ' "$_rep.raw" | head -1 | cut -c12-) ran an exec whose image has no path in the trace (fexecve of a descriptor, or lost NAMI records): it cannot be checked" >> "$_rep"
 		_err=1
 	fi
 	if grep -qE '^(kldload|kldunload) ' "$_rep.raw"; then
@@ -174,17 +187,35 @@ guard_undef()
 	return 0
 }
 
-# guard_copyout_dataset <copy-out path> <its dataset> <the pool's bootfs>: the copy-out must lie outside the boot
-# environment root (the parent of bootfs, whatever its name: zroot/ROOT, zroot/bootenv, ...), or the run is written
-# into the test boot environment and lost on the return.  An unreadable dataset or bootfs is an error.
+# guard_plain_path <path>: an absolute path of letters, numbers and / . _ - in plain form (no trailing /, //, . or ..
+# component): the one-shot compares the physical path of the directory it makes with this text
+guard_plain_path()
+{
+	case $1 in /*) ;; *) echo "fail $1 is not an absolute path"; return 1 ;; esac
+	case $1 in *[!A-Za-z0-9/._-]*) echo "fail $1 may hold letters, numbers and / . _ - only"; return 1 ;; esac
+	case $1 in */ | *//* | */./* | */../* | */. | */..) echo "fail $1 is not in plain form (no trailing /, //, . or .. component)"; return 1 ;; esac
+	echo "pass $1 is a plain absolute path"
+	return 0
+}
+
+# guard_copyout_dataset <copy-out path> <its dataset> <bootfs of every pool, one per word>: the copy-out must lie
+# outside every boot environment root (the parent of a pool's bootfs, whatever its name: zroot/ROOT, zroot/bootenv,
+# ...), or the run is written into the test boot environment and lost on the return.  A pool without bootfs ("-") has
+# no boot environments.  No dataset, or no pool with a bootfs at all, is an error.
 guard_copyout_dataset()
 {
-	_br=${3%/*}
-	if [ -z "$2" ]; then echo "error copy-out $1: no dataset found for it: it cannot be told whether it survives the return"; return 2; fi
-	if [ -z "$3" ] || [ "$3" = - ] || [ "$_br" = "$3" ]; then echo "error copy-out $1: the boot environment root cannot be read (bootfs '$3')"; return 2; fi
-	case $2 in
-	"$_br" | "$_br"/*) echo "fail copy-out $1 is on $2, under the boot environment root $_br: the run would be lost on the return"; return 1 ;;
-	esac
-	echo "pass copy-out $1 is on $2, outside the boot environment root $_br"
+	_co=$1; _ds=$2; shift 2
+	if [ -z "$_ds" ]; then echo "error copy-out $_co: no dataset found for it: it cannot be told whether it survives the return"; return 2; fi
+	_roots=
+	for _bf in "$@"; do
+		case $_bf in '' | -) continue ;; */*) ;; *) echo "error copy-out $_co: bootfs '$_bf' is not a dataset below a pool"; return 2 ;; esac
+		_br=${_bf%/*}
+		_roots="$_roots $_br"
+		case $_ds in
+		"$_br" | "$_br"/*) echo "fail copy-out $_co is on $_ds, under the boot environment root $_br: the run would be lost on the return"; return 1 ;;
+		esac
+	done
+	if [ -z "$_roots" ]; then echo "error copy-out $_co: no pool has a bootfs: the boot environment root cannot be told"; return 2; fi
+	echo "pass copy-out $_co is on $_ds, outside the boot environment root(s)$_roots"
 	return 0
 }

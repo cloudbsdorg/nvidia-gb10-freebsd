@@ -15,10 +15,11 @@
 #   - a row whose last record is "running" stopped there (a panic or a kill): error;
 #   - the native rows are the ones that ran (pass, fail, error); native_verdict is fail when one of them is fail or
 #     error, else pass;
+#   - a planned row other than done that records info is an error (a check must give a result);
 #   - verdict: fail when native_verdict is fail or the run has no final done row; incomplete when no row failed but a
 #     planned row is needs-linux, needs-linuxkpi, not-available or not-run; pass only when every planned row passed.
 #     A run that measured little therefore reads incomplete, never pass.
-# Exit: 0 pass, 1 fail, 3 incomplete, 2 usage or unreadable input.  The last line printed is PASS, FAIL or INCOMPLETE.
+# Exit: 0 pass, 1 fail, 3 incomplete, 2 usage or unreadable input, 4 a crash (the run could not be read).  The last line printed is PASS, FAIL or INCOMPLETE.
 
 import json
 import os
@@ -29,7 +30,7 @@ PLANNED = [
     "deadman", "panic-settings", "linux-enable", "env-before",
     "hash-nvidia_gsp_ga10x_fw.ko", "hash-nvidia.ko", "hash-nvidia-modeset.ko", "hash-nvrm-info", "hash-libnvrm.so.1",
     "load-nvidia_gsp_ga10x_fw", "load-nvidia", "load-nvidia-modeset", "load", "env-loaded",
-    "gpu-node", "root-open", "gpu-verify", "nvidiactl-open", "modeset-open",
+    "gpu-node", "gpu-detect-native", "root-open", "gpu-verify", "nvidiactl-open", "modeset-open",
     "nvrm-info", "nvrm-info-native", "nvrm-info-no-new-module",
     "uvm-ioctl-suite", "uvm-owner-probe", "uvm-owner-race", "prime-import", "render-uapi", "nvrm-s2-memory",
     "env-after", "env-after-delta", "done",
@@ -64,6 +65,9 @@ def complete(rows, bad):
     """Give every planned row a status.  A planned row the run never wrote has no place in the write order, so the
     rule looks at the whole run: when any written row (planned or not: preloaded, guard-lib, ...) failed, the missing
     row was not reached (not-run); when none failed, the run lost it (an error)."""
+    for name in PLANNED:
+        if name in rows and name != "done" and rows[name]["status"] == "info":
+            rows[name] = {"status": "error", "detail": "a planned check recorded info, not a result: " + rows[name].get("detail", "")}
     any_failed = any(r["status"] in ("fail", "error") for r in rows.values())
     for name in PLANNED:
         if name not in rows:
@@ -133,4 +137,8 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # a crash is not a verdict: exit 4, and the one-shot writes a FAIL summary
+        print("summarize: could not read the run: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        sys.exit(4)

@@ -44,15 +44,16 @@ SHAFILE=$WORK/logs/native-tools/stage-a682522/SHA256-native-a682522.txt
 COMMIT=
 MNT=
 NOOWNER=0
-usage() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0" >&2; exit 2; }
+help() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0"; exit 0; }
+usage() { echo "check-be.sh: ${1:-give a boot environment or -m ROOT} (check-be.sh -h shows every option)" >&2; exit 2; }
 while [ $# -gt 0 ]; do
 	case $1 in
-	-s) [ $# -ge 2 ] || usage; SHAFILE=$2; shift 2 ;;
-	-c) [ $# -ge 2 ] || usage; COMMIT=$2; shift 2 ;;
-	-m) [ $# -ge 2 ] || usage; MNT=$2; shift 2 ;;
+	-s) [ $# -ge 2 ] || usage "-s needs a value"; SHAFILE=$2; shift 2 ;;
+	-c) [ $# -ge 2 ] || usage "-c needs a value"; COMMIT=$2; shift 2 ;;
+	-m) [ $# -ge 2 ] || usage "-m needs a value"; MNT=$2; shift 2 ;;
 	-U) NOOWNER=1; shift ;;
-	-h | --help) usage ;;
-	-*) echo "check-be.sh: unknown argument: $1" >&2; usage ;;
+	-h | --help) help ;;
+	-*) usage "unknown argument: $1" ;;
 	*) break ;;
 	esac
 done
@@ -131,7 +132,7 @@ for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 done
 for _f in nvrm-info libnvrm.so.1; do
 	[ -f "$MODS/$_f" ] || continue
-	_l=$(guard_brand "$MODS/$_f") && ok "${_l#* }" || bad "${_l#* }"
+	_l=$(guard_elf "$MODS/$_f") && ok "${_l#* }" || bad "${_l#* }"
 done
 if [ -f "$KROOT/SHA256.txt" ] && cmp -s "$SHAFILE" "$KROOT/SHA256.txt"; then ok "the installed hash list is the given one"; else bad "the installed hash list is missing or differs from $SHAFILE"; fi
 
@@ -222,10 +223,23 @@ case $_co in
 /*)
 	_p=$_co; while [ ! -e "$_p" ] && [ "$_p" != / ]; do _p=$(dirname "$_p"); done
 	_ds=$(zfs list -H -o name "$_p" 2> /dev/null)
-	_bf=$(zpool get -H -o value bootfs "${_ds%%/*}" 2> /dev/null)
-	_l=$(guard_copyout_dataset "$_co" "$_ds" "$_bf") && ok "${_l#* }" || bad "${_l#* }" ;;
+	_bfs=$(zpool get -H -o value bootfs 2> /dev/null | tr '\n' ' ')
+	# the boot environment's own dataset names its root, whatever bootfs says (known when bectl mounted it here)
+	_own=; [ "$MOUNTED" = 0 ] || _own=$(zfs list -H -o name "$MNT" 2> /dev/null)
+	_l=$(guard_copyout_dataset "$_co" "$_ds" $_bfs $_own) && ok "${_l#* }" || bad "${_l#* }"
+	# the one-shot refuses a copy-out with a symbolic link in its path, and one not in plain form: say so now
+	if _l=$(guard_plain_path "$_co"); then
+		_acc=; _lk=
+		set -f
+		for _c in $(echo "$_co" | tr / ' '); do _acc=$_acc/$_c; [ ! -L "$_acc" ] || _lk=$_acc; done
+		set +f
+		[ -z "$_lk" ] && ok "copy-out $_co has no symbolic link in its path" || bad "copy-out $_co: $_lk is a symbolic link, and the one-shot refuses to copy through one: rebuild with make-be.sh -o and the physical path (realpath $_co)"
+	else
+		bad "copy-out: ${_l#* }: the one-shot would refuse the copy; rebuild with make-be.sh -o and a plain path"
+	fi ;;
 *) bad "copy-out '$_co' is not an absolute path" ;;
 esac
+[ -x "$MNT/usr/local/bin/python3" ] && ok "python3 is in the clone (summarize.py needs it)" || bad "no /usr/local/bin/python3 in the clone: summary.json would not be written"
 grep -Eq '^nvidia_native_tools_testboot_vram="[0-9]+"$' "$_rcd" 2> /dev/null && grep -Eq '^nvidia_native_tools_testboot_sm="[0-9]+\.[0-9]+"$' "$_rcd" 2> /dev/null && ok "the board's VRAM and SM are set: $(grep -E '_(vram|sm)=' "$_rcd" | tr '\n' ' ')" || bad "the board's VRAM or SM is not set in $_rcd"
 
 if [ "$rc" = 0 ]; then echo "check-be.sh: all checks passed"; else echo "check-be.sh: FAILED: do not arm this boot environment; fix what failed above, or remove it (bectl destroy ${BE:-BE}) and build a new one with make-be.sh -n N"; fi

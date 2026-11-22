@@ -406,3 +406,20 @@ STATUS, hand back.
   GB10_WORK; check-be finds the steps by check-be markers, derives the BE root from bootfs (any name), prints no ok
   after a failed override check, says what to do on failure; make-be -h prints the whole header. Kit test 121/0.
   Branch fast-forwarded to main d015038 (root Makefile, #2440).
+- Kit committed as c26d46d (gate rounds 1c084a59 and ec926a58), pushed. The spec entry above is superseded by the code
+  and ROWS.md wherever they differ: only nvrm-info and gpu-detect.sh are traced, any kldunload fails, statuses as in
+  ROWS.md.
+- Follow-up commit, from the round-2 findings: the second copy-out goes into the same directory by device and inode
+  (no root cp through a planted link), the directory must be ours and 0700; an exec with no path in the trace
+  (fexecve) is an error; the dead-man check counts only root's shutdown (pgrep -U 0); check-be reads every pool's
+  bootfs (a data pool without one passes); make-be refuses a copy-out not in plain form, and --activate runs
+  check-be.sh first and arms nothing when it fails; static rows may only be needs-linux, needs-linuxkpi or
+  not-available; a planned check recording info is an error; gpu-detect.sh is traced (row gpu-detect-native, 32
+  planned rows); staged nvrm-info and libnvrm.so.1 must be ELF (guard_elf); check-be wants python3 in the clone and
+  the one-shot writes a FAIL summary when summarize.py cannot run; usage errors are one line. Kit test 133/0.
+- Follow-up gate round 1 (receipt 7b02720b) fixed: any fexecve is an error (its image has no path even when the
+  interpreter does); a summarize.py crash exits 4 and the one-shot needs exit 0, 1 or 3 AND a summary.json, else a
+  FAIL summary; info rows turn into errors before the not-run rule looks for failures; check-be adds the root of the
+  BE dataset itself (when it mounted the BE) to the bootfs roots, checks the copy-out path in plain form
+  (guard_plain_path, shared with make-be) under set -f, says what to do; option values missing give the right
+  message; the --activate refusal is tested. Kit test 146/0.

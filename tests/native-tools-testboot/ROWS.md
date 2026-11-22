@@ -22,11 +22,14 @@ It loads no Linuxulator module and no LinuxKPI module, and it runs no Linux bina
 |---|---|
 | pass, fail | the row ran natively and passed or failed |
 | error | the row could not look; it counts as a failure, never as "found nothing" |
-| info | a record, not a check |
+| info | a record, not a check. A planned check row (anything but done) that records info is an error |
 | needs-linux | the tool needs the Linuxulator; the evidence is in the detail |
 | needs-linuxkpi | the tool needs LinuxKPI or drm-kmod; the evidence is in the detail |
 | not-available | the native tool or its evidence does not exist yet |
 | not-run | the row was not reached: an earlier row failed. Either the rc script records it, or `summarize.py` fills it in for a planned row the run never wrote. A planned row that is missing while no row failed is an error |
+
+A static row's evidence file may only say needs-linux, needs-linuxkpi or not-available: any other
+status there is recorded as an error.
 
 `summary.json` (schema `native-tools-summary/1`, `native-tools-summary.schema.json`) lists every
 planned row with its status. It carries two verdicts:
@@ -47,6 +50,7 @@ planned row with its status. It carries two verdicts:
 | load-*, load | the GSP firmware first, then `nvidia.ko` and `nvidia-modeset.ko`, as root and by full path |
 | env-loaded | the guard again; the listing must name `nvidia.ko` and `nvidia-modeset.ko` |
 | gpu-node, root-open, gpu-verify | `gpu-detect.sh` (vendored from uvm-bsd) picks the card by PCI class, vendor and driver parent, never by `/dev/nvidia0`; root opens the node once; the driver confirms the opened node is the chosen card |
+| gpu-detect-native | `gpu-detect.sh` ran under `ktrace -i -t cn`. Every file it executed (`pciconf`, `sysctl`, `awk` and the rest) must be FreeBSD-native, nothing may call kldload or kldunload, and no module may appear |
 | nvidiactl-open, modeset-open | root opens `/dev/nvidiactl` and `/dev/nvidia-modeset` |
 | nvrm-info | `tests/libnvrm/boot_nvrm_info.sh` runs `nvrm-info` (libnvrm, RM-direct) in every mode against the driver and compares it with sysctl, pciconf and the board's stated VRAM and SM (`make-be.sh -V -S`) |
 | nvrm-info-native | the row ran under `ktrace -i -t cn`. Every file that a successful execve ran (the image and its interpreters) must be a FreeBSD-branded ELF or a #! script, at an absolute path that still exists; a relative or vanished path is an error. Any kldload or kldunload call fails the row |
