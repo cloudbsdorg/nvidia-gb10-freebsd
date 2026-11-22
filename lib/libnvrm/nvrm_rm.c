@@ -53,6 +53,7 @@
 
 #include "nvrm_internal.h"
 #include "nvrm_rm_sys.h"
+#include "nvrm_rm_priv.h"
 
 /* ---- system call table ------------------------------------------------- */
 
@@ -91,32 +92,17 @@ const nvrm_rm_sys nvrm_rm_real_sys = {
 };
 static const nvrm_rm_sys *sys = &nvrm_rm_real_sys;
 
+const nvrm_rm_sys *
+nvrm_rm_get_sys(void)
+{
+	return (sys);
+}
+
 void
 nvrm_rm_set_sys(const nvrm_rm_sys *s)
 {
 	sys = s != NULL ? s : &nvrm_rm_real_sys;
 }
-
-/* ---- ioctl numbers ----------------------------------------------------- */
-
-#define IOC_CHECK_VERSION	_IOWR(NV_IOCTL_MAGIC, NV_ESC_CHECK_VERSION_STR, \
-				    nv_ioctl_rm_api_version_t)
-#define IOC_XFER		_IOWR(NV_IOCTL_MAGIC, NV_ESC_IOCTL_XFER_CMD, \
-				    nv_ioctl_xfer_t)
-#define IOC_RM_ALLOC		_IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, \
-				    NVOS21_PARAMETERS)
-#define IOC_RM_CONTROL		_IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, \
-				    NVOS54_PARAMETERS)
-#define IOC_RM_FREE		_IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_FREE, \
-				    NVOS00_PARAMETERS)
-/* ATTACH_GPUS_TO_FD carries 4 bytes per GPU: its size is the GPU count. */
-#define IOC_ATTACH(n)		_IOC(IOC_INOUT, NV_IOCTL_MAGIC, \
-				    NV_ESC_ATTACH_GPUS_TO_FD, \
-				    (n) * sizeof(NvU32))
-
-#define HANDLE_BASE		0xd1a00000u
-/* Status of a call whose ioctl(2) itself failed: not an RM status. */
-#define IOCTL_FAILED		0xfffffff0u
 
 /* ---- the process that owns a descriptor --------------------------------- */
 
@@ -142,32 +128,11 @@ register_atfork(void)
 	pthread_atfork(NULL, NULL, atfork_child);
 }
 
-/* ---- backend state ----------------------------------------------------- */
-
-struct nvrm_backend {
-	pid_t			pid;		/* the process that opened it */
-	unsigned		generation;	/* fork_generation when it was opened */
-	int			fd;
-	NvHandle		client;
-	uint32_t		next_handle;
-	nv_ioctl_card_info_t	cards[NV_MAX_DEVICES];
-	nvrm_str		running;
-	int			wc, wc_reason;
-};
-
-struct nvrm_gpu {
-	nvrm_backend		*be;
-	uint32_t		id;
-	NvHandle		device, subdevice;
-	nv_ioctl_card_info_t	card;
-	int			have_card;
-};
-
 /* ---- RM calls ---------------------------------------------------------- */
 
 /* Returns the RM status; a failed ioctl(2) is IOCTL_FAILED. */
-static NvU32
-rm_alloc(nvrm_backend *be, NvHandle parent, NvHandle *hnew, NvU32 cls,
+NvU32
+nvrm_rm_alloc(nvrm_backend *be, NvHandle parent, NvHandle *hnew, NvU32 cls,
     void *params, NvU32 size)
 {
 	NVOS21_PARAMETERS p;
@@ -185,8 +150,8 @@ rm_alloc(nvrm_backend *be, NvHandle parent, NvHandle *hnew, NvU32 cls,
 	return (p.status);
 }
 
-static NvU32
-rm_free(nvrm_backend *be, NvHandle parent, NvHandle obj)
+NvU32
+nvrm_rm_free(nvrm_backend *be, NvHandle parent, NvHandle obj)
 {
 	NVOS00_PARAMETERS p;
 
@@ -199,8 +164,8 @@ rm_free(nvrm_backend *be, NvHandle parent, NvHandle obj)
 	return (p.status);
 }
 
-static NvU32
-rm_control(nvrm_backend *be, NvHandle obj, NvU32 cmd, void *params,
+NvU32
+nvrm_rm_control(nvrm_backend *be, NvHandle obj, NvU32 cmd, void *params,
     NvU32 size)
 {
 	NVOS54_PARAMETERS p;
@@ -225,8 +190,8 @@ status_reason(NvU32 st)
 	    NVRM_R_RM_FAILED);
 }
 
-static NvHandle
-new_handle(nvrm_backend *be)
+NvHandle
+nvrm_rm_new_handle(nvrm_backend *be)
 {
 	return (HANDLE_BASE + be->next_handle++);
 }
@@ -266,8 +231,8 @@ read_sysctls(nvrm_backend *be)
 	}
 }
 
-static int
-rm_open(nvrm_backend **bep, char *err, size_t errlen)
+int
+nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen)
 {
 	nvrm_backend *be;
 	nv_ioctl_rm_api_version_t v;
@@ -325,7 +290,7 @@ rm_open(nvrm_backend **bep, char *err, size_t errlen)
 		return (NVRM_E_VERSION);
 	}
 	/* The RM client of this process: one per enumerate. */
-	st = rm_alloc(be, 0, &client, NV01_ROOT, NULL, 0);
+	st = nvrm_rm_alloc(be, 0, &client, NV01_ROOT, NULL, 0);
 	if (st != NV_OK) {
 		snprintf(err, errlen, "cannot allocate the RM client "
 		    "(status 0x%x)", (unsigned)st);
@@ -347,17 +312,17 @@ rm_open(nvrm_backend **bep, char *err, size_t errlen)
  * exited), so every fork() of this process also counts a generation, in an
  * atfork handler of the child, and the owner must have both.
  */
-static int
-rm_owner(const nvrm_backend *be)
+int
+nvrm_rm_owner(const nvrm_backend *be)
 {
 	return (my_pid() == be->pid && fork_generation == be->generation);
 }
 
-static void
-rm_close(nvrm_backend *be)
+void
+nvrm_rm_close(nvrm_backend *be)
 {
-	if (rm_owner(be))
-		rm_free(be, 0, be->client);
+	if (nvrm_rm_owner(be))
+		nvrm_rm_free(be, 0, be->client);
 	sys->close(be->fd);
 	free(be);
 }
@@ -405,7 +370,7 @@ rm_list_gpus(nvrm_backend *be, uint32_t *ids, unsigned max, unsigned *n,
 
 	/* The RM's own list of probed GPUs, then attach them in the RM. */
 	memset(&probed, 0, sizeof(probed));
-	st = rm_control(be, be->client, NV0000_CTRL_CMD_GPU_GET_PROBED_IDS,
+	st = nvrm_rm_control(be, be->client, NV0000_CTRL_CMD_GPU_GET_PROBED_IDS,
 	    &probed, sizeof(probed));
 	if (st != NV_OK) {
 		snprintf(err, errlen, "NV0000_CTRL_CMD_GPU_GET_PROBED_IDS "
@@ -423,7 +388,7 @@ rm_list_gpus(nvrm_backend *be, uint32_t *ids, unsigned max, unsigned *n,
 		attach.gpuIds[i] = probed.gpuIds[i];
 		ids[(*n)++] = probed.gpuIds[i];
 	}
-	st = rm_control(be, be->client, NV0000_CTRL_CMD_GPU_ATTACH_IDS,
+	st = nvrm_rm_control(be, be->client, NV0000_CTRL_CMD_GPU_ATTACH_IDS,
 	    &attach, sizeof(attach));
 	if (st != NV_OK) {
 		snprintf(err, errlen, "NV0000_CTRL_CMD_GPU_ATTACH_IDS failed "
@@ -460,7 +425,7 @@ rm_gpu_open(nvrm_backend *be, uint32_t id, nvrm_gpu **gpup, char *err,
 
 	memset(&info, 0, sizeof(info));
 	info.gpuId = id;
-	st = rm_control(be, be->client, NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2,
+	st = nvrm_rm_control(be, be->client, NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2,
 	    &info, sizeof(info));
 	if (st != NV_OK) {
 		snprintf(err, errlen, "NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2 "
@@ -471,8 +436,8 @@ rm_gpu_open(nvrm_backend *be, uint32_t id, nvrm_gpu **gpup, char *err,
 	}
 	memset(&dp, 0, sizeof(dp));
 	dp.deviceId = info.deviceInstance;
-	g->device = new_handle(be);
-	st = rm_alloc(be, be->client, &g->device, NV01_DEVICE_0, &dp,
+	g->device = nvrm_rm_new_handle(be);
+	st = nvrm_rm_alloc(be, be->client, &g->device, NV01_DEVICE_0, &dp,
 	    sizeof(dp));
 	if (st != NV_OK) {
 		snprintf(err, errlen, "NV01_DEVICE_0 allocation failed for "
@@ -482,13 +447,13 @@ rm_gpu_open(nvrm_backend *be, uint32_t id, nvrm_gpu **gpup, char *err,
 	}
 	memset(&sp, 0, sizeof(sp));
 	sp.subDeviceId = info.subDeviceInstance;
-	g->subdevice = new_handle(be);
-	st = rm_alloc(be, g->device, &g->subdevice, NV20_SUBDEVICE_0, &sp,
+	g->subdevice = nvrm_rm_new_handle(be);
+	st = nvrm_rm_alloc(be, g->device, &g->subdevice, NV20_SUBDEVICE_0, &sp,
 	    sizeof(sp));
 	if (st != NV_OK) {
 		snprintf(err, errlen, "NV20_SUBDEVICE_0 allocation failed for "
 		    "GPU id 0x%x (status 0x%x)", (unsigned)id, (unsigned)st);
-		rm_free(be, be->client, g->device);
+		nvrm_rm_free(be, be->client, g->device);
 		free(g);
 		return (NVRM_E_IO);
 	}
@@ -499,9 +464,9 @@ rm_gpu_open(nvrm_backend *be, uint32_t id, nvrm_gpu **gpup, char *err,
 static void
 rm_gpu_close(nvrm_gpu *g)
 {
-	if (rm_owner(g->be)) {
-		rm_free(g->be, g->device, g->subdevice);
-		rm_free(g->be, g->be->client, g->device);
+	if (nvrm_rm_owner(g->be)) {
+		nvrm_rm_free(g->be, g->device, g->subdevice);
+		nvrm_rm_free(g->be, g->be->client, g->device);
 	}
 	free(g);
 }
@@ -518,7 +483,7 @@ info_one(nvrm_gpu *g, NvU32 cmd, void *params, NvU32 size, NvU32 *list_size,
 	memset(params, 0, size);
 	*list_size = 1;
 	entry->index = index;
-	st = rm_control(g->be, g->subdevice, cmd, params, size);
+	st = nvrm_rm_control(g->be, g->subdevice, cmd, params, size);
 	if (st != NV_OK)
 		return (status_reason(st));
 	*out = entry->data;
@@ -568,7 +533,7 @@ pci_info(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
 	NvU32 st;
 
 	memset(&b, 0, sizeof(b));
-	st = rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_BUS_GET_PCI_INFO,
+	st = nvrm_rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_BUS_GET_PCI_INFO,
 	    &b, sizeof(b));
 	if (st != NV_OK)
 		return (status_reason(st));
@@ -601,7 +566,7 @@ id_info(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
 
 	memset(&i, 0, sizeof(i));
 	i.gpuId = g->id;
-	st = rm_control(g->be, g->be->client,
+	st = nvrm_rm_control(g->be, g->be->client,
 	    NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2, &i, sizeof(i));
 	if (st != NV_OK)
 		return (status_reason(st));
@@ -656,7 +621,7 @@ prop_gpu(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 	case NVRM_P_ARCHITECTURE:
 	case NVRM_P_IMPLEMENTATION:
 		memset(&a, 0, sizeof(a));
-		st = rm_control(g->be, g->subdevice,
+		st = nvrm_rm_control(g->be, g->subdevice,
 		    NV2080_CTRL_CMD_MC_GET_ARCH_INFO, &a, sizeof(a));
 		if (st != NV_OK)
 			return (status_reason(st));
@@ -671,7 +636,7 @@ prop_gpu(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 		    NV2080_CTRL_GR_INFO_INDEX_LITTER_NUM_SM_PER_TPC, out));
 	case NVRM_P_GPC_MASK:
 		memset(&gm, 0, sizeof(gm));
-		st = rm_control(g->be, g->subdevice,
+		st = nvrm_rm_control(g->be, g->subdevice,
 		    NV2080_CTRL_CMD_GR_GET_GPC_MASK, &gm, sizeof(gm));
 		if (st != NV_OK)
 			return (status_reason(st));
@@ -680,7 +645,7 @@ prop_gpu(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 	default:	/* NVRM_P_TPC_MASK */
 		memset(&tm, 0, sizeof(tm));
 		tm.gpcId = arg;
-		st = rm_control(g->be, g->subdevice,
+		st = nvrm_rm_control(g->be, g->subdevice,
 		    NV2080_CTRL_CMD_GR_GET_TPC_MASK, &tm, sizeof(tm));
 		if (st != NV_OK)
 			return (status_reason(st));
@@ -705,7 +670,7 @@ prop_memory(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
 		    out));
 	case NVRM_P_MAX_PAGE_SIZE:
 		memset(&ps, 0, sizeof(ps));
-		st = rm_control(g->be, g->subdevice,
+		st = nvrm_rm_control(g->be, g->subdevice,
 		    NV2080_CTRL_CMD_GPU_GET_MAX_SUPPORTED_PAGE_SIZE, &ps,
 		    sizeof(ps));
 		if (st != NV_OK)
@@ -779,7 +744,7 @@ rm_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 	memset(&gid, 0, sizeof(gid));
 	gid.flags = DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _FORMAT, _ASCII) |
 	    DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _TYPE, _SHA1);
-	st = rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_GPU_GET_GID_INFO,
+	st = nvrm_rm_control(g->be, g->subdevice, NV2080_CTRL_CMD_GPU_GET_GID_INFO,
 	    &gid, sizeof(gid));
 	buf[0] = '\0';
 	if (st != NV_OK)
@@ -797,7 +762,7 @@ rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 	unsigned i, lim;
 
 	memset(&c, 0, sizeof(c));
-	st = rm_control(g->be, g->device, NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2,
+	st = nvrm_rm_control(g->be, g->device, NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2,
 	    &c, sizeof(c));
 	if (st != NV_OK)
 		return (status_reason(st));
@@ -832,8 +797,8 @@ const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.name = "rm",
 	.score = 100,
 	.probe = rm_probe,
-	.open = rm_open,
-	.close = rm_close,
+	.open = nvrm_rm_open,
+	.close = nvrm_rm_close,
 	.running_version = rm_running_version,
 	.list_gpus = rm_list_gpus,
 	.gpu_open = rm_gpu_open,
@@ -842,4 +807,5 @@ const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.gpu_str = rm_gpu_str,
 	.gpu_classes = rm_gpu_classes,
 	.limit = rm_limit,
+	.mem = &nvrm_rm_mem_ops,
 };

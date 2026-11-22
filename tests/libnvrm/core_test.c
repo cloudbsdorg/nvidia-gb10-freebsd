@@ -783,6 +783,24 @@ test_names_and_fields(void)
 	CHECK_STR(nvrm_error_id(NVRM_E_NODEV), "no_gpu");
 	CHECK_STR(nvrm_error_id(-1), "unknown");
 	CHECK_STR(nvrm_error_id(NVRM_E__COUNT), "unknown");
+	/* every code has a text and an id, none the fallback, no two alike */
+	{
+		int i, j;
+
+		for (i = 0; i < NVRM_E__COUNT; i++) {
+			CHECK(nvrm_strerror(i) != NULL && nvrm_error_id(i) != NULL);
+			if (nvrm_strerror(i) == NULL || nvrm_error_id(i) == NULL)
+				continue;
+			CHECK(strcmp(nvrm_strerror(i), "unknown error") != 0);
+			CHECK(strcmp(nvrm_error_id(i), "unknown") != 0);
+			for (j = 0; j < i; j++) {
+				CHECK(strcmp(nvrm_strerror(i), nvrm_strerror(j)) != 0);
+				CHECK(strcmp(nvrm_error_id(i), nvrm_error_id(j)) != 0);
+			}
+		}
+		CHECK_STR(nvrm_error_id(NVRM_E_DENIED), "denied");
+		CHECK_STR(nvrm_error_id(NVRM_E_BUSY), "busy");
+	}
 	CHECK_STR(nvrm_reason_id(NVRM_R_NO_NUMA), "no_numa_node");
 	CHECK_STR(nvrm_reason_id(-1), "unknown");
 	CHECK_STR(nvrm_reason_id(NVRM_R__COUNT), "unknown");
@@ -1000,6 +1018,22 @@ test_field_reason_and_masks(void)
 	CHECK(ctx == NULL && strstr(err, "unknown enumeration flags") != NULL);
 	o.flags = NVRM_ENUM_ALLOW_ALLOC | 0x100;
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
+	/* each reserved word must be zero */
+	{
+		unsigned i;
+
+		o.flags = 0;
+		for (i = 0; i < 4; i++) {
+			memset(o.reserved, 0, sizeof(o.reserved));
+			o.reserved[i] = 1u << i;
+			ctx = (nvrm_ctx *)1;
+			CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
+			CHECK(ctx == NULL && strstr(err, "reserved must be zero") != NULL);
+		}
+		memset(o.reserved, 0, sizeof(o.reserved));
+		CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+		nvrm_close(ctx);
+	}
 }
 
 /* ---- Capsicum helper ----------------------------------------------------- */

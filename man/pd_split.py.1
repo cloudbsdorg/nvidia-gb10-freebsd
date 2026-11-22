@@ -1,0 +1,95 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 19, 2026
+.Dt PD_SPLIT.PY 1
+.Os
+.Sh NAME
+.Nm pd_split.py
+.Nd prefill on one llama-server, decode on another
+.Sh SYNOPSIS
+.Nm
+.Ar prefill_url
+.Ar decode_url
+.Op Ar n_predict
+.Op Fl -slot-file Ar slot_file
+.Op Fl -json Ar path
+.Op Fl -label-prefill Ar label
+.Op Fl -label-decode Ar label
+.Sh DESCRIPTION
+.Nm
+computes the KV cache of a prompt on one
+.Xr llama-server 1 ,
+saves it to a slot file, restores that file on a second
+.Xr llama-server 1
+and generates the answer there, without computing the prompt again.
+.Pp
+The script sends one long prompt (about 1900 tokens) for prefill only, saves
+the slot, restores it on the decode server and generates the requested number
+of tokens there.
+Then it runs the whole request on each server alone and reports whether the
+split output matches the decode server's own output.
+A mismatch is reported with the first differing character, so a broken split
+run can be traced without reading two whole answers.
+.Pp
+Both servers must be started with
+.Cm --slot-save-path
+naming the same directory (the slot file is written by one and read by the
+other), with the same model and the same context size, and with one slot
+.Cm -np 1 .
+Slot 0 of each server is erased first and used for every request.
+.Pp
+The two URLs must be http(s) URLs, written as they are given.
+The scheme is matched case-insensitively (RFC 3986), so
+.Cm HTTP://host
+is an http URL and is accepted.
+A URL with another scheme, a URL with a space or a control character in it, a
+URL that is not ASCII, a URL without a host, a URL with a query or a fragment
+and a URL whose port is not a number are refused before the first request is
+made.
+.Pp
+The options are:
+.Bl -tag -width Ds
+.It Fl -slot-file Ar slot_file
+The slot file name used by the save and restore requests.
+The default is
+.Cm pd-slot.bin .
+.It Fl -json Ar path
+Write the results (timings, outputs, comparisons) to this JSON file.
+.It Fl -label-prefill Ar label
+The label for the prefill server in the printed lines.
+The default is
+.Cm "prefill server" .
+.It Fl -label-decode Ar label
+The label for the decode server in the printed lines.
+The default is
+.Cm "decode server" .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+The split run finished.
+.It 1
+The run failed.
+One line
+.Pq Li "pd_split.py: ..."
+on stderr, never a traceback.
+.It 2
+The command line was wrong.
+.It 130
+The run was interrupted.
+.El
+.Sh EXAMPLES
+Prefill on the GPU and decode on the CPU:
+.Bd -literal -offset indent
+$ pd_split.py http://127.0.0.1:18080 http://127.0.0.1:18081 128
+.Ed
+.Pp
+The same run with another slot file, other labels, and the results written to
+a JSON file:
+.Bd -literal -offset indent
+$ pd_split.py http://127.0.0.1:18080 http://127.0.0.1:18081 128 \e
+	--slot-file slot-42.bin --label-prefill gpu --label-decode cpu \e
+	--json pd-split.json
+.Ed
+.Sh SEE ALSO
+.Xr llama-server 1

@@ -1,0 +1,208 @@
+Subject: LinuxKPI arm64: Ampere Altra erratum 82288, map PCIe write-combining as Device
+SPDX-License-Identifier: BSD-2-Clause
+Applies to: sys/compat/linuxkpi/common/src/linux_page.c
+Needed on: Ampere Altra and Altra Max hosts that run a drm-kmod driver.
+Inert elsewhere: whether this is an Altra (ACPI MCFG OEM ID "Ampere", OEM
+table ID starting "Altra") is decided once when LinuxKPI initialises; on
+any other machine no mapping is changed, whatever the setting.  Tunable
+and sysctl compat.linuxkpi.altra_82288 (-1 auto, default: 1 on an Altra;
+0 off; 1 kernel mappings; 2 kernel and user mappings); read-only
+compat.linuxkpi.altra_82288_active (the mode in effect).
+
+The Altra PCIe root complex can mis-address CPU writes whose byte enables
+are not contiguous, which Normal (write-combining) mappings produce.  This
+patch makes _ioremap_attr() and the LinuxKPI page fault handler hand out
+Device-nGnRE for the Altra PCIe windows instead, and on the Altra never a
+cacheable write-through mapping there.  The fault path only reads the
+cached detection result.  See kernel-patches/README.md.
+
+diff --git a/sys/compat/linuxkpi/common/src/linux_page.c b/sys/compat/linuxkpi/common/src/linux_page.c
+index a95d86753..f876a8c0d 100644
+--- a/sys/compat/linuxkpi/common/src/linux_page.c
++++ b/sys/compat/linuxkpi/common/src/linux_page.c
+@@ -26,6 +26,8 @@
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "opt_acpi.h"
++
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/malloc.h>
+@@ -56,6 +58,10 @@
+ #include <vm/uma.h>
+ #include <vm/uma_int.h>
+ 
++#if defined(__aarch64__) && defined(DEV_ACPI)
++#include <contrib/dev/acpica/include/acpi.h>
++#endif
++
+ #include <linux/gfp.h>
+ #include <linux/mm.h>
+ #include <linux/preempt.h>
+@@ -392,12 +398,152 @@ vmmap_remove(void *addr)
+ 	return (vmmap);
+ }
+ 
++#if defined(__aarch64__)
++/*
++ * Ampere Altra erratum 82288 (PCIE_65): the root complex can generate wrong
++ * addresses for CPU writes with a discontiguous set of byte enables, which
++ * Normal (write-combining) mappings produce.  As in the Linux workaround,
++ * hand out Device-nGnRE instead of Normal-NC for the Altra PCIe windows.
++ *
++ * compat.linuxkpi.altra_82288 is the setting: -1 auto (default: 1 on an
++ * Altra), 0 off, 1 kernel mappings (ioremap_wc), 2 kernel and user (mmap)
++ * mappings.  Whether this is an Altra (ACPI MCFG OEM "Ampere" / table
++ * "Altra") is decided once, when LinuxKPI initialises, and cached; the
++ * mapping paths, the page fault handler included, only read the cache.  On
++ * any other machine nothing here changes a mapping, whatever the setting.
++ * compat.linuxkpi.altra_82288_active reports the mode in effect.
++ */
++SYSCTL_DECL(_compat_linuxkpi);
++static int lkpi_altra_82288 = -1;
++SYSCTL_INT(_compat_linuxkpi, OID_AUTO, altra_82288, CTLFLAG_RWTUN,
++    &lkpi_altra_82288, 0,
++    "Ampere Altra erratum 82288: map PCIe WC as Device (-1 auto, 0 off, "
++    "1 kernel, 2 kernel+user)");
++static int lkpi_altra_detected;
++
++/* The mode in effect: 0 on every machine that is not an Altra. */
++static int
++lkpi_altra_82288_mode(void)
++{
++	int mode;
++
++	if (atomic_load_int(&lkpi_altra_detected) == 0)
++		return (0);
++	mode = atomic_load_int(&lkpi_altra_82288);
++	if (mode < 0)
++		return (1);
++	return (mode > 2 ? 2 : mode);
++}
++
++static int
++sysctl_lkpi_altra_82288_active(SYSCTL_HANDLER_ARGS)
++{
++	int v;
++
++	v = lkpi_altra_82288_mode();
++	return (sysctl_handle_int(oidp, &v, 0, req));
++}
++SYSCTL_PROC(_compat_linuxkpi, OID_AUTO, altra_82288_active,
++    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
++    sysctl_lkpi_altra_82288_active, "I",
++    "Ampere Altra erratum 82288 mode in effect (0 off or not an Altra, "
++    "1 kernel, 2 kernel+user)");
++
++/*
++ * Uses the early table helpers of acpi_machdep.c (pmap_mapbios), which
++ * work both from a module load and from a kernel with LinuxKPI built in.
++ */
++static void
++lkpi_altra_82288_init(void *arg __unused)
++{
++	int altra, mode;
++
++	altra = 0;
++#ifdef DEV_ACPI
++	{
++		ACPI_TABLE_HEADER *hdr;
++		vm_paddr_t pa;
++
++		pa = acpi_find_table(ACPI_SIG_MCFG);
++		hdr = pa != 0 ? acpi_map_table(pa, ACPI_SIG_MCFG) : NULL;
++		if (hdr != NULL) {
++			if (strncmp(hdr->OemId, "Ampere", 6) == 0 &&
++			    strncmp(hdr->OemTableId, "Altra", 5) == 0)
++				altra = 1;
++			acpi_unmap_table(hdr);
++		}
++	}
++#else
++	printf("linuxkpi: built without DEV_ACPI: Ampere Altra erratum 82288 "
++	    "detection unavailable\n");
++#endif
++	atomic_store_int(&lkpi_altra_detected, altra);
++	if (altra == 0)
++		return;
++	mode = lkpi_altra_82288_mode();
++	if (mode != 0)
++		printf("linuxkpi: Ampere Altra erratum 82288: PCIe "
++		    "write-combining mapped as Device (mode %d)\n", mode);
++	else
++		printf("linuxkpi: Ampere Altra erratum 82288: workaround off "
++		    "(compat.linuxkpi.altra_82288=0)\n");
++}
++SYSINIT(lkpi_altra_82288, SI_SUB_DRIVERS, SI_ORDER_FIRST,
++    lkpi_altra_82288_init, NULL);
++
++/*
++ * The Altra PCIe memory windows: 32-bit BARs below 2 GiB, 64-bit BARs in
++ * [0x2000_0000_0000, 0x4000_0000_0000) and [0x6000_0000_0000,
++ * 0x8000_0000_0000).  On the Altra host these patches were tested on,
++ * every BAR that pciconf -lb lists falls in the first two.  Only consulted
++ * on a detected Altra.
++ */
++static bool
++lkpi_altra_pcie_range(vm_paddr_t pa, vm_size_t size)
++{
++	vm_paddr_t end = pa + size;
++
++	return (pa < 0x80000000UL ||
++	    (end > 0x200000000000UL && pa < 0x400000000000UL) ||
++	    (end > 0x600000000000UL && pa < 0x800000000000UL));
++}
++
++/*
++ * The attribute to use for a LinuxKPI mapping of [pa, pa + size).  Only on
++ * a detected Altra, and only for its PCIe windows: an uncached or
++ * write-combining request becomes Device-nGnRE when the mode is at least
++ * minmode (1 for kernel mappings, 2 for user mappings), and a cacheable
++ * write-through request becomes Normal non-cacheable otherwise.  Every other
++ * machine gets the attribute it asked for.
++ */
++static vm_memattr_t
++lkpi_arm64_pcie_memattr(vm_paddr_t pa, vm_size_t size, vm_memattr_t attr,
++    int minmode)
++{
++	if (atomic_load_int(&lkpi_altra_detected) == 0)
++		return (attr);
++	if (attr != VM_MEMATTR_UNCACHEABLE &&
++	    attr != VM_MEMATTR_WRITE_COMBINING)
++		return (attr);
++	if (!lkpi_altra_pcie_range(pa, size))
++		return (attr);
++	if (lkpi_altra_82288_mode() >= minmode)
++		return (VM_MEMATTR_DEVICE);
++	if (attr == VM_MEMATTR_WRITE_COMBINING)
++		return (VM_MEMATTR_UNCACHEABLE);	/* never cacheable WT */
++	return (attr);
++}
++#endif
++
+ #if defined(__i386__) || defined(__amd64__) || defined(__powerpc__) || defined(__aarch64__) || defined(__riscv)
+ void *
+ _ioremap_attr(vm_paddr_t phys_addr, unsigned long size, int attr)
+ {
+ 	void *addr;
+ 
++#if defined(__aarch64__)
++	attr = lkpi_arm64_pcie_memattr(phys_addr, size, attr, 1);
++#endif
+ 	addr = pmap_mapdev_attr(phys_addr, size, attr);
+ 	if (addr == NULL)
+ 		return (NULL);
+@@ -598,7 +744,12 @@ lkpi_vmf_insert_pfn_prot_locked(struct vm_area_struct *vma, unsigned long addr,
+ 		}
+ 		vm_page_valid(page);
+ 	}
++#if defined(__aarch64__)
++	pmap_page_set_memattr(page, lkpi_arm64_pcie_memattr(IDX_TO_OFF(pfn),
++	    PAGE_SIZE, pgprot2cachemode(prot), 2));
++#else
+ 	pmap_page_set_memattr(page, pgprot2cachemode(prot));
++#endif
+ 	vma->vm_pfn_count++;
+ 
+ 	return (VM_FAULT_NOPAGE);

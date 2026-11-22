@@ -281,10 +281,23 @@ if [ ! -s "$TMPD/lint.out" ] && { [ "$_lrc" -eq 0 ] || [ -s "$TMPD/lint.raw" ]; 
 else
 	bad "man/nvidia.4 does not lint clean"; sed 's/^/    /' "$TMPD/lint.out"
 fi
-MSG='nvidia0: NVRM: rm_init_adapter() failed!'
+# The documents name the unit as nvidiaN because the unit number is never assumed (the card is not always unit 0).
+DIAG='NVRM: rm_init_adapter() failed!'
+MSG="nvidiaN: $DIAG"
 grep -qF "$MSG" "$repo/man/nvidia.4" && grep -qF "$MSG" "$repo/README.md" \
-    && ok "man page and README name the exact diagnostic the driver prints" || bad "the diagnostic text is missing from the man page or the README"
-grep -qF 'rm_init_adapter() failed!' "$TREE/nvidia/nvidia_subr.c" && ok "the driver prints that diagnostic" || bad "the driver does not print the documented diagnostic"
+    && ok "man page and README name the driver's diagnostic with the unit placeholder nvidiaN" || bad "the man page or the README does not name the diagnostic as nvidiaN: ..."
+for _doc in man/nvidia.4 README.md; do
+	grep -qE 'nvidia[0-9]+: NVRM: rm_init_adapter\(\) failed!' "$repo/$_doc"
+	_grc=$?
+	if [ "$_grc" -eq 0 ]; then
+		bad "$_doc names the diagnostic with a concrete unit number"
+	elif [ "$_grc" -eq 1 ]; then
+		ok "$_doc does not name the diagnostic with a concrete unit number"
+	else
+		bad "could not read $_doc"
+	fi
+done
+grep -qF "$DIAG" "$TREE/nvidia/nvidia_subr.c" && ok "the driver prints that diagnostic (device_printf adds the unit prefix)" || bad "the driver does not print the documented diagnostic"
 grep -q 'nvidia_gsp_ga10x_fw' "$repo/man/nvidia.4" && grep -q 'EnableGpuFirmware' "$repo/man/nvidia.4" \
     && ok "man page gives the remedy (firmware module) and explains EnableGpuFirmware" || bad "man page lacks the firmware remedy"
 if grep -n '0x19f8\|Track #' "$repo/man/nvidia.4" > "$TMPD/hist.out"; then bad "man page carries a fault address or a tracker number"; cat "$TMPD/hist.out"; else ok "man page has neither a fault address nor a tracker number"; fi

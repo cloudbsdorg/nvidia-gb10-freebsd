@@ -1,0 +1,15 @@
+{
+ "version": 1,
+ "paths": [
+  {
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "native": true
+  },
+  {
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "native": true
+  }
+ ]
+}

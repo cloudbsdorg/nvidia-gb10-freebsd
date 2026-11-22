@@ -524,6 +524,12 @@ nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts, char *err,
 		    "were built for another version of libnvrm");
 		return (NVRM_E_INVAL);
 	}
+	if (opts != NULL && (opts->reserved[0] | opts->reserved[1] |
+	    opts->reserved[2] | opts->reserved[3]) != 0) {
+		set_err(err, errlen, "nvrm_enum_opts.reserved must be zero: "
+		    "the options were built for another version of libnvrm");
+		return (NVRM_E_INVAL);
+	}
 	ops = choose_backend(opts, err, errlen);
 	if (ops == NULL)
 		return (NVRM_E_NOBACKEND);

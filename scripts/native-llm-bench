@@ -1,0 +1,938 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# native-llm-bench - run native FreeBSD llama.cpp Vulkan benchmarks by PCI ID.
+# Standard library only. NLB_TEST=1 enables the fixture-command interface.
+"""Select one GPU by PCI bus, prove a native Vulkan path, and record benchmarks.
+
+Exit status: 0 ok, 1 a benchmark or its resource check failed, 2 usage/error,
+3 a non-native or ambiguous path was refused, 4 no eligible device.
+"""
+import datetime
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+VERSION = 1
+MIB = 1024 ** 2
+GIB = 1024 ** 3
+VENDORS = {"nvidia": "0x10de", "radeon": "0x1002"}
+CARDS = {"nvidia": "nvidia-rtx5060ti", "radeon": "amd-rx7600"}
+DRIVER_SUFFIX = {"nvidia": "nvk", "radeon": "radv"}
+ICD_LIBRARIES = {"nvidia": "libvulkan_nvk_nvrm.so", "radeon": "libvulkan_radeon.so"}
+DRIVER_NAMES = {"nvidia": "NVK (CloudBSD, libnvrm)", "radeon": "radv"}
+NOUVEAU_LIBRARY = "libvulkan_nouveau.so"
+NO_NVK = ("no NVK-on-libnvrm Vulkan driver (nvk_nvrm_icd.<arch>.json) is installed; "
+          "it is Track #2379")
+LOADER_VARIABLES = (
+    "VK_ADD_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_DRIVER_FILES",
+    "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE",
+    "VK_LOADER_LAYERS_ENABLE", "VK_INSTANCE_LAYERS", "VK_LAYER_PATH",
+    "VK_ADD_LAYER_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "GGML_VK_VISIBLE_DEVICES",
+)
+ICD_READ_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError)
+HOST_HEADROOM = 2 * GIB  # Leave room for the benchmark and normal host work.
+GPU_HEADROOM = GIB  # Leave room for compute allocations outside the model.
+BENCH_ARGS = ("-ngl", "99", "-r", "3", "-p", "512", "-n", "128")
+MODEL_RUNS = (
+    ("Llama-3.2-3B-Instruct-Q4_K_M.gguf", "1"),
+    ("llama-2-7b.Q4_0.gguf", "0,1"),
+)
+USAGE = """usage: native-llm-bench --gpu nvidia|radeon [--build DIR] [--models DIR]
+                        [--build-tag TAG] [--out RUNDIR] [--threads N]
+                        [--device BUS] [--dry-run] [--jsonl]
+                        [--hw-preflight PATH] [--icd-dir DIR] [--medians FILE]"""
+HERE = os.path.dirname(os.path.abspath(__file__))
+VALUE_OPTIONS = {
+    "--gpu": "gpu", "--build": "build", "--build-tag": "build_tag",
+    "--models": "models", "--out": "out", "--threads": "threads",
+    "--device": "device", "--hw-preflight": "hw_preflight",
+    "--icd-dir": "icd_dir", "--medians": "medians",
+}
+HELP_LINES = (
+    "  --gpu nvidia|radeon   select the GPU vendor (required)",
+    "  --build DIR           read DIR/bin/llama-bench",
+    "  --build-tag TAG       prefix the recorded build description",
+    "  --models DIR          read the two GGUF models (default: ~/work/models)",
+    "  --out RUNDIR          new or empty output directory",
+    "  --threads N           benchmark threads (default: 8)",
+    "  --device BUS          PCI selector when several devices are eligible",
+    "  --dry-run             check the native path and print planned commands",
+    "  --jsonl               emit steps and rows as JSON Lines",
+    "  --hw-preflight PATH   hardware preflight helper",
+    "  --icd-dir DIR         Vulkan ICD directory",
+    "                        (default: /usr/local/share/vulkan/icd.d)",
+    "  --medians FILE        published comparison medians",
+    "  -h, --help            print this help and exit",
+)
+COMMAND_DEFAULTS = {
+    "vulkaninfo": ("NLB_VULKANINFO", "vulkaninfo"),
+    "pciconf": ("NLB_PCICONF", "pciconf"),
+    "sysctl": ("NLB_SYSCTL", "sysctl"),
+    "kldstat": ("NLB_KLDSTAT", "kldstat"),
+    "fstat": ("NLB_FSTAT", "fstat"),
+    "file": ("NLB_FILE", "file"),
+    "bectl": ("NLB_BECTL", "bectl"),
+    "uname": ("NLB_UNAME", "uname"),
+}
+
+
+class ToolError(Exception):
+    """An expected result with its public status and process exit code."""
+    def __init__(self, message, status="refused", code=3, show_usage=False):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.show_usage = show_usage
+
+
+def parse_cli(argv):
+    """Parse without argparse so usage errors also have the JSON contract.
+
+    Time: O(arguments). Space: O(arguments).
+    """
+    if "--help" in argv or "-h" in argv:
+        return {"help": True}
+    opts = {"dry_run": False, "jsonl": False, "device": None}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--dry-run":
+            opts["dry_run"] = True
+        elif arg == "--jsonl":
+            opts["jsonl"] = True
+        elif arg in VALUE_OPTIONS:
+            if i + 1 >= len(argv):
+                raise ToolError("%s needs a value" % arg, "error", 2, show_usage=True)
+            opts[VALUE_OPTIONS[arg]] = argv[i + 1]
+            i += 1
+        elif arg.startswith("-"):
+            raise ToolError("unknown option %s" % arg, "error", 2, show_usage=True)
+        else:
+            raise ToolError("unexpected argument %s" % arg, "error", 2, show_usage=True)
+        i += 1
+    if opts.get("gpu") not in VENDORS:
+        raise ToolError("--gpu must be nvidia or radeon", "error", 2, show_usage=True)
+    try:
+        opts["threads"] = int(opts.get("threads", "8"))
+    except ValueError:
+        raise ToolError("--threads must be a positive integer", "error", 2, show_usage=True)
+    if opts["threads"] < 1:
+        raise ToolError("--threads must be a positive integer", "error", 2, show_usage=True)
+    work = os.path.abspath(os.path.expanduser(os.environ.get("GB10_WORK", "~/work/gb10")))
+    opts["build"] = os.path.abspath(os.path.expanduser(
+        opts.get("build", os.path.join(work, "llm", "b12627", "build-vulkan"))))
+    opts["models"] = os.path.abspath(os.path.expanduser(opts.get("models", "~/work/models")))
+    if not opts.get("out"):
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        opts["out"] = os.path.join(work, "llm", "history", "runs", "%s-native-%s-%s" %
+                                   (stamp, opts["gpu"], DRIVER_SUFFIX[opts["gpu"]]))
+    opts["out"] = os.path.abspath(os.path.expanduser(opts["out"]))
+    opts["hw_preflight"] = os.path.abspath(os.path.expanduser(opts.get(
+        "hw_preflight", "~/git/skills/skills/hardware-preflight-and-verify/scripts/hw-preflight")))
+    opts["icd_dir"] = os.path.abspath(os.path.expanduser(
+        opts.get("icd_dir", "/usr/local/share/vulkan/icd.d")))
+    opts["medians"] = os.path.abspath(os.path.expanduser(
+        opts.get("medians", os.path.join(HERE, "..", "docs", "published-medians.json"))))
+    return opts
+
+
+def write_json(path, doc):
+    """Write one deterministic, human-readable JSON document."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+
+
+def pci_tuple(bus):
+    """Return four decimal PCI components, or raise a public refusal."""
+    m = re.fullmatch(r"pci(\d+):(\d+):(\d+):(\d+)", bus or "")
+    if not m:
+        raise ToolError("invalid PCI bus from preflight: %r" % bus)
+    return tuple(int(x) for x in m.groups())
+
+
+def linux_path(path):
+    """Whether an ICD or its library names a Linuxulator location."""
+    expanded = os.path.realpath(path)
+    return "linuxroot" in path or "linuxroot" in expanded or "/compat/linux" in expanded
+
+
+def read_icd_library(path):
+    """Return an ICD manifest's library_path, raising its input error."""
+    with open(path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    body = manifest.get("ICD", manifest)
+    return body["library_path"]
+
+
+def nouveau_refusal(source):
+    """Identify the manifest or environment variable that selected nouveau."""
+    return ("%s names %s: nouveau is not a supported path; remove that manifest "
+            "or unset that override; install the NVK-on-libnvrm Mesa (%s)" %
+            (source, NOUVEAU_LIBRARY, ICD_LIBRARIES["nvidia"]))
+
+
+def parse_vulkaninfo(text):
+    """Return GPU blocks in vulkaninfo order with scalar fields and PCI buses.
+
+    Only decimal VkPhysicalDevicePCIBusInfoPropertiesEXT values participate in
+    PCI matching.  CPU blocks stay in the list but are excluded from ggml's
+    Vulkan index later. Time: O(output). Space: O(GPU blocks).
+    """
+    matches = list(re.finditer(r"(?m)^GPU(\d+):\s*$", text))
+    blocks = []
+    for n, match in enumerate(matches):
+        end = matches[n + 1].start() if n + 1 < len(matches) else len(text)
+        body = text[match.end():end]
+        block = {"gpu": int(match.group(1))}
+        for key in ("deviceType", "deviceName", "driverName", "driverInfo",
+                    "pciDomain", "pciBus", "pciDevice", "pciFunction"):
+            found = re.search(r"(?m)^\s*%s\s*=\s*(.*?)\s*$" % re.escape(key), body)
+            if found:
+                block[key] = found.group(1)
+        if all(k in block for k in ("pciDomain", "pciBus", "pciDevice", "pciFunction")):
+            try:
+                block["pci"] = tuple(int(block[k], 10) for k in
+                                     ("pciDomain", "pciBus", "pciDevice", "pciFunction"))
+            except ValueError:
+                block["pci"] = None
+        blocks.append(block)
+    return blocks
+
+
+def parse_devices(text):
+    """Return Vulkan index -> {name, free_bytes}; reject duplicate indices."""
+    devices = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*Vulkan(\d+):\s*(.*?)\s*$", line)
+        if not m:
+            continue
+        index = int(m.group(1))
+        if index in devices:
+            raise ToolError("llama-bench listed Vulkan%d more than once" % index)
+        rest = m.group(2)
+        memory = re.match(r"^(.*?)\s*\((\d+(?:\.\d+)?)\s*MiB,\s*"
+                          r"(\d+(?:\.\d+)?)\s*MiB free\)\s*$", rest)
+        if memory:
+            name = memory.group(1)
+            free = int(float(memory.group(3)) * 1024 ** 2)
+        else:
+            name, free = rest, None
+        devices[index] = {"name": name, "free_bytes": free}
+    return devices
+
+
+def bench_test(record):
+    """Convert llama-bench prompt/generation counts to its history test name."""
+    prompt, generated = int(record["n_prompt"]), int(record["n_gen"])
+    if prompt and not generated:
+        return "pp%d" % prompt
+    if generated and not prompt:
+        return "tg%d" % generated
+    return "pp%d+tg%d" % (prompt, generated)
+
+
+def active_boot_environment(text):
+    """Return the active (now) BE name from bectl list output."""
+    active = []
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and ("N" in fields[1] or "R" in fields[1]):
+            active.append(fields)
+    for fields in active:
+        if "N" in fields[1]:
+            return fields[0]
+    if active:
+        return active[0][0]
+    raise ToolError("bectl list did not identify an active boot environment", "error", 2)
+
+
+class Harness:
+    def __init__(self, opts):
+        self.opts = opts
+        self.gpu = opts["gpu"]
+        self.card = CARDS[self.gpu]
+        self.out = opts["out"]
+        self.test_mode = os.environ.get("NLB_TEST") == "1"
+        self.overrides = {name: os.environ[name] for name in sorted(os.environ)
+                          if name.startswith("NLB_") and name != "NLB_TEST"}
+        if self.overrides and not self.test_mode:
+            name = next(iter(self.overrides))
+            raise ToolError("%s is honoured only with NLB_TEST=1" % name, "error", 2)
+        self.path_status = "test" if self.test_mode else "native"
+        self.env = os.environ.copy()
+        for variable in LOADER_VARIABLES:
+            self.env.pop(variable, None)
+        self.inherited_driver_files = os.environ.get("VK_DRIVER_FILES")
+        self.check_loader_overrides()
+        self.commands = {
+            name: (os.environ.get(env, default) if self.test_mode else default)
+            for name, (env, default) in COMMAND_DEFAULTS.items()
+        }
+        self.commands["hw-preflight"] = (os.environ.get("NLB_HW_PREFLIGHT", opts["hw_preflight"])
+                                         if self.test_mode else opts["hw_preflight"])
+        default_bench = os.path.join(opts["build"], "bin", "llama-bench")
+        self.commands["llama-bench"] = (os.environ.get("NLB_LLAMA_BENCH", default_bench)
+                                        if self.test_mode else default_bench)
+        self.doc = {"version": VERSION, "status": "ok", "gpu": self.gpu,
+                    "test_mode": self.test_mode, "path_status": self.path_status,
+                    "steps": [], "rows": [], "medians": [], "error": None}
+        self.bus = None
+        self.node = None
+        self.device = None
+        self.vulkan_index = None
+        self.listing = ""
+        self.build_commits = []
+        self.median_model, self.medians = self.load_medians(opts["medians"])
+        self.summary_path = None
+
+    def check_loader_overrides(self):
+        """Refuse inherited loader controls; VK_DRIVER_FILES is checked later."""
+        for variable in LOADER_VARIABLES:
+            if variable == "VK_DRIVER_FILES" or variable not in os.environ:
+                continue
+            if (self.gpu == "nvidia" and
+                    variable in ("VK_ADD_DRIVER_FILES", "VK_ICD_FILENAMES")):
+                for entry in os.environ[variable].split(":"):
+                    if not entry:
+                        continue
+                    try:
+                        library = read_icd_library(entry)
+                    except ICD_READ_ERRORS:
+                        library = None
+                    if (os.path.basename(entry) == NOUVEAU_LIBRARY or
+                            isinstance(library, str) and
+                            os.path.basename(library) == NOUVEAU_LIBRARY):
+                        raise ToolError(nouveau_refusal(variable))
+            raise ToolError("loader override %s is set; unset it" % variable)
+
+    def add_step(self, name, status="ok", **details):
+        step = {"step": name, "status": status}
+        step.update(details)
+        self.doc["steps"].append(step)
+        message = "%s: %s" % (name, status)
+        if status == "skipped" and details.get("reason"):
+            message = "%s: %s" % (name, details["reason"])
+        print(message, file=sys.stderr)
+        return step
+
+    def run_command(self, name, arguments=(), status="refused", code=3, combined=False):
+        command = [self.commands[name]] + list(arguments)
+        output = ({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT} if combined
+                  else {"capture_output": True})
+        try:
+            result = subprocess.run(command, text=True, env=self.env, **output)
+        except OSError as e:
+            raise ToolError("cannot execute %s: %s" % (command[0], e), status, code)
+        if result.returncode:
+            detail = ((result.stderr or "").strip() or (result.stdout or "").strip() or
+                      "no diagnostic")
+            raise ToolError("%s exited %d: %s" %
+                            (shlex.join(command), result.returncode, detail), status, code)
+        return result.stdout
+
+    def file_description(self, path):
+        """Return only file(1)'s description, never its pathname field."""
+        return self.run_command("file", ["-b", path]).strip()
+
+    @staticmethod
+    def is_freebsd_description(description):
+        """Match FreeBSD only in file's description and reject GNU/Linux."""
+        if "GNU/Linux" in description:
+            return False
+        return re.search(r"\bfor FreeBSD\b|\bFreeBSD-style\b", description) is not None
+
+    def stage(self, name, function):
+        try:
+            details = function()
+        except ToolError as e:
+            self.add_step(name, e.status, error=str(e))
+            raise
+        self.add_step(name, **details)
+
+    def make_node_map(self, path):
+        lines = []
+        if self.gpu == "radeon":
+            text = self.run_command("sysctl", ["hw.dri"])
+            pattern = re.compile(r"(?m)^hw\.dri\.(\d+)\.busid:\s*"
+                                 r"pci:([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):"
+                                 r"([0-9a-fA-F]{2})\.([0-9a-fA-F])\s*$")
+            for match in pattern.finditer(text):
+                minor = int(match.group(1))
+                domain, bus, slot, function = (int(x, 16) for x in match.groups()[1:])
+                lines.append("dri/renderD%d pci%d:%d:%d:%d" %
+                             (minor + 128, domain, bus, slot, function))
+        else:
+            try:
+                names = self.run_command("sysctl", ["-N", "dev.nvidia"])
+            except ToolError:
+                raise ToolError("nvidia.ko is not loaded (load it in a test boot)", "none", 4)
+            units = sorted({int(x) for x in re.findall(r"(?m)\bdev\.nvidia\.(\d+)\.", names)})
+            parents = {}
+            for unit in units:
+                parents[unit] = self.run_command(
+                    "sysctl", ["-n", "dev.nvidia.%d.%%parent" % unit]).strip()
+            pci = self.run_command("pciconf", ["-l"])
+            for unit in units:
+                found = re.search(r"(?m)^%s@pci(\d+:\d+:\d+:\d+):" %
+                                  re.escape(parents[unit]), pci)
+                if found:
+                    lines.append("nvidia%d pci%s" % (unit, found.group(1)))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + ("\n" if lines else ""))
+        return lines
+
+    def preflight(self):
+        node_map = os.path.join(self.out, "preflight-node-map.txt")
+        lines = self.make_node_map(node_map)
+        command = [self.commands["hw-preflight"], "--vendor", VENDORS[self.gpu],
+                   "--node-map", node_map]
+        if self.opts["device"]:
+            command.extend(["--device", self.opts["device"]])
+        text = self.run_command("hw-preflight", command[1:])
+        try:
+            response = json.loads(text)
+        except ValueError as e:
+            raise ToolError("hw-preflight returned invalid JSON: %s" % e)
+        if not isinstance(response, dict) or not isinstance(response.get("devices"), list):
+            raise ToolError("hw-preflight response has no devices list")
+        status = response.get("status")
+        if status == "none":
+            raise ToolError("no eligible %s GPU (vendor %s)" % (self.gpu, VENDORS[self.gpu]),
+                            "none", 4)
+        if status != "ok":
+            raise ToolError("hardware preflight %s: %s" %
+                            (status, response.get("error") or "no diagnostic"))
+        eligible = [d for d in response["devices"] if isinstance(d, dict)
+                    and d.get("vendor", "").lower() == VENDORS[self.gpu]
+                    and d.get("role") != "bmc"]
+        if not eligible:
+            raise ToolError("no eligible %s GPU (vendor %s)" % (self.gpu, VENDORS[self.gpu]),
+                            "none", 4)
+        if len(eligible) > 1 and not self.opts["device"]:
+            buses = ", ".join(str(d.get("bus", "unknown")) for d in eligible)
+            raise ToolError("several eligible devices; select one by PCI address with "
+                            "--device BUS (eligible: %s)" % buses)
+        verified = [v for v in response.get("verify", []) if isinstance(v, dict)
+                    and v.get("answers") is True and v.get("node_present") is True
+                    and v.get("found_bus") == v.get("bus")]
+        if len(verified) != 1:
+            raise ToolError("hardware preflight needs exactly one verified device; got %d" % len(verified))
+        selected = pci_tuple(verified[0]["bus"])
+        if selected not in {pci_tuple(d.get("bus")) for d in eligible}:
+            raise ToolError("hardware preflight verified a device outside its eligible list")
+        if self.opts["device"] and selected != pci_tuple(self.opts["device"]):
+            raise ToolError("hardware preflight verified %s instead of requested %s" %
+                            (verified[0]["bus"], self.opts["device"]))
+        self.bus = "pci" + ":".join(str(x) for x in selected)
+        self.node = verified[0].get("node")
+        if not isinstance(self.node, str) or not self.node:
+            raise ToolError("verified device has no GPU node")
+        return {"command": command, "response": response, "node_map": node_map,
+                "node_map_entries": lines, "bus": self.bus, "node": self.node}
+
+    def select_icd(self):
+        wanted = ICD_LIBRARIES[self.gpu]
+        nvidia = self.gpu == "nvidia"
+        expected_name = None
+        if nvidia:
+            arch = self.run_command("uname", ["-p"]).strip()
+            if not arch:
+                raise ToolError("uname -p returned no architecture for the NVK ICD")
+            expected_name = "nvk_nvrm_icd.%s.json" % arch
+
+        if self.inherited_driver_files is not None:
+            for entry in self.inherited_driver_files.split(":"):
+                if not entry:
+                    continue
+                try:
+                    library = read_icd_library(entry)
+                except ICD_READ_ERRORS:
+                    library = None
+                if nvidia and (os.path.basename(entry) == NOUVEAU_LIBRARY or
+                               isinstance(library, str) and
+                               os.path.basename(library) == NOUVEAU_LIBRARY):
+                    raise ToolError(nouveau_refusal("VK_DRIVER_FILES (%s)" % entry))
+
+        matches = []
+        try:
+            names = sorted(n for n in os.listdir(self.opts["icd_dir"]) if n.endswith(".json"))
+        except OSError as e:
+            raise ToolError("cannot read ICD directory %s: %s" % (self.opts["icd_dir"], e))
+        for name in names:
+            path = os.path.join(self.opts["icd_dir"], name)
+            try:
+                library = read_icd_library(path)
+            except ICD_READ_ERRORS as e:
+                raise ToolError("invalid Vulkan ICD %s: %s" % (path, e))
+            if nvidia and isinstance(library, str) and os.path.basename(library) == NOUVEAU_LIBRARY:
+                raise ToolError(nouveau_refusal(path))
+            if nvidia and name == expected_name:
+                if not isinstance(library, str) or os.path.basename(library) != wanted:
+                    raise ToolError("NVIDIA ICD %s library_path does not name %s" % (path, wanted))
+                matches.append((path, library))
+            elif not nvidia and isinstance(library, str) and os.path.basename(library) == wanted:
+                matches.append((path, library))
+        if not matches:
+            raise ToolError(NO_NVK if nvidia else
+                            "no native Radeon Vulkan driver: no ICD names %s" % wanted)
+        if len(matches) != 1:
+            raise ToolError("multiple Vulkan ICDs name %s; refusing to choose by order" % wanted)
+        path, library = matches[0]
+        if "/" not in library:
+            raise ToolError("Vulkan ICD %s has bare library_path %r; use an absolute path "
+                            "or a manifest-relative path containing /" % (path, library))
+        library_path = (library if os.path.isabs(library) else
+                        os.path.abspath(os.path.join(os.path.dirname(path), library)))
+        if linux_path(path) or linux_path(library_path):
+            raise ToolError("Linuxulator Vulkan ICD refused: %s -> %s" % (path, library_path))
+        file_output = self.file_description(library_path)
+        if not self.is_freebsd_description(file_output):
+            raise ToolError("Vulkan library is not a native FreeBSD binary: %s" % file_output)
+        if self.inherited_driver_files is not None:
+            entries = [entry for entry in self.inherited_driver_files.split(":") if entry]
+            if (len(entries) != 1 or
+                    os.path.realpath(entries[0]) != os.path.realpath(path)):
+                raise ToolError("inherited VK_DRIVER_FILES must be identical to the selected "
+                                "ICD %s" % path)
+        self.env["VK_DRIVER_FILES"] = path
+        return {"icd": path, "library": library_path, "file": file_output,
+                "VK_DRIVER_FILES": path}
+
+    def select_device(self):
+        text = self.run_command("vulkaninfo")
+        blocks = parse_vulkaninfo(text)
+        wanted = pci_tuple(self.bus)
+        matches = [b for b in blocks if b.get("pci") == wanted]
+        if len(matches) != 1:
+            addresses = ["pci" + ":".join(str(x) for x in b["pci"])
+                         for b in blocks if b.get("pci") is not None]
+            raise ToolError("no unique Vulkan GPU at preflight PCI address %s (found: %s); "
+                            "never falling back to index 0" %
+                            (self.bus, ", ".join(addresses) or "none"))
+        self.device = matches[0]
+        expected = DRIVER_NAMES[self.gpu]
+        if self.device.get("driverName") != expected:
+            raise ToolError("Vulkan driverName %r does not match required %r" %
+                            (self.device.get("driverName"), expected))
+        non_cpu = [b for b in blocks if b.get("deviceType") != "PHYSICAL_DEVICE_TYPE_CPU"]
+        self.vulkan_index = non_cpu.index(self.device)
+        self.listing = self.run_command("llama-bench", ["--list-devices"])
+        devices = parse_devices(self.listing)
+        names = [b.get("deviceName") for b in non_cpu]
+        if len(names) != len(set(names)):
+            indices = list(range(len(non_cpu)))
+            listed_names = [devices[n]["name"] for n in indices if n in devices]
+            if sorted(devices) != indices or listed_names != names:
+                raise ToolError("llama-bench Vulkan device order does not match vulkaninfo "
+                                "order for duplicate non-CPU device names")
+        listed = devices.get(self.vulkan_index)
+        if listed is None:
+            raise ToolError("llama-bench has no Vulkan%d for PCI %s" % (self.vulkan_index, self.bus))
+        if listed["name"] != self.device.get("deviceName"):
+            raise ToolError("Vulkan%d name %r does not match vulkaninfo deviceName %r" %
+                            (self.vulkan_index, listed["name"], self.device.get("deviceName")))
+        return {"device": self.device, "bus": self.bus, "vulkan_index": self.vulkan_index,
+                "listed_device": listed, "vulkaninfo_devices": len(blocks)}
+
+    def native_process(self):
+        binary = self.commands["llama-bench"]
+        file_output = self.file_description(binary)
+        if not self.is_freebsd_description(file_output):
+            raise ToolError("llama-bench at %s is not a FreeBSD binary; build llama.cpp "
+                            "natively (docs/llm.md)" % binary)
+        modules = []
+        for line in self.run_command("kldstat").splitlines():
+            fields = line.split()
+            if fields and fields[-1].endswith(".ko"):
+                modules.append(fields[-1])
+        verbose = self.run_command("kldstat", ["-v"])
+        modules.extend(re.findall(
+            r"(?<![A-Za-z0-9_])(?:linux64elf|linuxelf|linux_common)(?:\.ko)?"
+            r"(?![A-Za-z0-9_])", verbose))
+        linux = sorted(set(modules).intersection(
+            ("linux.ko", "linux64.ko", "linux_common.ko",
+             "linux64elf", "linuxelf", "linux_common")))
+        if self.gpu == "nvidia" and linux:
+            raise ToolError("NVIDIA native run refused with Linux compatibility present (%s): "
+                            "use a kernel without COMPAT_LINUX and boot with linux_enable=NO" %
+                            ", ".join(linux))
+        return {"binary": binary, "file": file_output, "linux_modules": linux,
+                "test_mode": self.test_mode, "path_status": self.path_status,
+                "command_overrides": self.overrides, "native": not self.test_mode}
+
+    def planned_commands(self):
+        plans = []
+        for filename, flash in MODEL_RUNS:
+            model = os.path.join(self.opts["models"], filename)
+            name = os.path.splitext(filename)[0]
+            raw = os.path.join(self.out, "%s-%s.json" % (self.gpu, name))
+            command = [self.commands["llama-bench"], "-m", model, "-dev",
+                       "Vulkan%d" % self.vulkan_index, "-fa", flash,
+                       "-t", str(self.opts["threads"])]
+            command.extend(BENCH_ARGS)
+            command.extend(["-o", "json"])
+            plans.append({"model": name, "model_path": model, "fa": flash, "command": command,
+                          "stdout": raw, "stderr": os.path.splitext(raw)[0] + ".err"})
+        return plans
+
+    def median_for(self, fa, test):
+        for median in self.medians:
+            if median["fa"] == fa and median["test"] == test:
+                return median
+        return None
+
+    def rows_from_result(self, plan):
+        try:
+            with open(plan["stdout"], encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            raise ToolError("cannot parse benchmark output %s: %s" % (plan["stdout"], e), "failed", 1)
+        if isinstance(raw, dict):
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            raise ToolError("benchmark output %s has no rows" % plan["stdout"], "failed", 1)
+        rows = []
+        try:
+            for n, record in enumerate(raw):
+                if not isinstance(record, dict):
+                    raise ValueError("row %d is not an object" % n)
+                self.build_commits.append(record.get("build_commit"))
+                listed = str(record.get("devices", "")).split(",")
+                if "Vulkan%d" % self.vulkan_index not in [x.strip() for x in listed]:
+                    raise ValueError("row %d did not run on Vulkan%d" % (n, self.vulkan_index))
+                fa = int(record["flash_attn"])
+                test = bench_test(record)
+                value = round(float(record["avg_ts"]), 2)
+                row = {"model": plan["model"], "fa": fa, "test": test, "t/s": value,
+                       "value_tps": value, "stddev": round(float(record["stddev_ts"]), 2),
+                       "date": record.get("test_time"), "card": self.card, "backend": "vulkan",
+                       "test_mode": self.test_mode, "path": self.path_status,
+                       "path_status": self.path_status, "source": plan["stdout"]}
+                if plan["model"] == self.median_model:
+                    median = self.median_for(fa, test)
+                    if median:
+                        difference = float("%.1f" % ((value - median["median"]) /
+                                                    median["median"] * 100))
+                        row.update({"published_median": median["median"],
+                                    "difference_percent": difference,
+                                    "median_sources": median["sources"]})
+                rows.append(row)
+        except (KeyError, TypeError, ValueError) as e:
+            raise ToolError("invalid llama-bench row in %s: %s" % (plan["stdout"], e), "failed", 1)
+        return rows
+
+    def resource_check(self, plan):
+        try:
+            model_size = os.path.getsize(plan["model_path"])
+        except OSError as e:
+            raise ToolError("cannot stat model %s: %s" % (plan["model_path"], e), "failed", 1)
+        values = {}
+        for name in ("vm.stats.vm.v_free_count", "vm.stats.vm.v_inactive_count", "hw.pagesize"):
+            output = self.run_command("sysctl", ["-n", name], "failed", 1)
+            try:
+                values[name] = int(output.strip())
+            except ValueError:
+                raise ToolError("sysctl %s returned a non-integer: %r" % (name, output), "failed", 1)
+        host_free = (values["vm.stats.vm.v_free_count"] +
+                     values["vm.stats.vm.v_inactive_count"]) * values["hw.pagesize"]
+        try:
+            load = list(os.getloadavg())
+        except OSError as e:
+            raise ToolError("cannot read load average: %s" % e, "failed", 1)
+        self.listing = self.run_command("llama-bench", ["--list-devices"], "failed", 1)
+        devices = parse_devices(self.listing)
+        listed = devices.get(self.vulkan_index)
+        if listed is None or listed["free_bytes"] is None:
+            raise ToolError("Vulkan%d free GPU memory is not reported" % self.vulkan_index, "failed", 1)
+        holders = self.run_command("fstat", ["/dev/" + self.node], "failed", 1)
+        check = {"model_size_bytes": model_size, "host_free_inactive_bytes": host_free,
+                 "host_required_bytes": model_size + HOST_HEADROOM,
+                 "gpu_free_bytes": listed["free_bytes"],
+                 "gpu_required_bytes": model_size + GPU_HEADROOM,
+                 "load_average": load, "gpu_node": "/dev/" + self.node,
+                 "gpu_processes": holders, "list_devices": self.listing}
+        if host_free < check["host_required_bytes"]:
+            return check, "low-host-memory", (
+                "insufficient host memory: need %.1f MiB, free+inactive %.1f MiB" %
+                (check["host_required_bytes"] / MIB, host_free / MIB))
+        if listed["free_bytes"] < check["gpu_required_bytes"]:
+            return check, "low-gpu-memory", (
+                "insufficient GPU memory: need %.1f MiB, free %.1f MiB" %
+                (check["gpu_required_bytes"] / MIB, listed["free_bytes"] / MIB))
+        return check, None, None
+
+    def run_one(self, plan):
+        details = {"model": plan["model"], "fa": plan["fa"], "command": plan["command"],
+                   "stdout": plan["stdout"], "stderr": plan["stderr"], "resources": None}
+        try:
+            check, reason, error = self.resource_check(plan)
+        except ToolError as e:
+            self.add_step("run", "failed", reason="resource-check", error=str(e), **details)
+            raise
+        details["resources"] = check
+        if reason:
+            self.add_step("run", "failed", reason=reason, error=error, **details)
+            raise ToolError(error, "failed", 1)
+        try:
+            with open(plan["stdout"], "w", encoding="utf-8") as stdout, \
+                    open(plan["stderr"], "w", encoding="utf-8") as stderr:
+                result = subprocess.run(plan["command"], stdout=stdout, stderr=stderr, env=self.env)
+        except OSError as e:
+            error = "cannot execute llama-bench: %s" % e
+            self.add_step("run", "failed", error=error, **details)
+            raise ToolError(error, "failed", 1)
+        if result.returncode:
+            error = "llama-bench exited %d for %s fa %s; stderr: %s" % (
+                result.returncode, plan["model"], plan["fa"], plan["stderr"])
+            self.add_step("run", "failed", returncode=result.returncode, error=error, **details)
+            raise ToolError(error, "failed", 1)
+        try:
+            rows = self.rows_from_result(plan)
+        except ToolError as e:
+            self.add_step("run", "failed", error=str(e), **details)
+            raise
+        self.doc["rows"].extend(rows)
+        self.add_step("run", "ok", row_count=len(rows), **details)
+
+    def run_models(self):
+        plans = self.planned_commands()
+        if self.opts["dry_run"]:
+            planned = [{k: p[k] for k in ("model", "fa", "command", "stdout", "stderr")}
+                       for p in plans]
+            self.add_step("runs", "dry-run", planned_commands=planned)
+            for plan in plans:
+                print("plan: " + shlex.join(plan["command"]), file=sys.stderr)
+            return
+        failed = None
+        for n, plan in enumerate(plans):
+            if failed:
+                self.add_step("run", "skipped", model=plan["model"], fa=plan["fa"],
+                              command=plan["command"], reason="skipped: an earlier run failed")
+                continue
+            try:
+                self.run_one(plan)
+            except ToolError as e:
+                failed = e
+        if failed:
+            self.add_step("runs", "failed", error=str(failed))
+            raise failed
+        self.add_step("runs", "ok", completed=len(plans))
+
+    def load_medians(self, path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                doc = json.load(f)
+            model = doc.get("model")
+            if (doc.get("version") != 1 or not isinstance(model, str) or not model or
+                    not isinstance(doc.get("groups"), list)):
+                raise ValueError("expected version 1, a model and a groups list")
+            selected = []
+            seen = set()
+            for group in doc["groups"]:
+                if not isinstance(group, dict):
+                    raise ValueError("median group is not an object")
+                if group.get("card") != self.card or group.get("backend") != "vulkan":
+                    continue
+                sources = group.get("sources")
+                results = group.get("results")
+                if not isinstance(sources, list) or not sources:
+                    raise ValueError("median group sources must be a nonempty list")
+                if not isinstance(results, list) or not results:
+                    raise ValueError("median group results must be a nonempty list")
+                for result in results:
+                    if not isinstance(result, dict):
+                        raise ValueError("median result is not an object")
+                    if (not isinstance(result.get("median"), (int, float)) or
+                            result["median"] <= 0):
+                        raise ValueError("median must be positive")
+                    key = (result.get("fa"), result.get("test"))
+                    if key in seen:
+                        raise ValueError("duplicate median result %r" % (key,))
+                    seen.add(key)
+                    selected.append(dict(result, sources=sources))
+            return model, selected
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            raise ToolError("cannot read published medians %s: %s" % (path, e), "error", 2)
+
+    def write_summary(self):
+        self.summary_path = os.path.join(self.out, "summary.json")
+        summary = {"version": VERSION, "status": self.doc["status"], "gpu": self.gpu,
+                   "card": self.card, "backend": "vulkan", "test_mode": self.test_mode,
+                   "path": self.path_status, "path_status": self.path_status,
+                   "command_overrides": self.overrides, "out": self.out,
+                   "rows": self.doc["rows"],
+                   "skipped": [s for s in self.doc["steps"] if s.get("status") == "skipped"],
+                   "error": self.doc["error"]}
+        try:
+            write_json(self.summary_path, summary)
+        except OSError as e:
+            raise ToolError("cannot write benchmark records: %s" % e, "error", 2)
+
+    def record(self):
+        try:
+            output = self.run_command("llama-bench", ["--version"], "error", 2, combined=True)
+            version = next((line.strip() for line in output.splitlines() if line.strip()), None)
+            if version is None:
+                raise ToolError("llama-bench --version returned no first line", "error", 2)
+            if self.doc["rows"]:
+                if (not self.build_commits or
+                        any(not isinstance(commit, str) or not commit.strip()
+                            for commit in self.build_commits)):
+                    raise ToolError("llama-bench JSON rows have no valid build_commit", "error", 2)
+                commits = {commit.strip() for commit in self.build_commits}
+                if len(commits) != 1:
+                    raise ToolError("llama-bench JSON rows have different build_commit values",
+                                    "error", 2)
+                build = "%s, commit %s native FreeBSD build (%s)" % (
+                    version, commits.pop(), self.opts["build"])
+            else:
+                # A resource refusal can leave no rows from which to read a commit.
+                build = "%s native FreeBSD build (%s)" % (version, self.opts["build"])
+            if self.opts.get("build_tag"):
+                build = "%s %s" % (self.opts["build_tag"], build)
+            boot = active_boot_environment(self.run_command("bectl", ["list"], "error", 2))
+            meta = {"test_mode": self.test_mode, "path_status": self.path_status,
+                    "path": self.path_status, "command_overrides": self.overrides, "_run": {
+                "card": self.card, "backend": "vulkan", "build": build,
+                "test_mode": self.test_mode, "path_status": self.path_status,
+                "path": self.path_status, "command_overrides": self.overrides,
+                "stack": "%s %s, %s, PCI %s, native FreeBSD" %
+                         (self.device["driverName"], self.device.get("driverInfo", ""),
+                          self.device["deviceName"], self.bus),
+                "boot": boot,
+                "note": "native-llm-bench: PCI-selected %s at %s (/dev/%s), Vulkan%d; "
+                        "3B then 7B; %s; host and GPU memory checked before each run" %
+                        (self.gpu, self.bus, self.node, self.vulkan_index,
+                         " ".join(BENCH_ARGS)),
+            }}
+            meta_path = os.path.join(self.out, "meta.json")
+            try:
+                write_json(meta_path, meta)
+            except OSError as e:
+                raise ToolError("cannot write benchmark records: %s" % e, "error", 2)
+        except ToolError as e:
+            if self.doc["status"] != "failed":
+                self.doc["status"] = e.status
+            self.doc["error"] = str(e)
+            raise
+        except Exception as e:
+            self.doc["status"] = "error"
+            self.doc["error"] = "internal error: %s: %s" % (type(e).__name__, e)
+            raise
+        finally:
+            # A metadata failure must not discard rows from completed benchmarks.
+            self.write_summary()
+        return {"meta": meta_path, "summary": self.summary_path, "rows": len(self.doc["rows"])}
+
+    def prepare_output(self):
+        """Create a new run directory, or accept only an existing empty one."""
+        try:
+            if os.path.isdir(self.out):
+                if os.listdir(self.out):
+                    raise ToolError("output directory %s is not empty" % self.out, "error", 2)
+            elif os.path.lexists(self.out):
+                raise ToolError("output path %s is not a directory" % self.out, "error", 2)
+            else:
+                os.makedirs(self.out)
+        except OSError as e:
+            raise ToolError("cannot create output directory %s: %s" % (self.out, e), "error", 2)
+
+    def execute(self):
+        self.prepare_output()
+        self.stage("preflight", self.preflight)
+        self.stage("icd", self.select_icd)
+        self.stage("device", self.select_device)
+        self.stage("native-process", self.native_process)
+        self.doc["medians"] = self.medians
+        try:
+            self.run_models()
+        except ToolError:
+            self.doc["status"] = "failed"
+            self.doc["error"] = next((s.get("error") for s in reversed(self.doc["steps"])
+                                      if s.get("step") == "runs"), "benchmark failed")
+            if self.opts["dry_run"]:
+                raise
+        if not self.opts["dry_run"]:
+            self.stage("record", self.record)
+        self.add_step("output", "ok", out=self.out, summary=self.summary_path)
+
+
+def print_help():
+    print(USAGE)
+    for line in HELP_LINES:
+        print(line)
+    print("NLB_* command overrides require NLB_TEST=1 and produce test records.")
+
+
+def emit(doc, opts):
+    if opts.get("jsonl"):
+        for step in doc["steps"]:
+            print(json.dumps(dict(step, type="step"), ensure_ascii=False))
+        for row in doc["rows"]:
+            print(json.dumps(dict(row, type="row"), ensure_ascii=False))
+        summary = {k: v for k, v in doc.items() if k not in ("steps", "rows")}
+        summary.update({"type": "summary", "step_count": len(doc["steps"]),
+                        "row_count": len(doc["rows"])})
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        print(json.dumps(doc, indent=1, ensure_ascii=False))
+    if doc["rows"]:
+        print("model                              fa test  t/s      stddev  diff%", file=sys.stderr)
+        for row in doc["rows"]:
+            print("%-34s %2s %-5s %8.2f %7.2f  %s" %
+                  (row["model"], row["fa"], row["test"], row["t/s"], row["stddev"],
+                   row.get("difference_percent", "-")), file=sys.stderr)
+    print("status: " + doc["status"], file=sys.stderr)
+    if doc.get("error"):
+        print("error: " + doc["error"], file=sys.stderr)
+
+
+def run(argv):
+    jsonl = "--jsonl" in argv
+    try:
+        opts = parse_cli(argv)
+        if opts.get("help"):
+            print_help()
+            return 0
+        harness = Harness(opts)
+        try:
+            harness.execute()
+        except ToolError as e:
+            keep_failed = harness.doc["status"] == "failed"
+            if not keep_failed:
+                harness.doc["status"] = e.status
+            harness.doc["error"] = str(e)
+            harness.add_step("output", harness.doc["status"], error=str(e), out=harness.out)
+            emit(harness.doc, opts)
+            return 1 if keep_failed else e.code
+        except Exception as e:
+            harness.doc["status"] = "error"
+            harness.doc["error"] = "internal error: %s: %s" % (type(e).__name__, e)
+            harness.add_step("output", "error", error=harness.doc["error"], out=harness.out)
+            emit(harness.doc, opts)
+            return 2
+        emit(harness.doc, opts)
+        return 1 if harness.doc["status"] == "failed" else 0
+    except ToolError as e:
+        doc = {"version": VERSION, "status": e.status, "gpu": None, "steps": [],
+               "rows": [], "medians": [], "error": str(e)}
+        emit(doc, {"jsonl": jsonl})
+        if e.show_usage:
+            print(USAGE, file=sys.stderr)
+        return e.code
+    except Exception as e:
+        doc = {"version": VERSION, "status": "error", "gpu": None, "steps": [], "rows": [],
+               "medians": [], "error": "internal error: %s: %s" % (type(e).__name__, e)}
+        emit(doc, {"jsonl": jsonl})
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

@@ -1,0 +1,5 @@
+Open /dev/nvidia0 directly and render on /dev/dri/renderD128.
+Example only: ls /dev/nvidia0  # hw-preflight: example
+Scan out on dri/card1 for the colour bars.
+nvidia1: NVRM: loading driver
+nvidia1: NVRM: marked line  # hw-preflight: example

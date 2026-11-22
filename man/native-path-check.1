@@ -1,0 +1,145 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 22, 2026
+.Dt NATIVE-PATH-CHECK 1
+.Os
+.Sh NAME
+.Nm native-path-check
+.Nd check benchmark records against the native-path registry
+.Sh SYNOPSIS
+.Nm
+.Op Fl -registry Ar file
+.Op Fl -jsonl
+.Ar bench-history.json
+.Sh DESCRIPTION
+The
+.Nm
+utility reads a
+.Pa bench-history.json
+document and checks every entry of its
+.Dq records
+list against the native-path registry.
+.Pp
+The rule: if the native underpinnings exist, the workload is native.
+A Linuxulator run where a native path exists is invalid.
+Where no native path exists yet, a Linuxulator run is kept, but marked as a
+last resort.
+.Pp
+The registry lists, for each pair of card and backend, whether a native
+.Fx
+path exists.
+Every record carries
+.Dq path
+(native or linuxulator) and
+.Dq path_status
+(native, superseded or last-resort).
+One violation is reported per record and rule broken:
+.Bl -tag -width "superseded-without-native"
+.It Li record-invalid
+The entry of
+.Dq records
+is not an object.
+.It Li field-type
+.Dq path ,
+.Dq path_status ,
+.Dq card
+or
+.Dq backend
+or
+.Dq superseded_by
+is present but not a string.
+One violation is reported per record, naming every such field.
+.It Li field-missing
+The record has no
+.Dq card
+or no
+.Dq backend ,
+or neither.
+The message names the missing fields.
+.It Li path-missing
+The record has no
+.Dq path .
+.It Li path-invalid
+.Dq path
+is neither native nor linuxulator.
+.It Li unknown-pair
+The pair of card and backend is not in the registry.
+Fix the record or add the pair to the registry file.
+.It Li native-without-path
+A native record, but the registry says the pair has no native path.
+.It Li status-invalid
+A path_status that is not native, superseded or last-resort; a native
+record whose path_status is not native; or a linuxulator record without a native
+path whose path_status is not last-resort.
+.It Li linux-where-native
+A linuxulator record where the registry says a native path exists, whose
+path_status is not superseded.
+.It Li superseded-without-native
+A superseded linuxulator record that does not name its successor.
+A superseded record needs a string field
+.Dq superseded_by
+which is contained in the
+.Dq source
+of some native record with the same card, backend and model, dated on or after
+the superseded record.
+The message says which part failed.
+.El
+.Pp
+By default one JSON document is printed on standard output with the keys
+version, status (ok, violations or error), checked, counts (native and
+linuxulator), violations and error.
+Each violation has index, date, card, backend, path, path_status, rule and
+detail.
+.Sh OPTIONS
+.Bl -tag -width "--registry file"
+.It Fl -registry Ar file
+Read the registry from
+.Ar file
+instead of the default.
+.It Fl -jsonl
+Print one JSON line per violation, then one summary line with the same keys as
+the document, without violations.
+.It Fl h , Fl -help
+Print the usage, with the resolved default registry path, and exit.
+.El
+.Sh FILES
+.Bl -tag -width "docs/native-paths.json"
+.It Pa docs/native-paths.json
+The default registry, found relative to the directory of the script
+.Pq Pa ../docs/native-paths.json .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 3n
+.It 0
+Every record passes (status ok).
+.It 1
+At least one violation (status violations).
+.It 2
+Usage error, or the registry or input is unreadable or invalid (status error).
+A registry is invalid when it lacks
+.Dq paths ,
+its version is not 1, an entry has a non-string card or backend or a
+non-boolean native, or a pair appears twice.
+A history is invalid when it has no records, or lacks
+.Dq records ,
+or when that is not a list.
+With
+.Fl -jsonl
+anywhere on the command line, even a usage error is printed as one JSON line.
+Without it, a usage error is also written in plain text to standard error.
+An unexpected internal failure is reported as status error, exit 2.
+.El
+.Sh EXAMPLES
+Check the benchmark history:
+.Bd -literal -offset indent
+native-path-check bench-history.json
+.Ed
+.Pp
+List only the violations, one per line:
+.Bd -literal -offset indent
+native-path-check --jsonl bench-history.json
+.Ed
+.Sh SEE ALSO
+.Pa docs/llm.md ,
+.Pa docs/native-paths.json

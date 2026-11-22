@@ -1,0 +1,303 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 22, 2026
+.Dt NATIVE-LLM-BENCH 1
+.Os
+.Sh NAME
+.Nm native-llm-bench
+.Nd benchmark a native FreeBSD Vulkan GPU selected by PCI address
+.Sh SYNOPSIS
+.Nm
+.Fl -gpu Ar nvidia | radeon
+.Op Fl -build Ar dir
+.Op Fl -build-tag Ar tag
+.Op Fl -models Ar dir
+.Op Fl -out Ar rundir
+.Op Fl -threads Ar n
+.Op Fl -device Ar bus
+.Op Fl -dry-run
+.Op Fl -jsonl
+.Op Fl -hw-preflight Ar path
+.Op Fl -icd-dir Ar dir
+.Op Fl -medians Ar file
+.Sh DESCRIPTION
+The
+.Nm
+utility runs the native llama.cpp Vulkan benchmark on one AMD Radeon or NVIDIA
+GPU.
+It selects the GPU by its PCI address, proves that the Vulkan and benchmark
+paths are native
+.Fx ,
+checks resources before each model, and writes records for the benchmark
+history.
+It never falls back to a Vulkan device index or starts a Linuxulator path for
+NVIDIA.
+Native NVIDIA operation requires Mesa NVK on libnvrm; until that path can
+create a device, an NVIDIA invocation is refused with a reference to Track
+2379.
+.Pp
+The utility performs these stages in order and records each stage in its JSON
+output:
+.Bl -enum
+.It
+It runs
+.Ic hw-preflight
+with vendor 0x10de for NVIDIA or 0x1002 for Radeon and a generated device-node
+map.
+The Radeon map comes from
+.Ic sysctl Ns 's
+hw.dri busids; the NVIDIA map comes from dev.nvidia units, their parents, and
+.Ic pciconf .
+Exactly one verified device is required.
+Several eligible devices require
+.Fl -device ;
+no eligible device produces status
+.Dq none .
+.It
+It selects the unique ICD manifest whose library basename is
+.Pa libvulkan_radeon.so
+for Radeon.
+For NVIDIA, it obtains the architecture with
+.Ic uname Fl p
+and selects only
+.Pa nvk_nvrm_icd.<arch>.json
+when that manifest's library basename is
+.Pa libvulkan_nvk_nvrm.so .
+For example, the aarch64 manifest is
+.Pa nvk_nvrm_icd.aarch64.json .
+An NVIDIA ICD in the search directory or inherited environment that names
+.Pa libvulkan_nouveau.so
+is refused: nouveau is not a supported path; the NVK-on-libnvrm Mesa is
+required.
+For either GPU, an inherited
+.Ev VK_DRIVER_FILES
+is accepted only when its sole entry is identical to the selected manifest.
+Every other Vulkan loader, layer or dynamic-loader override is refused and
+removed from the child environment.
+A bare ICD library name is refused; a relative path containing a slash is
+resolved beside its manifest.
+It refuses manifests or libraries below a linuxroot or
+.Pa /compat/linux
+path, and libraries that
+.Ic file Fl b
+does not identify as
+.Fx
+from its description alone.
+The selected manifest is the sole value of
+.Ev VK_DRIVER_FILES
+for subsequent child processes.
+.It
+It parses full
+.Ic vulkaninfo
+output and selects the GPU block whose decimal PCI domain, bus, device and
+function equal the preflight address.
+The required driver name is
+.Dq radv
+for Radeon or
+.Dq NVK (CloudBSD, libnvrm)
+for NVIDIA.
+The Vulkan index is the block's position among non-CPU devices and is confirmed
+by name with
+.Ic llama-bench Fl -list-devices .
+When non-CPU device names are duplicated, the complete contiguous llama-bench
+name order must match vulkaninfo; otherwise selection is refused.
+.It
+It requires
+.Ic file Fl b
+to identify the llama-bench executable as a
+.Fx
+binary from its description alone.
+NVIDIA is refused if
+.Ic kldstat
+and
+.Ic kldstat Fl v
+show linux.ko, linux64.ko, linux_common.ko, linux64elf, linuxelf or
+linux_common.
+For Radeon, any such modules are recorded without refusing the run.
+.It
+It benchmarks Llama 3.2 3B Instruct Q4_K_M with flash attention enabled, then
+Llama 2 7B Q4_0 with flash attention disabled and enabled.
+Each invocation uses
+.Fl ngl Ar 99 ,
+.Fl r Ar 3 ,
+.Fl p Ar 512
+and
+.Fl n Ar 128 .
+Before starting a model, it records host free plus inactive memory, load
+average, free GPU memory, and processes holding the GPU node.
+It requires model size plus 2 GiB of host memory and model size plus 1 GiB of
+GPU memory.
+The first failed resource check or benchmark records a failed run for that
+model and records later models with the reason
+.Dq skipped: an earlier run failed .
+.It
+It writes the raw llama-bench JSON and standard-error files, a
+.Pa meta.json
+run description, and a
+.Pa summary.json
+containing all completed rows.
+The build description uses the first non-empty line that
+.Ic llama-bench Fl -version
+writes to standard output or standard error, followed by the build_commit value
+from the benchmark JSON rows and the native build directory.
+A metadata or recording failure after the benchmarks leaves the raw files in
+place and still writes
+.Pa summary.json
+with status
+.Dq error
+and every completed row.
+Llama 2 7B Q4_0 rows include the matching published median, its sources, and
+the percentage difference rounded to one decimal.
+.It
+It writes one JSON document to standard output and a human-readable table to
+standard error.
+With
+.Fl -jsonl ,
+it writes one line per stage and row, followed by one summary line.
+.El
+.Sh OPTIONS
+.Bl -tag -width "--hw-preflight path"
+.It Fl -gpu Ar nvidia | radeon
+Select the GPU vendor.
+This option is required.
+.It Fl -build Ar dir
+Read llama-bench from
+.Pa dir/bin/llama-bench .
+The default is
+.Pa $GB10_WORK/llm/b12627/build-vulkan .
+.It Fl -build-tag Ar tag
+Prefix the build description in
+.Pa meta.json
+with
+.Ar tag .
+For example,
+.Ar b12627
+records the source tag even when a shallow clone reports build number 1.
+.It Fl -models Ar dir
+Read the two GGUF models from
+.Ar dir .
+The default is
+.Pa ~/work/models .
+.It Fl -out Ar rundir
+Write raw results and run metadata below
+.Ar rundir .
+The directory must be new or empty; a nonempty directory is refused with exit
+2 before any file is changed.
+The default is
+.Pa $GB10_WORK/llm/history/runs/ Ns Ar UTC-stamp Ns -native- Ns Ar gpu Ns - Ns Ar nvk|radv ,
+where the UTC stamp has the form YYYYMMDDTHHMMSSZ.
+.It Fl -threads Ar n
+Pass
+.Ar n
+to llama-bench's
+.Fl t
+option.
+The default is 8.
+.It Fl -device Ar bus
+Pass a PCI bus selector such as
+.Ar pci13:1:0:0
+to hw-preflight.
+This is required when more than one device of the requested vendor is
+eligible.
+.It Fl -dry-run
+Perform preflight, ICD, device and native-process checks, print the two planned
+benchmark commands, and do not benchmark either model.
+.It Fl -jsonl
+Emit JSON Lines instead of one indented JSON document.
+.It Fl -hw-preflight Ar path
+Run the hardware preflight helper at
+.Ar path .
+The default is
+.Pa ~/git/skills/skills/hardware-preflight-and-verify/scripts/hw-preflight .
+.It Fl -icd-dir Ar dir
+Search
+.Ar dir
+for Vulkan ICD JSON manifests.
+The default is
+.Pa /usr/local/share/vulkan/icd.d .
+.It Fl -medians Ar file
+Read published comparisons from
+.Ar file .
+The default is
+.Pa ../docs/published-medians.json
+relative to the utility.
+.It Fl h , Fl -help
+Print usage and exit.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width "NLB_HW_PREFLIGHT"
+.It Ev GB10_WORK
+Base directory for the default build and output paths.
+The default is
+.Pa ~/work/gb10 .
+.It Ev VK_DRIVER_FILES
+An inherited value is accepted only when its sole entry is identical to the
+selected native ICD manifest.
+For NVIDIA, an entry naming
+.Pa libvulkan_nouveau.so
+is refused.
+The utility sets
+.Ev VK_DRIVER_FILES
+to the selected manifest for every child process after ICD selection.
+.It Ev VK_ADD_DRIVER_FILES , Ev VK_ICD_FILENAMES , Ev VK_LOADER_DRIVERS_SELECT , Ev VK_LOADER_DRIVERS_DISABLE
+These driver overrides are refused when set, including when empty.
+.It Ev VK_LOADER_LAYERS_ENABLE , Ev VK_INSTANCE_LAYERS , Ev VK_LAYER_PATH , Ev VK_ADD_LAYER_PATH
+These layer overrides are refused when set, including when empty.
+.It Ev LD_PRELOAD , Ev LD_LIBRARY_PATH , Ev GGML_VK_VISIBLE_DEVICES
+These dynamic-loader and device-order overrides are refused when set,
+including when empty.
+.It Ev NLB_TEST
+Set to 1 to enable the fixture-command interface.
+Test rows and metadata carry test_mode true and path_status test, never native
+history provenance.
+.It Ev NLB_VULKANINFO , Ev NLB_PCICONF , Ev NLB_SYSCTL , Ev NLB_KLDSTAT , Ev NLB_FSTAT , Ev NLB_FILE , Ev NLB_BECTL , Ev NLB_UNAME , Ev NLB_HW_PREFLIGHT , Ev NLB_LLAMA_BENCH
+Override the corresponding external command only when
+.Ev NLB_TEST
+is 1.
+Without it, an override produces exit 2 and names the variable.
+These overrides support fixture-backed testing without a GPU or a real
+llama-bench executable.
+.El
+.Sh FILES
+.Bl -tag -width "docs/published-medians.json"
+.It Pa docs/published-medians.json
+Published Vulkan comparison medians and their sources.
+.It Pa RUNDIR/meta.json
+Run card, backend, build, software stack, active boot environment and notes.
+.It Pa RUNDIR/summary.json
+Completed benchmark rows, published comparisons, skipped runs and errors.
+.It Pa RUNDIR/GPU-MODEL.json
+Raw llama-bench JSON for one model.
+.It Pa RUNDIR/GPU-MODEL.err
+Standard error from the same model invocation.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 3n
+.It 0
+All requested checks and benchmarks succeeded, or a dry-run completed.
+.It 1
+A benchmark failed or a pre-run resource check prevented it from starting.
+.It 2
+Usage, input, output, metadata or an unexpected internal error.
+.It 3
+A non-native, ambiguous, mismatched or unavailable-driver path was refused.
+.It 4
+No eligible device of the requested vendor was found.
+.El
+.Sh EXAMPLES
+Check the working native Radeon path without running either model:
+.Bd -literal -offset indent
+native-llm-bench --gpu radeon --dry-run
+.Ed
+.Pp
+Run both models on NVIDIA after NVK on libnvrm is installed; until then this
+command refuses the path with exit 3:
+.Bd -literal -offset indent
+native-llm-bench --gpu nvidia
+.Ed
+.Sh SEE ALSO
+.Xr native-path-check 1 ,
+.Xr vulkaninfo 1 ,
+.Pa docs/llm.md ,
+.Pa docs/published-medians.json

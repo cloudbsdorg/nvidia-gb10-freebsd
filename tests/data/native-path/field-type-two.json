@@ -1,0 +1,16 @@
+{
+ "records": [
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": [
+    "x"
+   ],
+   "backend": {
+    "a": 1
+   },
+   "path": "native",
+   "path_status": "native",
+   "model": "m"
+  }
+ ]
+}

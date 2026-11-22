@@ -14,7 +14,7 @@
 #include "nvrm_internal.h"
 
 #define SCHEMA_ID	"nvrm-info/1"
-#define SCHEMA_MINOR	0
+#define SCHEMA_MINOR	1
 
 /* ---- emitter ----------------------------------------------------------- */
 

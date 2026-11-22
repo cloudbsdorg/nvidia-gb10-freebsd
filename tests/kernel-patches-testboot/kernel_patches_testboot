@@ -1,0 +1,333 @@
+#!/bin/sh
+#
+# PROVIDE: kernel_patches_testboot
+# REQUIRE: LOGIN kld
+# KEYWORD: nojail
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# One-shot test-boot recorder for kernel-patches/ (Track #2442): the FreeBSD
+# kernel patches 0001-0004 on an Ampere Altra with an AMD GPU.  make-be.sh
+# installs it into a test boot environment that boots the patched kernel as
+# /boot/kernel.kpfix and does NOT load amdgpu from kld_list; this script loads
+# it, after recording the state before.  It runs once, in the background.
+#
+# Rows go to results.jsonl: {"row","result","detail"}, result pass, fail,
+# info or skip.  A "running" row is written and synced before each step that
+# can panic; a final "done" row ends the run (a trailing "running" row means
+# the step after it panicked or hung).  The verdict line in summary.txt is
+# PASS when no row failed and "done" is there.
+#
+#   amdgpu-preloaded no amdgpu was loaded before the recorder and its dead-man
+#   deadman          the dead-man timer (shutdown -r +N) is pending; nothing
+#                    is loaded without it
+#   panic-settings   kern.panic_reboot_wait_time 5, debug.debugger_on_panic 0
+#   boot-kernel      kern.bootfile is /boot/kernel.kpfix/kernel; any other
+#                    kernel stops the run (nothing below is meaningful)
+#   kernel-hash      the booted kernel file is the one make-be.sh installed
+#   kit-version      installed kit version and active boot environment (info)
+#   mcfg             the ACPI MCFG header (info)
+#   align-setting    machdep.kern_align_fixup reads -1 (automatic)
+#   align-active     machdep.kern_align_fixup_active reads 1 (Altra detected)
+#   align-dmesg      "arm64: kernel alignment-fault fixup enabled (Ampere Altra)"
+#   align-early      that line comes before the first pcib attach line: the
+#                    decision is made before configure() attaches drivers
+#   ecam-dmesg       at least one "pcibN: 32-bit config space reads only"
+#   lkpi-setting     compat.linuxkpi.altra_82288 reads -1
+#   lkpi-active      compat.linuxkpi.altra_82288_active reads 1
+#   lkpi-dmesg       "linuxkpi: Ampere Altra erratum 82288: ... (mode 1)"
+#   align-runtime    writing 0 turns the fixup off (_active 0), writing -1
+#                    turns it back on (_active 1): -1 never means off
+#   lkpi-runtime     the same for compat.linuxkpi.altra_82288 (0, then -1)
+#   fixups-before    machdep.kern_align_fixups before amdgpu (info)
+#   amdgpu-load      kldload amdgpu succeeds and amdgpu is loaded
+#   gpu-pci          pciconf shows the AMD display device (vendor 0x1002,
+#                    class 0x03): configuration reads are right
+#   gpu-dri          /dev/dri/renderD128 exists
+#   gpu-vulkan       vulkaninfo --summary names a RADV device
+#   gpu-job          a small native llama-bench Vulkan run (pp64, tg16)
+#                    finishes with rc 0 and prints its rows
+#   fixups-after     machdep.kern_align_fixups after the GPU job (info)
+#   panic-free       no "panic" or "Misaligned access" line in dmesg
+#   done             the run is over
+#
+# Then the run is copied out to the home dataset (it survives the return),
+# owned by the copyout user, and testboot-return brings the host back to the
+# normal boot environment.  rc.conf variables: kernel_patches_testboot_enable,
+# _normal_be (cloudbsd-rx7600), _deadman (minutes, 45), _work
+# (/var/db/kernel-patches-test), _copyout, _owner (the user who owns the
+# copy), _kernel (/boot/kernel.kpfix/kernel), _hashes
+# (/usr/local/etc/kernel_patches_testboot.sha256), _bench (llama-bench of the
+# Vulkan build), _model (a GGUF model), _return (testboot-return).
+
+. /etc/rc.subr
+
+name=kernel_patches_testboot
+rcvar=kernel_patches_testboot_enable
+start_cmd=kernel_patches_testboot_start
+stop_cmd=:
+
+: "${kernel_patches_testboot_normal_be:=cloudbsd-rx7600}"
+: "${kernel_patches_testboot_deadman:=45}"
+: "${kernel_patches_testboot_work:=/var/db/kernel-patches-test}"
+: "${kernel_patches_testboot_copyout:=}"
+: "${kernel_patches_testboot_owner:=}"
+: "${kernel_patches_testboot_kernel:=/boot/kernel.kpfix/kernel}"
+: "${kernel_patches_testboot_hashes:=/usr/local/etc/kernel_patches_testboot.sha256}"
+: "${kernel_patches_testboot_bench:=}"
+: "${kernel_patches_testboot_model:=}"
+: "${kernel_patches_testboot_return:=/usr/local/sbin/testboot-return}"
+: "${kernel_patches_testboot_version:=/usr/local/etc/kernel_patches_testboot.version}"
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT=$kernel_patches_testboot_work/$STAMP
+DM_OK=0
+DM_CHILD=
+STOP_TESTS=0
+
+row()	# row <name> <pass|fail|info|skip|running> <detail>
+{
+	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
+	    "$(printf '%s' "$3" | tr -c '[:print:]' ' ' | tr '"\\' "''")" >> "$OUT/results.jsonl"
+	echo "== row $1: $2: $3"
+}
+
+running()
+{
+	row "$1" running "$2"
+	sync
+}
+
+# this boot only: the lines after the last boot marker (the message buffer can keep
+# the previous boot's lines)
+boot_only()
+{
+	awk '/---<<BOOT>>---/ { n = 0; delete l; next } { l[++n] = $0 } END { for (i = 1; i <= n; i++) print l[i] }'
+}
+
+# expect <row> <sysctl> <value>: pass when the sysctl reads exactly <value>
+expect()
+{
+	_v=$(sysctl -n "$2" 2>&1)
+	if [ "$_v" = "$3" ]; then row "$1" pass "$2 is $_v"; else row "$1" fail "$2 is '$_v', expected $3"; fi
+}
+
+as_owner() { su -m "$kernel_patches_testboot_owner" -c '/bin/sh -c '\''exec "$0" "$@"'\'' "$0" "$@"' "$@"; }
+
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+{
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
+deadman_arm()
+{
+	case $kernel_patches_testboot_deadman in
+	''|*[!0-9]*|0) row deadman fail "kernel_patches_testboot_deadman is '$kernel_patches_testboot_deadman', not a positive number of minutes"; return 0 ;;
+	esac
+	DM_CHILD=
+	shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ -e /var/run/noshutdown ]; then
+		_dm_fail="/var/run/noshutdown exists"
+	elif [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" 0; then
+		_dm_fail="pid $_dm_pid is not a root shutdown"
+	fi
+	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
+	if [ -n "$_dm_fail" ]; then
+		row deadman fail "$_dm_fail; first line of deadman.txt: ${_dm_first:-<empty>}"
+	else
+		DM_CHILD=$_dm_pid
+		row deadman pass "shutdown -r +$kernel_patches_testboot_deadman is pending as pid $DM_CHILD"
+		DM_OK=1
+	fi
+	sync
+}
+
+run_tests()
+{
+	if kldstat -q -n amdgpu; then
+		row amdgpu-preloaded fail "amdgpu was loaded before the recorder ran: no dead-man covered it"
+		STOP_TESTS=1
+		return 0
+	fi
+	row amdgpu-preloaded pass "amdgpu was not loaded before the recorder ran"
+	deadman_arm
+	row kit-version info "$(cat "$kernel_patches_testboot_version" 2>/dev/null || echo unknown); BE $(bectl list -H 2>/dev/null | awk '$2 ~ /N/ {print $1}')"
+	sysctl kern.panic_reboot_wait_time=5 debug.debugger_on_panic=0 > "$OUT/sysctl-set.txt" 2>&1
+	_ps=$(sysctl -n kern.panic_reboot_wait_time debug.debugger_on_panic 2>&1 | tr '\n' ' ')
+	if [ "$_ps" = "5 0 " ]; then row panic-settings pass "5 0"; else row panic-settings fail "read back '$_ps'"; fi
+
+	_bf=$(sysctl -n kern.bootfile)
+	if [ "$_bf" = "$kernel_patches_testboot_kernel" ]; then
+		row boot-kernel pass "$_bf; $(uname -v)"
+	else
+		row boot-kernel fail "booted $_bf, not $kernel_patches_testboot_kernel: nothing else is tested"
+		return 0
+	fi
+	_want=$(awk '$2 == "kernel" { print $1 }' "$kernel_patches_testboot_hashes" 2>/dev/null)
+	_got=$(sha256 -q "$_bf" 2>/dev/null)
+	if [ -n "$_want" ] && [ "$_got" = "$_want" ]; then row kernel-hash pass "$_got"; else row kernel-hash fail "$_got, the list says ${_want:-nothing}"; fi
+
+	dmesg -a 2>&1 | boot_only > "$OUT/dmesg-boot.txt"
+	cp /var/run/dmesg.boot "$OUT/dmesg.boot.orig" 2>/dev/null
+	boot_only < /var/run/dmesg.boot > "$OUT/dmesg.boot" 2>/dev/null
+	[ -s "$OUT/dmesg.boot" ] || cp "$OUT/dmesg-boot.txt" "$OUT/dmesg.boot"
+	acpidump -t 2>/dev/null | grep -A3 'MCFG:' > "$OUT/mcfg.txt"
+	row mcfg info "$(sed -n 's/^[[:space:]]*\(OEMID=.*\)/\1/p' "$OUT/mcfg.txt" | head -1)"
+	sysctl machdep.kern_align_fixup machdep.kern_align_fixup_active machdep.kern_align_fixups \
+	    compat.linuxkpi.altra_82288 compat.linuxkpi.altra_82288_active > "$OUT/sysctl-before.txt" 2>&1
+
+	expect align-setting machdep.kern_align_fixup -1
+	expect align-active machdep.kern_align_fixup_active 1
+	_a=$(grep -n 'arm64: kernel alignment-fault fixup enabled (Ampere Altra)' "$OUT/dmesg.boot" | head -1 | cut -d: -f1)
+	_p=$(grep -n '^pcib[0-9]*: ' "$OUT/dmesg.boot" | head -1 | cut -d: -f1)
+	if [ -n "$_a" ]; then row align-dmesg pass "line $_a of dmesg.boot"; else row align-dmesg fail "no alignment-fault fixup line in dmesg.boot"; fi
+	if [ -n "$_a" ] && [ -n "$_p" ] && [ "$_a" -lt "$_p" ]; then
+		row align-early pass "the fixup line ($_a) comes before the first pcib line ($_p)"
+	else
+		row align-early fail "fixup line ${_a:-none}, first pcib line ${_p:-none}"
+	fi
+	_e=$(grep -c '^pcib[0-9]*: 32-bit config space reads only' "$OUT/dmesg.boot")
+	if [ "$_e" -ge 1 ]; then row ecam-dmesg pass "$_e host bridges"; else row ecam-dmesg fail "no 32-bit config space line"; fi
+	expect lkpi-setting compat.linuxkpi.altra_82288 -1
+	expect lkpi-active compat.linuxkpi.altra_82288_active 1
+	if grep -q 'linuxkpi: Ampere Altra erratum 82288: PCIe write-combining mapped as Device (mode 1)' "$OUT/dmesg.boot"; then
+		row lkpi-dmesg pass "erratum 82288 line, mode 1"
+	else
+		row lkpi-dmesg fail "no erratum 82288 (mode 1) line in dmesg.boot"
+	fi
+
+	# no GPU driver is loaded yet, so switching off for a moment is safe
+	sysctl machdep.kern_align_fixup=0 > /dev/null 2>&1; _off=$(sysctl -n machdep.kern_align_fixup_active)
+	sysctl machdep.kern_align_fixup=-1 > /dev/null 2>&1; _on=$(sysctl -n machdep.kern_align_fixup_active)
+	if [ "$_off" = 0 ] && [ "$_on" = 1 ]; then row align-runtime pass "0 gives _active 0, -1 gives _active 1"; else row align-runtime fail "0 gave $_off, -1 gave $_on"; fi
+	sysctl compat.linuxkpi.altra_82288=0 > /dev/null 2>&1; _off=$(sysctl -n compat.linuxkpi.altra_82288_active)
+	sysctl compat.linuxkpi.altra_82288=-1 > /dev/null 2>&1; _on=$(sysctl -n compat.linuxkpi.altra_82288_active)
+	if [ "$_off" = 0 ] && [ "$_on" = 1 ]; then row lkpi-runtime pass "0 gives _active 0, -1 gives _active 1"; else row lkpi-runtime fail "0 gave $_off, -1 gave $_on"; fi
+	_f0=$(sysctl -n machdep.kern_align_fixups)
+	row fixups-before info "$_f0"
+
+	if [ "$DM_OK" != 1 ]; then
+		row amdgpu-load fail "not loaded: no dead-man timer"
+		return 0
+	fi
+	running amdgpu-load "kldload amdgpu: a panic from here leaves this row last"
+	if kldload amdgpu > "$OUT/kldload-amdgpu.txt" 2>&1 && kldstat -q -n amdgpu; then
+		row amdgpu-load pass "$(kldstat -v -n amdgpu 2>/dev/null | head -1)"
+	else
+		row amdgpu-load fail "$(head -c 300 "$OUT/kldload-amdgpu.txt")"
+		return 0
+	fi
+	kldstat -v > "$OUT/kldstat-v.txt" 2>&1
+	pciconf -lv > "$OUT/pciconf.txt" 2>&1
+	_g=$(pciconf -l | awk '/vendor=0x1002/ && /class=0x03/' | head -1)
+	if [ -n "$_g" ]; then
+		row gpu-pci pass "$_g"
+	else
+		row gpu-pci fail "no AMD display device in pciconf -l"
+	fi
+	if [ -c /dev/dri/renderD128 ]; then row gpu-dri pass "/dev/dri/renderD128"; else row gpu-dri fail "no /dev/dri/renderD128"; fi
+	if [ -z "$kernel_patches_testboot_owner" ]; then
+		row gpu-vulkan fail "kernel_patches_testboot_owner is empty; make-be.sh sets it"
+	else
+		running gpu-vulkan "vulkaninfo --summary"
+		as_owner timeout 120 vulkaninfo --summary > "$OUT/vulkaninfo.txt" 2>&1
+		if grep -q 'RADV' "$OUT/vulkaninfo.txt"; then
+			row gpu-vulkan pass "$(grep -m1 'deviceName' "$OUT/vulkaninfo.txt" | sed 's/^[[:space:]]*//')"
+		else
+			row gpu-vulkan fail "no RADV device: $(tail -2 "$OUT/vulkaninfo.txt" | tr '\n' ' ')"
+		fi
+	fi
+	if [ -z "$kernel_patches_testboot_owner" ]; then
+		row gpu-job fail "kernel_patches_testboot_owner is empty; make-be.sh sets it"
+	elif [ -z "$kernel_patches_testboot_bench" ]; then
+		row gpu-job fail "kernel_patches_testboot_bench is empty; make-be.sh sets it"
+	elif [ -z "$kernel_patches_testboot_model" ]; then
+		row gpu-job fail "kernel_patches_testboot_model is empty; make-be.sh sets it"
+	elif [ -x "$kernel_patches_testboot_bench" ] && [ -f "$kernel_patches_testboot_model" ]; then
+		running gpu-job "llama-bench Vulkan pp64 tg16"
+		as_owner timeout 600 "$kernel_patches_testboot_bench" -m "$kernel_patches_testboot_model" -ngl 99 -p 64 -n 16 -r 1 > "$OUT/llama-bench.txt" 2>&1
+		_rc=$?
+		if [ "$_rc" = 0 ] && grep -q 'tg16' "$OUT/llama-bench.txt"; then
+			row gpu-job pass "$(grep -e 'pp64' -e 'tg16' "$OUT/llama-bench.txt" | tr -s ' ' | tr '\n' ';')"
+		else
+			row gpu-job fail "llama-bench rc $_rc: $(tail -3 "$OUT/llama-bench.txt" | tr '\n' ' ')"
+		fi
+	else
+		row gpu-job fail "no $kernel_patches_testboot_bench or $kernel_patches_testboot_model"
+	fi
+	_f1=$(sysctl -n machdep.kern_align_fixups)
+	row fixups-after info "$_f1 ($((_f1 - _f0)) during amdgpu and the GPU job)"
+	sysctl machdep.kern_align_fixup machdep.kern_align_fixup_active machdep.kern_align_fixups \
+	    compat.linuxkpi.altra_82288 compat.linuxkpi.altra_82288_active > "$OUT/sysctl-after.txt" 2>&1
+}
+
+kernel_patches_testboot_start()
+{
+	if ! { mkdir -p "$kernel_patches_testboot_work" && chmod 0700 "$kernel_patches_testboot_work" && mkdir -m 0700 "$OUT"; }; then
+		echo "== kernel_patches_testboot: cannot make $OUT; returning to $kernel_patches_testboot_normal_be"
+		( "$kernel_patches_testboot_return" "$kernel_patches_testboot_normal_be" ) > /dev/null 2>&1 &
+		return 0
+	fi
+	: > "$OUT/results.jsonl"
+	(
+	run_tests
+	if [ "$STOP_TESTS" != 1 ]; then
+		dmesg -a 2>&1 | boot_only > "$OUT/dmesg-after.txt"
+		_bad='^panic: |Misaligned access from kernel space|Synchronous External Abort|Fatal data abort|sleeping thread|lock order reversal'
+		if grep -E -q "$_bad" "$OUT/dmesg-after.txt"; then
+			row panic-free fail "$(grep -E -m1 "$_bad" "$OUT/dmesg-after.txt")"
+		else
+			row panic-free pass "no panic, abort, misaligned access or lock warning in this boot's dmesg"
+		fi
+	fi
+	row done info "the run is over"
+	_f=$(grep -c '"result":"fail"' "$OUT/results.jsonl")
+	_r=$(grep -c '"result":"running"' "$OUT/results.jsonl")
+	if [ "$_f" = 0 ]; then echo "PASS: no row failed" > "$OUT/summary.txt"; else
+		{ echo "FAIL: $_f row(s) failed"; grep '"result":"fail"' "$OUT/results.jsonl"; } > "$OUT/summary.txt"; fi
+	echo "($_r running rows; each was followed by its result row)" >> "$OUT/summary.txt"
+	sync
+	owner=$kernel_patches_testboot_owner
+	copyout=$kernel_patches_testboot_copyout
+	if [ -z "$copyout" ]; then
+		echo "== copy-out skipped: kernel_patches_testboot_copyout is empty; make-be.sh sets it"
+	elif [ -z "$owner" ]; then
+		echo "== copy-out skipped: kernel_patches_testboot_owner is empty; make-be.sh sets it"
+	else
+		_dst=$copyout/$STAMP
+		if tar -C "$OUT" -cf - . | as_owner /bin/sh -c 'umask 077; mkdir -p "$0" && mkdir "$0/$1" && tar -C "$0/$1" -xf -' "$copyout" "$STAMP"; then
+			echo "== copied the run to $_dst"
+		else
+			echo "== COULD NOT copy the run to $_dst: it stays in $OUT"
+		fi
+	fi
+	sync
+	"$kernel_patches_testboot_return" "$kernel_patches_testboot_normal_be" > "$OUT/testboot-return.txt" 2>&1
+	_trc=$?
+	echo "== testboot-return exit $_trc"
+	if [ "$_trc" = 3 ]; then
+		case $DM_CHILD in
+		''|*[!0-9]*) ;;
+		*) kill "$DM_CHILD" > /dev/null 2>&1 ;;
+		esac
+	fi
+	) > "$OUT/rc.log" 2>&1 &
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"

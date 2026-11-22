@@ -24,3 +24,20 @@ nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds)
 		return (NVRM_E_CAPSICUM);
 	return (NVRM_OK);
 }
+
+/*
+ * A spare descriptor, limited to what it is for.  A mapping descriptor keeps
+ * only the right to be mapped (read and write); an export descriptor only the
+ * right the RM needs to find it by number (read).  Neither can issue an ioctl.
+ */
+int
+nvrm_cap_limit_desc(int fd, int kind)
+{
+	cap_rights_t rights;
+
+	if (kind == NVRM_DESC_MAP)
+		cap_rights_init(&rights, CAP_MMAP_RW);
+	else
+		cap_rights_init(&rights, CAP_READ);
+	return (cap_rights_limit(fd, &rights) == 0 ? NVRM_OK : NVRM_E_CAPSICUM);
+}

@@ -1,0 +1,10 @@
+{
+ "records": [
+  {
+   "date": "d",
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "path_status": "native"
+  }
+ ]
+}
