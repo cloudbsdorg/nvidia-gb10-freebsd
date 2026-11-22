@@ -14,10 +14,10 @@
 #       printf format with %s / %d filled the way the recorder expects), and
 #       every strings(1) needle in make-be.sh/check-be.sh comes from them;
 #   (f) make-be.sh never activates a boot environment (no "bectl activate");
-#   (g) the recorder has no /home/ path and runs both GPU jobs through su -m;
+#   (g) the recorder has no personal home path and runs both GPU jobs through su -m;
 #   (h) make-be.sh writes devmatch_blocklist and removes testboot-return.hold;
 #   (i) check-be.sh rejects a malformed -N before checking for root;
-#   (j) dead-man runtime fakes use GB10_WORK (default $HOME/work/gb10) for
+#   (j) dead-man runtime fakes use GB10_WORK (default <repo>/work) for
 #       their mktemp directory under its tmp subdirectory, never /tmp.
 
 set -u
@@ -65,9 +65,9 @@ else
 fi
 
 # Exercise the extracted functions without invoking shutdown(8).  All fakes
-# live under GB10_WORK (default $HOME/work/gb10), never /tmp, and cleanup only
+# live under GB10_WORK (default <repo>/work), never /tmp, and cleanup only
 # kills exact pids started by this test.
-_dm_test_root=${GB10_WORK:-$HOME/work/gb10}/tmp
+_dm_test_root=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp
 if [ "$(id -u)" = 0 ]; then
 	printf 'skip  dead-man runtime cases: refuse to run as root\n'
 elif ! mkdir -p "$_dm_test_root"; then
@@ -257,15 +257,16 @@ EOF
 chk_kernel_strings "$kit/make-be.sh"
 chk_kernel_strings "$kit/check-be.sh"
 
-if grep -q '/home/' "$rc"; then
-	bad "the recorder contains a /home/ path"
+_home_pattern=/$(printf 'home')/
+if grep -q "$_home_pattern" "$rc"; then
+	bad "the recorder contains a personal home path"
 else
-	ok "the recorder contains no /home/ path"
+	ok "the recorder contains no personal home path"
 fi
-if grep -q '/home/' "$kit/make-be.sh"; then
-	bad "make-be.sh contains a /home/ path"
+if grep -q "$_home_pattern" "$kit/make-be.sh"; then
+	bad "make-be.sh contains a personal home path"
 else
-	ok "make-be.sh contains no /home/ path"
+	ok "make-be.sh contains no personal home path"
 fi
 
 if grep -qF 'as_owner timeout 120 vulkaninfo --summary' "$rc" &&

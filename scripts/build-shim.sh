@@ -12,9 +12,9 @@
 #            its bare word as the first argument (nvidia-modeset), the form
 #            the README's build recipe uses.
 #   TREE      prepared working tree (from scripts/prepare-tree.sh); defaults
-#             to ${GB10_WORK:-$HOME/work/gb10}/build/tree
+#             to ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree
 #   LOG       build log to write; defaults to
-#             ${GB10_WORK:-$HOME/work/gb10}/logs/build-shim-<UTC stamp>.log
+#             ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/logs/build-shim-<UTC stamp>.log
 #
 # Environment:
 #   GB10_WORK work root holding the default TREE and logs/
@@ -83,7 +83,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 SYSDIR=${SYSDIR:-/usr/src/sys}
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

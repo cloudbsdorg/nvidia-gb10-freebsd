@@ -105,9 +105,11 @@ on an Ampere Altra only (found by its ACPI MCFG table), the PCIe ECAM quirk and 
 fixup (`machdep.kern_align_fixup`). They are reported as `warn`: the build and install work
 without them.
 
-For machines, `sh scripts/make.sh preflight --json` prints the same JSON as
-`make preflight JSON=1` without the `*** Error code 1` lines BSD make adds to its output when
-something is missing. Without a GPU, preflight reports `"device": "no NVIDIA device"`. `WORK=`,
+For machines, call the driver directly: `sh scripts/make.sh preflight --json`, or
+`MK_JSON=1 sh scripts/make.sh install` (`MK_JSONL=1` for JSON Lines). These print the same
+objects as the corresponding `make` targets without the `*** Error code 1` lines BSD make adds
+to stdout after a failing recipe; the driver still exits 1. Without a GPU, preflight reports
+`"device": "no NVIDIA device"`. `WORK=`,
 `PREFIX=`, `DESTDIR=`, `SYSDIR=`, `BSDSRCTOP=` and `DRMKMODDIR=` override the defaults; `make`
 alone lists the targets. The numbered steps below are what `make build` runs, one by one.
 

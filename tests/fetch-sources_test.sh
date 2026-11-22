@@ -9,7 +9,7 @@
 # touches the network.  The pinned sha256, commit, tag and tarball name are
 # read from SOURCES through scripts/lib.sh's sources_get, so a pin bump
 # needs no edit here.  Stubs and scratch files live in a mktemp(1)
-# directory under $HOME/work/gb10/tmp — /tmp is never used.
+# directory under $(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp — /tmp is never used.
 #
 # Usage: sh tests/fetch-sources_test.sh
 # Exit:  0 when every case passes, 1 otherwise.  Each case prints
@@ -29,7 +29,7 @@ script=$repo/scripts/fetch-sources.sh
 . "$repo/scripts/lib.sh"
 
 # Unpredictable scratch directory, removed by the trap on every exit path.
-test_dir=$(mktemp -d "$HOME/work/gb10/tmp/fetch-test.XXXXXXXX") || exit 1
+test_dir=$(mktemp -d "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp/fetch-test.XXXXXXXX") || exit 1
 # cleanup - remove exactly this run's scratch directory.
 # Time:  O(files created under test_dir), once per run.
 # Space: O(1).

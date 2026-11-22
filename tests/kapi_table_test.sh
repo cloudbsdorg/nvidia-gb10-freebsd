@@ -49,7 +49,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOURCES"; exit 1; }
 OGKMSRC=$WORK/sources/open-gpu-kernel-modules-$ver
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src

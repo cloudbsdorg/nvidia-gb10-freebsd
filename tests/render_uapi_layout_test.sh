@@ -37,7 +37,7 @@
 # loudly, and the test then exits 2 instead of 0; set RENDER_UAPI_ALLOW_SKIP=1
 # to accept the skips (the other checks still decide the result).
 #
-# Environment: GB10_WORK (default $HOME/work/gb10; scratch goes to $GB10_WORK/tmp
+# Environment: GB10_WORK (default <repo>/work; scratch goes to $GB10_WORK/tmp
 # unless TMPDIR is set), SYSDIR (default $HOME/src/csrc-90dcf68/sys, a FreeBSD
 # src/sys checkout), RENDER_UAPI_ALLOW_SKIP.
 # Exit: 0 all pass, 1 a check failed, 2 a prerequisite is missing or a check was skipped.

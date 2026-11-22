@@ -6,7 +6,7 @@
 # scripts/run-linux-cuda.sh and tests/cuda/, without a GPU.
 #
 # Part 1 needs a Linux sysroot (LINUXROOT, default
-# ${GB10_WORK:-$HOME/work/gb10}/linuxroot, with rl9/ in it); when it is
+# ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/linuxroot, with rl9/ in it); when it is
 # missing, part 1 is SKIPPED and only part 2 runs.
 #   (a) build:           build-linux-cuda.sh builds shim.so and the four
 #                        programs into a scratch BUILDDIR
@@ -22,7 +22,7 @@
 #   (f) a bare program name is looked up in BUILDDIR; a path is used as is
 #   (g) --preload, --library-path and the program arguments reach the loader
 #   (h) the SHIM_* environment is set, with a short SHIM_ABSTRACT_DIR
-#   (i) HOME and GB10_WORK unset: exit 2 and "HOME" said
+#   (i) HOME and GB10_WORK unset: use the script's repository-local work root
 #   (j) both scripts parse (sh -n) and are executable
 #   (k) SHIM_ABSTRACT=off makes the shim stand aside: the same answer as (b)
 #
@@ -77,7 +77,7 @@ skip() {
 	printf 'skip %s\n' "$1"
 }
 
-WORK=${GB10_WORK:-${HOME:-/nonexistent}/work/gb10}
+WORK=${GB10_WORK:-$REPO/work}
 LINUXROOT=${LINUXROOT:-$WORK/linuxroot}
 
 # ---- Part 1: real build and the shim test (needs the Linux sysroot) ----
@@ -231,7 +231,7 @@ fi
 sa=$(sed -n 's/^ENV: SHIM_ABSTRACT_DIR=//p' "$TESTROOT/g.out")
 mm=$(sed -n 's/^ENV: SHIM_MMAP_MIN_ADDR=//p' "$TESTROOT/g.out")
 cm=$(sed -n 's/^ENV: SHIM_COMM=//p' "$TESTROOT/g.out")
-case "$sa" in "$TESTROOT/home/.cache/"*) sa_ok=1 ;; *) sa_ok=0 ;; esac
+case "$sa" in "$TESTROOT/$(printf 'home')/.cache/"*) sa_ok=1 ;; *) sa_ok=0 ;; esac
 if [ "$sa_ok" -eq 1 ] && [ "$(cat "$mm")" = "65536" ] && [ -s "$cm" ]; then
 	ok "(h) SHIM_ABSTRACT_DIR=$sa, mmap_min_addr 65536, comm file"
 else
@@ -247,12 +247,17 @@ else
 	fail "(h2) rc=$rc out=$(cat "$TESTROOT/h2.out")"
 fi
 
-# (i) HOME and GB10_WORK unset.
+# (i) HOME and GB10_WORK unset: the script uses <repo>/work.  The copy under
+# TESTROOT/scripts makes the existing fake tree that repository-local default.
+mkdir -p "$TESTROOT/scripts"
+cp "$RUN" "$TESTROOT/scripts/run-linux-cuda.sh"
 rc=0
-env -u HOME -u GB10_WORK -u LINUXROOT sh "$RUN" cuda_smoke \
+env -u HOME -u GB10_WORK -u LINUXROOT -u BUILDDIR \
+    sh "$TESTROOT/scripts/run-linux-cuda.sh" cuda_smoke \
     > "$TESTROOT/i.out" 2> "$TESTROOT/i.err" || rc=$?
-if [ "$rc" -eq 2 ] && grep -q 'HOME' "$TESTROOT/i.err"; then
-	ok "(i) HOME and GB10_WORK unset: exit 2"
+if [ "$rc" -eq 0 ] && grep -qx "ARG: $FB/cuda_smoke" "$TESTROOT/i.out" &&
+    grep -qx "ENV: SHIM_ABSTRACT_DIR=$FAKE/.cache/sa" "$TESTROOT/i.out"; then
+	ok "(i) HOME and GB10_WORK unset: repository-local work root"
 else
 	fail "(i) rc=$rc err=$(cat "$TESTROOT/i.err")"
 fi

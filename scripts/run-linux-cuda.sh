@@ -11,7 +11,7 @@
 #        aarch64 program.
 #
 # Environment:
-#   GB10_WORK  work root (default $HOME/work/gb10)
+#   GB10_WORK  work root (default <repo>/work)
 #   LINUXROOT  Linux roots (default $GB10_WORK/linuxroot): nv/ holds NVIDIA's
 #              libcuda, rl9/ the Rocky 9 libraries and ld-linux
 #   BUILDDIR   build output (default $GB10_WORK/build/linux-cuda)
@@ -22,7 +22,7 @@
 #              (default: files the script creates in $HOME/.cache/sa)
 #   SHIM_IOCTL_LOG  set to 1 to log ioctl argument blocks
 #
-# Exit status: that of PROG; 2 usage or no work root; 1 a path is missing.
+# Exit status: that of PROG; 2 usage; 1 a path is missing.
 
 set -eu
 
@@ -41,11 +41,7 @@ case "${1:-}" in
 	;;
 esac
 
-if [ -z "${GB10_WORK:-}" ] && [ -z "${HOME:-}" ]; then
-	echo "run-linux-cuda: HOME is not set and GB10_WORK is not set" >&2
-	exit 2
-fi
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 LINUXROOT=${LINUXROOT:-$WORK/linuxroot}
 BUILDDIR=${BUILDDIR:-$WORK/build/linux-cuda}
 CACHE=${HOME:-$WORK}/.cache/sa

@@ -42,7 +42,7 @@
 # patched source (they must fail as well).
 #
 # Usage: sh tests/drm_null_memory_test.sh [TREE]
-#   TREE defaults to ${GB10_WORK:-$HOME/work/gb10}/build/tree; the pristine
+#   TREE defaults to ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree; the pristine
 #   source is ${GB10_WORK}/sources/NVIDIA-FreeBSD-x86_64-<version>/src.
 # Exit: 0 every case passes, 1 otherwise.
 
@@ -53,7 +53,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TREE=${1:-$WORK/build/tree}
 ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOURCES"; exit 1; }
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src

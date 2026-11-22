@@ -11,8 +11,8 @@
 #   (b) preflight --json parses, has the contract fields, reports
 #       "no NVIDIA device" or "NVIDIA device present", and exits 1 when an
 #       item is missing (an empty WORK has no sources); text preflight too
-#   (c) install into a DESTDIR without YES and without a terminal: refused,
-#       nothing written
+#   (c) install into a user-owned DESTDIR without YES and without a terminal:
+#       the DESTDIR is the confirmation, so the staged files are installed
 #   (d) install YES=1 into a DESTDIR: every staged file lands; each manifest
 #       line's mode, owner and sha256 match the file on disk; the modules
 #       are exactly the module list of make.sh; the created directories are
@@ -54,24 +54,75 @@
 #       accept and record it; a changed licence asks again; preflight and
 #       help say so
 # The MK_* switches of a calling make (make test YES=1) are cleared first.
-# Scratch files live under WORK/tmp (never /tmp) and are removed at the end.
+# The planted build, source tarball and pinned-looking trees keep every
+# automatic install-prereqs run offline.  Scratch files live under WORK/tmp
+# (never /tmp) and are removed at the end.
 
 set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 export PATH
 unset MK_WORK MK_PREFIX MK_DESTDIR MK_SYSDIR MK_BSDSRCTOP MK_DRMKMODDIR \
-    MK_YES MK_ASSUME_YES MK_JSON MK_PURPOSE MK_ACCEPT_NVIDIA_LICENSE MK_ACCEPT_ALL_LICENSES
+    MK_YES MK_ASSUME_YES MK_JSON MK_JSONL MK_PURPOSE MK_ACCEPT_NVIDIA_LICENSE MK_ACCEPT_ALL_LICENSES
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 base=${GB10_WORK:-$repo/work}
 mkdir -p -- "$base/tmp"
 S=$(mktemp -d "$base/tmp/make_contract.XXXXXX") || exit 1
-trap 'chmod -R u+w "$S" 2>/dev/null; rm -rf -- "$S"' EXIT
+trap 'if [ "${KEEP_SCRATCH:-0}" = 1 ]; then printf "scratch: %s\n" "$S"; else chmod -R u+w "$S" 2>/dev/null; rm -rf -- "$S"; fi' EXIT
 fail=0
 ok() { printf 'ok    %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+
+url=$(awk '$1 == "nvidia_freebsd_url" { print $2 }' "$repo/SOURCES")
+want_sha=$(awk '$1 == "nvidia_freebsd_sha256" { print $2 }' "$repo/SOURCES")
+ogkm_tag=$(awk '$1 == "ogkm_tag" { print $2 }' "$repo/SOURCES")
+want_commit=$(awk '$1 == "ogkm_commit" { print $2 }' "$repo/SOURCES")
+top=${url##*/}
+top=${top%.tar.xz}
+export PLANT_TAR_NAME="$top.tar.xz" PLANT_WANT_SHA="$want_sha" PLANT_WANT_COMMIT="$want_commit"
+H=$S/hooks
+mkdir -p -- "$H"
+cat > "$H/sha256" <<'EOF'
+#!/bin/sh
+case "$*" in
+*"$PLANT_TAR_NAME"*) printf '%s\n' "$PLANT_WANT_SHA" ;;
+*) exec /sbin/sha256 "$@" ;;
+esac
+EOF
+cat > "$H/git" <<'EOF'
+#!/bin/sh
+case "$*" in
+*' rev-parse HEAD'*) printf '%s\n' "$PLANT_WANT_COMMIT" ;;
+*' status --porcelain --untracked-files=no'*) exit 0 ;;
+*' diff --quiet HEAD'*) exit 0 ;;
+*) echo "planted git: unexpected command: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod 755 "$H/sha256" "$H/git"
+GB10_TEST_HOOKS=1
+FETCH=/bin/false
+SHA256=$H/sha256
+GIT=$H/git
+export GB10_TEST_HOOKS FETCH SHA256 GIT
+
 # assignments in front of a shell function are not exported to the
-# commands it runs (sh(1)), so mk exports the switches itself
-mk() { export MK_WORK MK_DESTDIR MK_YES; sh "$repo/scripts/make.sh" "$@"; }
+# commands it runs (sh(1)), so mk exports the switches itself.  Install uses
+# the planted source trees and accepts the planted licence explicitly.
+mk() (
+	MK_ACCEPT_NVIDIA_LICENSE=0
+	MK_ACCEPT_ALL_LICENSES=0
+	export MK_WORK MK_DESTDIR MK_YES MK_ACCEPT_NVIDIA_LICENSE MK_ACCEPT_ALL_LICENSES
+	if [ -n "${W:-}" ]; then
+		MK_SYSDIR=$W/src/sys
+		MK_BSDSRCTOP=$W/src
+		MK_DRMKMODDIR=$S/drm-kmod
+		export MK_SYSDIR MK_BSDSRCTOP MK_DRMKMODDIR
+	fi
+	if [ "${1:-}" = install ]; then
+		MK_ACCEPT_NVIDIA_LICENSE=1
+		export MK_ACCEPT_NVIDIA_LICENSE
+	fi
+	sh "$repo/scripts/make.sh" "$@"
+)
 me=$(id -un):$(id -gn)
 
 # (a) help and purpose under both makes
@@ -151,6 +202,7 @@ grep -q '^miss  sources: ' "$S/pf.txt" && grep -q '^preflight: [1-9][0-9]* missi
 
 # A planted build: every module make.sh installs, libnvrm and nvrm-info, as
 # plain files, and a build stamp that matches so install does not rebuild.
+# The cached source inputs satisfy install-prereqs without a network.
 T=$W/build/tree
 mods=$(mk _module-list)
 [ "$(printf '%s\n' "$mods" | wc -l | tr -d ' ')" -ge 6 ] || bad "module list: $mods"
@@ -165,22 +217,30 @@ printf 'a\n' > "$L/lib/libnvrm.a"
 printf 'prog\n' > "$L/info/nvrm-info"
 printf 'drm\n' > "$W/build/drm.ko"
 printf 'dmabuf\n' > "$W/build/dmabuf.ko"
-mkdir -p "$W/sources"
-printf 'NVIDIA licence (planted)\n' > "$W/sources/nvidia-license.txt"
+mkdir -p "$W/sources/$top/doc" "$W/sources/open-gpu-kernel-modules-$ogkm_tag/.git" \
+    "$W/src/sys/sys" "$W/src/include" "$S/drm-kmod"
+printf 'NVIDIA Driver License Agreement (test copy)\n' > "$W/sources/$top/doc/license.txt"
+tar -cJf "$W/sources/$top.tar.xz" -C "$W/sources" "$top"
+printf 'X=1\n' > "$S/drm-kmod/linuxkpi_version.mk"
+printf '#define __FreeBSD_version %s\n' "$(sysctl -n kern.osreldate)" > "$W/src/sys/sys/param.h"
 MK_WORK=$W mk _build-stamp > "$W/build/stamp"
 D=$S/dest
 mkdir -p "$D/boot/modules" "$D/usr/local/etc" "$D/etc"
 snap() { (cd "$1" && find . | sort); }
 snap "$D" > "$S/before.list"
 
-# (c) no YES, no terminal: refused
-(MK_WORK=$W MK_DESTDIR=$D mk install < /dev/null) > "$S/c.out" 2>&1
+# (c) a user-owned DESTDIR is itself the confirmation; no YES or terminal is
+# needed.  Use a separate destination so (d) still tests a first install.
+DC=$S/dest-no-yes
+mkdir -p "$DC/boot/modules" "$DC/usr/local/etc" "$DC/etc"
+(MK_WORK=$W MK_DESTDIR=$DC MK_YES=0 mk install < /dev/null) > "$S/c.out" 2>&1
 rc=$?
-snap "$D" > "$S/c.list"
-if [ "$rc" != 0 ] && cmp -s "$S/before.list" "$S/c.list" && grep -q 'no terminal' "$S/c.out"; then
-	ok "install without YES and without a terminal is refused"
+if [ "$rc" = 0 ] && [ -f "$DC/boot/modules/nvidia.ko" ] \
+    && [ -f "$DC/var/db/nvidia-gb10-freebsd/installed.manifest" ] \
+    && ! grep -q 'no terminal to ask' "$S/c.out"; then
+	ok "install into a user DESTDIR needs neither YES nor a terminal"
 else
-	bad "install without YES (rc $rc)"
+	bad "install without YES (rc $rc): $(tail -n 3 "$S/c.out")"
 fi
 
 inst() { MK_WORK=$W MK_DESTDIR=$1 MK_YES=1 mk install > "$2" 2>&1 < /dev/null; }
@@ -231,7 +291,8 @@ D9=$S/dest9
 mkdir -p "$D9/boot/modules" "$D9/etc"
 if [ "$(cd "$repo" && env DESTDIR="$D9" make -V DESTDIR)" = "$D9" ] \
     && [ "$(cd "$repo" && env PREFIX=/opt/gb10 make -V PREFIX)" = /opt/gb10 ]; then
-	(cd "$repo" && env DESTDIR="$D9" PREFIX=/opt/gb10 make install YES=1 WORK="$W") > "$S/y.out" 2>&1 < /dev/null
+	(cd "$repo" && env DESTDIR="$D9" PREFIX=/opt/gb10 make install YES=1 ACCEPT_NVIDIA_LICENSE=1 \
+	    WORK="$W" SYSDIR="$W/src/sys" BSDSRCTOP="$W/src" DRMKMODDIR="$S/drm-kmod") > "$S/y.out" 2>&1 < /dev/null
 	rc=$?
 	if [ "$rc" = 0 ] && [ -f "$D9/opt/gb10/etc/rc.d/nvidia_linux" ] \
 	    && [ -f "$D9/var/db/nvidia-gb10-freebsd/installed.manifest" ] \
@@ -255,6 +316,8 @@ M10=$D10/var/db/nvidia-gb10-freebsd/installed.manifest
 grep -q '^@prefix /usr/local$' "$M10"
 pfxrc=$?
 env MK_WORK="$W" MK_DESTDIR="$D10" MK_YES=1 MK_PREFIX=/opt \
+    MK_SYSDIR="$W/src/sys" MK_BSDSRCTOP="$W/src" MK_DRMKMODDIR="$S/drm-kmod" \
+    MK_ACCEPT_NVIDIA_LICENSE=1 \
     sh "$repo/scripts/make.sh" install > "$S/z2.out" 2>&1 < /dev/null
 rc2=$?
 env MK_WORK="$W" MK_DESTDIR="$D10" MK_YES=1 MK_PREFIX=/opt \
@@ -448,7 +511,7 @@ top=NVIDIA-FreeBSD-x86_64-580.178.04
 mkdir -p "$S/lt/$top/doc" "$WL/sources"
 printf 'NVIDIA Driver License Agreement (test copy)\n' > "$S/lt/$top/doc/license.txt"
 tar -cJf "$WL/sources/$top.tar.xz" -C "$S/lt" "$top"
-lic() { env MK_WORK="$WL" "$@" sh "$repo/scripts/make.sh" _licence < /dev/null; }
+lic() { env MK_WORK="$WL" MK_ACCEPT_NVIDIA_LICENSE=0 MK_ACCEPT_ALL_LICENSES=0 "$@" sh "$repo/scripts/make.sh" _licence < /dev/null; }
 lic MK_YES=1 > "$S/r1.out" 2>&1
 rc=$?
 [ "$rc" = 1 ] && grep -q 'ACCEPT_NVIDIA_LICENSE=1' "$S/r1.out" && grep -q 'YES=1 alone' "$S/r1.out" \

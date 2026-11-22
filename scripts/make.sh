@@ -22,7 +22,14 @@
 #   build            build every module, drm.ko and dmabuf.ko when no other
 #                    drm.ko is installed, libnvrm and nvrm-info
 #   test             run the repository unit tests
-#   install          build if needed, stage, then install as root
+#   install          block before writing when a prerequisite cannot be fixed;
+#                    otherwise ask once, up front, for everything that runs as
+#                    root (YES=1 answers; no terminal and no YES=1 is a
+#                    blocker), then install prerequisites, build if needed,
+#                    stage, then install; English, JSON=1 or JSONL=1 output.
+#                    Outcome: installed, blocked, or interrupted (a signal
+#                    during the install step: exit 1, and the rollback result
+#                    is stated, never assumed)
 #   deinstall        remove exactly what install wrote and what configure set
 #   test-install     the stock-install end-to-end run (tests/install-e2e)
 #   clean            remove WORK/build and WORK/stage (keeps the downloads)
@@ -36,7 +43,10 @@
 #   MK_YES MK_ASSUME_YES   1: do not ask (never accepts a licence)
 #   MK_ACCEPT_NVIDIA_LICENSE  1: accept NVIDIA's driver licence
 #   MK_ACCEPT_ALL_LICENSES    1: accept every licence the install meets
-#   MK_JSON       1: preflight prints JSON
+#   MK_JSON       1: preflight or install prints one JSON summary object
+#   MK_JSONL      1: install prints one JSON object per event, then a summary;
+#                 with MK_JSON=1 as well, JSONL wins and one line on stderr
+#                 says JSON=1 is ignored
 #   MK_PURPOSE    the Makefile REPO_PURPOSE, echoed by preflight
 #
 # Kernel modules install to $DESTDIR/boot/modules, everything else under
@@ -201,6 +211,11 @@ setup() {
 # permits this user), sudo, su (on a terminal, for a member of wheel; su
 # asks for the root password) or none.
 root_method() {
+	# test hook (GB10_TEST_HOOKS=1 only): pin the answer
+	_rm_hook=$(test_hook make.sh GB10_TEST_ROOT_METHOD "" 2>/dev/null) || _rm_hook=
+	case $_rm_hook in
+	root|doas|sudo|su|none) echo "$_rm_hook"; return 0 ;;
+	esac
 	if [ "$(id -u)" = 0 ]; then
 		echo root
 	elif command -v doas >/dev/null 2>&1 && [ -r /usr/local/etc/doas.conf ] \
@@ -213,6 +228,21 @@ root_method() {
 	else
 		echo none
 	fi
+}
+
+# destdir_user_owned: 0 when DESTDIR is set and this user may write it as
+# themselves: it exists and is this user's real directory, or it does not
+# exist yet and the nearest existing parent is this user's.  A DESTDIR owned
+# by anyone else (root's, say) needs root, whoever runs make.
+destdir_user_owned() {
+	[ -n "$DESTDIR" ] || return 1
+	[ "$(id -u)" != 0 ] || return 1
+	_du=$DESTDIR
+	while [ ! -e "$_du" ] && [ ! -L "$_du" ] && [ "$_du" != / ]; do
+		_du=$(dirname -- "$_du")
+	done
+	[ -d "$_du" ] && [ ! -L "$_du" ] || return 1
+	[ "$(stat -f '%u' "$_du")" = "$(id -u)" ]
 }
 
 # as_root CMD...: run CMD as root, the way root_method names.
@@ -245,6 +275,9 @@ pkgs_needed() {
 		[ "$_src" = base ] && continue
 		command -v "$_t" >/dev/null 2>&1 || printf '%s\n' "$_src"
 	done
+	# test hook (GB10_TEST_HOOKS=1 only): one more package to install
+	_pk_hook=$(test_hook make.sh GB10_TEST_PKG_NEEDED "" 2>/dev/null) || _pk_hook=
+	[ -z "$_pk_hook" ] || printf '%s\n' "$_pk_hook"
 }
 
 # --- preflight ------------------------------------------------------------
@@ -328,8 +361,9 @@ kernel_patch_items() {
 	esac
 }
 
-do_preflight() {
+collect_preflight() {
 	setup
+	items=
 	_os=$(uname -s)
 	_arch=$(uname -p 2>/dev/null || uname -m)
 	_run=$(running_osreldate)
@@ -395,7 +429,15 @@ EOF
 	kernel_patch_items
 	_rm=$(root_method)
 	case $_rm in
-	none) add_item root missing "no doas rule or sudo for $(id -un), and su needs a terminal and membership of wheel" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf" ;;
+	none)
+		if destdir_user_owned; then
+			add_item root ok "no root helper needed for a user-owned DESTDIR install" ""
+		elif [ -n "$DESTDIR" ]; then
+			add_item root missing "DESTDIR $DESTDIR is not owned by $(id -un): installing there needs root, and there is no doas rule or sudo for $(id -un)" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf, or use a DESTDIR you own"
+		else
+			add_item root missing "no doas rule or sudo for $(id -un), and su needs a terminal and membership of wheel" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf"
+		fi
+		;;
 	su) add_item root ok "su (asks for the root password)" "" ;;
 	*) add_item root ok "$_rm" "" ;;
 	esac
@@ -411,6 +453,12 @@ EOF
 		_device="no NVIDIA device"
 	fi
 	_missing=$(printf '%s' "$items" | awk -F'|' '$2 == "missing"' | wc -l | tr -d ' ')
+}
+
+# render_preflight renders only what collect_preflight found.  Keeping collection
+# separate lets make install inspect the same items without printing a second,
+# incompatible report in its JSON and JSONL modes.
+render_preflight() {
 	if [ "${MK_JSON:-0}" = 1 ]; then
 		printf '{\n  "schema_version": "1.0",\n  "tool": "preflight",\n'
 		printf '  "purpose": "%s",\n' "$(json_str "${MK_PURPOSE:-application}")"
@@ -457,6 +505,11 @@ EOF
 		printf 'preflight: %s missing\n' "$_missing"
 	fi
 	[ "$_missing" = 0 ]
+}
+
+do_preflight() {
+	collect_preflight
+	render_preflight
 }
 
 # --- install-prereqs ------------------------------------------------------
@@ -523,12 +576,21 @@ show_licence() {
 		licence_explain "$_lic" >&2
 		die "stopped: the NVIDIA driver licence is not accepted yet"
 	fi
-	licence_explain "$_lic"
-	printf 'Press Enter to read the licence.' && read -r _x
-	${PAGER:-more} "$_lic" || true
-	printf 'Do you accept the NVIDIA driver licence? [yes/no] '
-	read -r _ans || _ans=
-	case $_ans in
+	# The explanation and the question go to the terminal itself: the
+	# standard streams of a make install phase are captured in a log the
+	# user would not see until the phase ended.  install_run_phase hands
+	# over the real standard output (fd 3) and standard error (fd 4).
+	_lic_answer=
+	if [ -t 3 ]; then
+		licence_ask_terminal "$_lic" >&3
+	elif [ -t 4 ]; then
+		licence_ask_terminal "$_lic" >&4
+	elif ( : > /dev/tty ) 2>/dev/null; then
+		licence_ask_terminal "$_lic" > /dev/tty
+	else
+		licence_ask_terminal "$_lic"
+	fi
+	case $_lic_answer in
 	y|Y|yes|YES|Yes) ;;
 	*)
 		licence_explain "$_lic" >&2
@@ -539,13 +601,30 @@ show_licence() {
 	return 0
 }
 
+# licence_ask_terminal LICENCE: show why we ask, the licence, and the question
+# on this function's standard output (the caller points it at the terminal);
+# the answer is left in _lic_answer.  It runs in the calling shell.
+licence_ask_terminal() {
+	licence_explain "$1"
+	printf 'Press Enter to read the licence.' && read -r _x
+	${PAGER:-more} "$1" || true
+	printf 'Do you accept the NVIDIA driver licence? [yes/no] '
+	read -r _lic_answer || _lic_answer=
+}
+
 do_install_prereqs() {
+	_auto=${1:-}
 	setup
 	ensure_work
 	_need=$(pkgs_needed | sort -u | tr '\n' ' ')
 	if [ -n "$_need" ]; then
 		note "packages to install: $_need"
-		ask "Install these packages with pkg(8) as root?" || die "packages not installed: $_need"
+		# The one-command install has already asked for the installation by
+		# being invoked.  Its automatic package step never accepts a licence;
+		# show_licence below still requires its own explicit answer.
+		if [ "$_auto" != auto ]; then
+			ask "Install these packages with pkg(8) as root?" || die "packages not installed: $_need"
+		fi
 		if [ ! -x /usr/local/sbin/pkg ]; then
 			note "pkg(8) is not bootstrapped yet: bootstrapping it first"
 			as_root env ASSUME_ALWAYS_YES=yes /usr/sbin/pkg bootstrap -f
@@ -1050,31 +1129,318 @@ EOF
 	return "$_so"
 }
 
+# One install report feeds all three output modes.  Blockers and installed
+# paths are collected once; English, JSON and JSONL never invent separate
+# explanations or file lists.
+install_blockers=
+install_records=
+install_add_blocker() {
+	install_blockers="$install_blockers$1|$2|$3
+"
+}
+
+# install_collect_blockers [remaining]: before prerequisites run, only items
+# that install-prereqs cannot fix are blockers.  Afterwards every missing item
+# is a blocker.  A licence without an accepting setting is immediately
+# unfixable when there is no terminal on which to show and accept it.
+install_collect_blockers() {
+	_remaining=${1:-initial}
+	_install_items=$items
+	# stdin of the loop below is its here-document: look at it out here
+	_have_tty=0
+	[ ! -t 0 ] || _have_tty=1
+	while IFS='|' read -r _n _s _r _f; do
+		[ "$_s" = missing ] || continue
+		if [ "$_remaining" != remaining ]; then
+			case $_n in
+			tool:git|tool:gmake|sources|sysdir|bsdsrctop|drmkmoddir) continue ;;
+			licence)
+				if [ -n "$(licence_setting)" ] || { ! yes_set && [ "$_have_tty" = 1 ]; }; then
+					continue
+				fi
+				;;
+			esac
+		fi
+		install_add_blocker "$_n" "$_r" "$_f"
+	done <<EOF
+$_install_items
+EOF
+}
+
+install_progress() {
+	if [ "${MK_JSONL:-0}" = 1 ]; then
+		printf '{"schema_version":"1.0","tool":"install","kind":"progress","phase":"%s","message":"%s"}\n' \
+		    "$(json_str "$1")" "$(json_str "$2")"
+	elif [ "${MK_JSON:-0}" != 1 ]; then
+		printf 'install: %s: %s\n' "$1" "$2"
+	fi
+}
+
+install_outcome=blocked
+install_logdir=
+install_signalled=0
+
+# install_failure_blockers RC LOG: the blockers of a failed install step, and
+# the outcome.  A status above 128 (a signal) or a signal the parent saw is
+# "interrupted"; every other failure is "blocked".  What the rollback did is
+# read from the step's own log ("rollback: restored", or one
+# "rollback-failed PATH: WHY" line per path left alone), never assumed.
+install_failure_blockers() {
+	_ifr=$1
+	_ifl=$2
+	_what="install failed with exit $_ifr"
+	install_outcome=blocked
+	if [ "$_ifr" -gt 128 ] || [ "$install_signalled" = 1 ]; then
+		install_outcome=interrupted
+		_what="install interrupted (exit $_ifr)"
+	fi
+	_failed=$(sed -n 's/^rollback-failed //p' "$_ifl")
+	if [ -n "$_failed" ]; then
+		install_add_blocker install "$_what; the previous state was NOT fully restored (the paths are listed next); full output: $_ifl" "check the listed paths by hand, then rerun make install"
+		while read -r _fl; do
+			[ -n "$_fl" ] || continue
+			install_add_blocker rollback "$_fl" "inspect it and restore or remove it by hand"
+		done <<EOT
+$_failed
+EOT
+	elif grep -q '^rollback: restored$' "$_ifl"; then
+		install_add_blocker install "$_what; every replaced file and new file was restored; full output: $_ifl" "rerun make install"
+	else
+		install_add_blocker install "$_what; the rollback did not report, so the destination state is unknown; full output: $_ifl" "check the destination, run make deinstall, then rerun make install"
+	fi
+}
+
+# install_next_steps: what to do after a good install, one step per line.
+# With a DESTDIR the files are only staged: nothing is loaded from there.
+# Otherwise the module is loaded with the root tool this user has.
+install_next_steps() {
+	if [ -n "$DESTDIR" ]; then
+		printf 'the files are staged under %s; nothing was loaded: install that tree on the target system to use it\n' "$DESTDIR"
+	else
+		case $(root_method) in
+		root) printf 'kldload nvidia-drm\n' ;;
+		doas) printf 'doas kldload nvidia-drm\n' ;;
+		sudo) printf 'sudo kldload nvidia-drm\n' ;;
+		su) printf "su root -c 'kldload nvidia-drm'\n" ;;
+		*) printf 'kldload nvidia-drm (as root: this user has no doas, sudo or su)\n' ;;
+		esac
+	fi
+	printf 'kldstat\nnvrm-info --json\n'
+}
+
+# install_root_plan: the steps this install runs as root, one per line;
+# nothing when it needs no root at all.
+install_root_plan() {
+	_pn=$(pkgs_needed | sort -u | tr '\n' ' ')
+	_pn=${_pn% }
+	[ -z "$_pn" ] || printf 'install these packages with pkg(8): %s\n' "$_pn"
+	if ! destdir_user_owned; then
+		printf 'install the driver, libraries and tools into %s as root (owner root:wheel)\n' "${DESTDIR:-/}"
+	fi
+}
+
+# install_confirm PLAN: the one question, asked before any root step.
+install_confirm() {
+	_q="These steps run as root, in this order:
+$(printf '%s\n' "$1" | awk '{ printf "  %d. %s\n", NR, $0 }')
+Go ahead? [y/N] "
+	if [ "${MK_JSON:-0}" = 1 ] || [ "${MK_JSONL:-0}" = 1 ]; then
+		printf '%s' "$_q" >&2
+	else
+		printf '%s' "$_q"
+	fi
+	read -r _ans || return 1
+	case $_ans in
+	y|Y|yes|YES|Yes) return 0 ;;
+	esac
+	return 1
+}
+
+# Run a phase in a new sh so its set -e and die paths stay active even though
+# the parent captures its status.  Machine modes keep the log out of stdout;
+# English shows exactly the same phase output after the phase ends.
+install_run_phase() {
+	_phase=$1
+	_fix=$2
+	shift 2
+	# the log lives in this run's own private directory (install_logdir)
+	_log=$install_logdir/$_phase.log
+	install_progress "$_phase" started
+	_rc=0
+	# fd 3 and 4 keep the real standard output and error for a question that
+	# must reach the terminal (the licence); the phase itself is captured.
+	# The subshell traps the termination signals (a trap is not inherited by
+	# the command it starts) so it waits for the phase, which rolls back.
+	( trap : HUP INT TERM; "$@" ) 3>&1 4>&2 > "$_log" 2>&1 || _rc=$?
+	if [ "${MK_JSON:-0}" != 1 ] && [ "${MK_JSONL:-0}" != 1 ]; then
+		if [ "$_rc" = 0 ]; then cat "$_log"; else cat "$_log" >&2; fi
+	fi
+	if [ "$_rc" != 0 ]; then
+		if [ "$_phase" = install ]; then
+			install_failure_blockers "$_rc" "$_log"
+		else
+			install_add_blocker "$_phase" "$_phase failed with exit $_rc; full output: $_log" "$_fix"
+		fi
+		return 1
+	fi
+	install_progress "$_phase" done
+}
+
+install_collect_records() {
+	install_records=
+	_stage_list=$(stage_files "$STAGE")
+	while read -r _f; do
+		[ -n "$_f" ] || continue
+		if [ -L "$STAGE$_f" ]; then _mode=link; else _mode=$(stat -f '%Lp' "$STAGE$_f"); fi
+		install_records="$install_records$_f|$_mode
+"
+	done <<EOF
+$_stage_list
+EOF
+}
+
+install_summary() {
+	_outcome=$1
+	if [ "${MK_JSON:-0}" = 1 ] || [ "${MK_JSONL:-0}" = 1 ]; then
+		printf '{"schema_version":"1.0","tool":"install","outcome":"%s","blockers":[' "$_outcome"
+		_i=0
+		printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+			[ "$_i" = 0 ] || printf ','
+			printf '{"index":%s,"name":"%s","reason":"%s","fix":"%s"}' \
+			    "$_i" "$(json_str "$_n")" "$(json_str "$_r")" "$(json_str "$_f")"
+			_i=$((_i + 1))
+		done
+		printf '],"installed":['
+		_i=0
+		printf '%s' "$install_records" | while IFS='|' read -r _p _m; do
+			[ -n "$_p" ] || continue
+			[ "$_i" = 0 ] || printf ','
+			printf '{"path":"%s","mode":"%s"}' "$(json_str "$_p")" "$(json_str "$_m")"
+			_i=$((_i + 1))
+		done
+		printf '],"next":['
+		if [ "$_outcome" = installed ]; then
+			_i=0
+			install_next_steps | while read -r _ns; do
+				[ "$_i" = 0 ] || printf ','
+				printf '"%s"' "$(json_str "$_ns")"
+				_i=$((_i + 1))
+			done
+		fi
+		printf ']}\n'
+		return 0
+	fi
+	printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+		printf 'blocked %s: %s\n' "$_n" "$_r"
+		[ -z "$_f" ] || printf 'fix: %s\n' "$_f"
+	done
+	if [ "$_outcome" = installed ]; then
+		printf '%s' "$install_records" | while IFS='|' read -r _p _m; do
+			[ -n "$_p" ] && printf 'installed %s %s\n' "$_p" "$_m"
+		done
+		install_next_steps | while read -r _ns; do
+			printf 'next: %s\n' "$_ns"
+		done
+	fi
+	printf 'install: %s\n' "$_outcome"
+}
+
 do_install() {
-	setup
+	install_blockers=
+	install_records=
+	install_outcome=blocked
+	if [ "${MK_JSON:-0}" = 1 ] && [ "${MK_JSONL:-0}" = 1 ]; then
+		printf 'make.sh: JSON=1 is ignored: JSONL=1 wins (one object per line)\n' >&2
+		MK_JSON=0
+	fi
+	# Collection performs no writes.  In particular, an unaccepted licence or
+	# an unusable platform cannot create WORK, STATEDIR or a destination file.
+	collect_preflight
+	install_collect_blockers
+	if [ -n "$install_blockers" ]; then
+		install_summary blocked
+		return 1
+	fi
+	# One question, before any privileged step: everything that runs as root,
+	# in order.  YES=1 answers it; without a terminal and without YES=1 it
+	# is a blocker and nothing has been done.
+	_plan=$(install_root_plan)
+	if [ -n "$_plan" ] && ! yes_set; then
+		if [ ! -t 0 ]; then
+			install_add_blocker confirm "this install runs steps as root ($(printf '%s' "$_plan" | tr '\n' ';')) and there is no terminal to ask on" "run with YES=1 or on a terminal"
+			install_summary blocked
+			return 1
+		fi
+		if ! install_confirm "$_plan"; then
+			install_add_blocker confirm "the root steps were not confirmed; nothing was done" "rerun on a terminal and answer yes, or add YES=1"
+			install_summary blocked
+			return 1
+		fi
+	fi
 	ensure_work
+	# Phase logs go in a fresh private directory made here, so a name planted
+	# beforehand (a symbolic link, say) is never written through.
+	for _lp in "$WORK/logs" "$WORK/logs/make-install"; do
+		if [ -L "$_lp" ]; then
+			install_add_blocker logs "$_lp is a symbolic link; refusing to write the phase logs through it" "remove the symbolic link"
+			install_summary blocked
+			return 1
+		fi
+		[ -d "$_lp" ] || mkdir -m 755 -- "$_lp"
+	done
+	install_logdir=$(mktemp -d "$WORK/logs/make-install/run.XXXXXX") || die "cannot create a private log directory in $WORK/logs/make-install"
+	if ! install_run_phase prereqs "rerun make install after correcting the prerequisite error" \
+	    sh "$repo/scripts/make.sh" _install-prereqs-auto; then
+		install_summary blocked
+		return 1
+	fi
+	collect_preflight
+	install_collect_blockers remaining
+	if [ -n "$install_blockers" ]; then
+		install_summary blocked
+		return 1
+	fi
 	_ok=1
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || _ok=0
 	done
 	[ -f "$LIBOBJ/info/nvrm-info" ] || _ok=0
 	if [ "$_ok" = 1 ] && [ -f "$WORK/build/stamp" ] && [ "$(build_stamp)" = "$(cat "$WORK/build/stamp")" ]; then
-		note "install: the build is current"
+		install_progress build "the build is current"
 	else
-		do_build
+		if ! install_run_phase build "rerun make install after correcting the build error" \
+		    sh "$repo/scripts/make.sh" build; then
+			install_summary blocked
+			return 1
+		fi
 	fi
-	stage
+	if ! install_run_phase stage "rerun make install after correcting the staging error" \
+	    sh "$repo/scripts/make.sh" _stage; then
+		install_summary blocked
+		return 1
+	fi
 	_n=$(stage_files "$STAGE" | wc -l | tr -d ' ')
-	note "install: $_n files: modules to $DESTDIR/boot/modules, the rest under $DESTDIR$PREFIX"
-	if [ -n "$DESTDIR" ] && [ "$(id -u)" != 0 ]; then
-		ask "Install them into $DESTDIR (owned by $(id -un))?" || die "install: nothing installed"
-		install_stage "$STAGE" "$DESTDIR" "$PREFIX" user
+	install_progress install "$_n staged files: modules to $DESTDIR/boot/modules, the rest under $DESTDIR$PREFIX"
+	# The install step is the only one that may be cut short by a signal: this
+	# process notes it, the step rolls itself back, and the outcome follows
+	# what the step reports, never what was planned.
+	install_signalled=0
+	trap 'install_signalled=1' HUP INT TERM
+	_irc=0
+	if destdir_user_owned; then
+		install_run_phase install "" \
+		    sh "$repo/scripts/make.sh" _install-stage "$STAGE" "$DESTDIR" "$PREFIX" || _irc=1
 	else
-		ask "Install them as root (owner root:wheel)?" || die "install: nothing installed"
-		as_root sh "$repo/scripts/make.sh" _install-stage "$STAGE" "$DESTDIR" "$PREFIX"
+		install_run_phase install "" \
+		    as_root sh "$repo/scripts/make.sh" _install-stage "$STAGE" "$DESTDIR" "$PREFIX" || _irc=1
 	fi
-	note "install: done; manifest $MANIFEST"
-	note "install: next: make configure (loader.conf and rc.conf for loading at boot), or kldload nvidia-drm"
+	trap - HUP INT TERM
+	if [ "$_irc" != 0 ]; then
+		install_summary "$install_outcome"
+		return 1
+	fi
+	install_collect_records
+	install_summary installed
 }
 
 # migrate_manifest DESTDIR PREFIX [user|root]: commit 23c18da kept the
@@ -1151,6 +1517,136 @@ migrate_manifest() {
 # and files of the previous install that this stage no longer has are
 # removed when they are still ours.  With "user" (a non-root DESTDIR run)
 # the files keep this user as owner.
+# Transaction backups hold the original bytes, modes and link targets of
+# every path this install can replace or remove.  The manifest and an old-place
+# manifest are included, as is linker.hints (kldxref rewrites it last).
+txn_backup() {
+	_tb_path=$1
+	if awk -v p="$_tb_path" '$3 == p { found = 1 } END { exit !found }' "$_txn_records"; then
+		return 0
+	fi
+	_tb_dest=$_txn_root$_tb_path
+	_tb_kind=absent
+	if [ -L "$_tb_dest" ]; then
+		_tb_kind=link
+		readlink "$_tb_dest" > "$_txn_dir/$_txn_n.target" || die "cannot save the link at $_tb_dest"
+	elif [ -e "$_tb_dest" ]; then
+		[ -f "$_tb_dest" ] || die "refusing to replace $_tb_dest: not a file or symbolic link"
+		_tb_kind=file
+		cp -p -- "$_tb_dest" "$_txn_dir/$_txn_n.file" || die "cannot back up $_tb_dest"
+	fi
+	printf '%s %s %s\n' "$_txn_n" "$_tb_kind" "$_tb_path" >> "$_txn_records"
+	_txn_n=$((_txn_n + 1))
+}
+
+# txn_state PATH: what PATH holds now, as one line: "A" nothing, "F:SHA256" a
+# file, "L:TARGET" a symbolic link, "O" anything else.
+txn_state() {
+	if [ -L "$1" ]; then
+		printf 'L:%s\n' "$(readlink "$1")"
+	elif [ -f "$1" ]; then
+		printf 'F:%s\n' "$(sha256 -q "$1")"
+	elif [ -e "$1" ]; then
+		printf 'O\n'
+	else
+		printf 'A\n'
+	fi
+}
+
+# txn_intend PATH STATE: record, before it is written, what this install is
+# about to leave at PATH.  The rollback touches a path only when it holds
+# its original state or one of these; anything else was changed by another
+# process and is left alone and reported.
+txn_intend() {
+	printf '%s %s\n' "$1" "$2" >> "$_txn_intents"
+}
+
+# txn_orig_state N KIND: the state txn_backup saved as backup N.
+txn_orig_state() {
+	case $2 in
+	file) printf 'F:%s\n' "$(sha256 -q "$_txn_dir/$1.file")" ;;
+	link) printf 'L:%s\n' "$(cat "$_txn_dir/$1.target")" ;;
+	*) printf 'A\n' ;;
+	esac
+}
+
+# txn_signal NUMBER: a signal during the install.  The exit status (128 plus
+# the number) is how make install learns it was interrupted; the EXIT trap
+# then rolls back.
+txn_signal() {
+	exit $((128 + $1))
+}
+
+# txn_rollback_fail PATH WHY: a path the rollback left as it found it.
+txn_rollback_fail() {
+	printf 'rollback-failed %s: %s\n' "$1" "$2"
+	_txn_failed=1
+}
+
+# EXIT is deliberate: die, an interrupted copy, a failed install(1), and a
+# failed kldxref all take the same restoration path.  Restoration is best
+# effort after an I/O error, but every path is attempted and the original
+# failure status is retained.  A path is removed or restored only while it
+# still holds what this run wrote (or its original); otherwise it is left
+# and printed as "rollback-failed PATH: WHY".  The last line says
+# "rollback: restored" only when every path was put back.
+txn_exit() {
+	_txn_rc=$?
+	trap '' HUP INT TERM
+	trap - EXIT
+	if [ "${_txn_active:-0}" = 1 ]; then
+		[ "$_txn_rc" != 0 ] || _txn_rc=1
+		_txn_failed=0
+		note "install: failed; restoring every replaced file and removing new files"
+		if [ "${_txn_hints:-0}" = 1 ]; then
+			# kldxref ran (or was cut short) under this install
+			txn_intend /boot/modules/linker.hints "$(txn_state "$_txn_root/boot/modules/linker.hints")"
+		fi
+		if [ -n "$_txn_records" ] && [ -f "$_txn_records" ]; then
+			while read -r _tb_n _tb_kind _tb_path; do
+				[ -n "$_tb_path" ] || continue
+				_tb_dest=$_txn_root$_tb_path
+				rm -f -- "$_tb_dest.new" "$_tb_dest.rollback" 2>/dev/null || true
+				_tb_cur=$(txn_state "$_tb_dest")
+				_tb_orig=$(txn_orig_state "$_tb_n" "$_tb_kind")
+				if [ "$_tb_cur" = "$_tb_orig" ]; then
+					continue
+				fi
+				if ! grep -qxF -- "$_tb_path $_tb_cur" "$_txn_intents" 2>/dev/null; then
+					txn_rollback_fail "$_tb_path" "not restored: changed by another process since this install wrote it"
+					continue
+				fi
+				case $_tb_kind in
+				absent)
+					rm -f -- "$_tb_dest" 2>/dev/null || txn_rollback_fail "$_tb_path" "not restored: could not remove it"
+					;;
+				file)
+					if cp -p -- "$_txn_dir/$_tb_n.file" "$_tb_dest.rollback" 2>/dev/null \
+					    && mv -f -- "$_tb_dest.rollback" "$_tb_dest" 2>/dev/null; then :
+					else
+						txn_rollback_fail "$_tb_path" "not restored: could not put the original back"
+					fi
+					;;
+				link)
+					rm -f -- "$_tb_dest" 2>/dev/null || true
+					ln -s "$(cat "$_txn_dir/$_tb_n.target")" "$_tb_dest" 2>/dev/null \
+					    || txn_rollback_fail "$_tb_path" "not restored: could not put the original link back"
+					;;
+				esac
+			done < "$_txn_records"
+		fi
+		# The transaction lives below STATEDIR.  Remove it after the backups
+		# have been used but before the new directories, or STATEDIR and its
+		# new parents cannot be empty when their turn comes.
+		[ -z "$_w" ] || rm -rf -- "$_w" 2>/dev/null || true
+		printf '%s\n' "$_newdirs" | awk 'NF' | sort -r | while read -r _dir; do
+			rmdir -- "$_txn_root$_dir" 2>/dev/null || true
+		done
+		[ "$_txn_failed" = 1 ] || printf 'rollback: restored\n'
+	fi
+	exit "$_txn_rc"
+}
+
 install_stage() {
 	_src=$1
 	_d=$2
@@ -1163,8 +1659,6 @@ install_stage() {
 		[ "$(stat -f '%u' "$_d")" = 0 ] || die "refusing DESTDIR $_d as root: not owned by root"
 	fi
 	safe_parents "$_d" "$STATEDIR/x" "$_mode" || die "refusing $_d$STATEDIR: a directory on the way is a symbolic link or not root's"
-	migrate_manifest "$_d" "$_pfx" "$_mode" \
-	    || die "install: migration refused; remove the planted file or check its owner"
 	_manifest_pfx=$_pfx
 	if [ -e "$_man" ] || [ -L "$_man" ]; then
 		[ ! -L "$_man" ] || die "refusing $_man: symbolic link"
@@ -1180,9 +1674,41 @@ install_stage() {
 $_newdirs"
 		_dir=$(dirname -- "$_dir")
 	done
+	# The rollback is armed before anything is created, so a failure at any
+	# later point (including making the private directory) cannot leak it.
+	_w=
+	_txn_root=$_d
+	_txn_dir=
+	_txn_records=
+	_txn_intents=
+	_txn_hints=0
+	_txn_n=0
+	_txn_active=1
+	trap txn_exit EXIT
+	trap 'txn_signal 1' HUP
+	trap 'txn_signal 2' INT
+	trap 'txn_signal 15' TERM
 	mkdir -p -- "$_d$STATEDIR"
 	_w=$(mktemp -d "$_d$STATEDIR/.install.XXXXXX") || die "cannot create a private directory in $_d$STATEDIR"
-	trap 'rm -rf -- "$_w"' EXIT
+	_txn_dir=$_w/backups
+	_txn_records=$_w/backup.list
+	_txn_intents=$_w/intents
+	mkdir -- "$_txn_dir"
+	: > "$_txn_records"
+	: > "$_txn_intents"
+	# Save manifests before migration, which is itself rolled back if any
+	# later validation or copy fails.
+	txn_backup "$STATEDIR/installed.manifest"
+	_old_manifest=$_pfx/share/$name/installed.manifest
+	if [ -f "$_d$_old_manifest" ] && [ ! -L "$_d$_old_manifest" ]; then
+		txn_backup "$_old_manifest"
+	fi
+	txn_backup /boot/modules/linker.hints
+	migrate_manifest "$_d" "$_pfx" "$_mode" \
+	    || die "install: migration refused; remove the planted file or check its owner"
+	# migration wrote the new manifest and removed the old-place one
+	txn_intend "$STATEDIR/installed.manifest" "$(txn_state "$_man")"
+	txn_intend "$_old_manifest" "$(txn_state "$_d$_old_manifest")"
 	_s=$_w/stage
 	mkdir -- "$_s"
 	tar -C "$_src" -cf - . | tar -C "$_s" -xpf - || die "cannot copy the stage"
@@ -1206,7 +1732,19 @@ $_newdirs"
 			awk -v p="$_f" '$1 == p' "$_prev" | grep -q . || die "refusing to replace $_d$_f: make install did not write it"
 			still_ours "$_d" "$_prev" "$_f" || die "refusing to replace $_d$_f: it changed since make install wrote it"
 		fi
+		txn_backup "$_f"
 	done < "$_w/list"
+	# Save files which a smaller stage would remove before creating anything.
+	_stale=$(awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_prev" | sort -u)
+	while read -r _f; do
+		[ -n "$_f" ] || continue
+		[ "$_f" = "$STATEDIR/installed.manifest" ] && continue
+		grep -qxF -- "$_f" "$_w/list" && continue
+		path_ok "$_f" && allowed_path "$_f" "$_manifest_pfx" && safe_parents "$_d" "$_f" "$_mode" || continue
+		txn_backup "$_f"
+	done <<EOF
+$_stale
+EOF
 	# Directories this install creates are recorded ("path dir").
 	while read -r _f; do
 		_dir=$(dirname -- "$_f")
@@ -1227,18 +1765,22 @@ $_dir"
 		done < "$_w/list"
 		printf '%s\n' "$_newdirs" | awk 'NF { print $0 " dir" }'
 	} | awk '!seen[$0]++' > "$_man.new"
+	txn_intend "$STATEDIR/installed.manifest" "$(txn_state "$_man.new")"
 	mv -f -- "$_man.new" "$_man"
 	while read -r _f; do
+		txn_intend "$_f" "$(txn_state "$_s$_f")"
 		if [ -L "$_s$_f" ]; then
-			ln -sfh "$(readlink "$_s$_f")" "$_d$_f"
+			ln -sfh "$(readlink "$_s$_f")" "$_d$_f" || die "install: cannot replace the link $_d$_f"
 		else
 			# shellcheck disable=SC2086
-			install $_own -m "$(stat -f '%Lp' "$_s$_f")" -- "$_s$_f" "$_d$_f.new"
-			mv -f -- "$_d$_f.new" "$_d$_f"
+			install $_own -m "$(stat -f '%Lp' "$_s$_f")" -- "$_s$_f" "$_d$_f.new" \
+			    || die "install: cannot write $_d$_f"
+			mv -f -- "$_d$_f.new" "$_d$_f" || die "install: cannot replace $_d$_f"
 		fi
 	done < "$_w/list"
 	# Files of the previous install that this stage no longer has.
-	awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_prev" | sort -u | while read -r _f; do
+	while read -r _f; do
+		[ -n "$_f" ] || continue
 		[ "$_f" = "$STATEDIR/installed.manifest" ] && continue
 		grep -qxF -- "$_f" "$_w/list" && continue
 		if ! path_ok "$_f"; then
@@ -1252,9 +1794,12 @@ $_dir"
 		safe_parents "$_d" "$_f" "$_mode" || continue
 		rm -f -- "$_d$_f.new"
 		if still_ours "$_d" "$_prev" "$_f"; then
-			rm -f -- "$_d$_f"
+			txn_intend "$_f" A
+			rm -f -- "$_d$_f" || die "install: cannot remove the obsolete $_d$_f"
 		fi
-	done
+	done <<EOF
+$_stale
+EOF
 	{
 		printf '@prefix %s\n' "$_pfx"
 		while read -r _f; do
@@ -1264,17 +1809,23 @@ $_dir"
 		awk '$2 == "dir"' "$_prev"
 		printf '%s\n' "$_newdirs" | awk 'NF { print $0 " dir" }'
 	} | awk '!seen[$0]++' > "$_man.new"
+	txn_intend "$STATEDIR/installed.manifest" "$(txn_state "$_man.new")"
 	mv -f -- "$_man.new" "$_man"
 	chmod 444 "$_man"
-	rm -rf -- "$_w"
-	trap - EXIT
 	# kldxref refreshes linker.hints; in a DESTDIR its failure (for example
-	# a staging tree without other modules) is reported, not fatal.
+	# a staging tree without other modules) is reported, not fatal.  A live
+	# kldxref failure is an install failure and therefore rolls back too.
+	_kldxref=$(test_hook make.sh GB10_TEST_KLDXREF /usr/sbin/kldxref) || die "install: refused the kldxref test hook"
+	_txn_hints=1
 	if [ -z "$_d" ]; then
-		kldxref /boot/modules
+		"$_kldxref" /boot/modules || die "install: kldxref /boot/modules failed"
 	else
-		kldxref "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
+		"$_kldxref" "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
 	fi
+	_txn_hints=0
+	_txn_active=0
+	trap - EXIT HUP INT TERM
+	rm -rf -- "$_w"
 }
 
 # kernel module names (as kldstat -n takes them) of every module we install
@@ -1439,6 +1990,11 @@ preflight)
 	do_preflight
 	;;
 install-prereqs) do_install_prereqs ;;
+_install-prereqs-auto) do_install_prereqs auto ;;
+_stage)
+	setup
+	stage
+	;;
 configure) do_configure ;;
 build) do_build ;;
 test) do_test ;;
@@ -1469,6 +2025,10 @@ _configure)
 	apply_config "$2"
 	;;
 _module-list) module_list ;;
+_next-steps)
+	setup
+	install_next_steps
+	;;
 _licence)
 	setup
 	ensure_work

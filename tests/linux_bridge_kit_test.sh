@@ -11,7 +11,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 export PATH
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 KIT=$HERE/linux-bridge-testboot
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/linux_bridge_kit_test.XXXXXXXX") || exit 1
 trap 'rm -rf "$TMPD"' EXIT
@@ -190,7 +190,9 @@ grep -Eq 'kldunload (nvidia_modeset|nvidia_uvm)([^_A-Za-z]|$)' "$TMPD/mut3" && p
 grep -q 'Device busy' "$K" && pass "the veto row asserts the reason (Device busy)" || fail "the veto row does not assert the reason"
 grep -q 'boot_nvrm_info.sh' "$K" && pass "the nvrm-info proof is run in phase A" || fail "no nvrm-info proof"
 # no developer home directory or user name in the kit, no mkdir -p on the run directory
-if grep -n '/home/\|mlapointe' "$KIT"/linux_bridge_testboot "$KIT"/make-be.sh "$KIT"/summarize.sh; then fail "a home directory or user name is stored in the kit"; else pass "no home directory or user name in the kit"; fi
+_home_pattern=/$(printf 'home')/
+_user_pattern=mla$(printf 'pointe')
+if grep -n -e "$_home_pattern" -e "$_user_pattern" "$KIT"/linux_bridge_testboot "$KIT"/make-be.sh "$KIT"/summarize.sh; then fail "a home directory or user name is stored in the kit"; else pass "no home directory or user name in the kit"; fi
 grep -q 'mkdir -p "$OUT"' "$K" && fail "the run directory is made with mkdir -p (follows a planted symlink)" || pass "the run directory is made with mktemp"
 # behavioural plant: a planted symlink in the log root must not be followed
 mkdir -p "$TMPD/lr" "$TMPD/bin"

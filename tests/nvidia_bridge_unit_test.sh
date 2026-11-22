@@ -11,7 +11,7 @@ export PATH
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$HERE/..
 SRC=$REPO/src/gb10-linux-bridge
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/nvidia_bridge_unit_test.XXXXXXXX") || exit 1
 trap 'rm -rf "$TMPD"' EXIT
