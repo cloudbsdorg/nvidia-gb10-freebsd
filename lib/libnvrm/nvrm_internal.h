@@ -111,9 +111,17 @@ extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
 /* Translate a stored reason id; -1 means the id is not in the reason table. */
 int	nvrm_reason_from_id(const char *id);
-/* Test seam: stands in for getpid() where the RM backend asks who owns a
- * descriptor; NULL = the real one. */
+/* The process and fork generation that own backend objects. */
+typedef struct nvrm_owner {
+	pid_t		pid;
+	unsigned long	generation;
+} nvrm_owner;
+void	nvrm_owner_set(nvrm_owner *o);
+int	nvrm_owner_is_me(const nvrm_owner *o);
+/* Test seam: stands in for getpid(); NULL = the real one. */
 extern pid_t (*nvrm_getpid_hook)(void);
+/* Test seam: runs the pthread_atfork(3) child handler. */
+void	nvrm_owner_fork_seam(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
@@ -205,8 +213,9 @@ typedef struct nvrm_bmem_info {
  * its own, says why in err.  The core owns the bookkeeping (VA allocator,
  * lists, argument rules); a backend only talks to the GPU.  A release (unmap,
  * free) that the GPU side refuses returns an error too, so the core can keep
- * what is still held out of reuse; a release a backend skips on purpose (a
- * fork child, which does not own the RM client) is a success.
+ * what is still held out of reuse.  A release gets owner == 0 in a fork
+ * child: the backend releases its own records and does process-local work,
+ * but does not act on the parent's RM client or fake GPU.
  */
 typedef struct nvrm_mem_ops {
 	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
@@ -217,24 +226,24 @@ typedef struct nvrm_mem_ops {
 		    size_t errlen);
 	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
 		    int sparse, nvrm_bres **r, char *err, size_t errlen);
-	int	(*va_release)(nvrm_bres *r, char *err, size_t errlen);
+	int	(*va_release)(nvrm_bres *r, int owner, char *err, size_t errlen);
 	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
 	int	(*mem_register)(nvrm_bclient *bc, void *addr, uint64_t bytes,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
-	int	(*mem_free)(nvrm_bmem *m, char *err, size_t errlen);
+	int	(*mem_free)(nvrm_bmem *m, int owner, char *err, size_t errlen);
 	int	(*map_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
 		    uint64_t offset, uint64_t length, int read_only, char *err,
 		    size_t errlen);
 	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
-		    uint64_t length, char *err, size_t errlen);
+		    uint64_t length, int owner, char *err, size_t errlen);
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
 	 * descriptor carry one mapping); the core closes it on unmap. */
 	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
 		    char *err, size_t errlen);
-	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, char *err,
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, int owner, char *err,
 		    size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
@@ -311,6 +320,7 @@ struct nvrm_client {
 	nvrm_u64	max_page_size;
 	int		host_arm64;
 	int		allow_map;
+	nvrm_owner	owner;
 	nvrm_pool	pool[NVRM_DESC__COUNT];	/* indexed by NVRM_DESC_* */
 	nvrm_client_stats st;
 	char		errmsg[160];

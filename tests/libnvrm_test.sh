@@ -106,7 +106,7 @@ expect_rc "drift mutant: the build fails with 'schema drift'" $rc 0
 
 # ---- unit tests with coverage ---------------------------------------------
 CINC="-pthread -I$L -I$L/include -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
-LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c"
+LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c"
 mkdir -p "$W/cov"
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/core_test" "$T/core_test.c" $LIBSRC >"$W/cc1.log" 2>&1
 rc=$?
@@ -200,7 +200,7 @@ sed -i '' 's/text_version(nvrm_schema_version());/printf("0.0");/' "$MD/nvrm-inf
 if cmp -s "$MD/nvrm-info.c" "$L/nvrm-info/nvrm-info.c"; then
 	bad "mutant schema-text-source: the edit did not apply"
 else
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
 	rc=$?
 	if [ $rc -ne 0 ]; then
@@ -238,7 +238,7 @@ expect_rc "core + fake backend: 100% line and branch coverage" $rc 0
 rc=$?
 expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc 0
 (cd "$W/cov" && llvm-profdata merge -o mem.profdata mem.*.profraw && llvm-profdata merge -o rmmem.profdata rmmem.*.profraw)
-(cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_fake_mem.c)
+(cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_owner.c nvrm_fake_mem.c)
 rc=$?
 expect_rc "memory core, VA allocator and fake memory model: 100% line and branch coverage" $rc 0
 (cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c)
@@ -260,7 +260,7 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
 	if [ "$4" = version_test ]; then MUTSRC=; fi
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
@@ -315,6 +315,14 @@ mutant gpc-width nvrm.c 's/(mask >> NVRM_MAX_GPCS) != 0/0/' core_test
 mutant enumerate-call-failure nvrm.c 's/if (info_has_call_failure(&ctx->dev\[i\].info))/if (0)/' core_test
 mutant rm-version-errno nvrm_rm.c 's/rc != 0 \&\& errno != EINVAL/0/' rm_test
 # memory and VA: each rule has a mutant that one of the memory tests kills
+mutant owner-core nvrm_mem.c '/^nvrm_mem_alloc/,/^}/s/	rc = owner_check(cl);/	rc = NVRM_OK;/' mem_test
+mutant owner-skip-release nvrm_mem.c '/^nvrm_mem_free/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' mem_test
+mutant owner-flag-gmap nvrm_mem.c '/^gmap_drop/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' mem_test
+mutant owner-flag-cpu nvrm_mem.c '/^cpu_drop/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' rm_mem_test
+mutant owner-flag-va nvrm_mem.c '/^nvrm_va_release/,/^}/s/r->b, nvrm_owner_is_me(\&cl->owner)/r->b, 1/' rm_mem_test
+mutant owner-flag-close nvrm_mem.c '/^nvrm_client_close/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' rm_mem_test
+mutant rm-free-owner nvrm_rm_mem.c '/^free_object/,/^}/s/if (!owner)/if (0)/' rm_mem_test
+mutant rm-unmap-local nvrm_rm_mem.c '/^rmm_unmap_cpu/,/^}/s/munmap(addr, m->bytes);/if (owner) munmap(addr, m->bytes);/' rm_mem_test
 mutant va-merge nvrm_va.c 's/prev->end == addr/0/' mem_test
 mutant attr-uncached nvrm_mem.c 's/return (NVRM_ATTR_DEVICE);$/return (NVRM_ATTR_CACHED);/' mem_test
 mutant attr-arm64 nvrm_mem.c 's/if (!host_arm64)/if (1)/' mem_test
@@ -331,17 +339,16 @@ mutant fake-sparse nvrm_fake_mem.c 's/memset(p, 0, n);/(void)0;/' mem_test
 mutant fake-exported nvrm_fake_mem.c 's/ || !o->exported//' mem_test
 mutant fake-spare-limit nvrm_fake_mem.c 's/	    export_spare_limit(\*fd);/	    NVRM_OK;/' mem_test
 mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
-mutant rm-owner nvrm_rm_mem.c 's/	if (nvrm_rm_owner(s))$/	if (1)/' rm_mem_test
-mutant rm-free-owner nvrm_rm_mem.c 's/	if (!nvrm_rm_owner(c->s))$/	if (0)/' rm_mem_test
 mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,$/	return (1 ? NVRM_OK : status_fail(err, errlen,/' rm_mem_test
-mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got != 0 ? got : a->page_size;/out->page_size = a->page_size;/' rm_mem_test
+mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got;/out->page_size = a->page_size;/' rm_mem_test
+mutant wb-default nvrm_rm_mem.c 's/(void)import_page_size(surface\.attr, &got);/got = a->page_size;/' rm_mem_test
 mutant rm-huge-import nvrm_rm_mem.c 's/		\*ps = 2097152;/		*ps = 536870912;/' rm_mem_test
 mutant rm-coherency nvrm_rm_mem.c 's/		return (NVRM_COH_WC);/		return (NVRM_COH_CACHED);/' rm_mem_test
 mutant rm-va-end nvrm_rm_mem.c 's/va->end = vp.vaSize;/va->end = vp.vaBase + vp.vaSize;/' rm_mem_test
 mutant rm-session-map nvrm_rm_mem.c 's/(allow_map ? 0 : SESSION_CPU_MAP)/0/' rm_mem_test
 mutant rm-snoop nvrm_rm_mem.c 's/_CACHE_SNOOP, _ENABLE) : 0);/_CACHE_SNOOP, _ENABLE) : DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE));/' rm_mem_test
 mutant rm-close-sweep nvrm_rm_mem.c '/^rmm_client_close/,/^}/s/		free(r);//' rm_mem_test
-mutant rm-alloc-unknown-page nvrm_rm_mem.c 's/	if (got == 0 \&\& DRF_VAL/	if (0 \&\& DRF_VAL/' rm_mem_test
+mutant rm-alloc-unknown-page nvrm_rm_mem.c 's/	if (got == 0) {$/	if (0) {/' rm_mem_test
 mutant rm-node nvrm_rm_mem.c 's/DEVICE_PATH_FMT, c->minor);/DEVICE_PATH_FMT, 0);/' rm_mem_test
 mutant rm-leak nvrm_rm.c 's/		nvrm_rm_free(g->be, g->device, g->subdevice);//' rm_test
 # merge-review fixes (Opus A R1 R6, Opus B 1-10): each has a mutant that must die
@@ -365,13 +372,13 @@ mutant source-subsystem nvrm.c 's/\[NVRM_P_PCI_SUBSYSTEM_VENDOR\] = NVRM_S_RM,/[
 mutant source-cap-os nvrm.c 's/\[NVRM_P_CAP_OS_DEVICE_WC\] = NVRM_S_OS,/[NVRM_P_CAP_OS_DEVICE_WC] = NVRM_S_RM,/' core_test
 mutant source-derived nvrm.c 's/info->implementation.value, NVRM_S_DERIVED);/info->implementation.value, NVRM_S_RM);/' core_test
 mutant registry-once nvrm.c '/^nvrm_backend_select/,/^}/s/pthread_once(&builtins_once, register_builtins);/if (nregistered == 0) register_builtins();/' core_test
-mutant fork-guard nvrm_rm.c 's/return (my_pid() == be->pid \&\& fork_generation == be->generation);/return (1);/' rm_test
-mutant fork-generation nvrm_rm.c 's/fork_generation++;/;/' rm_test
-mutant fork-pid-only nvrm_rm.c 's/ \&\& fork_generation == be->generation//' rm_test
-mutant fork-generation-open nvrm_rm.c 's/be->generation = fork_generation;/be->generation = fork_generation + 1;/' rm_test
+mutant fork-guard nvrm_owner.c 's/return (my_pid() == o->pid \&\& fork_generation == o->generation);/return (1);/' rm_test
+mutant fork-generation nvrm_owner.c 's/fork_generation++;/;/' rm_test
+mutant fork-pid-only nvrm_owner.c 's/ \&\& fork_generation == o->generation//' rm_test
+mutant fork-generation-open nvrm_owner.c 's/o->generation = fork_generation;/o->generation = fork_generation + 1;/' rm_test
 mutant fd-leak-version nvrm_rm.c '/NVRM_RM_VERSION, NVRM_RM_VERSION);/,/NVRM_E_VERSION/s/sys->close(be->fd);//' rm_test
 mutant fork-guard-gpu nvrm_rm.c 's/	if (nvrm_rm_owner(g->be)) {/	if (1) {/' rm_test
-mutant fork-guard-pid nvrm_rm.c 's/be->pid = my_pid();/be->pid = 0;/' rm_test
+mutant fork-guard-pid nvrm_owner.c 's/o->pid = my_pid();/o->pid = 0;/' rm_test
 mutant nogpu-error nvrm.c 's|/\* No GPU is a result, not an error: the context holds zero devices. \*/|if (rc == NVRM_OK \&\& n == 0) rc = NVRM_E_NODEV;|' core_test
 
 # ---- JSON modes against the schema --------------------------------------
@@ -1378,7 +1385,7 @@ doc_checks() {
 	# the fork rule as the code has it, the arm64 rule with both constants,
 	# and the memory page in plain words
 	_chk sh -c '! grep -q "every other call is refused" "$1" && grep -q "a release (unmap, free, VA release, close) succeeds" "$1" && grep -q "INHERIT_NONE" "$1" || { echo "docs: nvrm.h states a fork rule the code does not have"; false; }' sh "$_l/include/nvrm/nvrm.h"
-	_chk sh -c 'grep -q "releases succeed and drop only the child" "$1" && grep -q "GPU mappings only" "$1" && ! grep -q "(0: " "$1" && ! grep -q "card list" "$1" || { echo "docs: nvrm_mem(3) fork rule, NOTSUP wording, (0: N) notation or card list"; false; }' sh "$_l/man/nvrm_mem.3"
+	_chk sh -c 'grep -q "Releases succeed and release only what the child holds" "$1" && grep -q "GPU mappings only" "$1" && ! grep -q "(0: " "$1" && ! grep -q "card list" "$1" || { echo "docs: nvrm_mem(3) fork rule, NOTSUP wording, (0: N) notation or card list"; false; }' sh "$_l/man/nvrm_mem.3"
 	_chk sh -c 'sed -n "/^.It video memory, arm64/,/^.El/p" "$1" | grep -q "NVRM_ATTR_WC" && sed -n "/^.It video memory, arm64/,/^.El/p" "$1" | grep -q "is 0" || { echo "docs: nvrm(7) arm64 rule lacks NVRM_ATTR_WC or the flag value"; false; }' sh "$_l/man/nvrm.7"
 	# installed docs say "this version", never a planning label
 	for f in "$_l/man/nvrm.3" "$_l/man/nvrm_mem.3" "$_l/man/nvrm.7" "$_l/include/nvrm/nvrm.h" "$_readme"; do

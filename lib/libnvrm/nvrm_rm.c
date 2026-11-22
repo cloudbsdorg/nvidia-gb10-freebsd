@@ -106,30 +106,6 @@ nvrm_rm_set_sys(const nvrm_rm_sys *s)
 	sys = s != NULL ? s : &nvrm_rm_real_sys;
 }
 
-/* ---- the process that owns a descriptor --------------------------------- */
-
-pid_t (*nvrm_getpid_hook)(void);	/* test seam: NULL = getpid() */
-static unsigned fork_generation;	/* counts the fork()s that led here */
-static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
-
-static pid_t
-my_pid(void)
-{
-	return (nvrm_getpid_hook != NULL ? nvrm_getpid_hook() : getpid());
-}
-
-static void
-atfork_child(void)
-{
-	fork_generation++;
-}
-
-static void
-register_atfork(void)
-{
-	pthread_atfork(NULL, NULL, atfork_child);
-}
-
 /* ---- RM calls ---------------------------------------------------------- */
 
 /* Returns the RM status; a failed ioctl(2) is IOCTL_FAILED. */
@@ -368,9 +344,7 @@ nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen)
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
-	pthread_once(&atfork_once, register_atfork);
-	be->pid = my_pid();
-	be->generation = fork_generation;
+	nvrm_owner_set(&be->owner);
 	be->fd = sys->open(NVRM_CTL_PATH, O_RDWR | O_CLOEXEC);
 	if (be->fd < 0) {
 		snprintf(err, errlen, "cannot open %s: %s", NVRM_CTL_PATH,
@@ -437,7 +411,7 @@ nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen)
 int
 nvrm_rm_owner(const nvrm_backend *be)
 {
-	return (my_pid() == be->pid && fork_generation == be->generation);
+	return (nvrm_owner_is_me(&be->owner));
 }
 
 void

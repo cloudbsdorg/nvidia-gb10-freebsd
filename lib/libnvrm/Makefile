@@ -28,8 +28,8 @@ LIB=		nvrm
 SHLIB_MAJOR=	1
 VERSION_MAP=	${.CURDIR}/Version.map
 SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fake_mem.c nvrm_fields.c \
-		nvrm_json.c nvrm_mem.c nvrm_names.c nvrm_rm.c nvrm_rm_mem.c \
-		nvrm_table.c nvrm_va.c
+		nvrm_json.c nvrm_mem.c nvrm_names.c nvrm_owner.c nvrm_rm.c \
+		nvrm_rm_mem.c nvrm_table.c nvrm_va.c
 INCSDIR=	${INCLUDEDIR}/nvrm
 INCS=		include/nvrm/nvrm.h include/nvrm/nvrm_version.h
 MAN=		man/nvrm.3 man/nvrm_mem.3 man/nvrm.7

@@ -90,11 +90,13 @@ typedef struct fake_map {
 	struct fake_map	*next;
 	uint64_t	va, length, offset;
 	nvrm_bmem	*m;
+	fake_obj	*o;		/* software-GPU state, independent of m */
+	void		*user;
 	int		read_only;
 } fake_map;
 
 struct nvrm_bres {
-	fake_res	r;		/* first: the list holds &r */
+	fake_res	*r;		/* the parent's list outlives a child record */
 	nvrm_bclient	*c;
 };
 
@@ -217,12 +219,20 @@ static void
 dev_put(fake_dev *d)
 {
 	fake_dev **pp;
+	fake_obj *o;
 
 	if (--d->nclients != 0)
 		return;
 	for (pp = &devs; *pp != d; pp = &(*pp)->next)
 		;
 	*pp = d->next;
+	/* A fork child frees its backend records but not the parent's objects.
+	 * The in-process owner-hook test relies on the last client sweep. */
+	while ((o = d->objs) != NULL) {
+		d->objs = o->next;
+		live_objects--;
+		free(o);
+	}
 	nvrm_va_destroy(d->region[0]);
 	nvrm_va_destroy(d->region[1]);
 	close(d->fd);
@@ -328,7 +338,7 @@ fk_client_close(nvrm_bclient *c)
 	while ((r = c->res) != NULL) {
 		c->res = r->next;
 		live_res--;
-		free((nvrm_bres *)r);
+		free(r);
 	}
 	while ((m = c->held) != NULL) {
 		c->held = m->held_next;
@@ -407,27 +417,38 @@ fk_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
+	r->r = NVRM_CALLOC(1, sizeof(*r->r));
+	if (r->r == NULL) {
+		free(r);
+		snprintf(err, errlen, "out of memory");
+		return (NVRM_E_NOMEM);
+	}
 	r->c = c;
-	r->r.va = va;
-	r->r.bytes = bytes;
-	r->r.sparse = sparse;
-	r->r.next = c->res;
-	c->res = &r->r;
+	r->r->va = va;
+	r->r->bytes = bytes;
+	r->r->sparse = sparse;
+	r->r->next = c->res;
+	c->res = r->r;
 	live_res++;
 	*rp = r;
 	return (NVRM_OK);
 }
 
 static int
-fk_va_release(nvrm_bres *r, char *err, size_t errlen)
+fk_va_release(nvrm_bres *r, int owner, char *err, size_t errlen)
 {
 	fake_res **pp;
 
+	if (!owner) {
+		free(r);
+		return (NVRM_OK);
+	}
 	INJECT(NVRM_FAKE_OP_VA_RELEASE, err, errlen);
-	for (pp = &r->c->res; *pp != &r->r; pp = &(*pp)->next)
+	for (pp = &r->c->res; *pp != r->r; pp = &(*pp)->next)
 		;
-	*pp = r->r.next;
+	*pp = r->r->next;
 	live_res--;
+	free(r->r);
 	free(r);
 	return (NVRM_OK);
 }
@@ -500,8 +521,12 @@ mapped_somewhere(const nvrm_bmem *m)
 }
 
 static int
-fk_mem_free(nvrm_bmem *m, char *err, size_t errlen)
+fk_mem_free(nvrm_bmem *m, int owner, char *err, size_t errlen)
 {
+	if (!owner) {
+		free(m);
+		return (NVRM_OK);
+	}
 	/* Still mapped (an unmap was refused): like the RM, the mapping keeps
 	 * the memory alive, until the client closes. */
 	if (mapped_somewhere(m)) {
@@ -538,6 +563,8 @@ fk_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 	g->length = length;
 	g->offset = offset;
 	g->m = m;
+	g->o = m->o;
+	g->user = m->user;
 	g->read_only = read_only;
 	g->next = r->c->maps;
 	r->c->maps = g;
@@ -547,11 +574,13 @@ fk_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 
 static int
 fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
-    char *err, size_t errlen)
+    int owner, char *err, size_t errlen)
 {
 	fake_map **pp, *g;
 
 	(void)length;
+	if (!owner)
+		return (NVRM_OK);
 	INJECT(NVRM_FAKE_OP_UNMAP_GPU, err, errlen);
 	for (pp = &r->c->maps; (*pp)->m != m || (*pp)->va != va;
 	    pp = &(*pp)->next)
@@ -583,9 +612,11 @@ fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 }
 
 static int
-fk_unmap_cpu(nvrm_bmem *m, void *addr, char *err, size_t errlen)
+fk_unmap_cpu(nvrm_bmem *m, void *addr, int owner, char *err, size_t errlen)
 {
 	munmap(addr, m->o->bytes);
+	if (!owner)
+		return (NVRM_OK);
 	INJECT(NVRM_FAKE_OP_UNMAP_CPU, err, errlen);
 	return (NVRM_OK);
 }
@@ -774,17 +805,16 @@ gpu_copy(const nvrm_bclient *c, const fake_map *g, uint64_t va, void *buf,
     size_t n, int write)
 {
 	uint64_t off = g->offset + (va - g->va);
-	nvrm_bmem *m = g->m;
 
-	if (m->user != NULL) {
+	if (g->user != NULL) {
 		if (write)
-			memcpy((char *)m->user + off, buf, n);
+			memcpy((char *)g->user + off, buf, n);
 		else
-			memcpy(buf, (char *)m->user + off, n);
+			memcpy(buf, (char *)g->user + off, n);
 	} else if (write)
-		(void)pwrite(c->dev->fd, buf, n, (off_t)(m->o->off + off));
+		(void)pwrite(c->dev->fd, buf, n, (off_t)(g->o->off + off));
 	else
-		(void)pread(c->dev->fd, buf, n, (off_t)(m->o->off + off));
+		(void)pread(c->dev->fd, buf, n, (off_t)(g->o->off + off));
 }
 
 int

@@ -390,8 +390,11 @@ The client was not opened with
 the CPU mapping does not allow the access, or this process did not open the
 client: in a
 .Xr fork 2
-child a call that would create or act on RM objects is refused, while
-releases succeed and drop only the child's records.
+child, a call that would allocate, register, map, export or import memory or
+reserve VA is refused.
+Releases succeed and release only what the child holds; in particular,
+.Fn nvrm_mem_unmap_cpu
+still removes the child's own mapping.
 The getters,
 .Fn nvrm_mem_read
 and
@@ -409,7 +412,8 @@ The backend has no memory support; or the GPU has no device node, so
 .Dv NVRM_OPEN_ALLOW_MAP
 cannot be honoured (open without it to use GPU mappings only); or the RM
 cannot express what was asked, or allocated with a page size the library
-does not know.
+does not know; or the RM did not report the page size an allocation got
+(ask for an explicit page size).
 .It Bq Er NVRM_E_RM
 The RM refused a call; the message names the call and the RM status.
 .It Bq Er NVRM_E_IO
