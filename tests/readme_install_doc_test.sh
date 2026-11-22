@@ -468,26 +468,70 @@ done
 IFS=$oldifs
 sed -n 's/^next: //p' "$S/installed" > "$S/next-lines"
 [ -s "$S/next-lines" ] || bad "README Installed has no quoted next: lines"
+# The quoted examples are compared with what make.sh printed in a test run: the
+# flow test's planted install (blocked and installed output) and its next steps
+# for a doas user (a live load: a DESTDIR install stages, it loads nothing).
+mkdir -p "$S/samples"
+# Sample-only mode of the flow test: it runs the planted blocked install, the
+# planted install and the doas next steps, and exits non-zero if any of them
+# misbehaves.  Its other checks are its own business.
+if GB10_FLOW_SAMPLES_ONLY=1 GB10_FLOW_SAMPLES=$S/samples sh "$repo/tests/make_install_flow_test.sh" > "$S/flow.log" 2>&1 \
+    && [ -s "$S/samples/blocked.out" ] && [ -s "$S/samples/installed.out" ] \
+    && [ -s "$S/samples/next-doas.out" ] && [ -s "$S/samples/next-note.out" ]; then
+	ok "the planted blocked run, install and next steps ran and wrote their output"
+else
+	bad "the planted runs behind the quoted output failed: $(tail -n 3 "$S/flow.log" | tr '\n' ' ')"
+fi
 while IFS= read -r nl; do
 	[ -n "$nl" ] || continue
-	if printed_whole_line "$nl"; then
-		ok "Installed next step is printed by make.sh: $nl"
+	if sed 's/^/next: /' "$S/samples/next-doas.out" 2>/dev/null | grep -qxF -- "next: $nl"; then
+		ok "Installed next step is what make.sh printed: $nl"
 	else
-		bad "Installed next step is not printed by make.sh: $nl"
+		bad "Installed next step is not what make.sh printed: $nl"
 	fi
 done < "$S/next-lines"
+# The one quoted line that is not prefixed is the boot-load note.
+grep -v -e '^next: ' -e '^```' "$S/installed" | grep -F 'make configure YES=1' > "$S/note-lines"
+if [ -s "$S/note-lines" ] && [ "$(cat "$S/note-lines")" = "$(cat "$S/samples/next-note.out" 2>/dev/null)" ]; then
+	ok "Installed quotes the boot-load note as make.sh printed it"
+else
+	bad "Installed does not quote the boot-load note as make.sh printed it"
+fi
+# README order: the firmware step comes before the kldload step.
+_fwl=$(grep -n 'EnableGpuFirmware=1' "$S/next-lines" | head -n 1 | cut -d: -f1)
+_kll=$(grep -n 'kldload' "$S/next-lines" | head -n 1 | cut -d: -f1)
+if [ -n "$_fwl" ] && [ -n "$_kll" ] && [ "$_fwl" -lt "$_kll" ]; then
+	ok "README Installed quotes the firmware step before the kldload step"
+else
+	bad "README Installed does not quote the firmware step before the kldload step"
+fi
+# The other quoted lines (not next:) must be lines make.sh printed.
+grep -E '^install: ' "$S/installed" > "$S/install-lines"
+[ -s "$S/install-lines" ] || bad "README Installed has no quoted install: lines"
+while IFS= read -r il; do
+	[ -n "$il" ] || continue
+	if grep -qxF -- "$il" "$S/samples/installed.out" 2>/dev/null; then
+		ok "Installed line is what make.sh printed: $il"
+	else
+		bad "Installed line is not what make.sh printed: $il"
+	fi
+done < "$S/install-lines"
 check "README Installed says the root tool in the kldload line is the one you have" has 'root tool in that line is the one' "$S/installed"
 check "README Installed puts EnableGpuFirmware=1 with the load instructions" has 'hw.nvidia.registry.EnableGpuFirmware=1' "$S/installed"
 grep -v '^next: ' "$readme" > "$S/readme-unquoted"
 check "README never hardcodes doas for kenv or kldload, in code or inline, outside the quoted output" no_match 'doas +(kenv|kldload)' "$S/readme-unquoted"
 
-# Blocked: the quoted fix line is what make.sh prints today.
-fixline=$(sed -n 's/^fix: //p' "$S/blocked" | head -n 1)
-if [ -n "$fixline" ] && grep -F -- "$fixline" "$make_sh" >/dev/null 2>&1; then
-	ok "Blocked fix line is in make.sh"
-else
-	bad "Blocked fix line is missing or not in make.sh: $fixline"
-fi
+# Blocked: every quoted line is a line make.sh printed in the test run.
+awk '/^```text$/ { i = 1; next } /^```$/ { i = 0 } i' "$S/blocked" > "$S/blocked-lines"
+[ -s "$S/blocked-lines" ] || bad "README Blocked quotes no output"
+while IFS= read -r bl; do
+	[ -n "$bl" ] || continue
+	if grep -qxF -- "$bl" "$S/samples/blocked.out" 2>/dev/null; then
+		ok "Blocked line is what make.sh printed: $bl"
+	else
+		bad "Blocked line is not what make.sh printed: $bl"
+	fi
+done < "$S/blocked-lines"
 check "README Blocked says what a blocked install writes and leaves" has 'stay installed' "$S/blocked"
 check "README never calls a sample real output" no_match '[Rr]eal ([Ee]nglish )?[Oo]utput' "$readme"
 check "README labels the samples as example output from make.sh" has 'Example output (from `scripts/make.sh`' "$readme"

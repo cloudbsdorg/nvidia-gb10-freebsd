@@ -139,6 +139,7 @@ snap "$D1" > "$S/blocked.before"
 # even a manifest or a destination directory can be written.
 run_install "$W1" "$D1" "$S/blocked.out"
 rc=$?
+rc_blocked_sample=$rc
 snap "$D1" > "$S/blocked.after"
 if [ "$rc" = 1 ] && grep -q 'ACCEPT_NVIDIA_LICENSE=1' "$S/blocked.out" \
     && cmp -s "$S/blocked.before" "$S/blocked.after" \
@@ -194,6 +195,19 @@ fi
 # (a) exact one-command install, with command-line licence acceptance.
 run_install "$W1" "$D1" "$S/installed.out" ACCEPT_NVIDIA_LICENSE=1
 rc=$?
+# GB10_FLOW_SAMPLES_ONLY=1 (tests/readme_install_doc_test.sh): write the output
+# of the planted blocked run, the planted install and the doas next steps into
+# GB10_FLOW_SAMPLES, and exit non-zero unless all three behaved.
+if [ "${GB10_FLOW_SAMPLES_ONLY:-0}" = 1 ]; then
+	_so=1
+	if [ -d "${GB10_FLOW_SAMPLES:-}" ] && [ "$rc_blocked_sample" = 1 ] && [ "$rc" = 0 ] \
+	    && env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= sh "$repo/scripts/make.sh" _next-steps 2>/dev/null > "$S/next-doas.out" \
+	    && env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= sh "$repo/scripts/make.sh" _next-note 2>/dev/null > "$S/next-note.out" \
+	    && grep -q 'kldload nvidia-drm' "$S/next-doas.out" && [ -s "$S/next-note.out" ]; then
+		cp "$S/blocked.out" "$S/installed.out" "$S/next-doas.out" "$S/next-note.out" "$GB10_FLOW_SAMPLES/" && _so=0
+	fi
+	exit "$_so"
+fi
 if [ "$rc" = 0 ] && grep -q '/boot/modules/nvidia.ko' "$S/installed.out" \
     && grep -q 'staged under' "$S/installed.out" \
     && grep -q 'kldstat' "$S/installed.out" && grep -q 'nvrm-info --json' "$S/installed.out" \
@@ -229,6 +243,75 @@ assert len(d["next"]) == 3 and "staged under" in d["next"][0]
 assert d["next"][1:] == ["kldstat", "nvrm-info --json"]
 EOF
 then ok "installed JSON is one object and agrees with English"; else bad "installed JSON (rc $rc): $(tail -n 4 "$S/installed.json" | tr '\n' ' ')"; fi
+
+# Output wording (Track #2440): the fix names the command the user ran, the
+# progress prefix is printed once, and the next steps are commands to paste.
+LICFIX_RUN='make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question'
+LICFIX_PRE='make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer the licence question'
+if grep -qxF "fix: $LICFIX_RUN" "$S/blocked.out" \
+    && ! grep -q 'make install-prereqs' "$S/blocked.out" \
+    && python3 -I - "$S/blocked.json" "$LICFIX_RUN" <<'PEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+b = [x for x in d["blockers"] if x["name"] == "licence"]
+assert len(b) == 1, b
+assert b[0]["fix"] == sys.argv[2], b[0]["fix"]
+PEOF
+then ok "make install: the blocked licence fix names make install, in English and JSON"
+else bad "licence fix names the wrong command: $(grep '^fix:' "$S/blocked.out" | tr '\n' ' ')"; fi
+# make preflight (the install-prereqs view) keeps naming install-prereqs.
+WPF=$S/wpf
+plant_work "$WPF"
+_wp=$(cd "$repo" && env -u ACCEPT_NVIDIA_LICENSE -u ACCEPT_ALL_LICENSES GB10_TEST_HOOKS=1 \
+    MK_WORK="$WPF" MK_SYSDIR="$WPF/src/sys" MK_BSDSRCTOP="$WPF/src" MK_DRMKMODDIR="$WPF-drm" \
+    sh scripts/make.sh preflight --json 2>/dev/null < /dev/null)
+if printf '%s\n' "$_wp" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+r = [x for x in d["status"] if x["name"] == "licence"]
+assert len(r) == 1 and r[0]["fix"] == sys.argv[1], r' "$LICFIX_PRE"; then
+	ok "make preflight: the licence fix names make install-prereqs"
+else
+	bad "preflight licence fix: $(printf '%s' "$_wp" | grep -o '"fix": "make install-prereqs[^"]*"' | head -n 2 | tr '\n' ' ')"
+fi
+if [ "$(grep -c '^install: done$' "$S/installed.out")" = 1 ] && ! grep -q '^install: install:' "$S/installed.out"; then
+	ok "the install progress prefix is printed once"
+else
+	bad "doubled prefix: $(grep 'install:' "$S/installed.out" | tr '\n' ' ')"
+fi
+FWK=hw.nvidia.registry.EnableGpuFirmware=1
+NONE_SUF='(as root: this user has no doas, sudo or su)'
+oldifs=$IFS
+IFS='|'
+for _pair in "root|kenv $FWK|kldload nvidia-drm" "doas|doas kenv $FWK|doas kldload nvidia-drm" \
+    "sudo|sudo kenv $FWK|sudo kldload nvidia-drm" "su|su root -c 'kenv $FWK'|su root -c 'kldload nvidia-drm'" \
+    "none|kenv $FWK $NONE_SUF|kldload nvidia-drm $NONE_SUF"; do
+	set -- $_pair
+	_m=$1
+	_fw=$2
+	_kl=$3
+	IFS=$oldifs
+	env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=$_m MK_DESTDIR= sh "$repo/scripts/make.sh" _next-steps 2>/dev/null > "$S/next-$_m.out"
+	if [ "$(sed -n 1p "$S/next-$_m.out")" = "$_fw" ] && [ "$(sed -n 2p "$S/next-$_m.out")" = "$_kl" ] \
+	    && [ "$(sed -n 3,4p "$S/next-$_m.out" | tr '\n' '|')" = 'kldstat|nvrm-info --json|' ]; then
+		ok "next steps ($_m): the firmware command, then kldload, each one a command"
+	else
+		bad "next steps ($_m): $(tr '\n' '|' < "$S/next-$_m.out") (want [$_fw] then [$_kl])"
+	fi
+	IFS='|'
+done
+IFS=$oldifs
+_note=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= sh "$repo/scripts/make.sh" _next-note 2>/dev/null)
+if printf '%s\n' "$_note" | grep -q 'make configure YES=1'; then
+	ok "a live install says make configure YES=1 loads the driver at boot"
+else
+	bad "no boot-load note: [$_note]"
+fi
+if ! grep -q 'EnableGpuFirmware\|make configure' "$S/installed.out"; then
+	ok "a DESTDIR install has no firmware or load step"
+else
+	bad "DESTDIR install mentions the firmware setting"
+fi
 
 # JSONL carries progress objects followed by exactly the same summary shape.
 D1L=$S/d1-jsonl
@@ -1138,7 +1221,7 @@ then ok "a DESTDIR install says the files are staged, no kldload"
 else bad "DESTDIR next steps: $(tr -d '\n' < "$S/installed.json" | head -c 300)"; fi
 _ns=
 for _m in root doas sudo su; do
-	_ns="$_ns$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=$_m MK_DESTDIR= sh "$repo/scripts/make.sh" _next-steps 2>/dev/null | head -n 1)|"
+	_ns="$_ns$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=$_m MK_DESTDIR= sh "$repo/scripts/make.sh" _next-steps 2>/dev/null | grep kldload | head -n 1)|"
 done
 if [ "$_ns" = "kldload nvidia-drm|doas kldload nvidia-drm|sudo kldload nvidia-drm|su root -c 'kldload nvidia-drm'|" ]; then
 	ok "the root tool the user has is the one named"
