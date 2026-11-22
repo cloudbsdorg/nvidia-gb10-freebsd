@@ -9,6 +9,9 @@
  * classes the GPU lists wins.  A GPU that matches no row is still reported,
  * with the family-supplied values unavailable.
  *
+ * Ada has no copy class of its own in the headers: its copy engines are the
+ * ones of the generation before (0xC7B5), as the RM class lists show.
+ *
  * Board decorators are PCI-subsystem entries that only add or override
  * options and never decide support.  No decorator goes in without a real
  * board that needs it, so the table is empty today.
@@ -25,7 +28,7 @@ const nvrm_family nvrm_family_table[] = {
 	    { KiB(4), KiB(64), MiB(2), MiB(512) } },
 	{ "hopper", 0xC86F, 0xCBC0, 0xCB97, 0xC8B5,
 	    { KiB(4), KiB(64), MiB(2), MiB(512) } },
-	{ "ada", 0xC56F, 0xC9C0, 0xC997, 0,
+	{ "ada", 0xC56F, 0xC9C0, 0xC997, 0xC7B5,
 	    { KiB(4), KiB(64), MiB(2) } },
 	{ "ampere-ga10x", 0xC56F, 0xC7C0, 0xC797, 0xC7B5,
 	    { KiB(4), KiB(64), MiB(2) } },

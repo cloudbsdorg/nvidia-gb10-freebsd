@@ -10,10 +10,37 @@
 # does not use nvidia-smi or any Linux layer, and it never loads or unloads a
 # module.
 #
-# usage: boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
+# What the board is, stated by the kit and not read back from the library
+# (a value compared with itself proves nothing):
+#   BOOT_EXPECT_VRAM_BYTES  the video memory the board has, in bytes, exactly
+#                           as the RM reports it (0 for a unified-memory part);
+#                           e.g. 17179869184 for a 16 GiB card
+#   BOOT_EXPECT_SM          the SM version, major.minor (12.0 for the RTX 5060
+#                           Ti)
+# Both are required, and both apply to every GPU the run reports (the test
+# boards have one).  A missing or different value is a FAIL.  The kernel log of
+# FreeBSD does not report VRAM, so there is no log line to compare it with.
+# bar1_size is compared with BAR1 of the same device in `pciconf -lvb`, a
+# source that does not go through the RM: BAR1 is the memory BAR at config
+# offset 0x14 (BAR0, the registers, is at 0x10; BAR3 at 0x1c).  No GPU at all
+# is a FAIL here: the board has one.
+#
+# The proof is that nvrm-info needs no Linux layer, so the test BE must not
+# have one: set linux_enable="NO" in the test BE's rc.conf and keep the Linux
+# modules out of kld_list (the Linux ABI modules linux.ko, linux64.ko and
+# linux_common.ko must not be loaded, and the sysctl compat.linux.osrelease
+# must not answer).  The check runs twice, before the first and after the last
+# nvrm-info run, so a module loaded in between is seen; a sysctl that cannot
+# be read is a FAIL, never "absent".  Modules of LinuxKPI (linuxkpi.ko,
+# linuxkpi_video.ko, ...) are not a Linux layer and do not fail this check:
+# another GPU's driver may be loaded.
+#
+# usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m \
+#            boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
 # Writes OUTDIR/results.txt (one PASS/FAIL/INFO line per check, last line
 # "== done rc=N"), OUTDIR/nvrm-info.json, nvrm-info.jsonl, sysctl.txt,
-# pciconf.txt, dmesg-nvrm.txt, kldstat.txt.  Exit status: number of FAILs.
+# pciconf.txt, dmesg-nvrm.txt, kldstat.txt, kldstat-after.txt.  Exit status:
+# number of FAILs.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 LC_ALL=C
@@ -21,10 +48,10 @@ export PATH LC_ALL
 # The proof is of the real driver: the environment must not select the fake
 # backend (only the suite's own test of this script sets BOOT_ALLOW_FAKE).
 ALLOW_FAKE_NOTE=
-[ -n "$BOOT_ALLOW_FAKE" ] || unset NVRM_BACKEND NVRM_FAKE_PROFILE NVRM_FAKE_FAIL BOOT_KLDSTAT
+[ -n "$BOOT_ALLOW_FAKE" ] || unset NVRM_BACKEND NVRM_FAKE_PROFILE NVRM_FAKE_FAIL BOOT_KLDSTAT BOOT_PCICONF BOOT_SYSCTL
 [ -z "$BOOT_ALLOW_FAKE" ] || ALLOW_FAKE_NOTE=1
 
-OUT=${1:?usage: boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]}
+OUT=${1:?usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]}
 INFO=${2:-nvrm-info}
 SCHEMA=${3:-}
 mkdir -p "$OUT" || exit 99
@@ -35,28 +62,56 @@ pass() { printf 'PASS %s\n' "$1" >>"$R"; }
 fail() { printf 'FAIL %s\n' "$1" >>"$R"; }
 info() { printf 'INFO %s\n' "$1" >>"$R"; }
 
+# a test may stand a stub in for each of these (honoured only with BOOT_ALLOW_FAKE)
+KLD=${BOOT_KLDSTAT:-kldstat}
+PCICONF=${BOOT_PCICONF:-pciconf}
+SYSCTL=${BOOT_SYSCTL:-sysctl}
 [ -z "$ALLOW_FAKE_NOTE" ] || fail "BOOT_ALLOW_FAKE is set: this run is not a proof of the real driver"
-info "start $(date -u +%Y-%m-%dT%H:%M:%SZ) host $(hostname) kernel $(sysctl -n kern.bootfile 2>&1)"
-KLD=${BOOT_KLDSTAT:-kldstat}	# a test may stand a stub in
+info "start $(date -u +%Y-%m-%dT%H:%M:%SZ) host $(hostname) kernel $($SYSCTL -n kern.bootfile 2>&1)"
 $KLD >"$OUT/kldstat.txt" 2>&1
 grep -qE ' nvidia\.ko' "$OUT/kldstat.txt" && pass "nvidia.ko is loaded" || fail "nvidia.ko is not loaded"
-# the claim to prove: nvrm-info needs no Linux kmod.  A loaded linux or
-# linux64 module means this boot proves nothing about it: that is a FAIL.
-if $KLD | awk '{print $5}' | grep -qE '^(linux|linux64)'; then
-	fail "a linux or linux64 kmod is loaded: this boot cannot prove nvrm-info runs without one"
-else
-	pass "no linux or linux64 kmod loaded while nvrm-info runs"
-fi
-info "linuxkpi modules loaded: $($KLD | awk '{print $5}' | grep -ciE 'linuxkpi|lkpi|drm|dmabuf')"
+
+# The claim to prove: nvrm-info needs no Linux layer.  linux.ko, linux64.ko or
+# linux_common.ko (exactly these names: never linuxkpi*) or an answering
+# compat.linux.osrelease (a Linux ABI built into the kernel) mean this boot
+# proves nothing about it: that is a FAIL.  Run before the first and after the
+# last nvrm-info run: linux_check WHEN KLDSTAT-FILE.  A kldstat that does not
+# even name the kernel, or a sysctl that fails for any reason but "unknown
+# oid", is a FAIL: a probe that could not look has not found nothing.
+linux_check() {
+	_when=$1; _f=$2
+	_mods=$(awk '{print $5}' "$_f" | grep -E '^(linux|linux64|linux_common)\.ko$' | tr '\n' ' ')
+	if [ -n "$_mods" ]; then
+		fail "a Linux ABI kmod (${_mods% }) is loaded $_when: this boot cannot prove nvrm-info runs without one; set linux_enable=NO in the test BE's rc.conf and take it out of kld_list"
+	elif awk '{print $5}' "$_f" | grep -qx kernel; then
+		pass "no Linux ABI kmod loaded $_when"
+	else
+		fail "kldstat output $_when does not name the kernel: the module list could not be read; run as root and check kldstat on the BE"
+	fi
+	_abi=$($SYSCTL -n compat.linux.osrelease 2>"$OUT/linux-sysctl.err"); _st=$?
+	if [ $_st -eq 0 ] && [ -n "$_abi" ]; then
+		if [ -n "$_mods" ]; then
+			fail "compat.linux.osrelease answers ($_abi) $_when: the Linux ABI is present"
+		else
+			fail "compat.linux.osrelease answers ($_abi) $_when but no Linux kmod is loaded: the kernel has the Linux ABI built in (COMPAT_LINUX); boot a kernel without it"
+		fi
+	elif [ $_st -ne 0 ] && grep -q 'unknown oid' "$OUT/linux-sysctl.err"; then
+		pass "compat.linux.osrelease does not answer $_when: no Linux ABI"
+	else
+		fail "compat.linux.osrelease could not be read $_when (exit $_st: $(head -c 200 "$OUT/linux-sysctl.err")): the probe proves nothing; run as root and read $OUT/linux-sysctl.err"
+	fi
+}
+linux_check "before nvrm-info runs" "$OUT/kldstat.txt"
+info "linuxkpi modules loaded (not a Linux layer): $(awk '{print $5}' "$OUT/kldstat.txt" | grep -ciE 'linuxkpi|lkpi|drm|dmabuf')"
 [ -c /dev/nvidiactl ] && pass "/dev/nvidiactl exists" || fail "/dev/nvidiactl missing"
 
 # what the driver says by itself
 {
-	sysctl hw.nvidia.version
-	sysctl hw.nvidia.altra_device_wc_active
-	sysctl hw.nvidia.gpus
+	$SYSCTL hw.nvidia.version
+	$SYSCTL hw.nvidia.altra_device_wc_active
+	$SYSCTL hw.nvidia.gpus
 } >"$OUT/sysctl.txt" 2>&1
-pciconf -lv >"$OUT/pciconf.txt" 2>&1
+$PCICONF -lvb >"$OUT/pciconf.txt" 2>&1
 dmesg | grep -iE 'nvrm|nvidia' >"$OUT/dmesg-nvrm.txt" 2>&1
 
 # nvrm-info, every mode
@@ -89,8 +144,12 @@ if [ -n "$SCHEMA" ] && [ -f "$SCHEMA" ]; then
 	python3 -I "$V" "$SCHEMA" "$OUT/nvrm-info.jsonl" >>"$R" 2>&1 && pass "--jsonl validates against the schema" || fail "--jsonl does not validate"
 fi
 
+# the Linux layer again, after the last nvrm-info run
+$KLD >"$OUT/kldstat-after.txt" 2>&1
+linux_check "after nvrm-info ran" "$OUT/kldstat-after.txt"
+
 # compare with the driver, GPU by GPU, using python only to read the JSON
-python3 -I - "$OUT" "$HERE/../.." >>"$R" 2>&1 <<'PY'
+python3 -I - "$OUT" "$HERE/../.." "${BOOT_EXPECT_VRAM_BYTES:-}" "${BOOT_EXPECT_SM:-}" >>"$R" 2>&1 <<'PY'
 import json, os, re, subprocess, sys
 out = sys.argv[1]
 doc = json.load(open(out + "/nvrm-info.json"))
@@ -98,6 +157,7 @@ def say(ok, msg):
     print(("PASS " if ok else "FAIL ") + msg)
 def val(f):
     return f["value"] if f["available"] else None
+exp_vram, exp_sm = sys.argv[3], sys.argv[4]
 sysctl = open(out + "/sysctl.txt").read()
 pci = open(out + "/pciconf.txt").read()
 built = doc["built_for_rm_version"]
@@ -122,6 +182,30 @@ say(doc["backend"] == "rm",
     "nvrm-info used the rm backend (the real driver), backend=%s" % doc["backend"])
 devs = doc["devices"]
 print("INFO nvrm-info reports %d GPU(s)" % len(devs))
+say(len(devs) > 0, "nvrm-info reports %d GPU(s) (the board has one)" % len(devs) if devs else
+    "nvrm-info reports at least one GPU: none reported; check hw.nvidia.gpus in sysctl.txt and dmesg-nvrm.txt, and that nvidia.ko attached to the board")
+vram_ok = exp_vram.isdigit()
+say(vram_ok, "BOOT_EXPECT_VRAM_BYTES is %s" % exp_vram if vram_ok else
+    "BOOT_EXPECT_VRAM_BYTES must be the board's VRAM in bytes (e.g. 17179869184 for 16 GiB, 0 for a unified-memory part); got %r" % exp_vram)
+sm_ok = re.fullmatch(r"[0-9]+\.[0-9]+", exp_sm) is not None
+say(sm_ok, "BOOT_EXPECT_SM is %s" % exp_sm if sm_ok else
+    "BOOT_EXPECT_SM must be the board's SM version as major.minor (e.g. 12.0); got %r" % exp_sm)
+
+
+def bars(pci, header):
+    """The memory BARs listed under a pciconf -lvb header line: {offset: size}."""
+    lines = pci.splitlines()
+    found = {}
+    if header not in lines:
+        return found
+    for l in lines[lines.index(header) + 1:]:
+        if not l[:1].isspace():
+            break
+        m = re.match(r"\s+bar\s+\[([0-9a-f]+)\] = type (Prefetchable Memory|Memory), .*size (\d+)", l)
+        if m:
+            found[m.group(1)] = int(m.group(3))
+    return found
+
 for d in devs:
     i = d["index"]
     ident, gpu, mem = d["identity"], d["gpu"], d["memory"]
@@ -150,15 +234,29 @@ for d in devs:
     print("INFO GPU %d model (sysctl) %s; family (libnvrm) %s; chip_id %s; SM %s.%s" % (
         i, m.group(1) if m else None, val(d["gpu"]["family"]), val(gpu["chip_id"]),
         val(gpu["sm_version_major"]), val(gpu["sm_version_minor"])))
-    say(val(gpu["sm_version_major"]) is not None, "GPU %d SM version is available" % i)
+    sm = (val(gpu["sm_version_major"]), val(gpu["sm_version_minor"]))
+    say(None not in sm and sm_ok and "%d.%d" % sm == exp_sm,
+        "GPU %d SM version nvrm-info=%s expected BOOT_EXPECT_SM=%s" % (
+            i, "%s.%s" % sm if None not in sm else None, exp_sm))
     say(val(gpu["sm_count"]) is not None and val(gpu["sm_count"]) > 0,
         "GPU %d sm_count available and nonzero: %s" % (i, val(gpu["sm_count"])))
-    # VRAM: pciconf memory regions are not a size source; compare with the
-    # kernel log line that reports the framebuffer when there is one
-    print("INFO GPU %d vram_size %s bar1_size %s max_page_size %s numa %s" % (
-        i, mem["vram_size"], mem["bar1_size"], mem["max_page_size"], mem["numa_node"]))
-    log = open(out + "/dmesg-nvrm.txt").read()
-    print("INFO GPU %d kernel log lines mentioning nvrm/nvidia: %d (read dmesg-nvrm.txt for VRAM, compare by hand with vram_size)" % (i, len(log.splitlines())))
+    # VRAM against the board's stated size; BAR1 against a memory BAR of the
+    # same device in pciconf -lvb (neither goes back through the RM)
+    vram = val(mem["vram_size"])
+    say(vram is not None and vram_ok and vram == int(exp_vram),
+        "GPU %d vram_size nvrm-info=%s expected BOOT_EXPECT_VRAM_BYTES=%s" % (i, vram, exp_vram))
+    bar1 = val(mem["bar1_size"])
+    found = bars(pci, hit[0]) if hit else {}
+    if not hit:
+        say(False, "GPU %d bar1_size cannot be checked: no pciconf -lvb line has %s" % (i, want))
+    elif not found:
+        say(False, "GPU %d bar1_size cannot be checked: no memory BAR is listed under %s" % (i, hit[0].split()[0]))
+    elif "14" not in found:
+        say(False, "GPU %d bar1_size cannot be checked: %s has no memory BAR at config offset 0x14 (BAR1); it lists %s" % (i, hit[0].split()[0], sorted(found)))
+    else:
+        say(bar1 is not None and bar1 == found["14"],
+            "GPU %d bar1_size nvrm-info=%s, BAR1 (config offset 0x14) in pciconf -lvb is %s" % (i, bar1, found["14"]))
+    print("INFO GPU %d max_page_size %s numa %s" % (i, mem["max_page_size"], mem["numa_node"]))
     caps = {c["name"]: c for c in d["capabilities"]}
     wc = re.search(r"hw\.nvidia\.altra_device_wc_active: (\d+)", sysctl)
     if wc:

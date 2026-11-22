@@ -55,6 +55,13 @@ see
 .Xr nvrm 3 .
 .Sh EXIT STATUS
 .Ex -std
+A machine with the driver loaded and no GPU is not a failure: the status is 0.
+Text mode prints "no GPU is attached",
+.Fl -json
+prints an empty list of devices, and
+.Fl -jsonl
+prints the header and an end record with count 0.
+No usable backend is a failure.
 Status 2 means a usage error, including two output modes or
 .Fl -schema
 with

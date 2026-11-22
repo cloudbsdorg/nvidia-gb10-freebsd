@@ -7,6 +7,8 @@
 #ifndef _NVRM_INTERNAL_H_
 #define _NVRM_INTERNAL_H_
 
+#include <sys/types.h>
+
 #include <nvrm/nvrm.h>
 
 /*
@@ -85,7 +87,7 @@ typedef struct nvrm_backend_ops {
 	int	(*gpu_classes)(nvrm_gpu *gpu, uint32_t *list, unsigned max,
 		    unsigned *n);
 	/* Limit the descriptors for Capsicum.  Returns enum nvrm_error. */
-	int	(*limit)(nvrm_backend *be, int allow_alloc_map);
+	int	(*limit)(nvrm_backend *be, int allow_alloc);
 } nvrm_backend_ops;
 
 /* Registry. */
@@ -93,8 +95,14 @@ int	nvrm_backend_register(const nvrm_backend_ops *ops);
 const nvrm_backend_ops *nvrm_backend_select(const char *name);
 void	nvrm_registry_reset(void);	/* tests: drop every provider */
 void	nvrm_registry_builtin(void);	/* the two built-in providers */
+unsigned nvrm_registry_count(void);	/* tests: providers registered */
+/* Test seam: runs between the two built-in registrations. */
+extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
+/* Test seam: stands in for getpid() where the RM backend asks who owns a
+ * descriptor; NULL = the real one. */
+extern pid_t (*nvrm_getpid_hook)(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
@@ -142,8 +150,7 @@ struct nvrm_ctx {
 };
 
 /* Capsicum helper shared by the backends (nvrm_cap.c). */
-int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds,
-	    int mappable);
+int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);
 
 /* Field and capability descriptors (nvrm_fields.c); one definition. */
 /* Most GPCs an enabled-unit mask can describe (the masks are 32 bits). */

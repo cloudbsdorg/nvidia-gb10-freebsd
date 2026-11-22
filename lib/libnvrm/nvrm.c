@@ -7,6 +7,7 @@
  * names a chip or a vendor's board: the generation table and the decorator
  * table (nvrm_table.c) hold the data.
  */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +21,11 @@
 
 static const nvrm_backend_ops *registry[MAX_BACKENDS];
 static unsigned nregistered;
-static int builtins_done;
+/* The built-in providers are registered once, by the first select, however
+ * many threads race to it (pthread_once: libnvrm links libthr for this). */
+static pthread_once_t builtins_once = PTHREAD_ONCE_INIT;
 int (*nvrm_issetugid_hook)(void);
+void (*nvrm_registry_pause_hook)(void);
 
 int
 nvrm_backend_register(const nvrm_backend_ops *ops)
@@ -32,19 +36,36 @@ nvrm_backend_register(const nvrm_backend_ops *ops)
 	return (NVRM_OK);
 }
 
+static void
+register_builtins(void)
+{
+	nvrm_backend_register(&nvrm_backend_rm_ops);
+	if (nvrm_registry_pause_hook != NULL)
+		nvrm_registry_pause_hook();	/* tests: widen the race window */
+	nvrm_backend_register(&nvrm_backend_fake_ops);
+}
+
+/* Tests: drop every provider.  The lazy registration is spent first, so a
+ * reset registry stays empty until it is filled. */
 void
 nvrm_registry_reset(void)
 {
+	pthread_once(&builtins_once, register_builtins);
 	nregistered = 0;
-	builtins_done = 1;	/* a reset registry stays empty until filled */
 }
 
+/* Tests: exactly the two built-in providers. */
 void
 nvrm_registry_builtin(void)
 {
-	nvrm_backend_register(&nvrm_backend_rm_ops);
-	nvrm_backend_register(&nvrm_backend_fake_ops);
-	builtins_done = 1;
+	nvrm_registry_reset();
+	register_builtins();
+}
+
+unsigned
+nvrm_registry_count(void)
+{
+	return (nregistered);
 }
 
 const nvrm_backend_ops *
@@ -53,8 +74,7 @@ nvrm_backend_select(const char *name)
 	const nvrm_backend_ops *best = NULL;
 	unsigned i;
 
-	if (!builtins_done)
-		nvrm_registry_builtin();
+	pthread_once(&builtins_once, register_builtins);
 	for (i = 0; i < nregistered; i++) {
 		if (name != NULL) {
 			if (strcmp(registry[i]->name, name) == 0)
@@ -119,7 +139,7 @@ static const int prop_source[NVRM_P_COUNT] = {
 	[NVRM_P_PCI_SUBSYSTEM_VENDOR] = NVRM_S_RM,
 	[NVRM_P_PCI_SUBSYSTEM_DEVICE] = NVRM_S_RM,
 	[NVRM_P_PCI_REVISION] = NVRM_S_RM,
-	[NVRM_P_RM_GPU_ID] = NVRM_S_OS,
+	[NVRM_P_RM_GPU_ID] = NVRM_S_RM,
 	[NVRM_P_ARCHITECTURE] = NVRM_S_RM,
 	[NVRM_P_IMPLEMENTATION] = NVRM_S_RM,
 	[NVRM_P_SM_VERSION] = NVRM_S_RM,
@@ -469,10 +489,7 @@ open_devices(nvrm_ctx *ctx, char *err, size_t errlen)
 	int rc;
 
 	rc = ctx->ops->list_gpus(ctx->be, ids, NVRM_MAX_GPUS, &n, err, errlen);
-	if (rc == NVRM_OK && n == 0) {
-		set_err(err, errlen, "no GPU is attached");
-		rc = NVRM_E_NODEV;
-	}
+	/* No GPU is a result, not an error: the context holds zero devices. */
 	for (i = 0; rc == NVRM_OK && i < n; i++) {
 		rc = ctx->ops->gpu_open(ctx->be, ids[i], &ctx->dev[i].gpu, err,
 		    errlen);
@@ -524,7 +541,8 @@ nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts, char *err,
 	ops->running_version(ctx->be, &ctx->running);
 	rc = open_devices(ctx, err, errlen);
 	if (rc == NVRM_OK)
-		rc = ops->limit(ctx->be, opts != NULL && (opts->flags & NVRM_ENUM_ALLOW_ALLOC_MAP) != 0);
+		rc = ops->limit(ctx->be, opts != NULL &&
+		    (opts->flags & NVRM_ENUM_ALLOW_ALLOC) != 0);
 	if (rc == NVRM_E_CAPSICUM)
 		set_err(err, errlen,
 		    "cannot limit the descriptors for capability mode");

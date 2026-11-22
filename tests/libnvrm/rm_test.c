@@ -14,6 +14,7 @@
 #include <sys/param.h>
 #include <sys/ioctl.h>
 #include <sys/filio.h>
+#include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -160,6 +161,65 @@ test_happy(void)
 	CHECK_EQ(K.bad, 0);
 }
 
+static pid_t parent_pid;
+
+static pid_t
+parent_pid_hook(void)
+{
+	return (parent_pid);
+}
+
+/* A forked child shares the open file, and so the RM client.  Its nvrm_close
+ * must free nothing in the RM: the parent's client stays live.  The child
+ * checks its own view of the scripted kernel and reports by exit status.
+ * With reuse_pid the child is also told it has the parent's process id (a
+ * grandchild given the id of an exited parent): the fork generation, not the
+ * id, must keep it from freeing. */
+static void
+fork_close_child(int reuse_pid)
+{
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc, st, live, freed;
+	pid_t pid;
+
+	reset_kernel();
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	live = K.nlive;
+	freed = K.nfree;
+	CHECK(live > 0);
+	parent_pid = getpid();
+	fflush(stdout);
+	pid = fork();
+	if (pid == 0) {
+		if (reuse_pid)
+			nvrm_getpid_hook = parent_pid_hook;
+		nvrm_close(ctx);
+		if (K.nfree != freed || K.nlive != live || K.bad != 0)
+			printf("FAIL fork: the child's close freed RM objects "
+			    "(free %d -> %d, live %d -> %d)\n", freed, K.nfree,
+			    live, K.nlive);
+		exit(K.nfree == freed && K.nlive == live && K.bad == 0 ?
+		    0 : 1);
+	}
+	CHECK(pid > 0);
+	CHECK(waitpid(pid, &st, 0) == pid);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	/* the parent closes its own client normally (the child checked, in its
+	 * own copy of the scripted kernel, that it freed nothing) */
+	nvrm_close(ctx);
+	CHECK_EQ(K.nlive, 0);
+	CHECK_EQ(K.bad, 0);
+}
+
+static void
+test_fork_close(void)
+{
+	fork_close_child(0);
+	fork_close_child(1);
+}
+
 static void
 test_open_failures(void)
 {
@@ -235,11 +295,16 @@ test_list_failures(void)
 	CHECK(strstr(err, "NV_ESC_CARD_INFO") != NULL);
 	CHECK_EQ(K.nlive, 0);
 
-	/* the OS layer has no GPU: the core says so */
+	/* the OS layer has no GPU: a success with zero devices, and the
+	 * client is still freed at close */
 	reset_kernel();
 	K.ngpus = 0;
 	ctx = enum_rm(&rc, err, sizeof(err));
-	CHECK_EQ(rc, NVRM_E_NODEV);
+	CHECK_EQ(rc, NVRM_OK);
+	CHECK(ctx != NULL);
+	CHECK_EQ(nvrm_device_count(ctx), 0);
+	CHECK_EQ(K.nlive, 1);			/* the client */
+	nvrm_close(ctx);
 	CHECK_EQ(K.nlive, 0);
 
 	reset_kernel();
@@ -544,7 +609,7 @@ static void
 test_least_privilege(void)
 {
 	nvrm_enum_opts o = { "rm" };		/* the default */
-	nvrm_enum_opts full = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };	/* explicit opt-in */
+	nvrm_enum_opts full = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC };	/* explicit opt-in */
 	nvrm_ctx *ctx;
 	char err[200];
 
@@ -606,6 +671,7 @@ main(void)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	nvrm_rm_set_sys(&scripted);
 	test_happy();
+	test_fork_close();
 	test_open_failures();
 	test_list_failures();
 	test_gpu_failures();

@@ -128,18 +128,27 @@ Zero-initialize the structure
 with no flag set, or with
 .Fa opts
 .Dv NULL ,
-the descriptors keep only the RM control and free escapes and no mapping
-right, which is all that reading device information needs.
-A caller that will allocate RM objects or map memory after
+the descriptors keep only the RM control and free escapes, which is all that
+reading device information needs.
+A caller that will allocate RM objects after
 .Xr cap_enter 2
 sets
-.Dv NVRM_ENUM_ALLOW_ALLOC_MAP
+.Dv NVRM_ENUM_ALLOW_ALLOC
 before the limit is applied: Capsicum rights can only be narrowed, never
 widened, so they cannot be asked for later.
+The descriptor never has a mapping right, with or without the flag, and this
+version of the library has no call that maps device memory, inside or outside
+capability mode; a later version may add one.
 A flag bit the library does not know makes
 .Fn nvrm_enumerate
 fail with
 .Dv NVRM_E_INVAL .
+.Pp
+No GPU attached is not an error:
+.Fn nvrm_enumerate
+returns 0 and
+.Fn nvrm_device_count
+returns 0.
 .Pp
 .Fn nvrm_close
 releases everything, including the RM objects.
@@ -226,12 +235,62 @@ returns 0 or one of
 .Dv NVRM_E_IO ,
 .Dv NVRM_E_NOMEM ,
 .Dv NVRM_E_INVAL ,
-.Dv NVRM_E_NODEV ,
 .Dv NVRM_E_CAPSICUM .
+.Dv NVRM_E_NODEV
+is no longer returned: a machine with the driver loaded and no GPU gives 0 and
+a context with no devices (a caller that tested for
+.Dv NVRM_E_NODEV
+now takes the success path with a count of 0).
+The code stays defined so that existing programs still build.
 .Fn nvrm_strerror
 and
 .Fn nvrm_error_id
 turn the code into text and a stable machine identifier.
+.Sh THREADS AND FORK
+A context and its devices are not safe for concurrent use.
+.Fn nvrm_device_refresh
+rewrites in place the information that
+.Fn nvrm_device_info_get
+handed out, so use one context per thread, or a lock of your own.
+Only the registry of backends is shared by every context: the built-in
+backends are registered once, with
+.Xr pthread_once 3 ,
+however many threads reach it first, so the library links
+.Lb libthr
+and a program that links it statically needs
+.Fl l Ns Cm thr .
+Nothing else is promised across threads.
+The fake backend keeps process-wide test state: use it from one thread.
+.Pp
+The control descriptor is close-on-exec but survives
+.Xr fork 2 ,
+and the RM client belongs to the open file, which a child shares with its
+parent.
+A child must not use a context except to call
+.Fn nvrm_close .
+The library records the process that enumerated and frees RM objects only
+there: in a forked child
+.Fn nvrm_close
+releases the child's copy of the descriptor and the memory and leaves the
+parent's client alone.
+The library counts the calls of
+.Xr fork 2
+in the process, so a process that is given the identifier of a parent that has
+exited is not taken for it.
+.Xr vfork 2
+and
+.Xr rfork 2
+run no such handler: a child made with them must not call
+.Fn nvrm_close ,
+or must
+.Xr execve 2
+first, which closes the descriptor.
+.Sh STABILITY
+This interface is provisional.
+The symbol version
+.Li NVRM_1.0
+and the structures behind it are frozen at the first package release and not
+before; a future version may still reshape them.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
 .It Ev NVRM_BACKEND

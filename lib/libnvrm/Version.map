@@ -4,6 +4,9 @@
  *
  * Symbol versions of libnvrm.so.1.  Additive changes add to NVRM_1.0's
  * successor (NVRM_1.1, ...); a new major keeps the old library installed.
+ *
+ * PROVISIONAL: NVRM_1.0 is frozen at the first package release and not
+ * before.  Until then the structures behind these calls may still change.
  */
 NVRM_1.0 {
 	global:

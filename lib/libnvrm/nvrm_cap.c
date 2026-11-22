@@ -12,14 +12,12 @@
 #include "nvrm_internal.h"
 
 int
-nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds,
-    int mappable)
+nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds)
 {
 	cap_rights_t rights;
 
+	/* Ioctl and event only.  There is no mapping right: S1 maps nothing. */
 	cap_rights_init(&rights, CAP_IOCTL, CAP_EVENT);
-	if (mappable)
-		cap_rights_set(&rights, CAP_MMAP_RW);
 	if (cap_rights_limit(fd, &rights) != 0)
 		return (NVRM_E_CAPSICUM);
 	if (cap_ioctls_limit(fd, cmds, ncmds) != 0)

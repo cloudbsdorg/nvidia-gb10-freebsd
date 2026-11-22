@@ -14,7 +14,7 @@
 #include "nvrm_internal.h"
 
 #define SCHEMA_ID	"nvrm-info/1"
-#define SCHEMA_MINOR	1
+#define SCHEMA_MINOR	0
 
 /* ---- emitter ----------------------------------------------------------- */
 
@@ -382,11 +382,20 @@ schema_device(FILE *fp)
 	for (i = 0; i < nvrm_ngroups; i++)
 		fprintf(fp, "        \"%s\": { \"$ref\": \"#/$defs/group_%s\" },\n",
 		    nvrm_group_names[i], nvrm_group_names[i]);
+	/* The capability flags are pinned by position: index i is the name
+	 * nvrm_cap_name(i), as a constant, so a rename or a reorder is a
+	 * schema change and not a silent one. */
 	fprintf(fp, "        \"capabilities\": {\n"
 	    "          \"type\": \"array\",\n"
 	    "          \"minItems\": %d,\n"
 	    "          \"maxItems\": %d,\n"
-	    "          \"items\": { \"$ref\": \"#/$defs/capability\" }\n"
+	    "          \"prefixItems\": [\n", NVRM_NCAPS, NVRM_NCAPS);
+	for (i = 0; i < NVRM_NCAPS; i++)
+		fprintf(fp, "            { \"$ref\": \"#/$defs/capability\", "
+		    "\"properties\": { \"index\": { \"const\": %u }, "
+		    "\"name\": { \"const\": \"%s\" } } }%s\n", i,
+		    nvrm_cap_name(i), i + 1 != NVRM_NCAPS ? "," : "");
+	fprintf(fp, "          ]\n"
 	    "        },\n"
 	    "        \"decorators\": {\n"
 	    "          \"type\": \"array\",\n"
@@ -394,7 +403,7 @@ schema_device(FILE *fp)
 	    "          \"items\": { \"type\": \"string\" }\n"
 	    "        }\n"
 	    "      }\n"
-	    "    },\n", NVRM_NCAPS, NVRM_NCAPS, NVRM_MAX_DECORATORS);
+	    "    },\n", NVRM_MAX_DECORATORS);
 }
 
 /* The document, header and device records. */
@@ -416,7 +425,7 @@ schema_documents(FILE *fp)
 	    "        \"running_rm_version\": { \"$ref\": \"#/$defs/text\" },\n"
 	    "        \"devices\": {\n"
 	    "          \"type\": \"array\",\n"
-	    "          \"minItems\": 1,\n"
+	    "          \"minItems\": 0,\n"
 	    "          \"maxItems\": %d,\n"
 	    "          \"items\": { \"$ref\": \"#/$defs/device\" }\n"
 	    "        }\n"

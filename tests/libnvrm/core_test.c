@@ -18,6 +18,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,9 +237,15 @@ test_enumerate(void)
 	CHECK(strstr(err, NVRM_RM_VERSION) != NULL);
 	setenv("NVRM_FAKE_FAIL", "list", 1);
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_IO);
+	/* zero GPUs is a result, not an error: OK, an empty context */
 	setenv("NVRM_FAKE_FAIL", "nogpu", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_NODEV);
-	CHECK(strstr(err, "no GPU") != NULL);
+	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	CHECK(ctx != NULL);
+	CHECK_EQ(nvrm_device_count(ctx), 0);
+	CHECK(nvrm_device_get(ctx, 0) == NULL);
+	CHECK_STR(nvrm_backend_name(ctx), "fake");
+	nvrm_close(ctx);
+	ctx = NULL;
 	setenv("NVRM_FAKE_FAIL", "gpu_open", 1);
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_IO);
 	setenv("NVRM_FAKE_FAIL", "limit", 1);
@@ -267,6 +274,92 @@ test_enumerate(void)
 }
 
 /* ---- the device model -------------------------------------------------- */
+
+/* Every source label is pinned: which layer supplied each value.  A new field
+ * needs a row here, so its label is a decision, not a default. */
+static void
+check_source_labels(const nvrm_device_info *i)
+{
+	static const struct { const char *name; int src; } want[] = {
+		{ "pci_domain", NVRM_S_OS }, { "pci_bus", NVRM_S_OS },
+		{ "pci_slot", NVRM_S_OS }, { "pci_function", NVRM_S_OS },
+		{ "pci_vendor", NVRM_S_OS }, { "pci_device", NVRM_S_OS },
+		{ "pci_subsystem_vendor", NVRM_S_RM },
+		{ "pci_subsystem_device", NVRM_S_RM },
+		{ "pci_revision", NVRM_S_RM },
+		{ "rm_gpu_id", NVRM_S_RM }, { "uuid", NVRM_S_RM },
+		{ "architecture", NVRM_S_RM },
+		{ "implementation", NVRM_S_RM },
+		{ "chip_id", NVRM_S_DERIVED },
+		{ "sm_version_major", NVRM_S_RM },
+		{ "sm_version_minor", NVRM_S_RM },
+		{ "gpc_count", NVRM_S_RM }, { "tpc_count", NVRM_S_RM },
+		{ "sm_count", NVRM_S_DERIVED },
+		{ "cls_gpfifo", NVRM_S_FAMILY },
+		{ "cls_compute", NVRM_S_FAMILY },
+		{ "cls_eng3d", NVRM_S_FAMILY },
+		{ "cls_copy", NVRM_S_FAMILY },
+		{ "classes", NVRM_S_RM }, { "family", NVRM_S_FAMILY },
+		{ "vram_size", NVRM_S_RM }, { "bar1_size", NVRM_S_RM },
+		{ "max_page_size", NVRM_S_RM },
+		{ "numa_node", NVRM_S_RM },
+		{ "page_sizes", NVRM_S_FAMILY },
+	};
+	unsigned f, w, hit, matched = 0;
+	int src = -1;
+
+	for (f = 0; f < nvrm_nfields; f++) {
+		const char *b = (const char *)i + nvrm_fields[f].offset;
+
+		src = nvrm_fields[f].kind == NVRM_K_U64 ?
+		    ((const nvrm_u64 *)b)->source :
+		    nvrm_fields[f].kind == NVRM_K_STR ?
+		    ((const nvrm_str *)b)->source :
+		    ((const nvrm_list *)b)->source;
+		for (hit = 0, w = 0; w < sizeof(want) / sizeof(want[0]);
+		    w++) {
+			if (strcmp(want[w].name, nvrm_fields[f].name))
+				continue;
+			hit++;
+			if (want[w].src != src)
+				printf("  %s: source %s, want %s\n",
+				    nvrm_fields[f].name,
+				    nvrm_source_name(src),
+				    nvrm_source_name(want[w].src));
+			CHECK_EQ(src, want[w].src);
+		}
+		CHECK_EQ(hit, 1);	/* a field with no pinned label */
+		matched += hit;
+	}
+	CHECK_EQ(matched, nvrm_nfields);
+	CHECK_EQ(sizeof(want) / sizeof(want[0]), nvrm_nfields);
+	/* the capability labels, keyed by name too: one row per flag, so an
+	 * appended flag needs a row (and cannot shift the others' labels) */
+	{
+		static const struct { const char *name; int src; } capw[] = {
+			{ "dmabuf_export", NVRM_S_RM }, { "ats", NVRM_S_RM },
+			{ "self_hosted", NVRM_S_RM },
+			{ "display_enabled", NVRM_S_RM }, { "soc", NVRM_S_RM },
+			{ "coherent_gpu_memory", NVRM_S_RM },
+			{ "os_device_wc_active", NVRM_S_OS },
+		};
+		unsigned c, k, found, rows = 0;
+
+		for (c = 0; c < NVRM_NCAPS; c++) {
+			for (found = 0, k = 0; k < sizeof(capw) / sizeof(capw[0]);
+			    k++) {
+				if (strcmp(capw[k].name, nvrm_cap_name(c)))
+					continue;
+				found++;
+				CHECK_EQ(i->caps[c].source, capw[k].src);
+			}
+			CHECK_EQ(found, 1);	/* a flag with no pinned label */
+			rows += found;
+		}
+		CHECK_EQ(rows, NVRM_NCAPS);
+		CHECK_EQ(sizeof(capw) / sizeof(capw[0]), NVRM_NCAPS);
+	}
+}
 
 static void
 test_model_discrete(void)
@@ -307,12 +400,12 @@ test_model_discrete(void)
 	CHECK_EQ(i->numa_node.reason, NVRM_R_NO_NUMA);
 	/* capabilities: stable index, name, per-flag availability */
 	CHECK(NVRM_HAVE(i->caps[0]) && i->caps[0].value == 1);
-	CHECK_STR(nvrm_cap_name(0), "dmabuf_export");
 	CHECK(NVRM_HAVE(i->caps[3]) && i->caps[3].value == 1);
 	CHECK(NVRM_HAVE(i->caps[1]) && i->caps[1].value == 0);
 	CHECK(!NVRM_HAVE(i->caps[6]));
 	CHECK_EQ(i->caps[6].reason, NVRM_R_OS_NOT_REPORTED);
 	CHECK_EQ(i->ndecorators, 0);
+	check_source_labels(i);
 	/* a refresh gives the same answer */
 	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_OK);
 	CHECK_EQ(info_of(ctx, 0)->sm_count.value, 36);
@@ -364,7 +457,15 @@ test_model_unknown_and_sparse(void)
 	CHECK(!NVRM_HAVE(i->cls_gpfifo) && !NVRM_HAVE(i->cls_compute));
 	CHECK(!NVRM_HAVE(i->cls_eng3d) && !NVRM_HAVE(i->cls_copy));
 	CHECK(!NVRM_HAVE(i->page_sizes));
+	/* every value the family supplies says family_unknown (not another
+	 * reason), and each one is checked by itself */
+	CHECK_EQ(i->cls_gpfifo.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK_EQ(i->cls_compute.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK_EQ(i->cls_eng3d.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK_EQ(i->cls_copy.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK_EQ(i->page_sizes.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK_STR(nvrm_reason_id(i->cls_gpfifo.reason), "family_unknown");
+	CHECK_STR(nvrm_reason_id(i->cls_copy.reason), "family_unknown");
 	/* the RM says SM version 0: the GPU does not support the query */
 	CHECK(!NVRM_HAVE(i->sm_version_major));
 	CHECK_EQ(i->sm_version_major.reason, NVRM_R_RM_UNSUPPORTED);
@@ -396,13 +497,63 @@ test_model_unknown_and_sparse(void)
 	nvrm_close(ctx);
 }
 
+/* The Ada row and the families that have no class of a kind. */
+static void
+test_model_ada(void)
+{
+	nvrm_ctx *ctx;
+	const nvrm_device_info *i;
+	static const uint32_t ada[] = { 0xc56f, 0xc9c0, 0xc997, 0xc7b5 };
+	static const uint32_t ada_nocopy[] = { 0xc56f, 0xc9c0, 0xc997 };
+
+	/* the Ada row: its copy class is the one of the generation before,
+	 * so the family reports it available, from the table */
+	reset_env();
+	nvrm_fake_inject_classes(ada, 4);
+	ctx = must_enum("discrete");
+	i = info_of(ctx, 0);
+	CHECK_STR(i->family.value, "ada");
+	CHECK(NVRM_HAVE(i->cls_eng3d));
+	CHECK(NVRM_HAVE(i->cls_copy));
+	CHECK_EQ(i->cls_copy.value, 0xC7B5);
+	CHECK(i->cls_copy.source == NVRM_S_FAMILY);
+	nvrm_close(ctx);
+	/* an Ada GPU whose class list lacks the copy class: absent, and not
+	 * "the family has none" (that statement would be false) */
+	reset_env();
+	nvrm_fake_inject_classes(ada_nocopy, 3);
+	ctx = must_enum("discrete");
+	i = info_of(ctx, 0);
+	CHECK_STR(i->family.value, "ada");
+	CHECK(!NVRM_HAVE(i->cls_copy));
+	CHECK_EQ(i->cls_copy.reason, NVRM_R_CLASS_ABSENT);
+	nvrm_close(ctx);
+	/* a table row with no class of a kind: the table says so */
+	{
+		static const nvrm_family row[] = {
+			{ "row", 1, 2, 3, 0, { 0 } },
+		};
+		nvrm_device_info info;
+
+		nvrm_info_init(&info);
+		info.classes.reason = NVRM_R_NONE;
+		info.classes.count = 3;
+		info.classes.value[0] = 1;
+		info.classes.value[1] = 2;
+		info.classes.value[2] = 3;
+		nvrm_apply_family(&info, row, 1);
+		CHECK(!NVRM_HAVE(info.cls_copy));
+		CHECK_EQ(info.cls_copy.reason, NVRM_R_FAMILY_NO_CLASS);
+		CHECK(NVRM_HAVE(info.cls_eng3d));
+	}
+}
+
 static void
 test_model_injections(void)
 {
 	nvrm_ctx *ctx;
 	const nvrm_device_info *i;
 	static const uint32_t no_eng3d[] = { 0xca6f, 0xcec0, 0xcab5 };
-	static const uint32_t ada[] = { 0xc56f, 0xc9c0, 0xc997 };
 
 	/* GPC mask works but a TPC mask fails part way */
 	reset_env();
@@ -479,16 +630,7 @@ test_model_injections(void)
 	CHECK(NVRM_HAVE(i->cls_copy));
 	nvrm_close(ctx);
 
-	/* a row the table has no copy class for: the table says so */
-	reset_env();
-	nvrm_fake_inject_classes(ada, 3);
-	ctx = must_enum("discrete");
-	i = info_of(ctx, 0);
-	CHECK_STR(i->family.value, "ada");
-	CHECK(NVRM_HAVE(i->cls_eng3d));
-	CHECK(!NVRM_HAVE(i->cls_copy));
-	CHECK_EQ(i->cls_copy.reason, NVRM_R_FAMILY_NO_CLASS);	/* family known */
-	nvrm_close(ctx);
+	test_model_ada();
 	reset_env();
 }
 
@@ -651,7 +793,19 @@ test_names_and_fields(void)
 	CHECK_STR(nvrm_source_name(-1), "unknown");
 	CHECK_STR(nvrm_source_name(NVRM_S__COUNT), "unknown");
 	CHECK(nvrm_cap_name(NVRM_NCAPS) == NULL);
-	CHECK_STR(nvrm_cap_name(NVRM_NCAPS - 1), "os_device_wc_active");
+	/* the capability index is a contract: every index has its name */
+	{
+		static const char *const want[] = { "dmabuf_export", "ats",
+		    "self_hosted", "display_enabled", "soc",
+		    "coherent_gpu_memory", "os_device_wc_active" };
+		unsigned c;
+
+		/* the names already released keep their index; a flag appended
+		 * later adds a name here, it never moves one */
+		CHECK(sizeof(want) / sizeof(want[0]) <= NVRM_NCAPS);
+		for (c = 0; c < sizeof(want) / sizeof(want[0]); c++)
+			CHECK_STR(nvrm_cap_name(c), want[c]);
+	}
 	/* every reason and every error has a distinct id and a text */
 	for (i = 0; i < NVRM_R__COUNT; i++)
 		CHECK(strlen(nvrm_reason_id(i)) > 0 &&
@@ -686,6 +840,29 @@ test_names_and_fields(void)
 		}
 		CHECK_EQ(pos, offsetof(nvrm_device_info, caps));
 		CHECK_EQ(rows, nvrm_nfields);
+	}
+	/* ... and the whole struct is tied, not only the part before the
+	 * capabilities: the capability array, the decorator count and the
+	 * decorator names follow each other with nothing in between, and
+	 * nothing follows the names.  A member added anywhere fails here until
+	 * it has a row (or is one of these). */
+	{
+		nvrm_device_info *np = NULL;
+		const size_t al = _Alignof(const char *);
+		size_t caps_end = offsetof(nvrm_device_info, caps) +
+		    sizeof(np->caps);
+		size_t cnt_end = offsetof(nvrm_device_info, ndecorators) +
+		    sizeof(np->ndecorators);
+
+		CHECK_EQ(offsetof(nvrm_device_info, ndecorators), caps_end);
+		CHECK_EQ(offsetof(nvrm_device_info, decorators),
+		    (cnt_end + al - 1) / al * al);
+		CHECK_EQ(sizeof(nvrm_device_info),
+		    offsetof(nvrm_device_info, decorators) +
+		    sizeof(np->decorators));
+		CHECK_EQ(sizeof(np->caps) / sizeof(np->caps[0]), NVRM_NCAPS);
+		CHECK_EQ(sizeof(np->decorators) / sizeof(np->decorators[0]),
+		    NVRM_MAX_DECORATORS);
 	}
 	/* a fresh info says "not queried" everywhere */
 	{
@@ -812,8 +989,8 @@ test_field_reason_and_masks(void)
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_OK);
 	nvrm_close(ctx);
-	/* the explicit opt-in for allocation and mapping */
-	o.flags = NVRM_ENUM_ALLOW_ALLOC_MAP;
+	/* the explicit opt-in for allocation (there is no mapping in S1) */
+	o.flags = NVRM_ENUM_ALLOW_ALLOC;
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	nvrm_close(ctx);
 	/* a bit the library does not know, including the retired bit 0 of the
@@ -821,7 +998,7 @@ test_field_reason_and_masks(void)
 	o.flags = 1;
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
 	CHECK(ctx == NULL && strstr(err, "unknown enumeration flags") != NULL);
-	o.flags = NVRM_ENUM_ALLOW_ALLOC_MAP | 0x100;
+	o.flags = NVRM_ENUM_ALLOW_ALLOC | 0x100;
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
 }
 
@@ -833,11 +1010,11 @@ test_cap_helper(void)
 	static const unsigned long a[] = { 1 }, b[] = { 2 };
 	int p[2];
 
-	CHECK_EQ(nvrm_cap_limit_fd(-1, a, 1, 1), NVRM_E_CAPSICUM);
+	CHECK_EQ(nvrm_cap_limit_fd(-1, a, 1), NVRM_E_CAPSICUM);
 	CHECK_EQ(pipe(p), 0);
-	CHECK_EQ(nvrm_cap_limit_fd(p[0], a, 1, 1), NVRM_OK);
+	CHECK_EQ(nvrm_cap_limit_fd(p[0], a, 1), NVRM_OK);
 	/* a limit can only be narrowed: a disjoint set is refused */
-	CHECK_EQ(nvrm_cap_limit_fd(p[0], b, 1, 0), NVRM_E_CAPSICUM);
+	CHECK_EQ(nvrm_cap_limit_fd(p[0], b, 1), NVRM_E_CAPSICUM);
 	close(p[0]);
 	close(p[1]);
 }
@@ -1013,11 +1190,77 @@ test_json(void)
 	nvrm_close(ctx);
 }
 
+/* ---- threads: the lazy registry is filled once ---------------------------- */
+
+static pthread_barrier_t race_bar;
+static const nvrm_backend_ops *race_got[8];
+
+static volatile int race_paused;
+
+static void
+race_pause(void)
+{
+	race_paused++;
+	usleep(20000);	/* the first thread sits in the middle of registering */
+}
+
+static void *
+race_thread(void *arg)
+{
+	pthread_barrier_wait(&race_bar);
+	race_got[(uintptr_t)arg] = nvrm_backend_select("fake");
+	return (NULL);
+}
+
+/* Must run before anything else selects a backend: the registry is lazy and
+ * process wide, so the race happens once.  It runs in a child process, with
+ * the registry still pristine (the child's profile is merged by %p). */
+static void
+test_registry_threads(void)
+{
+	pthread_t th[8];
+	unsigned k;
+	pid_t pid;
+	int st, bad;
+
+	fflush(stdout);
+	pid = fork();
+	if (pid == 0) {
+		bad = 0;
+		nvrm_registry_pause_hook = race_pause;
+		bad += pthread_barrier_init(&race_bar, NULL, 8) != 0;
+		for (k = 0; k < 8; k++)
+			bad += pthread_create(&th[k], NULL, race_thread,
+			    (void *)(uintptr_t)k) != 0;
+		for (k = 0; k < 8; k++)
+			pthread_join(th[k], NULL);
+		for (k = 0; k < 8; k++)
+			bad += race_got[k] != &nvrm_backend_fake_ops;
+		/* the precondition, as a check: the registry was pristine (the
+		 * pause ran) and the registration ran once, not once per thread */
+		if (race_paused != 1)
+			printf("FAIL threads: the registration ran %d times, "
+			    "want 1 (a registry that was not pristine, or a "
+			    "race)\n", race_paused);
+		bad += race_paused != 1;
+		/* exactly the two built-in providers, however many raced */
+		if (nvrm_registry_count() != 2)
+			printf("FAIL threads: %u providers registered, want 2\n",
+			    nvrm_registry_count());
+		bad += nvrm_registry_count() != 2;
+		exit(bad == 0 ? 0 : 1);
+	}
+	CHECK(pid > 0);
+	CHECK(waitpid(pid, &st, 0) == pid);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
 int
 main(int argc, char **argv)
 {
 	const char *skip = getenv("NVRM_TEST_SKIP");	/* the gate's plant */
 
+	test_registry_threads();
 	reset_env();
 	/* the first selection registers the built-in providers by itself */
 	CHECK(nvrm_backend_select("fake") == &nvrm_backend_fake_ops);

@@ -50,6 +50,9 @@ CFLAGS+=	-I${OGKM}/src/common/sdk/nvidia/inc \
 		-I${OGKM}/src/nvidia/arch/nvalloc/unix/include \
 		-I${OGKM}/src/common/inc
 WARNS?=		3
-LIBADD=
+# pthread_once for the backend registry.  LDADD, not LIBADD: LIBADD is only
+# processed by a build inside the FreeBSD source tree (measured: out of tree it
+# adds nothing, and libc's own pthread_once is a stub that never calls back).
+LDADD=		-lthr
 
 .include <bsd.lib.mk>

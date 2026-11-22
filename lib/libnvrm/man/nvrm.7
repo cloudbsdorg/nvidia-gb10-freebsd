@@ -107,13 +107,15 @@ Synthetic data for tests and for machines without a GPU.
 The default is least privilege.
 After enumeration the descriptors are limited to the ioctl and event rights
 and to the RM escapes control and free: enough to read device information and
-to release it, with no allocation and no mapping.
-A caller that will allocate RM objects or map memory after
+to release it, with no allocation.
+A caller that will allocate RM objects after
 .Xr cap_enter 2
 sets
-.Dv NVRM_ENUM_ALLOW_ALLOC_MAP
-in the enumeration option flags; the descriptors then also keep the allocate escape
-and the mapping right.
+.Dv NVRM_ENUM_ALLOW_ALLOC
+in the enumeration option flags; the descriptors then also keep the allocate
+escape.
+There is no mapping right in either case, and this version of the library
+has no call that maps device memory, inside or outside capability mode.
 It must say so before the limit is applied, because Capsicum rights can only be
 narrowed, never widened.
 .Xr nvrm-info 8
@@ -126,12 +128,20 @@ OS-layer values (sysctl, card list) are read before and kept.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 1;
+minor 0;
 documents name it in the
 .Li schema
 member.
 Additive changes raise the minor number; a breaking change is a new major
 schema installed beside the old one.
+The identifiers (reason ids, error codes, source names and the capability
+index and name pairs) are frozen in
+.Pa lib/libnvrm/schema/nvrm-info-1.ids ;
+the test suite compares the schema with that baseline and refuses one that
+removes, renames or renumbers an identifier.
+Until the first package release the interface is provisional (see
+.Xr nvrm 3 ) ,
+and this schema is minor 0 of it.
 .Sh SEE ALSO
 .Xr nvrm 3 ,
 .Xr nvrm-info 8

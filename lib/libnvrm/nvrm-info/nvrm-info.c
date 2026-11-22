@@ -36,8 +36,8 @@ usage(FILE *fp)
 	    "  --schema    print the JSON Schema of both outputs\n"
 	    "  --backend   rm (the kernel driver) or fake (no hardware);\n"
 	    "              default: NVRM_BACKEND, else rm\n"
-	    "Exit status: 0 success, 1 failure (a JSON error record is\n"
-	    "printed in the JSON modes), 2 usage.\n");
+	    "Exit status: 0 success (including no GPU attached), 1 failure\n"
+	    "(a JSON error record is printed in the JSON modes), 2 usage.\n");
 }
 
 static void
@@ -175,6 +175,8 @@ emit(nvrm_ctx *ctx, enum mode mode)
 		else
 			printf("unknown (%s)\n", nvrm_reason_text(
 			    nvrm_rm_running_version(ctx)->reason));
+		if (n == 0)
+			printf("no GPU is attached\n");
 		for (i = 0; i < n; i++)
 			text_device(nvrm_device_get(ctx, i), i);
 		return (fflush(stdout) == 0 ? 0 : -1);

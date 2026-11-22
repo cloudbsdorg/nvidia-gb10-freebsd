@@ -60,7 +60,7 @@ static void
 fake_case(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { .backend = "fake", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };
+	nvrm_enum_opts o = { .backend = "fake", .flags = NVRM_ENUM_ALLOW_ALLOC };
 	char err[200];
 	cap_rights_t have;
 	const nvrm_device_info *i;
@@ -70,10 +70,13 @@ fake_case(void)
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	fd = nvrm_fake_fd();
 	CHECK(fd >= 0);
-	/* the descriptor's rights: ioctl, mmap and event only */
+	/* the descriptor's rights: ioctl and event only, with or without the
+	 * allocation opt-in: S1 maps nothing, so no mapping right is held */
 	CHECK_EQ(cap_rights_get(fd, &have), 0);
 	CHECK(cap_rights_is_set(&have, CAP_IOCTL));
-	CHECK(cap_rights_is_set(&have, CAP_MMAP_RW));
+	CHECK(!cap_rights_is_set(&have, CAP_MMAP_RW));
+	CHECK(!cap_rights_is_set(&have, CAP_MMAP_R));
+	CHECK(!cap_rights_is_set(&have, CAP_MMAP_W));
 	CHECK(cap_rights_is_set(&have, CAP_EVENT));
 	CHECK(!cap_rights_is_set(&have, CAP_FCHMOD));	/* controls */
 	CHECK(!cap_rights_is_set(&have, CAP_BIND));
@@ -96,6 +99,9 @@ fake_case(void)
 	/* capability mode: no new descriptors */
 	CHECK_EQ(open("/dev/null", O_RDWR), -1);
 	CHECK_EQ(errno, ECAPMODE);
+	/* no mapping in capability mode, even with the opt-in */
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0) == MAP_FAILED);
+	CHECK_EQ(errno, ENOTCAPABLE);
 	/* the library's descriptor: an ioctl off the allow list is refused ... */
 	n = 1;
 	CHECK_EQ(ioctl(fd, FIONBIO, &n), -1);
@@ -115,7 +121,7 @@ static void
 rm_case(void)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC_MAP };
+	nvrm_enum_opts o = { .backend = "rm", .flags = NVRM_ENUM_ALLOW_ALLOC };
 	char err[200];
 	const nvrm_device_info *i;
 	int rc;
@@ -170,10 +176,18 @@ rm_case(void)
 		    NVOS21_PARAMETERS), &ap), -1);
 		CHECK_EQ(errno, ENOTTY);
 	}
-	/* ... and with the opt-in the mapping right is held (the pipe itself
-	 * cannot be mapped, but the refusal is not the capability check) */
+	/* ... but even with the opt-in there is no mapping right: S1 cannot
+	 * map memory in capability mode (the docs say so) */
+	{
+		cap_rights_t held;
+
+		CHECK_EQ(cap_rights_get(K.last_fd, &held), 0);
+		CHECK(!cap_rights_is_set(&held, CAP_MMAP_RW));
+		CHECK(!cap_rights_is_set(&held, CAP_MMAP_R));
+		CHECK(!cap_rights_is_set(&held, CAP_MMAP_W));
+	}
 	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED, K.last_fd, 0) == MAP_FAILED);
-	CHECK(errno != ENOTCAPABLE);
+	CHECK_EQ(errno, ENOTCAPABLE);
 	/* a new enumeration cannot open the control device: the real open
 	 * is refused in capability mode, and the library says so */
 	nvrm_rm_set_sys(NULL);
@@ -181,8 +195,8 @@ rm_case(void)
 	CHECK(strstr(err, "capability mode") != NULL);
 }
 
-/* The default enumeration (no NVRM_ENUM_ALLOW_ALLOC_MAP) keeps only the RM controls and frees and no
- * mapping right: the allocation escape is refused after cap_enter. */
+/* The default enumeration (no NVRM_ENUM_ALLOW_ALLOC) keeps only the RM
+ * controls and frees: the allocation escape is refused after cap_enter. */
 static void
 default_cases(void)
 {
@@ -218,6 +232,29 @@ default_cases(void)
 	CHECK_EQ(K.real_errno, 0);
 	i = nvrm_device_info_get(nvrm_device_get(ctx, 0));
 	CHECK(NVRM_HAVE(i->sm_count));
+	nvrm_rm_set_sys(NULL);
+}
+
+/* NULL options (and the backend from the environment) are the default too. */
+static void
+null_opts_case(void)
+{
+	nvrm_ctx *ctx;
+	char err[200];
+	NVOS21_PARAMETERS ap;
+
+	reset_kernel();
+	K.use_pipe = 1;
+	K.real_first = 1;
+	nvrm_rm_set_sys(&scripted);
+	setenv("NVRM_BACKEND", "rm", 1);
+	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(cap_enter(), 0);
+	memset(&ap, 0, sizeof(ap));
+	CHECK_EQ(ioctl(K.last_fd, _IOWR(NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC,
+	    NVOS21_PARAMETERS), &ap), -1);
+	CHECK_EQ(errno, ENOTCAPABLE);			/* no allocation */
+	CHECK_EQ(nvrm_device_refresh(nvrm_device_get(ctx, 0)), NVRM_OK);
 	nvrm_rm_set_sys(NULL);
 }
 
@@ -265,6 +302,7 @@ main(void)
 	bad += run_child("cap_test rm", rm_case);
 	bad += run_child("cap_test rm default (least privilege)", default_cases);
 	bad += run_child("cap_test fake default (least privilege)", fake_default);
+	bad += run_child("cap_test rm, NULL options (least privilege)", null_opts_case);
 	printf("cap_test: %s\n", bad == 0 ? "all passed" : "FAILED");
 	return (bad == 0 ? 0 : 1);
 }

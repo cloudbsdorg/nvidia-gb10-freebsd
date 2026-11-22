@@ -10,9 +10,9 @@
  * Environment:
  *   NVRM_FAKE_PROFILE  comma list of profiles, one GPU each (default
  *                      "discrete"): discrete, unified, unknown, sparse
- *   NVRM_FAKE_FAIL     open, version, list, nogpu, gpu_open, limit: make that
- *                      step fail, so callers' error paths run without
- *                      hardware.
+ *   NVRM_FAKE_FAIL     open, version, list, gpu_open, limit: make that step
+ *                      fail, so callers' error paths run without hardware;
+ *                      nogpu: list no GPU (a success with zero devices).
  *
  * Every query makes one real ioctl round trip on a descriptor the backend
  * owns, so the Capsicum limits (rights and the ioctl allow list) are
@@ -450,13 +450,13 @@ fake_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 }
 
 static int
-fake_limit(nvrm_backend *be, int allow_alloc_map)
+fake_limit(nvrm_backend *be, int allow_alloc)
 {
 	static const unsigned long cmds[] = { FIONREAD };
 
 	if (strcmp(be->fail, "limit") == 0)
 		return (NVRM_E_CAPSICUM);
-	return (nvrm_cap_limit_fd(be->fd, cmds, 1, allow_alloc_map));
+	return (nvrm_cap_limit_fd(be->fd, cmds, 1));
 }
 
 const nvrm_backend_ops nvrm_backend_fake_ops = {

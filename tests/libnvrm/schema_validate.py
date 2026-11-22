@@ -5,7 +5,8 @@
 # schema_validate.py - validate JSON against the subset of JSON Schema that
 # the libnvrm schema uses (draft 2020-12 keywords: $ref into #/$defs, oneOf,
 # type, const, enum, required, properties, additionalProperties: false, items,
-# minimum, minItems, maxItems).  An unknown keyword is an error, so the
+# prefixItems, minimum, minItems, maxItems; a $ref may carry sibling keywords,
+# which apply as well, as in draft 2020-12).  An unknown keyword is an error, so the
 # schema cannot start using something this validator silently ignores.
 #
 # usage: schema_validate.py SCHEMA [FILE]   (FILE or stdin: one JSON value per
@@ -15,7 +16,8 @@ import sys
 
 KNOWN = {"$schema", "$id", "title", "description", "$ref", "$defs", "oneOf",
          "type", "const", "enum", "required", "properties",
-         "additionalProperties", "items", "minimum", "minItems", "maxItems"}
+         "additionalProperties", "items", "prefixItems", "minimum", "minItems",
+         "maxItems"}
 
 
 def is_type(v, t):
@@ -75,10 +77,14 @@ def check_array(schema, v, root, path):
         errs.append("%s: too few items" % path)
     if "maxItems" in schema and len(v) > schema["maxItems"]:
         errs.append("%s: too many items" % path)
+    prefix = schema.get("prefixItems", [])
+    for i, sub in enumerate(prefix[:len(v)]):
+        errs.extend(check(sub, v[i], root, "%s[%d]" % (path, i)))
     if "items" in schema:
         for i, sub in enumerate(v):
-            errs.extend(check(schema["items"], sub, root,
-                              "%s[%d]" % (path, i)))
+            if i >= len(prefix):
+                errs.extend(check(schema["items"], sub, root,
+                                  "%s[%d]" % (path, i)))
     return errs
 
 
@@ -91,7 +97,9 @@ def check(schema, v, root, path):
         ref = schema["$ref"]
         if not ref.startswith("#/$defs/"):
             return ["%s: unsupported $ref %s" % (path, ref)]
-        return check(root["$defs"][ref[8:]], v, root, path)
+        rest = {k: x for k, x in schema.items() if k != "$ref"}
+        return (check(root["$defs"][ref[8:]], v, root, path) +
+                (check(rest, v, root, path) if rest else []))
     errs = check_oneof(schema, v, root, path) if "oneOf" in schema else []
     if "type" in schema and not is_type(v, schema["type"]):
         return errs + ["%s: not a %s" % (path, schema["type"])]

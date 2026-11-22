@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,9 +118,35 @@ nvrm_rm_set_sys(const nvrm_rm_sys *s)
 /* Status of a call whose ioctl(2) itself failed: not an RM status. */
 #define IOCTL_FAILED		0xfffffff0u
 
+/* ---- the process that owns a descriptor --------------------------------- */
+
+pid_t (*nvrm_getpid_hook)(void);	/* test seam: NULL = getpid() */
+static unsigned fork_generation;	/* counts the fork()s that led here */
+static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
+
+static pid_t
+my_pid(void)
+{
+	return (nvrm_getpid_hook != NULL ? nvrm_getpid_hook() : getpid());
+}
+
+static void
+atfork_child(void)
+{
+	fork_generation++;
+}
+
+static void
+register_atfork(void)
+{
+	pthread_atfork(NULL, NULL, atfork_child);
+}
+
 /* ---- backend state ----------------------------------------------------- */
 
 struct nvrm_backend {
+	pid_t			pid;		/* the process that opened it */
+	unsigned		generation;	/* fork_generation when it was opened */
 	int			fd;
 	NvHandle		client;
 	uint32_t		next_handle;
@@ -255,6 +282,9 @@ rm_open(nvrm_backend **bep, char *err, size_t errlen)
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
+	pthread_once(&atfork_once, register_atfork);
+	be->pid = my_pid();
+	be->generation = fork_generation;
 	be->fd = sys->open(NVRM_CTL_PATH, O_RDWR | O_CLOEXEC);
 	if (be->fd < 0) {
 		snprintf(err, errlen, "cannot open %s: %s", NVRM_CTL_PATH,
@@ -308,10 +338,26 @@ rm_open(nvrm_backend **bep, char *err, size_t errlen)
 	return (NVRM_OK);
 }
 
+/*
+ * The RM client belongs to the open file, which a forked child shares with
+ * its parent.  Only the process that opened the descriptor may free the
+ * client and the objects under it: a child that calls nvrm_close() only
+ * releases its own copy of the descriptor and the memory.  The process id
+ * alone is not enough (a grandchild can be given the id of a parent that has
+ * exited), so every fork() of this process also counts a generation, in an
+ * atfork handler of the child, and the owner must have both.
+ */
+static int
+rm_owner(const nvrm_backend *be)
+{
+	return (my_pid() == be->pid && fork_generation == be->generation);
+}
+
 static void
 rm_close(nvrm_backend *be)
 {
-	rm_free(be, 0, be->client);
+	if (rm_owner(be))
+		rm_free(be, 0, be->client);
 	sys->close(be->fd);
 	free(be);
 }
@@ -453,8 +499,10 @@ rm_gpu_open(nvrm_backend *be, uint32_t id, nvrm_gpu **gpup, char *err,
 static void
 rm_gpu_close(nvrm_gpu *g)
 {
-	rm_free(g->be, g->device, g->subdevice);
-	rm_free(g->be, g->be->client, g->device);
+	if (rm_owner(g->be)) {
+		rm_free(g->be, g->device, g->subdevice);
+		rm_free(g->be, g->be->client, g->device);
+	}
 	free(g);
 }
 
@@ -764,18 +812,20 @@ rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 /* Descriptors: rights and the escape allow list.  After this the process may
  * enter capability mode and keep querying through the same descriptor. */
 static int
-rm_limit(nvrm_backend *be, int allow_alloc_map)
+rm_limit(nvrm_backend *be, int allow_alloc)
 {
 	static const unsigned long full[] = {
 		IOC_RM_ALLOC, IOC_RM_CONTROL, IOC_RM_FREE
 	};
 	static const unsigned long query[] = { IOC_RM_CONTROL, IOC_RM_FREE };
 
-	/* The default keeps only the controls and the frees and no mapping
-	 * right; allocation and mapping need the caller's explicit request. */
-	if (!allow_alloc_map)
-		return (nvrm_cap_limit_fd(be->fd, query, 2, 0));
-	return (nvrm_cap_limit_fd(be->fd, full, 3, 1));
+	/* The default keeps only the controls and the frees; allocation needs
+	 * the caller's explicit request.  No mapping right is ever granted:
+	 * nothing in S1 maps memory (CPU mapping goes through descriptors a
+	 * later step opens before the limit). */
+	if (!allow_alloc)
+		return (nvrm_cap_limit_fd(be->fd, query, 2));
+	return (nvrm_cap_limit_fd(be->fd, full, 3));
 }
 
 const nvrm_backend_ops nvrm_backend_rm_ops = {

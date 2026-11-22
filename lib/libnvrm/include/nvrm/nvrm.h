@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * <nvrm/nvrm.h> - libnvrm: device discovery over the NVIDIA Resource Manager
- * (Track #2378, S1).  See nvrm(3) and nvrm(7).
+ * (Track #2378).  See nvrm(3) and nvrm(7).
  *
  * The library never names a chip: values come from the RM, and the chip
  * specific numbers (class ids, page sizes) from a generation table keyed by
@@ -12,6 +12,18 @@
  *
  * Every value is either available or carries a reason it is not: nothing is
  * ever reported as a made-up number.
+ *
+ * Threads and fork: a context and its devices are not safe for concurrent
+ * use (nvrm_device_refresh rewrites in place the information that
+ * nvrm_device_info_get handed out); use one context per thread, or your own
+ * lock.  Only the registry of backends is shared by every context: it is
+ * filled once, however many threads reach it first; nothing else is promised
+ * across threads.
+ * The fake backend keeps process-wide test state: use it from one thread.
+ * After
+ * fork() the child must not use a context except to call nvrm_close(), which
+ * then releases only the child's copy of the descriptor and the memory: the
+ * RM client belongs to the parent.
  */
 #ifndef _NVRM_NVRM_H_
 #define _NVRM_NVRM_H_
@@ -23,7 +35,9 @@
 
 /* The RM version this library is built against (open-gpu-kernel-modules). */
 #define NVRM_RM_VERSION		"580.178.04"
-/* Library API version (shared object nvrm.so.1, symbol version NVRM_1.0). */
+/* Library API version (shared object nvrm.so.1, symbol version NVRM_1.0).
+ * PROVISIONAL: the interface and the structures below are frozen at the first
+ * package release and not before; a future version may still reshape them. */
 #define NVRM_API_MAJOR		1
 #define NVRM_API_MINOR		0
 
@@ -43,7 +57,7 @@ enum nvrm_error {
 	NVRM_E_IO,		/* an RM call failed */
 	NVRM_E_NOMEM,
 	NVRM_E_INVAL,
-	NVRM_E_NODEV,		/* no GPU is attached */
+	NVRM_E_NODEV,		/* no longer returned: no GPU is a success with 0 devices */
 	NVRM_E_CAPSICUM,	/* the descriptors could not be limited */
 	NVRM_E__COUNT
 };
@@ -144,8 +158,8 @@ typedef struct nvrm_field {
 typedef struct nvrm_ctx nvrm_ctx;
 typedef struct nvrm_device nvrm_device;
 
-#define NVRM_ENUM_ALLOW_ALLOC_MAP	0x2	/* bit 0 was a retired flag: refused */
-#define NVRM_ENUM_KNOWN_FLAGS		NVRM_ENUM_ALLOW_ALLOC_MAP
+#define NVRM_ENUM_ALLOW_ALLOC		0x2	/* bit 0 was a retired flag: refused */
+#define NVRM_ENUM_KNOWN_FLAGS		NVRM_ENUM_ALLOW_ALLOC
 
 typedef struct nvrm_enum_opts {
 	const char	*backend;	/* NULL: NVRM_BACKEND, else best probe */
@@ -154,11 +168,14 @@ typedef struct nvrm_enum_opts {
 	 * flag set, or with opts NULL, the descriptors keep only the RM control
 	 * and free escapes and no mapping right (least privilege), which is all
 	 * that reading device information needs.  A caller that will allocate
-	 * RM objects or map memory after cap_enter() must set
-	 * NVRM_ENUM_ALLOW_ALLOC_MAP before the limit is applied: Capsicum rights
-	 * can only be narrowed, so they cannot be asked for later.  A bit this
-	 * library does not know is refused with NVRM_E_INVAL, so a caller built
-	 * for an older meaning of the member cannot silently get other rights.
+	 * RM objects after cap_enter() must set NVRM_ENUM_ALLOW_ALLOC before
+	 * the limit is applied: Capsicum rights can only be narrowed, so they
+	 * cannot be asked for later.  The descriptor never has a mapping right,
+	 * with or without this flag: this version of libnvrm
+	 * has no call that maps device memory, inside or outside capability mode.
+	 * A bit this library does not know is refused with NVRM_E_INVAL, so a
+	 * caller built for an older meaning of the member cannot silently get
+	 * other rights.
 	 */
 	unsigned	flags;
 } nvrm_enum_opts;
@@ -167,7 +184,8 @@ __BEGIN_DECLS
 /*
  * Open the control device, check the RM version, list the probed GPUs, attach
  * them, query each one, and limit the descriptors for Capsicum.  On failure
- * *ctxp is NULL and err (if not NULL) holds a one-line message.
+ * *ctxp is NULL and err (if not NULL) holds a one-line message.  No GPU is not
+ * a failure: it returns NVRM_OK with nvrm_device_count() 0.
  */
 int		nvrm_enumerate(nvrm_ctx **ctxp, const nvrm_enum_opts *opts,
 		    char *err, size_t errlen);

@@ -445,7 +445,10 @@ class list, VRAM, BAR1, page sizes, capability flags). Every value is available 
 reason; the layers are abstract device, class, family (a generation table keyed by class ids)
 and board decorators (none yet). Backends are providers: `rm` and `fake`
 (`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
-capability mode. `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
+capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; this
+version has no call that maps device memory). No GPU is a success with zero devices. The interface is provisional
+until the first package release. A context is not thread-safe, and a forked child must only
+`nvrm_close` it (see `nvrm(3)`). `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
 `lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
 the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
 the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.
