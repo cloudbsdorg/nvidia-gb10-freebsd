@@ -388,3 +388,16 @@ NEXT: 1) last nvrm_mem.c branch; 2) add nvrm_va.c nvrm_mem.c nvrm_fake_mem.c nvr
 - REJECTED with evidence: vaSize is the end (nvos.h says VA_LIMIT + 1); nvrm_list is an inline array (no use after free); the NV0041 address-space values are the NV0000 ones (ctrl0041.h says so).
 - Left as DEBT: quality.9 (fake test API in nvrm_internal.h), quality.14 (session bring-up written twice), the four lizard waivers.
 - Resume: if the suite is green, gate round 1 of the staged fix commit, answers, round 2, commit with Review-open lines, push, Track comment.
+
+## 2026-11-22T12:40Z commit 3b (stubs), written by Kimi k3.1-pro in two passes
+The tree now has four tools in bin/: nvptxas and ptxas, which write a CUDA-NATIVE-STUB-CUBIN 1 placeholder after checking the .target line, and nvfatbin and fatbinary, which write a CUDA-NATIVE-STUB-FATBIN 1 container. Both tools answer --version and --version --json.
+It also has lib64/libcudart.so.13, a stub runtime. The stub checks the wrapper magic 0x466243b1 and the fatbin header, records the kernels, and returns 801 from every launch. With CUDA_NATIVE_STUB_TRACE=1 it writes one JSONL trace line per call.
+There are four schemas. Man pages: nvptxas(1), nvfatbin(1), libcudart-stub(3).
+A full clang++ -x cuda compile and link of launch_main.cu now builds, runs and prints launch=801.
+Correction to the 07:12Z entry: its last line ("This entry is not committed yet.") is superseded; that entry was committed in ab2bc4e.
+Test: 161 passed, 0 failed, 0 skipped. Next: gate rounds 1 and 2, then commit.
+
+## 2026-11-22T13:36Z after the ZFS panic and reboot (about 13:24Z)
+Both Kimi rounds died. Nothing was lost: the staged work of round B pass 4 is intact; items 1-10 were done and item 11 was half done (181 passed, 1 failed).
+Resumed with ~/work/gb10/briefs/2425-c1.1-r3e-resume.md (items 11-15). Commit 3b is still uncommitted. Its gate round 1 receipt fa052367 is spent; round 2 comes after this pass.
+C1.4a pass 3 is resumed in wt-cuda-c14a with ~/work/gb10/briefs/2428-c1.4a-r1d-resume.md. Its gate round 1 receipt 5ec434ec is spent.

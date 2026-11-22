@@ -5,7 +5,7 @@
 .Os
 .Sh NAME
 .Nm cuda-native-toolchain
-.Nd compile CUDA source to PTX with clang and the cuda-native SDK tree
+.Nd compile and link CUDA source with the non-executing cuda-native SDK
 .Sh SYNOPSIS
 .Nm sh
 .Pa lib/cuda-native/mksdk.sh
@@ -22,6 +22,15 @@
 .Fl -cuda-device-only
 .Fl S
 .Ar file.cu
+.Pp
+.Nm clang++
+.Fl x Cm cuda
+.Fl -cuda-path Ns = Ns Ar outdir
+.Fl -cuda-gpu-arch Ns = Ns Ar arch
+.Ar file.cu
+.Fl L Ns Ar outdir/lib64
+.Fl l Ns Cm cudart
+.Fl Wl,-rpath, Ns Ar outdir/lib64
 .Sh DESCRIPTION
 cuda-native is a CUDA stack for
 .Fx
@@ -44,8 +53,23 @@ sets
 .Dv CUDA_VERSION
 to 13000, and clang takes the SDK version from it.
 .It Pa bin/
-empty for now.
-clang needs the directory to accept the tree as an installation.
+the executable
+.Nm nvptxas
+and
+.Nm nvfatbin
+stubs, also installed as
+.Nm ptxas
+and
+.Nm fatbinary
+for clang.
+.It Pa lib64/
+the non-executing
+.Pa libcudart.so.13
+and its relative
+.Pa libcudart.so
+linker symlink.
+.It Pa share/cuda-native/schema/
+the JSON schemas for tool versions, optional tool traces and runtime events.
 .It Pa nvvm/libdevice/libdevice.10.bc
 the device library that clang links into every device compile.
 .It Pa version.json
@@ -94,6 +118,14 @@ clang builds the host object.
 It leaves the launch calls
 .Pq Fn cudaLaunchKernel , Fn __cudaPushCallConfiguration , Fn __cudaPopCallConfiguration
 for the runtime library to provide.
+Without a host-only or device-only option, clang runs both tool stubs and can
+link the host program against the stub runtime.
+The cubin-placeholder header preserves PTX after its separator, and the
+diagnostic fatbin container records member sizes and hashes; neither contains
+executable GPU machine code.
+Every launch returns
+.Dv cudaErrorNotSupported
+.Pq 801 .
 .Sh ENVIRONMENT
 .Bl -tag -width LLVM
 .It Ev LLVM
@@ -105,6 +137,18 @@ The default is
 .It Ev TMPDIR
 Where the test makes its scratch directory; the default is
 .Pa /tmp .
+.It Ev CUDA_NATIVE_TRACE
+When nonempty, the installed tool stubs append JSONL call records to this file.
+The records can be validated with the schemas installed under
+.Pa share/cuda-native/schema/ .
+.It Ev CUDA_NATIVE_STUB_TRACE
+When set exactly to
+.Ql 1 ,
+the runtime stub writes JSON registration and launch events that conform to
+.Pa share/cuda-native/schema/cuda-native-stub-trace-1.schema.json
+to standard error.
+Any other nonempty value names a file to which the JSON lines are appended.
+An unset or empty value disables that trace.
 .El
 .Sh FILES
 .Bl -tag -width "tests/cuda_native_toolchain_test.sh" -compact
@@ -112,11 +156,17 @@ Where the test makes its scratch directory; the default is
 the sources of the tree
 .It Pa lib/cuda-native/libdevice/libdevice.ll
 the device library source
+.It Pa lib/cuda-native/tools/
+the POSIX shell sources of both device-tool stubs
+.It Pa lib/cuda-native/libcudart-stub/cudart_stub.c
+the launch and registration runtime source
+.It Pa lib/cuda-native/schema/
+the versioned tool-version, tool-trace and runtime-trace JSON schemas
 .It Pa lib/cuda-native/mksdk.sh
 the assembler of the tree
 .It Pa tests/cuda_native_toolchain_test.sh
-the test: the tree, PTX for all four arches, the host object, provenance and
-mutants
+the test: the tree, PTX for all four arches, full compiles, traces, link and run,
+registration IR, provenance and mutants
 .El
 .Sh EXIT STATUS
 .Pa mksdk.sh
@@ -150,7 +200,10 @@ sh lib/cuda-native/mksdk.sh obj/cuda-native
     --cuda-gpu-arch=sm_121 --cuda-device-only -S -o vadd.ptx vadd.cu
 .Ed
 .Sh SEE ALSO
-.Xr clang 1
+.Xr clang 1 ,
+.Xr nvfatbin 1 ,
+.Xr nvptxas 1 ,
+.Xr libcudart-stub 3
 .Sh HISTORY
 The SDK tree first appeared in the native CUDA work on Track #2380, stage C1.1
 .Pq Track #2425 .
@@ -166,19 +219,24 @@ leaves an unresolved
 symbol in its PTX.
 A later release adds a device library built from libclc.
 .It
-There is no
+The
 .Nm ptxas
-and no
+and
 .Nm fatbinary
-in
-.Pa bin/ ,
-so a full compile and link
-.Pq without Fl -cuda-device-only No or Fl -cuda-host-only
-does not work yet.
+programs are deliberately non-assembling stubs.
+The former writes a
+.Li CUDA-NATIVE-STUB-CUBIN 1
+placeholder with unchanged PTX after its header; the latter records all
+supplied payloads in the
+.Li CUDA-NATIVE-STUB-FATBIN 1
+diagnostic container.
+Neither produces executable GPU machine code.
 .It
-There is no
+The stub
 .Nm libcudart
-and no
+implements only clang's launch bookkeeping and validated host-side registration.
+Every launch returns 801 and no device code runs.
+There is no general CUDA runtime implementation and no
 .Nm libcuda
 yet.
 .El
