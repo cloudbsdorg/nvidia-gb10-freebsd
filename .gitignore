@@ -3,3 +3,4 @@ build/
 tmp/
 *.core
 .depend.*
+__pycache__/
