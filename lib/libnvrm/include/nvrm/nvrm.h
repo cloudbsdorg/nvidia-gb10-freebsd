@@ -59,6 +59,13 @@ enum nvrm_error {
 	NVRM_E_INVAL,
 	NVRM_E_NODEV,		/* no longer returned: no GPU is a success with 0 devices */
 	NVRM_E_CAPSICUM,	/* the descriptors could not be limited */
+	/* Appended by S2 (memory and VA). */
+	NVRM_E_RM,		/* the RM refused a call (the status is in the message) */
+	NVRM_E_DENIED,		/* the client was not opened with the right for it */
+	NVRM_E_NOSLOT,		/* no pre-opened spare descriptor is left */
+	NVRM_E_RANGE,		/* out of VA space, overlap, or outside the object */
+	NVRM_E_NOTSUP,		/* the backend does not provide the operation */
+	NVRM_E_BUSY,		/* still in use: unmap or free what depends on it */
 	NVRM_E__COUNT
 };
 
@@ -178,7 +185,130 @@ typedef struct nvrm_enum_opts {
 	 * other rights.
 	 */
 	unsigned	flags;
+	/* Room for later options.  Must be zero: a nonzero value is refused
+	 * with NVRM_E_INVAL, so a caller built for a later meaning of these
+	 * members cannot silently get this version's behaviour. */
+	uint32_t	reserved[4];
 } nvrm_enum_opts;
+
+/*
+ * ---- Memory and virtual address space (S2, Track #2419) -------------------
+ *
+ * nvrm_device_open() makes one RM client for one GPU: its own descriptors, its
+ * own VA space (the library hands out the addresses; the RM maps at exactly
+ * the ones asked for) and every memory object made through it.  The client is
+ * independent of the nvrm_ctx it was opened from and may outlive it.  Closing
+ * the client frees every object, mapping and reservation still in it.
+ *
+ * Capsicum: all descriptors are opened and limited here; after cap_enter() the
+ * client keeps working.  CPU mapping needs NVRM_OPEN_ALLOW_MAP: without it
+ * nvrm_mem_map_cpu() is refused with NVRM_E_DENIED, and no descriptor that
+ * could be mapped exists.
+ *
+ * CPU access follows the memory attribute rule (nvrm_mem(7)): the attribute a
+ * mapping gets is nvrm_mem_info.cpu_attr.  Through NVRM_ATTR_DEVICE only
+ * aligned accesses of 1, 2, 4 or 8 bytes are safe; use nvrm_mem_read() and
+ * nvrm_mem_write(), which obey the rule, or follow it in your own code.
+ *
+ * A client is not safe for concurrent use; use one thread per client or a lock.
+ */
+typedef struct nvrm_client nvrm_client;
+typedef struct nvrm_mem nvrm_mem;
+
+#define NVRM_OPEN_ALLOW_MAP	0x1	/* CPU mapping (and the descriptors it needs) */
+#define NVRM_OPEN_KNOWN_FLAGS	NVRM_OPEN_ALLOW_MAP
+
+typedef struct nvrm_open_opts {
+	uint32_t	size;		/* sizeof(nvrm_open_opts); 0 means that */
+	uint32_t	flags;		/* NVRM_OPEN_* */
+	uint32_t	map_slots;	/* with ALLOW_MAP: spare mapping descriptors (0: 16) */
+	uint32_t	export_slots;	/* spare export descriptors (0: 4) */
+} nvrm_open_opts;
+
+#define NVRM_MAP_SLOTS_DEFAULT		16
+#define NVRM_EXPORT_SLOTS_DEFAULT	4
+#define NVRM_SLOTS_MAX			1024
+
+enum nvrm_mem_kind {
+	NVRM_MEM_VRAM = 1,	/* the GPU's own memory (system memory where it has none) */
+	NVRM_MEM_SYSMEM,	/* system memory the GPU can reach, CPU-coherent */
+	NVRM_MEM_USER,		/* registered pages of the caller's address space */
+	NVRM_MEM_IMPORTED	/* imported from a descriptor */
+};
+
+enum nvrm_place {
+	NVRM_PLACE_VIDMEM = 1,
+	NVRM_PLACE_SYSMEM
+};
+
+enum nvrm_cpu_attr {
+	NVRM_ATTR_CACHED = 1,	/* write-back: any access */
+	NVRM_ATTR_WC,		/* write-combining (arm64: Normal non-cacheable) */
+	NVRM_ATTR_DEVICE	/* arm64 Device-nGnRE: aligned 1/2/4/8 byte accesses only */
+};
+
+#define NVRM_CPU_READ		0x1
+#define NVRM_CPU_WRITE		0x2
+
+typedef struct nvrm_vaspace_info {
+	uint32_t	size;
+	uint64_t	base;		/* lowest usable address */
+	uint64_t	end;		/* one past the highest */
+	uint64_t	free_bytes;	/* not reserved */
+} nvrm_vaspace_info;
+
+#define NVRM_VA_SPARSE		0x1	/* unmapped addresses read as zero, not fault */
+#define NVRM_VA_KNOWN_FLAGS	NVRM_VA_SPARSE
+
+typedef struct nvrm_va_params {
+	uint32_t	size;		/* sizeof(nvrm_va_params); 0 means that */
+	uint32_t	flags;		/* NVRM_VA_* */
+	uint64_t	bytes;
+	uint64_t	alignment;	/* 0: 4 KiB; a power of two */
+	uint64_t	fixed;		/* 0: the library picks; else the address */
+} nvrm_va_params;
+
+typedef struct nvrm_mem_params {
+	uint32_t	size;		/* sizeof(nvrm_mem_params); 0 means that */
+	uint32_t	kind;		/* NVRM_MEM_VRAM or NVRM_MEM_SYSMEM */
+	uint32_t	flags;		/* none yet: must be 0 */
+	uint32_t	reserved;	/* must be 0 */
+	uint64_t	bytes;		/* rounded up to the page size */
+	uint64_t	alignment;	/* 0: the page size; a power of two */
+	uint64_t	page_size;	/* 0: the backend's default; else 4 KiB, 64 KiB, 2 MiB, 512 MiB */
+} nvrm_mem_params;
+
+#define NVRM_MAP_READ_ONLY	0x1	/* the GPU may only read through this mapping */
+#define NVRM_MAP_KNOWN_FLAGS	NVRM_MAP_READ_ONLY
+
+typedef struct nvrm_gpu_map_params {
+	uint32_t	size;		/* sizeof(nvrm_gpu_map_params); 0 means that */
+	uint32_t	flags;		/* NVRM_MAP_* */
+	uint64_t	va;		/* the address, inside a reservation */
+	uint64_t	offset;		/* into the object; a multiple of its page size */
+	uint64_t	length;		/* 0: to the end of the object */
+} nvrm_gpu_map_params;
+
+typedef struct nvrm_mem_info {
+	uint32_t	size;
+	uint32_t	kind;		/* enum nvrm_mem_kind */
+	uint32_t	place;		/* enum nvrm_place */
+	uint32_t	cpu_attr;	/* enum nvrm_cpu_attr a CPU mapping gets */
+	uint64_t	bytes;
+	uint64_t	page_size;
+	uint32_t	cpu_mapped;
+	uint32_t	gpu_maps;
+} nvrm_mem_info;
+
+/* What a client holds now and what it has done: leak checks read this. */
+typedef struct nvrm_client_stats {
+	uint32_t	size;
+	uint32_t	reserved;
+	uint64_t	allocs, frees;		/* memory objects, ever */
+	uint64_t	live_mem, live_bytes;
+	uint64_t	live_reservations, live_gpu_maps, live_cpu_maps;
+	uint64_t	spare_descriptors;	/* pre-opened and unused */
+} nvrm_client_stats;
 
 __BEGIN_DECLS
 /*
@@ -198,6 +328,38 @@ nvrm_device	*nvrm_device_get(const nvrm_ctx *ctx, unsigned index);
 const nvrm_device_info *nvrm_device_info_get(const nvrm_device *dev);
 /* Query again through the already open descriptors (works in capability mode). */
 int		nvrm_device_refresh(nvrm_device *dev);
+
+
+/* ---- S2: see the comment above nvrm_client ---- */
+int		nvrm_device_open(const nvrm_device *dev,
+		    const nvrm_open_opts *opts, nvrm_client **clp, char *err,
+		    size_t errlen);
+void		nvrm_device_close(nvrm_client *cl);
+/* One line about the last call of the client that failed; "" if none did. */
+const char	*nvrm_client_errmsg(const nvrm_client *cl);
+int		nvrm_client_stats_get(const nvrm_client *cl,
+		    nvrm_client_stats *st);
+int		nvrm_vaspace_info_get(const nvrm_client *cl,
+		    nvrm_vaspace_info *info);
+int		nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p,
+		    uint64_t *va);
+int		nvrm_va_release(nvrm_client *cl, uint64_t va);
+int		nvrm_mem_alloc(nvrm_client *cl, const nvrm_mem_params *p,
+		    nvrm_mem **memp);
+int		nvrm_mem_register_user(nvrm_client *cl, void *addr,
+		    uint64_t bytes, nvrm_mem **memp);
+void		nvrm_mem_free(nvrm_mem *mem);
+int		nvrm_mem_info_get(const nvrm_mem *mem, nvrm_mem_info *info);
+int		nvrm_mem_map_gpu(nvrm_mem *mem, const nvrm_gpu_map_params *p);
+int		nvrm_mem_unmap_gpu(nvrm_mem *mem, uint64_t va);
+int		nvrm_mem_map_cpu(nvrm_mem *mem, unsigned prot, void **addr);
+int		nvrm_mem_unmap_cpu(nvrm_mem *mem);
+int		nvrm_mem_read(nvrm_mem *mem, uint64_t offset, void *buf,
+		    size_t len);
+int		nvrm_mem_write(nvrm_mem *mem, uint64_t offset, const void *buf,
+		    size_t len);
+int		nvrm_mem_export_fd(nvrm_mem *mem, int *fd);
+int		nvrm_mem_import_fd(nvrm_client *cl, int fd, nvrm_mem **memp);
 
 const char	*nvrm_strerror(int error);
 const char	*nvrm_error_id(int error);	/* stable machine id */

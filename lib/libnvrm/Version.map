@@ -32,6 +32,25 @@ NVRM_1.0 {
 		nvrm_json_end;
 		nvrm_json_error;
 		nvrm_json_schema;
+		nvrm_device_open;
+		nvrm_device_close;
+		nvrm_client_errmsg;
+		nvrm_client_stats_get;
+		nvrm_vaspace_info_get;
+		nvrm_va_reserve;
+		nvrm_va_release;
+		nvrm_mem_alloc;
+		nvrm_mem_register_user;
+		nvrm_mem_free;
+		nvrm_mem_info_get;
+		nvrm_mem_map_gpu;
+		nvrm_mem_unmap_gpu;
+		nvrm_mem_map_cpu;
+		nvrm_mem_unmap_cpu;
+		nvrm_mem_read;
+		nvrm_mem_write;
+		nvrm_mem_export_fd;
+		nvrm_mem_import_fd;
 	local:
 		*;
 };
