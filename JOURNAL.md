@@ -300,6 +300,72 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
 
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
+# Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain
+
+## 2026-11-22T06:20Z start
+Mark card 2026-11-22: native CUDA runs in parallel with NVK. Order from docs/NATIVE-CUDA.md section 8: C1.1 (toolchain spike, deps none) is the first stage that needs no libnvrm S2; C1.2 (PTX front end) needs only C0 (done); C1.4 needs S5. Installed llvm23-23.1.5 from pkg (sudo pkg install llvm23); its NVPTX lists sm_120/120a/120f/121/121a/121f and ptx90-93. clang 23 detects a --cuda-path tree from include/, bin/, nvvm/libdevice/libdevice.10.bc and version.json; it defaults to --offload-new-driver. Header surface found by probing with empty files: cuda.h, host_defines.h, driver_types.h, host_config.h, cuda_runtime.h, crt/host_runtime.h, then execution-space macros.
+Round 1 (an opencode round): brief ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md, report ~/work/gb10/tmp/2380-r1/ROUND-REPORT.md. Scope: lib/cuda-native SDK tree, mksdk.sh, test kernels, tests/cuda_native_toolchain_test.sh, root Makefile (contract; SUPERSEDED, see 07:10Z), cuda-native-toolchain(7), README section.
+Next: review round 1, gate x2, commit, push; file C1.x work packages under #2380.
+
+## 2026-11-22T06:40Z PAUSE for a test boot (orchestrator). RESUME here.
+Brief in short: start native CUDA stage C1.1 (llvm23 toolchain, our own --cuda-path SDK tree, headers, PTX for sm_120/sm_121) in parallel with NVK; libnvrm S2 (wt-libnvrm-s2) is not touched; code by opencode rounds, strict gate (2 rounds per commit), push after each commit.
+Done:
+- llvm23-23.1.5 installed from pkg on amp001 (NVPTX sm_120/121 with a/f, ptx90-93).
+- Track: C1 work packages filed under #2380 (epic #2362): C1.1 #2425 (In progress), C1.2 #2426, C1.3 #2427, C1.4a #2428 (libcuda API surface, fake backend, no S2), C1.4b #2429 (on libnvrm, needs S2-S5), C1.5 #2430, C1.6 #2431, C1.7 #2432, C1.8 #2433, C1.9 #2434, C1.10 #2435, C1.11 #2436. C4 not filed yet (goes under #2362, relates #2382).
+- Round 1 brief written: ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md. Its run made no change: no permitted round model was available (free models are not to be used for this code).
+Next:
+1. Rerun round 1 from this worktree: ocrun.sh 5400 <model> ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md ~/work/gb10/tmp/2380-r1/round.log with the watchdog (empty round.status first). Model: the usual round model once its quota is back.
+2. Review the round (provenance: no toolkit text), gate round 1 and 2, commit, push, Track comment on #2425 and #2380.
+3. Then C1.1 round 2: libclc-based libdevice, nvptxas/nvfatbin stubs, stub libcudart link, offload-new-driver notes, mma.cuh PTX. Then C1.4a (libcuda headers + fake backend).
+Note: the repo has no root Makefile; makefile-check refuses any commit without one, so round 1 adds it (tell the merge agent). SUPERSEDED at 07:10Z: another agent landed the root Makefile on main; this branch adds none.
+
+## 2026-11-22T07:10Z resumed after the test boot
+Orchestrator: no permitted round model is available (free models are not to be used for this code), so C1.1 round 1 is implemented directly by the agent. Do not add a root Makefile: another agent lands it on main. Watch STATUS.md for "ROOT MAKEFILE ON MAIN <sha>", then merge main into this branch.
+Done: lib/cuda-native, with the SDK headers, the libdevice placeholder, mksdk.sh and the cuda-native-toolchain(7) man page; tests/cuda-native/{vector_add,builtins}.cu; tests/cuda_native_toolchain_test.sh. The test was red before staging (the fresh copy lacked the files) and is green after: 51 passed, 0 failed.
+Findings while doing it:
+- clang 23 takes the SDK version from CUDA_VERSION in include/cuda.h. It ignores version.json, and it needs bin/ to accept the tree.
+- libdevice.10.bc must carry the nvptx64 data layout of the same clang, so mksdk.sh takes the layout from clang.
+- atomicAdd lowers to atom.relaxed.sys, which is stronger than the gpu scope CUDA uses; to revisit in C1.2/C1.6.
+README section, layout row and PROVENANCE entry written.
+Next: gate round 1, then gate round 2, then wait for the root Makefile on main, merge main, commit, push, and comment on Track #2425.
+
+## 2026-11-22T07:20Z commit 1 landed, commit 2 started
+Commit 1: 461afd3, on main d015038 (with the root Makefile), pushed. It went through 2 gate rounds plus a receipt over the rebased diff; open findings are recorded as Review-open lines.
+Commit 2 (open findings of commit 1), staged:
+- mksdk.sh: strips trailing slashes before the symlink refusal; probes in the build directory; shows the clang error plus a remedy; refuses missing sources; mv -h, checks the result after mv, recreates OUTDIR if mv fails.
+- Test: a failing llvm-as case that reaches the cleanup; a trailing-slash symlink case; provenance catches non-regular entries and grep errors; includes_exactly runs on the deadstub mutant; noglobal uses entry_only.cu; skip needs clang 23; failure cap 76; noinline and vector type checks with mutants.
+- host_defines.h: no __noinline__ macro (it broke __attribute__((__noinline__))).
+- README -o; man page exit wording.
+Test: 75 passed, 0 failed. Next: gate rounds 1 and 2, commit, push, Track.
+
+## 2026-11-22T07:12Z commit 2 landed; RESUME here
+Commit 2: befd07d, pushed. 81 checks green, 2 gate rounds.
+Correction to the 07:20Z entry: the layout probe runs before anything is created, not in the build directory.
+Next, commit 3:
+1. The Review-open items of befd07d:
+   - a mutated-copy test for a directory created between rmdir and mv;
+   - no rm through a link after mv;
+   - the ls status in the rmdir message;
+   - LLVM_MIN in the skip message and the header cap;
+   - the test asks mksdk.sh for the version check;
+   - show the mv and rmdir errors;
+   - the remedy example.
+2. libdevice from libclc. The ports devel/libclc has flavors up to llvm22 only, so an llvm23 flavor is needed (cloudbsd-ports), or a build from the llvm23 source.
+3. nvptxas and nvfatbin stubs in bin/, plus a stub libcudart, so a full compile and link works.
+4. PTX from the ggml mma.cuh.
+Then C1.4a (#2428).
+This entry is not committed yet.
+
+## 2026-11-22T11:20Z commit 3 round A (Kimi k3.1-pro in opencode)
+The Review-open items of befd07d are closed by round A. Brief: ~/work/gb10/briefs/2425-c1.1-r2-review-open.md. Report: ~/work/gb10/tmp/2425-rA/ROUND-REPORT.md; the round left its final sections unfilled, so it was judged by the tree.
+Changes:
+- mksdk.sh --check-llvm is now the one version check, used by builds and by the test skip.
+- After mv, nothing is removed through a link.
+- The rmdir message is told apart for an unreadable OUT, and the real mv and rmdir errors are shown.
+- The remedy names the current prefix.
+- Mutated-copy tests cover the nested-move and post-mv-link branches.
+Test: 87 passed, 0 failed. Next: gate rounds 1 and 2, commit, push. Then round B: nvptxas, nvfatbin and libcudart stubs, so a full compile and link works.
+
 
 ## 2026-11-22 libnvrm S2 (Track 2419; first written on agent/2378-libnvrm-s2 from 9d17827, now on agent/2419-libnvrm-s2 as WIP)
 First stop (test boot): nothing was saved in git then. Second stop (test boot, 2026-11-22): saved as WIP, see RESUME below. Work is uncommitted in this worktree; diff copy: ~/work/gb10/tmp/libnvrm-s2-wip-20261122.patch.

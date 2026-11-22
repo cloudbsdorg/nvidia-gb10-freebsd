@@ -1,0 +1,190 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt CUDA-NATIVE-TOOLCHAIN 7
+.Os
+.Sh NAME
+.Nm cuda-native-toolchain
+.Nd compile CUDA source to PTX with clang and the cuda-native SDK tree
+.Sh SYNOPSIS
+.Nm sh
+.Pa lib/cuda-native/mksdk.sh
+.Ar outdir
+.Pp
+.Nm sh
+.Pa lib/cuda-native/mksdk.sh
+.Fl -check-llvm
+.Pp
+.Nm clang++
+.Fl x Cm cuda
+.Fl -cuda-path Ns = Ns Ar outdir
+.Fl -cuda-gpu-arch Ns = Ns Ar arch
+.Fl -cuda-device-only
+.Fl S
+.Ar file.cu
+.Sh DESCRIPTION
+cuda-native is a CUDA stack for
+.Fx
+that uses no NVIDIA proprietary file.
+This page describes its first piece: the SDK tree that clang takes as a CUDA
+installation.
+The tree holds headers written from the public CUDA API references and from
+what clang's own CUDA runtime wrapper includes by name.
+It does not hold a single file of NVIDIA's CUDA toolkit.
+.Pp
+.Pa mksdk.sh
+assembles the tree in
+.Ar outdir ,
+which must be new or empty:
+.Bl -tag -width "nvvm/libdevice/libdevice.10.bc"
+.It Pa include/
+the SDK headers;
+.Pa cuda.h
+sets
+.Dv CUDA_VERSION
+to 13000, and clang takes the SDK version from it.
+.It Pa bin/
+empty for now.
+clang needs the directory to accept the tree as an installation.
+.It Pa nvvm/libdevice/libdevice.10.bc
+the device library that clang links into every device compile.
+.It Pa version.json
+cuda-native's own name and version, generated from the
+.Dv CUDA_VERSION
+and
+.Dv CUDA_NATIVE_VERSION
+macros of
+.Pa cuda.h .
+clang does not read it.
+.El
+.Pp
+With
+.Fl -check-llvm ,
+.Pa mksdk.sh
+runs the same LLVM tool and clang version checks as a build, prints
+.Ql llvm: <prefix> clang <major> ,
+and creates nothing.
+It exits 0 when the LLVM install is usable and 2 otherwise, with the same
+refusal diagnostic as a build.
+.Pp
+The compiler is clang from LLVM 23
+.Pq the ports Pa llvm23 No package .
+The base system clang is not used.
+The tested
+.Ar arch
+values are
+.Cm sm_120
+.Pq compute capability 12.0, GeForce RTX 50 series such as the GB206 ,
+.Cm sm_121
+.Pq compute capability 12.1, DGX Spark GB10 ,
+and their architecture-specific forms
+.Cm sm_120a
+and
+.Cm sm_121a .
+The output is PTX ISA 9.x text.
+Other arch values that clang knows, such as
+.Cm sm_120f
+and
+.Cm sm_121f ,
+are not refused, but they are not tested.
+.Pp
+With
+.Fl -cuda-host-only Fl c
+clang builds the host object.
+It leaves the launch calls
+.Pq Fn cudaLaunchKernel , Fn __cudaPushCallConfiguration , Fn __cudaPopCallConfiguration
+for the runtime library to provide.
+.Sh ENVIRONMENT
+.Bl -tag -width LLVM
+.It Ev LLVM
+The LLVM install that
+.Pa mksdk.sh
+and the test use; its clang must be version 23 or later.
+The default is
+.Pa /usr/local/llvm23 .
+.It Ev TMPDIR
+Where the test makes its scratch directory; the default is
+.Pa /tmp .
+.El
+.Sh FILES
+.Bl -tag -width "tests/cuda_native_toolchain_test.sh" -compact
+.It Pa lib/cuda-native/sdk/
+the sources of the tree
+.It Pa lib/cuda-native/libdevice/libdevice.ll
+the device library source
+.It Pa lib/cuda-native/mksdk.sh
+the assembler of the tree
+.It Pa tests/cuda_native_toolchain_test.sh
+the test: the tree, PTX for all four arches, the host object, provenance and
+mutants
+.El
+.Sh EXIT STATUS
+.Pa mksdk.sh
+exits 0 when the tree is built, 2 when the arguments or
+.Ar outdir
+are refused, the LLVM tools are missing or older than 23, and 1 when a step fails.
+A failed run leaves no partial tree:
+.Ar outdir
+stays absent or empty, because the tree is built next to it and renamed
+into place at the end.
+If
+.Ar outdir
+changes while the tree is built, the run fails and says so.
+.Pp
+With
+.Fl -check-llvm ,
+.Pa mksdk.sh
+exits 0 when the LLVM install is usable and 2 otherwise, including a usage error.
+.Pp
+The test exits with the number of failed checks, capped at 76 so that it is
+never confused with 77.
+It exits 77 when no clang 23 or later is found in
+.Pa $LLVM/bin
+and every check that ran passed (the checks that need LLVM are skipped),
+and 99 when it cannot set up.
+.Sh EXAMPLES
+Build the tree and emit PTX for the GB10:
+.Bd -literal -offset indent
+sh lib/cuda-native/mksdk.sh obj/cuda-native
+/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native \e
+    --cuda-gpu-arch=sm_121 --cuda-device-only -S -o vadd.ptx vadd.cu
+.Ed
+.Sh SEE ALSO
+.Xr clang 1
+.Sh HISTORY
+The SDK tree first appeared in the native CUDA work on Track #2380, stage C1.1
+.Pq Track #2425 .
+.Sh CAVEATS
+The following pieces are missing:
+.Bl -bullet -compact
+.It
+The device library has no functions yet.
+A kernel that calls a math function such as
+.Fn sinf
+leaves an unresolved
+.Li __nv_*
+symbol in its PTX.
+A later release adds a device library built from libclc.
+.It
+There is no
+.Nm ptxas
+and no
+.Nm fatbinary
+in
+.Pa bin/ ,
+so a full compile and link
+.Pq without Fl -cuda-device-only No or Fl -cuda-host-only
+does not work yet.
+.It
+There is no
+.Nm libcudart
+and no
+.Nm libcuda
+yet.
+.El
+.Pp
+The headers declare only what clang's wrapper and the test kernels need.
+.Fn atomicAdd
+lowers to a system-scope atomic.
+That is stronger than the device scope CUDA defines, so the results are
+correct but it may be slower; a later release changes it.

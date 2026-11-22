@@ -705,6 +705,7 @@ comparison tables): [`docs/llm.md`](docs/llm.md).
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
+| `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 | `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
@@ -862,3 +863,16 @@ RM refuses is counted (`failed_releases`) and its addresses are never reused. Th
 software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
 API is tested without hardware; the RM backend is tested against a scripted kernel
 (`tests/libnvrm/rm_mem_test.c`).
+
+## Native CUDA toolchain (cuda-native)
+
+`lib/cuda-native/` is the first piece of native CUDA (Track #2380, stage C1.1 #2425). It holds the
+SDK tree that clang takes as `--cuda-path`. Its headers are written from the public CUDA
+references and from what clang's CUDA runtime wrapper includes by name; no file of NVIDIA's CUDA
+toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg install llvm23`).
+`sh lib/cuda-native/mksdk.sh obj/cuda-native` builds the tree. Then
+`/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
+emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
+Not there yet: the libdevice math library, `ptxas`/`fatbinary`, `libcudart` and `libcuda`.
+Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips
+without LLVM 23).
