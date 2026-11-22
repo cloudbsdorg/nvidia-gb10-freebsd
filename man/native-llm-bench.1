@@ -252,6 +252,8 @@ These dynamic-loader and device-order overrides are refused when set,
 including when empty.
 .It Ev NLB_TEST
 Set to 1 to enable the fixture-command interface.
+Any other value, or none, leaves it off, and the command overrides listed after
+this entry are refused.
 Test rows and metadata carry test_mode true and path_status test, never native
 history provenance.
 .It Ev NLB_VULKANINFO , Ev NLB_PCICONF , Ev NLB_SYSCTL , Ev NLB_KLDSTAT , Ev NLB_FSTAT , Ev NLB_FILE , Ev NLB_BECTL , Ev NLB_UNAME , Ev NLB_HW_PREFLIGHT , Ev NLB_LLAMA_BENCH

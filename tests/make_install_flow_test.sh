@@ -738,25 +738,22 @@ for doc in (fixture, json.load(open(sys.argv[2])), json.load(open(sys.argv[3])))
 EOF
 then ok "install schema, sample registration and fixture agree with real output"; else bad "install schema or fixture"; fi
 
-# No personal defaults.  Split the needles so this check does not match its
-# own source.  README.md, docs/ and man/ are covered too.
-hpat=/$(printf 'home')/
-dollar=$
-hwork=${dollar}HOME/work
-bwork=${dollar}{HOME}/work
-twwork='~'"/work"
-user=mla$(printf 'pointe')
+# No personal defaults.  The needles are tests/lib/personal-paths.txt, the
+# same list tests/readme_install_doc_test.sh reads.  README.md, docs/ and man/
+# are covered too.
+needles=$repo/tests/lib/personal-paths.txt
 scan=$S/no-user-paths
+if [ -s "$needles" ]; then ok "personal-path needle list exists"; else bad "tests/lib/personal-paths.txt is missing or empty"; fi
 : > "$scan"
 for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
-	grep -R -n -F -e "$hpat" -e "$hwork" -e "$bwork" -e "$twwork" -e "$user" "$repo/$p" >> "$scan" 2>/dev/null || true
+	grep -R -n -F -f "$needles" "$repo/$p" >> "$scan" 2>/dev/null || true
 done
 for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
-	[ ! -f "$p" ] || grep -n -F -e "$hpat" -e "$hwork" -e "$bwork" -e "$twwork" -e "$user" "$p" >> "$scan" 2>/dev/null || true
+	[ ! -f "$p" ] || grep -n -F -f "$needles" "$p" >> "$scan" 2>/dev/null || true
 done
 if [ -s "$scan" ]; then
 	sed "s|$repo|<repo>|g" "$scan"
-	bad "personal paths or the personal account name remain"
+	bad "personal paths remain"
 else
 	ok "no personal paths in code, tests, README.md, docs or man"
 fi

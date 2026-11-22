@@ -136,16 +136,22 @@ bectl activate -t nvidia-test
 shutdown -r now
 ```
 
-In that boot environment, as root, from the checkout (`cd` to it first). These commands load
-files owned by the user who built them, so that user must be trusted with root:
+In that boot environment, as root, from the checkout (`cd` to it first). Loading modules from
+a work tree owned by a user, as root, trusts that user: whoever can write those files gets
+kernel code execution. Do this only for a tree you built yourself.
+
+`T` below is `GB10_WORK` when it is set in the root shell, else `work/` of the checkout. A
+root shell opened with `su -` or a fresh login does not carry the `GB10_WORK` you built with:
+set it to the same path in this root shell first (or set `T` yourself), and check the `T=`
+line it prints before going on:
 
 ```sh
-T="$(pwd)/work"
+T=${GB10_WORK:-$(pwd)/work}; echo "T=$T"
 kenv hw.nvidia.registry.EnableGpuFirmware=1
-kldload $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $T/build/tree/nvidia/nvidia.ko
-kldload $T/build/tree/nvidia-modeset/nvidia-modeset.ko
-kldload $T/build/tree/nvidia-drm/nvidia-drm.ko
+kldload "$T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko"
+kldload "$T/build/tree/nvidia/nvidia.ko"
+kldload "$T/build/tree/nvidia-modeset/nvidia-modeset.ko"
+kldload "$T/build/tree/nvidia-drm/nvidia-drm.ko"
 ```
 
 `nvidia.ko` depends on the architecture's GSP firmware module. Keep the firmware `kldload`
@@ -160,8 +166,8 @@ Linux layer. Linux CUDA, Vulkan and `nvidia-smi` additionally need both provider
 load the Linuxulator:
 
 ```sh
-kldload $T/build/tree/nvidia-linux/nvidia_linux.ko
-kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
+kldload "$T/build/tree/nvidia-linux/nvidia_linux.ko"
+kldload "$T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko"
 ```
 
 Build the providers with the two `--module=nvidia-linux` and `--module=nvidia-modeset-linux`
@@ -204,25 +210,40 @@ Return to the normal boot environment after the one-shot test (`bectl list` mark
 and next-boot environments). Keep a fallback environment, then install the modules as
 root-owned files:
 
-Run these as root from the checkout:
+Run these as root from the checkout. They copy files from the user-owned work tree, which
+trusts that user with root; install only a tree you built yourself. As above, `T` is
+`GB10_WORK` when set in the root shell, else `work/` of the checkout. If you built with
+`GB10_WORK` set, set it to the same path in this root shell first (or set `T` yourself), and
+check the `T=` line it prints:
 
 ```sh
 bectl create pre-nvidia
-T="$(pwd)/work"
+T=${GB10_WORK:-$(pwd)/work}; echo "T=$T"
 install -o root -g wheel -m 555 \
-    $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko \
-    $T/build/tree/nvidia/nvidia.ko \
-    $T/build/tree/nvidia-modeset/nvidia-modeset.ko \
-    $T/build/tree/nvidia-drm/nvidia-drm.ko \
-    $T/build/tree/nvidia-linux/nvidia_linux.ko \
-    $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko /boot/modules/
-install -o root -g wheel -m 555 rc.d/nvidia_linux /usr/local/etc/rc.d/nvidia_linux
+    "$T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko" \
+    "$T/build/tree/nvidia/nvidia.ko" \
+    "$T/build/tree/nvidia-modeset/nvidia-modeset.ko" \
+    "$T/build/tree/nvidia-drm/nvidia-drm.ko" /boot/modules/
 kldxref /boot/modules
 sysrc kld_list+="nvidia_gsp_ga10x_fw nvidia nvidia-modeset nvidia-drm"
+grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf || {
+    [ -z "$(tail -c 1 /boot/loader.conf 2>/dev/null)" ] || echo >> /boot/loader.conf
+    echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
+}
+```
+
+The Linux provider modules are optional. Skip this step on a host that runs no Linux
+binaries. To run them, build the providers (the two `--module=nvidia-linux` and
+`--module=nvidia-modeset-linux` commands above), then, as root and with the same `T`:
+
+```sh
+install -o root -g wheel -m 555 \
+    "$T/build/tree/nvidia-linux/nvidia_linux.ko" \
+    "$T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko" /boot/modules/
+install -o root -g wheel -m 555 rc.d/nvidia_linux /usr/local/etc/rc.d/nvidia_linux
+kldxref /boot/modules
 sysrc linux_enable=YES
 sysrc nvidia_linux_mode=AUTO
-grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
-    echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
 ```
 
 `kld_list` loads in the order given. `nvidia.ko` reads `hw.nvidia.registry.*` from the kernel
