@@ -58,6 +58,10 @@ stop_cmd=:
 : "${prime_import_testboot_loop_timeout:=20}"	# seconds for one probe of the wire loop
 : "${prime_import_testboot_lockfile:=/var/run/noshutdown}"
 : "${prime_import_testboot_version:=/usr/local/etc/prime_import_testboot.version}"
+prime_import_testboot_real_shutdown=/sbin/shutdown
+: "${prime_import_testboot_shutdown:=$prime_import_testboot_real_shutdown}"
+: "${prime_import_testboot_bectl:=bectl}"
+: "${prime_import_testboot_marker:=/usr/local/etc/prime_import_testboot.marker}"
 : "${prime_import_testboot_deadman:=60}"	# minutes until the dead-man timer fires; 0 disables.
 # Longer than the bounded worst case of the run, every timeout plus its -k 5:
 # import 125 s + loops x 25 s + reverse 125 s + CUDA 305 s + Vulkan 125 s =
@@ -97,6 +101,85 @@ wired()
 
 # The dead-man timer: a hang (not a panic) would leave the test boot environment
 # stuck.  Armed at the start, cancelled at the done row, never otherwise.
+# The pid helpers below let the cancel kill exactly the process the arm started.
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only for that exact shutdown process owned by <uid>
+{
+	case $1 in
+	''|*[!0-9]*) return 1 ;;
+	esac
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
+# dm_decide: the pure decision for a real shutdown call.  No side effects: it
+# only prints the reason it refuses and returns 1, or returns 0.  A real boot
+# needs ALL of autoboot=yes, rc_fast=yes and rc_arg=start: /etc/rc.subr strips
+# the one/fast/force prefix, so rc_arg is "start" for onestart too and cannot
+# tell a boot from a hand run; only autoboot=yes (set by /etc/rc) and
+# rc_fast=yes (set by the faststart prefix /etc/rc uses) can.
+dm_decide()	# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE
+{
+	if [ "$1" != 0 ]; then
+		echo "uid $1 is not 0"
+		return 1
+	fi
+	if [ "$2" != yes ]; then
+		echo "not an rc boot: autoboot is '${2:-unset}', not yes (a real boot needs autoboot=yes, rc_fast=yes and rc_arg=start)"
+		return 1
+	fi
+	if [ "$3" != yes ]; then
+		echo "not an rc boot: rc_fast is '${3:-unset}', not yes (a real boot needs autoboot=yes, rc_fast=yes and rc_arg=start)"
+		return 1
+	fi
+	if [ "$4" != start ]; then
+		echo "not an rc boot: rc_arg is '${4:-unset}', not start (a real boot needs autoboot=yes, rc_fast=yes and rc_arg=start)"
+		return 1
+	fi
+	if [ -z "$5" ]; then
+		echo "the marker file is missing or empty"
+		return 1
+	fi
+	if [ -z "$6" ]; then
+		echo "no current boot environment was found"
+		return 1
+	fi
+	if [ "$6" != "$5" ]; then
+		echo "current boot environment '$6' does not match marker '$5'"
+		return 1
+	fi
+	return 0
+}
+
+deadman_allowed()
+{
+	DM_REFUSE=
+	DM_STUB=0
+	# An override of the shutdown program is honoured only when this is NOT an rc
+	# boot start (autoboot is not yes) and it is an absolute, executable,
+	# non-setuid file: a file like that cannot reboot the machine.  At an rc boot
+	# the override is ignored and the real path is used under the real conditions.
+	# Decided: a root hand run (onestart) with such a stub override is allowed,
+	# because a stub that is not setuid cannot reboot the machine.
+	if [ "${autoboot:-}" != yes ] &&
+	    [ "$prime_import_testboot_shutdown" != "$prime_import_testboot_real_shutdown" ] &&
+	    [ "${prime_import_testboot_shutdown#/}" != "$prime_import_testboot_shutdown" ] &&
+	    [ -f "$prime_import_testboot_shutdown" ] && [ -x "$prime_import_testboot_shutdown" ] &&
+	    [ ! -u "$prime_import_testboot_shutdown" ]; then
+		DM_STUB=1
+		return 0
+	fi
+	prime_import_testboot_shutdown=$prime_import_testboot_real_shutdown
+	_dm_marker=$(sed -n '1p' "$prime_import_testboot_marker" 2> /dev/null)
+	_dm_be=$("$prime_import_testboot_bectl" list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}')
+	DM_REFUSE=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_marker" "$_dm_be") || return 1
+	return 0
+}
+
 deadman_arm()
 {
 	case $prime_import_testboot_deadman in
@@ -108,15 +191,42 @@ deadman_arm()
 		row deadman info "the dead-man timer is disabled (prime_import_testboot_deadman=0)"
 		return 0 ;;
 	esac
-	shutdown -r "+$prime_import_testboot_deadman" "prime_import_testboot dead-man: the machine restarts in $prime_import_testboot_deadman minutes unless the test run finishes" > /dev/null 2>&1 &
-	row deadman info "a dead-man timer is requested for $prime_import_testboot_deadman minutes from now unless the run finishes (an ordinary timed restart request; to cancel it by hand: pkill -f 'prime_import_testboot dead-man')"
-	sync
-	# the timer must really be pending: shutdown refuses to run when /var/run/noshutdown exists, and a refused or failed one leaves no process
-	sleep 1
-	if [ -e "$prime_import_testboot_lockfile" ] || ! pgrep -f "prime_import_testboot dead-man" > /dev/null 2>&1; then
-		row deadman fail "the dead-man timer was requested but is not pending (the restart request was refused because the lock file $prime_import_testboot_lockfile exists, or it failed): this boot is NOT protected against a hang, so stop the run, remove the lock file if it is there, and restart the machine by hand"
+	DM_CHILD=
+	# shutdown refuses to run when the lock file exists: do not call it at all
+	# (a call made first could leave a pending reboot that nobody records)
+	if [ -e "$prime_import_testboot_lockfile" ]; then
+		row deadman fail "the dead-man timer was requested but is not pending (the lock file $prime_import_testboot_lockfile exists, shutdown was not called): this boot is NOT protected against a hang"
 		sync
+		return 0
 	fi
+	if ! deadman_allowed; then
+		row deadman fail "REFUSED: not calling shutdown: $DM_REFUSE: this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	"$prime_import_testboot_shutdown" -r "+$prime_import_testboot_deadman" "prime_import_testboot dead-man: the machine restarts in $prime_import_testboot_deadman minutes unless the test run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
+	fi
+	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
+	if [ -n "$_dm_fail" ]; then
+		row deadman fail "the dead-man timer was requested but is not pending ($_dm_fail): this boot is NOT protected against a hang; first line of deadman.txt: ${_dm_first:-<empty>}"
+	else
+		DM_CHILD=$_dm_pid
+		if [ "$DM_STUB" = 1 ]; then
+			row deadman info "a dead-man timer is requested for $prime_import_testboot_deadman minutes from now unless the run finishes and is pending as pid $DM_CHILD; a stubbed shutdown is used; to cancel it by hand: kill $DM_CHILD"
+		else
+			row deadman info "a dead-man timer is requested for $prime_import_testboot_deadman minutes from now unless the run finishes and is pending as pid $DM_CHILD; to cancel it by hand: kill $DM_CHILD"
+		fi
+	fi
+	sync
 }
 
 deadman_cancel()
@@ -126,11 +236,19 @@ deadman_cancel()
 	*[!0]*) ;;
 	*) return 0 ;;
 	esac
-	# only the timer armed above: its wall message is unique to this script
-	if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then
-		row deadman info "the run finished: the dead-man timer is cancelled"
+	case $DM_CHILD in
+	''|*[!0-9]*)
+		row deadman info "the run finished: no dead-man timer was found to cancel (no exact shutdown pid was recorded; nothing was killed)"
+		return 0 ;;
+	esac
+	if ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman info "the run finished: no dead-man timer was found to cancel (pid $DM_CHILD is no longer a shutdown owned by uid $(id -u); nothing was killed)"
+		return 0
+	fi
+	if kill "$DM_CHILD" > /dev/null 2>&1; then
+		row deadman info "the run finished: the dead-man timer pid $DM_CHILD is cancelled"
 	else
-		row deadman info "the run finished: no dead-man timer was found to cancel (it may have been refused or has already fired)"
+		row deadman fail "the run finished but the confirmed dead-man timer pid $DM_CHILD could not be killed: it may still restart the machine"
 	fi
 }
 
