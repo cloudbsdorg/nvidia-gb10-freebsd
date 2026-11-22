@@ -172,17 +172,19 @@ Done:
 
 ## RESUME
 
-State: fork cloudbsd/26.3 at 00e288210ac (pushed). In the worktree, the
-gallium nouveau deletions are unstaged (on disk only).
+State: fork cloudbsd/26.3 at b5eb069d1f9 (pushed). In the worktree, the
+gallium nouveau deletions are unstaged (on disk only, 245 paths).
+b5eb069d1f9 (Kimi r8 and r9) fixed the open findings of 019a93c8543 and
+4b21c1c37f2: option quoting, the UPSTREAM regular-file check, the failure
+listings, the quiet self-tests, the empty-build uAPI check, the help width,
+the README placeholders, the meson error text and the CPD ranges. Left from
+those findings: the tegra leftovers and the predicate name (upstream churn,
+not worth it now).
 
 Resume order:
 1. The gallium deletion: wait for the decision above. Until then, do not
    stage src/gallium/drivers/nouveau or src/gallium/winsys/nouveau.
-2. Open findings of 019a93c8543 and 4b21c1c37f2 (listed in their commit
-   messages), through Kimi: mesa_opts quoting, the default configure with
-   nvk-kmd fixed to nvrm, the tegra leftovers, the predicate name, the
-   uAPI check on an empty build, the CPD ranges.
-3. Then the older items below.
+2. Then the older items below.
 
 Next (open work only):
 1. Follow-up fork commit for the gate round 2 findings (Kimi for the
