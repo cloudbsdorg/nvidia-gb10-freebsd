@@ -25,17 +25,46 @@ export PATH
 LLVM=${LLVM:-/usr/local/llvm23}
 LLVM_MIN=23
 # The one remedy every LLVM refusal names.
-LLVM_FIX="install LLVM $LLVM_MIN or later (pkg install llvm$LLVM_MIN), or set LLVM to its prefix, such as LLVM=/usr/local/llvm$LLVM_MIN"
+LLVM_FIX="install LLVM $LLVM_MIN or later (pkg install llvm$LLVM_MIN), or set LLVM to the prefix of another LLVM $LLVM_MIN-or-later install (now LLVM=$LLVM)"
 
+# Time: O(1).  Space: O(1).
 usage() {
 	echo "usage: sh $0 OUTDIR    (env LLVM, default /usr/local/llvm23)"
+	echo "       sh $0 --check-llvm"
 }
 die2() {
 	echo "mksdk: $*" >&2
 	exit 2
 }
 
+# Set major to the clang major version.  On refusal, print the build's
+# diagnostic and return 2; the caller decides whether to print the result.
+# Time: O(clang version output).  Space: O(1).
+check_llvm() {
+	major=
+	# Time: O(1) (two tool lookups).  Space: O(1).
+	for tool in llvm-as clang; do
+		if [ ! -x "$LLVM/bin/$tool" ]; then
+			echo "mksdk: $LLVM/bin/$tool not found; $LLVM_FIX" >&2
+			return 2
+		fi
+	done
+	major=$("$LLVM/bin/clang" --version 2>/dev/null |
+	    sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | sed -n 1p)
+	if [ -z "$major" ] || [ "$major" -lt "$LLVM_MIN" ]; then
+		echo "mksdk: $LLVM/bin/clang is version ${major:-unknown}; LLVM $LLVM_MIN or later is needed; $LLVM_FIX" >&2
+		return 2
+	fi
+}
+
 case ${1:-} in
+--check-llvm)
+	[ $# -eq 1 ] || { usage >&2; exit 2; }
+	check_llvm
+	rc=$?
+	printf 'llvm: %s clang %s\n' "$LLVM" "${major:-unknown}"
+	exit "$rc"
+	;;
 -h | --help)
 	usage
 	exit 0
@@ -66,14 +95,7 @@ if [ -e "$OUT" ]; then
 	[ -z "$(ls -A -- "$OUT")" ] ||
 	    die2 "$OUT is not empty; give a new or empty directory"
 fi
-for tool in llvm-as clang; do
-	[ -x "$LLVM/bin/$tool" ] ||
-	    die2 "$LLVM/bin/$tool not found; $LLVM_FIX"
-done
-major=$("$LLVM/bin/clang" --version 2>/dev/null |
-    sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | sed -n 1p)
-[ -n "$major" ] && [ "$major" -ge "$LLVM_MIN" ] ||
-    die2 "$LLVM/bin/clang is version ${major:-unknown}; LLVM $LLVM_MIN or later is needed; $LLVM_FIX"
+check_llvm || exit 2
 
 # Time: O(1).  Space: O(1).
 for src in sdk/include/cuda.h libdevice/libdevice.ll; do
@@ -131,18 +153,24 @@ RETRY="remove it or give another directory, then run mksdk.sh again"
 [ -L "$OUT" ] && { echo "mksdk: $OUT became a symbolic link during the build; $RETRY" >&2; exit 1; }
 removed=0
 if [ -d "$OUT" ]; then
-	if ! rmdir -- "$OUT" 2>/dev/null; then
-		if [ -n "$(ls -A -- "$OUT" 2>/dev/null)" ]; then
-			echo "mksdk: $OUT is no longer empty; $RETRY" >&2
+	if ! err=$(rmdir -- "$OUT" 2>&1); then
+		if entries=$(ls -A -- "$OUT" 2>/dev/null); then
+			if [ -n "$entries" ]; then
+				echo "mksdk: $OUT is no longer empty; $RETRY" >&2
+			else
+				echo "mksdk: cannot remove the empty $OUT to put the tree there; $RETRY" >&2
+			fi
 		else
-			echo "mksdk: cannot remove the empty $OUT to put the tree there; $RETRY" >&2
+			echo "mksdk: cannot read $OUT; $RETRY" >&2
 		fi
+		[ -z "$err" ] || printf '%s\n' "$err" >&2
 		exit 1
 	fi
 	removed=1
 fi
-if ! mv -h -- "$NEW" "$OUT" 2>/dev/null; then
+if ! err=$(mv -h -- "$NEW" "$OUT" 2>&1); then
 	echo "mksdk: cannot put the tree at $OUT (it changed during the build?); $RETRY" >&2
+	[ -z "$err" ] || printf '%s\n' "$err" >&2
 	# Put back the empty directory the caller gave.
 	[ $removed -eq 1 ] && mkdir -- "$OUT" 2>/dev/null
 	exit 1
@@ -150,8 +178,7 @@ fi
 # mv moves NEW into OUT when a directory appeared there after rmdir: the
 # tree then sits at OUT/<name of NEW>, not at OUT.
 if [ -L "$OUT" ] || [ -e "$OUT/${NEW##*/}" ] || [ ! -f "$OUT/include/cuda.h" ]; then
-	echo "mksdk: $OUT changed during the build; the tree is not in place; $RETRY" >&2
-	rm -rf -- "$OUT/${NEW##*/}"
+	echo "mksdk: $OUT changed during the build; the tree is not in place (a copy may be left at $OUT/${NEW##*/}); $RETRY" >&2
 	exit 1
 fi
 trap - EXIT

@@ -337,3 +337,31 @@ Commit 2 (open findings of commit 1), staged:
 - host_defines.h: no __noinline__ macro (it broke __attribute__((__noinline__))).
 - README -o; man page exit wording.
 Test: 75 passed, 0 failed. Next: gate rounds 1 and 2, commit, push, Track.
+
+## 2026-11-22T07:12Z commit 2 landed; RESUME here
+Commit 2: befd07d, pushed. 81 checks green, 2 gate rounds.
+Correction to the 07:20Z entry: the layout probe runs before anything is created, not in the build directory.
+Next, commit 3:
+1. The Review-open items of befd07d:
+   - a mutated-copy test for a directory created between rmdir and mv;
+   - no rm through a link after mv;
+   - the ls status in the rmdir message;
+   - LLVM_MIN in the skip message and the header cap;
+   - the test asks mksdk.sh for the version check;
+   - show the mv and rmdir errors;
+   - the remedy example.
+2. libdevice from libclc. The ports devel/libclc has flavors up to llvm22 only, so an llvm23 flavor is needed (cloudbsd-ports), or a build from the llvm23 source.
+3. nvptxas and nvfatbin stubs in bin/, plus a stub libcudart, so a full compile and link works.
+4. PTX from the ggml mma.cuh.
+Then C1.4a (#2428).
+This entry is not committed yet.
+
+## 2026-11-22T11:20Z commit 3 round A (Kimi k3.1-pro in opencode)
+The Review-open items of befd07d are closed by round A. Brief: ~/work/gb10/briefs/2425-c1.1-r2-review-open.md. Report: ~/work/gb10/tmp/2425-rA/ROUND-REPORT.md; the round left its final sections unfilled, so it was judged by the tree.
+Changes:
+- mksdk.sh --check-llvm is now the one version check, used by builds and by the test skip.
+- After mv, nothing is removed through a link.
+- The rmdir message is told apart for an unreadable OUT, and the real mv and rmdir errors are shown.
+- The remedy names the current prefix.
+- Mutated-copy tests cover the nested-move and post-mv-link branches.
+Test: 87 passed, 0 failed. Next: gate rounds 1 and 2, commit, push. Then round B: nvptxas, nvfatbin and libcudart stubs, so a full compile and link works.

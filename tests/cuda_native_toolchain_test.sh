@@ -18,19 +18,22 @@
 # - a host-only object that leaves the launch calls to libcudart;
 # - mutants of the tree and of the sources that the checks must notice.
 #
-# Every check prints "ok" or "FAIL".  Exit status: the number of failures
+# Every check prints "ok", "FAIL" or "skip".  The summary counts all three.
+# Exit status: the number of failures
 # (at most 76, so it never reads as 77), 77 when LLVM 23 is missing and
 # every check that ran passed (the checks that need LLVM were skipped), 99
 # when the setup failed (no fresh copy).
 # Run: sh tests/cuda_native_toolchain_test.sh
 # Env: LLVM (default /usr/local/llvm23), TMPDIR (scratch, default /tmp).
+# CUDA_NATIVE_TEST_CHILD=1 marks a child run, which never starts another.
+# CUDA_NATIVE_TEST_REPO overrides REPO for a child run from the staged copy.
 
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO=$(CDPATH= cd -- "$HERE/.." && pwd)
+REPO=${CUDA_NATIVE_TEST_REPO:-$(CDPATH= cd -- "$HERE/.." && pwd)}
 LLVM=${LLVM:-/usr/local/llvm23}
 export LLVM
 CXX=$LLVM/bin/clang++
@@ -42,14 +45,18 @@ trap 'exit 143' TERM
 
 PASS=0
 FAIL=0
+SKIP=0
 ok() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
+# skip_check NAME: record and print a skip without counting it as a pass.
+# Time: O(1).  Space: O(1).
+skip_check() { SKIP=$((SKIP + 1)); printf 'skip %s\n' "$1"; }
 # expect_rc NAME RC WANT: rc captured by the caller on its own line before.
 expect_rc() {
 	if [ "$2" -eq "$3" ]; then ok "$1"; else bad "$1 (rc=$2, want $3)"; fi
 }
 finish() {
-	printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+	printf '%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 	[ "$FAIL" -le 76 ] || FAIL=76
 	exit "$FAIL"
 }
@@ -66,7 +73,7 @@ expect_rc "the fresh copy holds mksdk.sh and the test kernels" $rc 0
 if [ $rc -ne 0 ]; then
 	echo "The test runs on the staged tree: stage the files first" \
 	    "(git add lib/cuda-native tests/cuda-native tests/cuda_native_toolchain_test.sh)." >&2
-	printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+	printf '%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 	exit 99
 fi
 CN=$SRC/lib/cuda-native
@@ -143,8 +150,9 @@ expect_rc "mutant: a symbolic link among the headers is caught" $rc 1
 MAN=$CN/man/cuda-native-toolchain.7
 # The man page states the failure cap of finish(); keep them the same.
 cap=$(sed -n 's/^	\[ "\$FAIL" -le \([0-9]*\) \] || FAIL=\1$/\1/p' "$SRC/tests/cuda_native_toolchain_test.sh")
-[ -n "$cap" ] && [ "$cap" -lt 77 ] && grep -q "capped at $cap" "$MAN"
-expect_rc "the man page states the failure cap of this test (${cap:-none})" $? 0
+[ -n "$cap" ] && [ "$cap" -lt 77 ] && grep -q "capped at $cap" "$MAN" &&
+    grep -q "^# (at most $cap," "$SRC/tests/cuda_native_toolchain_test.sh"
+expect_rc "the man page and test header state the failure cap of this test (${cap:-none})" $? 0
 mandoc -T lint -W warning "$MAN" >"$W/mandoc.out" 2>&1
 rc=$?
 [ $rc -eq 0 ] && [ ! -s "$W/mandoc.out" ]
@@ -154,15 +162,71 @@ expect_rc "cuda-native-toolchain.7 is mandoc -T lint -W warning clean" $? 0
 # ---- the rest needs LLVM 23 ------------------------------------------------
 # The minimum version is the one mksdk.sh enforces.
 llvm_min=$(sed -n 's/^LLVM_MIN=\([0-9][0-9]*\)$/\1/p' "$CN/mksdk.sh")
-cxx_major=$("$CXX" --version 2>/dev/null |
-    sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | sed -n 1p)
 if [ -z "$llvm_min" ]; then
 	bad "mksdk.sh states LLVM_MIN"
 	finish
 fi
-if [ ! -x "$CXX" ] || [ -z "$cxx_major" ] || [ "$cxx_major" -lt "$llvm_min" ]; then
-	echo "skip: no clang 23 at $CXX (pkg install llvm23, or set LLVM); the checks below did not run"
-	printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+man_llvm_min=$(sed -n 's/^The compiler is clang from LLVM \([0-9][0-9]*\)$/\1/p' "$MAN")
+[ -n "$man_llvm_min" ] && [ "$man_llvm_min" = "$llvm_min" ]
+expect_rc "the man page LLVM minimum equals mksdk.sh LLVM_MIN ($llvm_min)" $? 0
+man_status=$(mandoc -T ascii "$MAN" | col -b | sed -n '/^EXIT STATUS$/,/^EXAMPLES$/p' | tr '\n' ' ' | sed 's/  */ /g')
+printf '%s\n' "$man_status" |
+    grep -Fq 'With --check-llvm, mksdk.sh exits 0 when the LLVM install is usable and 2 otherwise, including a usage error.' &&
+    ! printf '%s\n' "$man_status" | grep -Fq 'Both outcomes print'
+expect_rc "the man page documents the --check-llvm outcome once" $? 0
+
+# llvm_decision MKSDK OUTFILE: classify the --check-llvm answer as run, skip
+# or broken; stdout goes to OUTFILE and stderr to OUTFILE.err.
+# Time: O(check-llvm output).  Space: O(1) beyond its output files.
+llvm_decision() {
+	_llvm_mksdk=$1
+	_llvm_out=$2
+	sh "$_llvm_mksdk" --check-llvm >"$_llvm_out" 2>"$_llvm_out.err"
+	_llvm_rc=$?
+	_llvm_lines=$(wc -l <"$_llvm_out" 2>/dev/null)
+	_llvm_shape=0
+	[ "$_llvm_lines" -eq 1 ] &&
+	    grep -Eq '^llvm: .* clang ([0-9]+|unknown)$' "$_llvm_out" && _llvm_shape=1
+	if [ "$_llvm_rc" -eq 0 ] && [ "$_llvm_shape" -eq 1 ]; then
+		printf 'run\n'
+	elif [ "$_llvm_rc" -eq 2 ] && [ "$_llvm_shape" -eq 1 ] &&
+	    grep -q '^mksdk: ' "$_llvm_out.err"; then
+		printf 'skip\n'
+	else
+		printf 'broken\n'
+	fi
+}
+
+# A syntax error also exits 2; it must never turn into a no-LLVM skip.
+cp -R "$CN" "$W/cn-broken"
+fi_line=$(grep -n -m 1 '^[[:space:]]*fi[[:space:]]*$' "$W/cn-broken/mksdk.sh")
+fi_line=${fi_line%%:*}
+[ -n "$fi_line" ] && sed -i '' "${fi_line}d" "$W/cn-broken/mksdk.sh"
+sh -n "$W/cn-broken/mksdk.sh" >"$W/broken-syntax.out" 2>&1
+broken_syntax_rc=$?
+broken_decision=$(llvm_decision "$W/cn-broken/mksdk.sh" "$W/broken-llvm.out")
+[ -n "$fi_line" ] && [ "$broken_syntax_rc" -ne 0 ] && [ "$broken_decision" = broken ]
+expect_rc "a syntactically broken mksdk.sh --check-llvm is a failure, not a skip" $? 0
+
+decision=$(llvm_decision "$CN/mksdk.sh" "$W/llvm-check.out")
+found_major=$(sed -n 's/^llvm: .* clang \([0-9][0-9]*\)$/\1/p' "$W/llvm-check.out")
+case $decision in
+skip)
+	echo "skip: no clang $llvm_min or later at $CXX (found ${found_major:-unknown}; pkg install llvm$llvm_min, or set LLVM); the checks below did not run"
+	printf '%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
+	[ "$FAIL" -eq 0 ] && exit 77
+	finish
+	;;
+broken)
+	bad "mksdk.sh --check-llvm gives a usable answer"
+	finish
+	;;
+run)
+	;;
+esac
+if [ ! -x "$CXX" ]; then
+	echo "skip: no executable clang++ at $CXX; the checks below did not run"
+	printf '%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 	[ "$FAIL" -eq 0 ] && exit 77
 	finish
 fi
@@ -229,8 +293,62 @@ ln -s "$LLVM/bin/clang" "$W/llvmas/bin/clang"
 chmod +x "$W/llvm19/bin/clang" "$W/llvmbad/bin/clang" "$W/llvmas/bin/llvm-as"
 LLVM=$W/llvm19 sh "$CN/mksdk.sh" "$W/sdk-old" >/dev/null 2>"$W/old.err"
 rc=$?
-[ $rc -eq 2 ] && [ ! -e "$W/sdk-old" ] && grep -q 'set LLVM' "$W/old.err"
-expect_rc "mksdk.sh refuses a clang older than 23 and says what to do" $? 0
+[ $rc -eq 2 ] && [ ! -e "$W/sdk-old" ] && grep -q 'set LLVM' "$W/old.err" &&
+    grep -q 'now LLVM=' "$W/old.err" &&
+    grep -Fq "install LLVM $llvm_min or later (pkg install llvm$llvm_min), or set LLVM to the prefix of another LLVM $llvm_min-or-later install (now LLVM=$W/llvm19)" "$W/old.err"
+expect_rc "mksdk.sh refuses a clang older than 23 and names the prefix in its remedy" $? 0
+
+# The test and other callers can ask mksdk.sh for the toolchain decision
+# without parsing clang --version or creating an SDK tree.
+mkdir "$W/checkllvm"
+(cd "$W/checkllvm" && sh "$CN/mksdk.sh" --check-llvm) >"$W/checkllvm.out" 2>"$W/checkllvm.err"
+rc=$?
+check_major=$(sed -n 's/^llvm: .* clang \([0-9][0-9]*\)$/\1/p' "$W/checkllvm.out")
+[ $rc -eq 0 ] && [ -n "$check_major" ] && [ "$check_major" -ge "$llvm_min" ] &&
+    [ "$(wc -l <"$W/checkllvm.out")" -eq 1 ] &&
+    grep -q "^llvm: $LLVM clang $check_major\$" "$W/checkllvm.out" &&
+    [ -z "$(ls -A "$W/checkllvm")" ]
+expect_rc "--check-llvm reports the real LLVM, succeeds and creates nothing" $? 0
+mkdir "$W/checkllvm-old"
+(cd "$W/checkllvm-old" && LLVM=$W/llvm19 sh "$CN/mksdk.sh" --check-llvm) \
+    >"$W/checkllvm-old.out" 2>"$W/checkllvm-old.err"
+rc=$?
+[ $rc -eq 2 ] && grep -qx "llvm: $W/llvm19 clang 19" "$W/checkllvm-old.out" &&
+    grep -q 'clang is version 19;' "$W/checkllvm-old.err" &&
+    [ -z "$(ls -A "$W/checkllvm-old")" ]
+expect_rc "--check-llvm refuses LLVM 19 with the build diagnostic and creates nothing" $? 0
+
+# Run this test as a child with an old clang to pin the skip contract.  The
+# child uses the same staged sources and returns 77 after its no-LLVM checks.
+# A child never starts another child, including when --check-llvm regresses.
+if [ "${CUDA_NATIVE_TEST_CHILD:-0}" = 1 ]; then
+	ok "skip-contract children (child run: not repeated)"
+else
+	ln -s clang "$W/llvm19/bin/clang++"
+	CUDA_NATIVE_TEST_CHILD=1 CUDA_NATIVE_TEST_REPO="$REPO" LLVM="$W/llvm19" sh "$SRC/tests/cuda_native_toolchain_test.sh" >"$W/skip.out" 2>&1
+	rc=$?
+	[ $rc -eq 77 ] &&
+	    grep -q "^skip: no clang $llvm_min or later at $W/llvm19/bin/clang++ (found 19;" "$W/skip.out"
+	expect_rc "the no-LLVM skip names the required and found versions" $? 0
+	grep -Eq '^[[:space:]]*CUDA_NATIVE_TEST_CHILD=1 CUDA_NATIVE_TEST_REPO="\$REPO" LLVM="\$W/llvm19" sh "\$SRC/tests/cuda_native_toolchain_test\.sh"' \
+	    "$SRC/tests/cuda_native_toolchain_test.sh"
+	expect_rc "the old-LLVM child is explicitly marked as a child" $? 0
+	grep -Eq '^[[:space:]]*CUDA_NATIVE_TEST_CHILD=1 CUDA_NATIVE_TEST_REPO="\$REPO" LLVM="\$W/llvm19" sh "\$SRC/tests/cuda_native_toolchain_test\.sh"' \
+	    "$SRC/tests/cuda_native_toolchain_test.sh" &&
+	    grep -Eq '^REPO=\$\{CUDA_NATIVE_TEST_REPO:-' "$SRC/tests/cuda_native_toolchain_test.sh"
+	expect_rc "the child runs the staged test and receives its source repository" $? 0
+
+	# A usable clang without its companion clang++ is also a named skip.
+	mkdir -p "$W/llvm-nocxx/bin"
+	ln -s "$LLVM/bin/clang" "$W/llvm-nocxx/bin/clang"
+	ln -s "$LLVM/bin/llvm-as" "$W/llvm-nocxx/bin/llvm-as"
+	CUDA_NATIVE_TEST_CHILD=1 CUDA_NATIVE_TEST_REPO="$REPO" LLVM="$W/llvm-nocxx" sh "$SRC/tests/cuda_native_toolchain_test.sh" >"$W/skip-cxx.out" 2>&1
+	rc=$?
+	[ $rc -eq 77 ] &&
+	    grep -Fq "skip: no executable clang++ at $W/llvm-nocxx/bin/clang++" "$W/skip-cxx.out"
+	expect_rc "a missing clang++ is a child skip, not a compile failure" $? 0
+fi
+
 mkdir -p "$W/fail1/sdk"
 LLVM=$W/llvmbad sh "$CN/mksdk.sh" "$W/fail1/sdk" >/dev/null 2>"$W/bad.err"
 rc=$?
@@ -282,8 +400,64 @@ LLVM=$W/llvmfile sh "$CN/mksdk.sh" "$W/file/sdk" >/dev/null 2>"$W/file.err"
 rc=$?
 [ $rc -eq 1 ] && [ -f "$W/file/sdk" ] && [ ! -s "$W/file/sdk" ] &&
     [ -z "$(find "$W/file" -name '.mksdk.*')" ] &&
-    grep -q 'cannot put the tree at' "$W/file.err" && grep -q 'run mksdk.sh again' "$W/file.err"
-expect_rc "a file planted during the build: rc 1, reported with the remedy, nothing left" $? 0
+    grep -q 'cannot put the tree at' "$W/file.err" && grep -q 'run mksdk.sh again' "$W/file.err" &&
+    grep -q 'mv:' "$W/file.err"
+expect_rc "a file planted during the build: rc 1, remedy and mv's own error, nothing left" $? 0
+
+# Exercise the rename into a directory that appeared after the rmdir check.
+# Fail closed: keep the caller's entry and any nested copy, and name the copy.
+cp -R "$CN" "$W/cn-nested"
+sed -i '' '/^if ! .*mv -h /i\
+mkdir -p "$OUT/held"
+' "$W/cn-nested/mksdk.sh"
+sh "$W/cn-nested/mksdk.sh" "$W/race2/sdk" >/dev/null 2>"$W/race2.err"
+rc=$?
+race2_name=$(find "$W/race2/sdk" -mindepth 1 -maxdepth 1 -type d -name '.mksdk.*' | sed -n 1p)
+race2_count=$(find "$W/race2/sdk" -mindepth 1 -maxdepth 1 -type d -name '.mksdk.*' | wc -l)
+[ $rc -eq 1 ] && [ -d "$W/race2/sdk/held" ] && [ "$race2_count" -eq 1 ] &&
+    [ -n "$race2_name" ] && grep -Fq "a copy may be left at $race2_name" "$W/race2.err" &&
+    [ -z "$(find "$W/race2" -mindepth 1 -maxdepth 1 -name '.mksdk.*')" ]
+expect_rc "a nested post-mv tree is left in place and its path is named" $? 0
+
+# If OUT becomes a link after mv, the post-mv cleanup must not follow it.
+cp -R "$CN" "$W/cn-postlink"
+sed -i '' "/^if \[ -L \"\$OUT\" \]/i\\
+mv \"\$OUT\" \"\$OUT.moved\"; mkdir -p \"$W/victim/\${NEW##*/}\"; ln -s \"$W/victim\" \"\$OUT\"
+" "$W/cn-postlink/mksdk.sh"
+sh "$W/cn-postlink/mksdk.sh" "$W/postlink/sdk" >/dev/null 2>"$W/postlink.err"
+rc=$?
+victim_name=$(ls -A "$W/victim" 2>/dev/null)
+[ $rc -eq 1 ] && [ -n "$victim_name" ] && [ -d "$W/victim/$victim_name" ] &&
+    grep -q 'changed during the build' "$W/postlink.err"
+expect_rc "post-mv cleanup never removes a tree through a symbolic link" $? 0
+
+# An unreadable OUT makes ls fail; that is not proof that OUT is empty.
+mkdir -p "$W/llvmperm/bin"
+ln -s "$LLVM/bin/clang" "$W/llvmperm/bin/clang"
+printf '#!/bin/sh\n"%s/bin/llvm-as" "$@" || exit 1\nmkdir -p "%s/perm/sdk/x"\nchmod 000 "%s/perm/sdk"\n' \
+    "$LLVM" "$W" "$W" >"$W/llvmperm/bin/llvm-as"
+chmod +x "$W/llvmperm/bin/llvm-as"
+# A skip is not a pass: the helper counts it without changing PASS.
+skip_pass=$PASS
+skip_total=$SKIP
+skip_check "skip counter self-test" >"$W/skip-check.out" 2>&1
+skip_rc=$?
+[ $skip_rc -eq 0 ] && [ "$PASS" -eq "$skip_pass" ] &&
+    [ "$SKIP" -eq $((skip_total + 1)) ] && grep -qx 'skip skip counter self-test' "$W/skip-check.out" &&
+    grep -Eq '^[[:space:]]*skip_check "an unreadable output directory is not called empty \(root\)"[[:space:]]*$' "$SRC/tests/cuda_native_toolchain_test.sh"
+skip_test_rc=$?
+SKIP=$skip_total
+expect_rc "skip_check counts a skip, not a pass, and handles the root case" $skip_test_rc 0
+if [ "$(id -u)" -eq 0 ]; then
+	skip_check "an unreadable output directory is not called empty (root)"
+else
+	LLVM=$W/llvmperm sh "$CN/mksdk.sh" "$W/perm/sdk" >/dev/null 2>"$W/perm.err"
+	rc=$?
+	chmod 755 "$W/perm/sdk"
+	[ $rc -eq 1 ] && grep -q 'cannot read' "$W/perm.err" &&
+	    ! grep -q 'the empty' "$W/perm.err"
+	expect_rc "an unreadable output directory is not called empty" $? 0
+fi
 
 # ---- compiles ----------------------------------------------------------------
 # devptx TREE ARCH SRC OUT [FLAGS...]: one device-only compile; the

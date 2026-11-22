@@ -11,6 +11,10 @@
 .Pa lib/cuda-native/mksdk.sh
 .Ar outdir
 .Pp
+.Nm sh
+.Pa lib/cuda-native/mksdk.sh
+.Fl -check-llvm
+.Pp
 .Nm clang++
 .Fl x Cm cuda
 .Fl -cuda-path Ns = Ns Ar outdir
@@ -53,6 +57,15 @@ macros of
 .Pa cuda.h .
 clang does not read it.
 .El
+.Pp
+With
+.Fl -check-llvm ,
+.Pa mksdk.sh
+runs the same LLVM tool and clang version checks as a build, prints
+.Ql llvm: <prefix> clang <major> ,
+and creates nothing.
+It exits 0 when the LLVM install is usable and 2 otherwise, with the same
+refusal diagnostic as a build.
 .Pp
 The compiler is clang from LLVM 23
 .Pq the ports Pa llvm23 No package .
@@ -117,6 +130,11 @@ into place at the end.
 If
 .Ar outdir
 changes while the tree is built, the run fails and says so.
+.Pp
+With
+.Fl -check-llvm ,
+.Pa mksdk.sh
+exits 0 when the LLVM install is usable and 2 otherwise, including a usage error.
 .Pp
 The test exits with the number of failed checks, capped at 76 so that it is
 never confused with 77.
