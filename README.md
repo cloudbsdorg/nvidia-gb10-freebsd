@@ -735,6 +735,31 @@ software GPU (video and system memory in one shared object, a VA table, sparse r
 API is tested without hardware; the RM backend is tested against a scripted kernel
 (`tests/libnvrm/rm_mem_test.c`).
 
+## Native test boot (no Linux layer)
+
+`tests/native-tools-testboot/` builds a one-shot boot environment,
+`nvidia-native-tools-test-YYYYMMDD-N`. It measures the card with native FreeBSD tools only:
+
+- `linux_enable="NO"`;
+- no Linuxulator or LinuxKPI module (amdgpu and drm are stripped from `kld_list` and blocked in
+  devmatch);
+- only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
+  Linux dependency since #2363;
+- `gpu-detect.sh` and `nvrm-info` traced under `ktrace`, so that every file they execute is checked.
+
+The environment check fails when a loaded file other than the kernel, or a module record in such a
+file, has a Linux-layer name listed by `guard_layer_name`, or when `compat.linux` answers. Module
+records built into the kernel file are only reported. A failed environment check makes every row
+`not-available` and the verdict `fail`. A traced tool fails its row when it executes a non-FreeBSD binary,
+calls `fexecve`, or calls `execve` with no path. A correct run on current main ends with the verdict
+`incomplete`: some rows are `not-available`, `needs-linux` or `needs-linuxkpi`. Without the optional
+UVM and DRM control modules their rows are `not-available`; the known Linux-dependent controls make
+the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json` (schema
+`native-tools-summary/1`) plus per-tool JSON. See
+[tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
+statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
+tests the kit without a boot.
+
 ## Native CUDA toolchain (cuda-native)
 
 `lib/cuda-native/` is the first piece of native CUDA (Track #2380, stage C1.1 #2425). It holds the
