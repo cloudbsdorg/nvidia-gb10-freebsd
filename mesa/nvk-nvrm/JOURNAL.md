@@ -130,6 +130,45 @@ Done:
   - make build test passes 21/21; the probe output is byte-identical across
     the refactor.
 
+- Log: 2026-11-22 later the same day, three more decisions by Mark, three
+  fork commits (all pushed to cloudbsd/26.3, each with two gate rounds):
+  - 084b498fbbe "highjack agents.md for every agent": our AGENTS.md governs
+    every agent in the fork (CLAUDE.md and GEMINI.md link to it). Mesa text
+    kept byte for byte as UPSTREAM-AGENTS.md, with UPSTREAM-CLAUDE.md and
+    UPSTREAM-GEMINI.md as byte copies (regular files: the gate does not scan
+    links). Since then Kimi accepts src/nouveau work (r3 step 0: "Yes.
+    AGENTS.md explicitly permits changes throughout this private fork").
+  - 019a93c8543 no "nouveau" in what users see: libvulkan_nvk_nvrm.so,
+    nvk_nvrm_icd.<arch>.json, driverName "NVK (CloudBSD, libnvrm)",
+    -Dvulkan-drivers=nvk alias, install into WORK/prefix, leak test.
+    make build test 30/30. Authors: Mesa-tree renames by a Sonnet
+    sub-agent; the rest by Kimi r3 and r5.
+  - The nouveau kernel-driver removal ("delete everything that talks to the
+    nouveau kernel driver; keep NVK, NAK and nvrm"): NOT done yet. Kimi r4
+    was started with the brief $W/build/nvk-nvrm/rounds/r4/task.md and
+    stopped by exact PID for the test-boot pause before it changed any file
+    (the working tree is clean at 019a93c8543).
+
+## RESUME (paused 2026-11-22 about 09:40Z for test boots)
+
+State: fork cloudbsd/26.3 at 019a93c8543, pushed, clean tree. This branch
+(agent/2379-nvk-nvrm) carries the docs. No round or watchdog is running.
+
+Resume order:
+1. Rerun Kimi r4 (the deletion) from the brief above, unchanged:
+   sh $W/build/nvk-nvrm/rounds/start-round.sh $W/build/nvk-nvrm/rounds/r4 dgx-mlapointe/kimi-k3.1-pro
+   then /bin/pwait on the watchdog pid it prints. Empty r4/round.status
+   first is done by the script. Review the diff, run make build test (30
+   checks plus the new "no nouveau uAPI in the build" check), two gate
+   rounds, commit as its own commit, push, Track comment.
+2. Fold in the open round 2 findings of 019a93c8543 (mesa_opts unquoted, so
+   a WORK with spaces breaks meson setup; the regular-file rule for the
+   UPSTREAM copies is not enforced; failing name checks do not list files;
+   help line width; README placeholders; usage string).
+3. Update DESIGN.md and this journal for the renames (libvulkan_nvk_nvrm,
+   -Dvulkan-drivers=nvk, the ICD names) once the deletion lands.
+4. Then the older items below.
+
 Next (open work only):
 1. Follow-up fork commit for the gate round 2 findings (Kimi for the
    cloudbsd/ files, Sonnet for src/nouveau; two review rounds):
