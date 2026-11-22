@@ -862,3 +862,23 @@ RM refuses is counted (`failed_releases`) and its addresses are never reused. Th
 software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
 API is tested without hardware; the RM backend is tested against a scripted kernel
 (`tests/libnvrm/rm_mem_test.c`).
+
+## Native test boot (no Linux layer)
+
+`tests/native-tools-testboot/` builds a one-shot boot environment,
+`nvidia-native-tools-test-YYYYMMDD-N`. It measures the card with native FreeBSD tools only:
+
+- `linux_enable="NO"`;
+- no Linuxulator or LinuxKPI module (amdgpu and drm are stripped from `kld_list` and blocked in
+  devmatch);
+- only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
+  Linux dependency since #2363;
+- `nvrm-info` traced under `ktrace`, so that every file it executes must be a FreeBSD-branded ELF.
+
+A row fails when any module whose name contains `linux` is loaded, or when a non-FreeBSD binary
+runs. The uvm-bsd tests are recorded as needs-linux, because `nvidia-uvm.ko` still depends on the
+Linuxulator; PRIME is recorded as needs-linuxkpi. Results are `summary.json` (schema
+`native-tools-summary/1`) plus per-tool JSON. See
+[tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
+statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
+tests the kit without a boot.
