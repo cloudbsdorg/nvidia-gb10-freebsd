@@ -423,3 +423,22 @@ STATUS, hand back.
   BE dataset itself (when it mounted the BE) to the bootfs roots, checks the copy-out path in plain form
   (guard_plain_path, shared with make-be) under set -f, says what to do; option values missing give the right
   message; the --activate refusal is tested. Kit test 146/0.
+
+## 2026-11-22 (native-tools test-boot kit, #2362): the first boot stopped at env-before on a false positive
+- Boot 20261122T072752Z of nvidia-native-tools-test-20261122-1 returned to cloudbsd-rx7600 with no panic. env-before
+  and env-after failed on module records compiled into /boot/kernel.rx7600/kernel (GENERIC has COMPAT_LINUXKPI):
+  uhub/usb_linux, lkpi_iic/iicbus, lkpi_iicbb/iicbb, drm and drmn lkpi_iic and lkpi_iicbb, pci/lkpi_mlx5_core_pci_table.
+  No Linux file was loaded and compat.linux was an unknown oid; nothing else ran (the loads were gated on env-before).
+- Fix (orchestrator rule): fail only on a loaded FILE other than the kernel with a Linux-layer name (contains linux,
+  or starts with lkpi, lindebugfs, linsysfs, linprocfs), on such a module record inside a loaded file other than the
+  kernel, or on compat.linux answering; the records inside the kernel file are an info row (env-*-kernel-records).
+  New rows ko-native-nvidia and ko-native-nvidia-modeset (kldxref dependencies and nm undefined symbols) gate the
+  loads. The boot listing is the fixture tests/data/native-tools-env-before-20261122T072752Z.kldstat. 34 planned
+  rows; kit test 163/0.
+- Gate round 1 (receipt 19a40871): the kernel exemption left a gap, a module calling built-in LinuxKPI by an
+  unprefixed name (idr_alloc) with no MODULE_DEPEND; closed by guard_lkpi_imports (undefined symbols of the module
+  against the symbols linuxkpi*.ko and lindebugfs.ko beside the running kernel define, linker-set bounds left out).
+  nvidia.ko and nvidia-modeset.ko of main import none; nvidia-drm-v5.ko imports 40 (the control). One name rule
+  (guard_layer_name) for files, records and dependencies, now with drm, dmabuf, ttm, amdgpu, radeonkms and i915kms;
+  guard_env prints the kernel records on a records line (no globals); kldxref positive control is the module
+  record; the record-inside-another-file branch is tested. Kit test 174/0.

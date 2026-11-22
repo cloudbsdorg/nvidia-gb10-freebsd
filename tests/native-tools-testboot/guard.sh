@@ -8,10 +8,16 @@
 # it is never read as "found nothing".
 #
 # The rule (Mark, 2026-11-22: native test results, not going through Linux):
-#   - modules: no loaded kld file or module whose name contains "linux" (the Linuxulator linux, linux64,
-#     linux_common; LinuxKPI linuxkpi, linuxkpi_video and lindebugfs (which is matched by name too); the optional NVIDIA bridges nvidia_linux and
-#     nvidia_modeset_linux; any future one), and the Linux ABI not compiled into the kernel (sysctl compat.linux
-#     answers only "unknown oid");
+#   - modules: no loaded kld FILE other than the kernel whose name contains "linux" (the Linuxulator linux.ko,
+#     linux64.ko, linux_common.ko; LinuxKPI linuxkpi.ko, linuxkpi_video.ko; the optional NVIDIA bridges nvidia_linux.ko
+#     and nvidia_modeset_linux.ko; any future one) or has a part that starts with lkpi, lindebugfs, linsysfs,
+#     linprocfs, drm, dmabuf, ttm, amdgpu, radeonkms or i915kms (guard_layer_name); no module record of such a name
+#     inside a loaded file other than the kernel; and the Linux ABI not in the kernel (sysctl compat.linux answers
+#     only "unknown oid").  Module records compiled into the kernel file itself are not loaded files: the stock kernel
+#     holds records such as uhub/usb_linux, lkpi_iic/iicbus, drm/lkpi_iicbb and pci/lkpi_mlx5_core_pci_table (the
+#     2026-11-22 boot, tests/data/native-tools-env-before-*.kldstat).  They are listed (guard_env prints a "records"
+#     line), never a failure.  What closes the gap they leave is guard_ko_native: a module to be loaded may not import
+#     any symbol that LinuxKPI defines (guard_lkpi_imports), whatever its name;
 #   - binaries: every file a row executes (from its ktrace: the image and the interpreters the kernel opened for each
 #     execve, which covers a #! script's interpreter and the ELF run-time linker) is a FreeBSD-branded ELF, or a #!
 #     script; a row that calls kldload or kldunload fails (the trace names a file id for kldunload, not a module).
@@ -26,9 +32,17 @@ guard_kld_names()
 	' "$1" 2> /dev/null
 }
 
+# guard_layer_name <name>: succeeds when the name, or any /-separated part of a module record name, belongs to the
+# Linux layer (the Linuxulator, LinuxKPI and its filesystems, and the drm-kmod drivers that run on LinuxKPI)
+guard_layer_name()
+{
+	printf '%s\n' "$1" | grep -Eiq 'linux|(^|/)(lkpi|lindebugfs|linsysfs|linprocfs|drm|dmabuf|ttm|amdgpu|radeonkms|i915kms)'
+}
+
 # guard_env <kldstat -v file> <kldstat exit status> <sysctl answer file> <sysctl exit status> [<required file>...]
 # The required files are the positive control: the listing must name each of them (kernel, and nvidia.ko once the
-# kit loaded it), or it is not a real listing.
+# kit loaded it), or it is not a real listing.  Prints the result line, then a line "records <list>" of the
+# Linux-layer module records compiled into the kernel file (the caller reports them as info).
 guard_env()
 {
 	_kf=$1; _ks=$2; _sf=$3; _ss=$4; shift 4
@@ -40,20 +54,94 @@ guard_env()
 			return 2
 		fi
 	done
-	_bad=$(guard_kld_names "$_kf" | grep -iE 'linux|lindebugfs|^lkpi' | sort -u | tr '\n' ' ')
-	if [ -n "$_bad" ]; then
-		echo "fail loaded modules whose name contains linux: ${_bad% }; build the boot environment from a base that loads none of them (make-be.sh strips amdgpu, drm and the Linux ABI from kld_list)"
+	# file|name for every file (record "F") and every module record ("M"), the file it lies in first
+	_recs=$(awk '
+	/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+0x/ { f = $5; print "F|" f "|" f; next }
+	/^[[:space:]]+[0-9]+[[:space:]]+/ && f != "" { print "M|" f "|" $2 }
+	' "$_kf")
+	_badf=; _badm=; _krec=
+	_oifs=$IFS; IFS='
+'
+	for _r in $_recs; do
+		_t=${_r%%|*}; _rest=${_r#*|}; _file=${_rest%%|*}; _name=${_rest#*|}
+
+		guard_layer_name "$_name" || continue
+		if [ "$_file" = kernel ]; then
+			[ "$_t" = M ] && _krec="$_krec $_name"
+		elif [ "$_t" = F ]; then
+			_badf="$_badf $_name"
+		else
+			_badm="$_badm $_file:$_name"
+		fi
+	done
+	IFS=$_oifs
+	_krec=${_krec# }
+	if [ -n "$_badf" ] || [ -n "$_badm" ]; then
+		echo "fail loaded Linux-layer files:${_badf:- none}; Linux-layer module records in loaded files:${_badm:- none}; build the boot environment from a base that loads none of them (make-be.sh strips amdgpu, drm and the Linux ABI from kld_list, and check-be.sh shows what still loads)"
+		echo "records $_krec"
 		return 1
 	fi
 	if [ "$_ss" = 0 ]; then
-		echo "fail sysctl compat.linux answers ($(head -c 120 "$_sf" | tr '\n' ' ')): the Linux ABI is present (compiled into the kernel, or loaded)"
+		echo "fail sysctl compat.linux answers ($(head -c 120 "$_sf" | tr '\n' ' ')): the Linux ABI is present (compiled into the kernel, or loaded); boot a kernel without COMPAT_LINUX"
+		echo "records $_krec"
 		return 1
 	fi
 	if ! grep -q 'unknown oid' "$_sf" 2> /dev/null; then
-		echo "error sysctl compat.linux failed (exit $_ss) without unknown oid: $(head -c 120 "$_sf" | tr '\n' ' '): the probe could not look"
+		echo "error sysctl compat.linux failed (exit $_ss) without unknown oid: $(head -c 120 "$_sf" | tr '\n' ' '): the probe could not look; run it as root"
+		echo "records $_krec"
 		return 2
 	fi
-	echo "pass no loaded module name contains linux, and compat.linux is an unknown oid"
+	echo "pass no Linux-layer file is loaded and compat.linux is an unknown oid; Linux-layer module records compiled into the kernel (not loaded files): ${_krec:-none}"
+	echo "records $_krec"
+	return 0
+}
+
+# guard_lkpi_imports <ko> <LinuxKPI module>...: the undefined symbols of the module that a LinuxKPI module defines
+# (nm -u against nm -g --defined-only), the linker-set bounds __start_set_* and __stop_set_* left out (every module
+# has them).  This catches a call into LinuxKPI by any name (idr_alloc, kasprintf), with or without a MODULE_DEPEND:
+# the kernel may carry LinuxKPI built in.  No LinuxKPI module given, or one nm cannot read, is an error.
+guard_lkpi_imports()
+{
+	_ko=$1; shift
+	[ $# -gt 0 ] || { echo "error no LinuxKPI module to compare $_ko with (linuxkpi.ko beside the kernel)"; return 2; }
+	_def=
+	for _m in "$@"; do
+		_o=$(nm -g --defined-only "$_m" 2> /dev/null) && [ -n "$_o" ] || { echo "error nm could not read the symbols of $_m"; return 2; }
+		_def="$_def
+$(printf '%s\n' "$_o" | awk 'NF >= 3 { print $3 }')"
+	done
+	_und=$(nm -u "$_ko" 2> /dev/null) && [ -n "$_und" ] || { echo "error nm -u could not read $_ko"; return 2; }
+	_hit=$( { printf '%s\n' "$_def" | sort -u; printf '%s\n' "$_und" | awk '{ print $NF }' | sort -u; } | sort | uniq -d | grep -Ev '^__(start|stop)_set_' | tr '\n' ' ')
+	if [ -n "$_hit" ]; then echo "fail ${_ko##*/} imports symbols LinuxKPI defines: ${_hit% }"; return 1; fi
+	echo "pass ${_ko##*/} imports nothing LinuxKPI defines (compared with $*)"
+	return 0
+}
+
+# guard_ko_native <ko> <scratch dir> <LinuxKPI module>...: the module declares no dependency on the Linux layer
+# (kldxref -d -v, guard_layer_name), has no undefined linux_, lkpi_ or linuxkpi_ symbol (guard_undef) and imports
+# nothing a LinuxKPI module defines (guard_lkpi_imports).  The positive control for kldxref is the module record of
+# the file itself ("module <name>"): without it kldxref did not read the file, an error.  No dependency is a pass.
+guard_ko_native()
+{
+	_k=$1; _sd=$2; shift 2
+	case $_sd in */kodep) ;; *) echo "error the scratch directory $_sd must end in /kodep (it is removed)"; return 2 ;; esac
+	rm -rf "$_sd"; mkdir -p "$_sd" && cp "$_k" "$_sd/" || { echo "error $_k could not be copied to $_sd for kldxref"; return 2; }
+	kldxref -d -v "$_sd" > "$_sd.out" 2>&1; _xs=$?
+	rm -rf "$_sd"
+	if [ "$_xs" != 0 ] || ! grep -q '^[[:space:]]*module ' "$_sd.out"; then
+		echo "error kldxref -d -v exited $_xs and printed no module record for $_k: $(head -c 160 "$_sd.out" | tr '\n' ' ')"
+		rm -f "$_sd.out"; return 2
+	fi
+	_d=$(sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' "$_sd.out" | sort -u | tr '\n' ' ')
+	rm -f "$_sd.out"
+	_bad=
+	for _x in $_d; do if guard_layer_name "$_x"; then _bad="$_bad $_x"; fi; done
+	if [ -n "$_bad" ]; then echo "fail ${_k##*/} depends on$_bad: it needs the Linux layer; build it from main a682522 or later"; return 1; fi
+	_ul=$(guard_undef "$_k"); _us=$?
+	[ "$_us" = 0 ] || { echo "$_ul"; return "$_us"; }
+	_ll=$(guard_lkpi_imports "$_k" "$@"); _ls=$?
+	[ "$_ls" = 0 ] || { echo "$_ll"; return "$_ls"; }
+	echo "pass ${_k##*/} depends only on ${_d:-nothing}, has no undefined Linux or LinuxKPI symbol, and imports nothing LinuxKPI defines"
 	return 0
 }
 

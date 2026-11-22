@@ -123,8 +123,10 @@ env_snapshot()
 	_n=$1; shift
 	kldstat -v > "$OUT/$_n.kldstat" 2>&1; _ks=$?
 	sysctl compat.linux > "$OUT/$_n.compat-linux" 2>&1; _ss=$?
-	_line=$(guard_env "$OUT/$_n.kldstat" "$_ks" "$OUT/$_n.compat-linux" "$_ss" "$@"); _gs=$?
-	guard_row "$_n" "$_line" "$_gs"
+	guard_env "$OUT/$_n.kldstat" "$_ks" "$OUT/$_n.compat-linux" "$_ss" "$@" > "$OUT/$_n.guard"; _gs=$?
+	guard_row "$_n" "$(head -1 "$OUT/$_n.guard")" "$_gs"
+	_kr=$(sed -n 's/^records //p' "$OUT/$_n.guard")
+	[ -z "$_kr" ] || row "$_n-kernel-records" info "Linux-layer module records compiled into the kernel file, not loaded files: $_kr"
 	return $_gs
 }
 
@@ -175,6 +177,16 @@ run_body()
 	if kldstat -q -m nvidia > /dev/null 2>&1; then row preloaded fail "nvidia is loaded before the kit loads it"; ok=0; fi
 	for _f in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1; do
 		if hash_ok "$_f"; then row "hash-$_f" pass "$(sha256 -q "$MODS/$_f")"; else row "hash-$_f" fail "$MODS/$_f is missing or not the hash of $KIT/SHA256.txt"; ok=0; fi
+	done
+	# the modules to load reference nothing of the Linuxulator or LinuxKPI: their declared dependencies (kldxref) and
+	# their undefined symbols (nm); a module that does is not loaded
+	# LinuxKPI as this boot has it: the modules beside the running kernel
+	_kd=$(dirname "$(sysctl -n kern.bootfile 2> /dev/null)")
+	_lk=; for _m in "$_kd"/linuxkpi*.ko "$_kd"/lindebugfs.ko; do [ -f "$_m" ] && _lk="$_lk $_m"; done
+	for _k in nvidia nvidia-modeset; do
+		_l=$(guard_ko_native "$MODS/$_k.ko" "$OUT/kodep" $_lk); _s=$?
+		guard_row "ko-native-$_k" "$_l" "$_s"
+		[ "$_s" = 0 ] || ok=0
 	done
 
 	if [ "$ok" = 1 ]; then

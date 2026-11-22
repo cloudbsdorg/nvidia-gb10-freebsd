@@ -28,7 +28,7 @@ import sys
 SCHEMA = "native-tools-summary/1"
 PLANNED = [
     "deadman", "panic-settings", "linux-enable", "env-before",
-    "hash-nvidia_gsp_ga10x_fw.ko", "hash-nvidia.ko", "hash-nvidia-modeset.ko", "hash-nvrm-info", "hash-libnvrm.so.1",
+    "hash-nvidia_gsp_ga10x_fw.ko", "hash-nvidia.ko", "hash-nvidia-modeset.ko", "hash-nvrm-info", "hash-libnvrm.so.1", "ko-native-nvidia", "ko-native-nvidia-modeset",
     "load-nvidia_gsp_ga10x_fw", "load-nvidia", "load-nvidia-modeset", "load", "env-loaded",
     "gpu-node", "gpu-detect-native", "root-open", "gpu-verify", "nvidiactl-open", "modeset-open",
     "nvrm-info", "nvrm-info-native", "nvrm-info-no-new-module",

@@ -82,6 +82,32 @@ sed '2,5d' "$T/kld-clean" > "$T/kld-no-kernel"
 guard_env "$T/kld-no-kernel" 0 "$T/sys-absent" 1 > /dev/null; expect 2 $? "guard_env: a listing without kernel is an error"
 cp "$T/kld-nvl" "$T/after"; guard_env_delta "$T/kld-clean" "$T/after" > /dev/null; expect 1 $? "guard_env_delta: a module that appeared fails"
 cp "$T/kld-clean" "$T/after2"; guard_env_delta "$T/kld-clean" "$T/after2" > /dev/null; expect 0 $? "guard_env_delta: no change passes"
+# the env-before listing of the 2026-11-22 native-tools boot (stock kernel with COMPAT_LINUXKPI): Linux-named module
+# records inside the kernel file are not loaded files; they are listed, and the guard passes
+FIX=$repo/tests/data/native-tools-env-before-20261122T072752Z.kldstat
+guard_env "$FIX" 0 "$T/sys-absent" 1 > "$T/fix.out"; expect 0 $? "guard_env: the 2026-11-22 boot listing (kernel-built-in lkpi and usb_linux records) passes"
+_krec=$(sed -n 's/^records //p' "$T/fix.out")
+for _r in uhub/usb_linux lkpi_iic/iicbus lkpi_iicbb/iicbb drm/lkpi_iic drmn/lkpi_iicbb pci/lkpi_mlx5_core_pci_table; do
+	case " $_krec " in *" $_r "*) ok "guard_env: kernel record $_r is listed as info" ;; *) no "guard_env: kernel record $_r is not listed ($_krec)" ;; esac
+done
+_r=sentinel; _name=sentinel; _x=$(guard_env "$FIX" 0 "$T/sys-absent" 1)
+[ "$_r $_name" = "sentinel sentinel" ] && ok "guard_env in a command substitution leaves the caller variables alone" || no "guard_env changed _r or _name"
+# a Linux-layer module under an innocuous file name: its record gives it away
+{ cat "$FIX"; printf '99    1 0xffff0005ea000000    63000 foo.ko (/boot/modules/foo.ko)\n\tContains modules:\n\t\t Id Name\n\t\t700 linux64elf\n'; } > "$T/fix-foo"
+guard_env "$T/fix-foo" 0 "$T/sys-absent" 1 > "$T/fix-foo.out"; expect 1 $? "guard_env: a record linux64elf inside foo.ko fails"
+grep -q 'foo.ko:linux64elf' "$T/fix-foo.out" && ok "guard_env: the message names foo.ko:linux64elf" || no "guard_env: $(head -1 "$T/fix-foo.out")"
+{ cat "$FIX"; printf '99    1 0xffff0005ea000000    63000 foo.ko (/boot/modules/foo.ko)\n\tContains modules:\n\t\t Id Name\n\t\t701 drmn/lkpi_iic\n'; } > "$T/fix-foo2"
+guard_env "$T/fix-foo2" 0 "$T/sys-absent" 1 > "$T/fix-foo2.out"; expect 1 $? "guard_env: a record drmn/lkpi_iic inside foo.ko fails"
+[ "$(sed -n 's/^records //p' "$T/fix-foo2.out" | tr ' ' '\n' | grep -cx 'drmn/lkpi_iic')" = 1 ] && ok "guard_env: drmn/lkpi_iic is listed once, from the kernel" || no "guard_env: drmn/lkpi_iic is not listed exactly once"
+{ cat "$FIX"; echo '99    1 0xffff0005ea000000    63000 drm.ko (/boot/modules/drm.ko)'; } > "$T/fix-drm"
+guard_env "$T/fix-drm" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: the boot listing plus drm.ko fails"
+{ cat "$FIX"; echo '99    1 0xffff0005ea000000    63000 linux64.ko (/boot/kernel/linux64.ko)'; } > "$T/fix-l64"
+guard_env "$T/fix-l64" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: the boot listing plus linux64.ko fails"
+{ cat "$FIX"; echo '99    1 0xffff0005ea000000    63000 nvidia_modeset_linux.ko (/boot/modules/nvidia_modeset_linux.ko)'; } > "$T/fix-nml"
+guard_env "$T/fix-nml" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: the boot listing plus nvidia_modeset_linux.ko fails"
+{ cat "$FIX"; echo '99    1 0xffff0005ea000000    63000 linsysfs.ko (/boot/kernel/linsysfs.ko)'; } > "$T/fix-lsfs"
+guard_env "$T/fix-lsfs" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: the boot listing plus linsysfs.ko fails"
+guard_env "$FIX" 0 "$T/sys-present" 0 > /dev/null; expect 1 $? "guard_env: the boot listing with compat.linux answering fails"
 _live=$T/kld-live; kldstat -v > "$_live" 2>&1; _ks=$?; sysctl compat.linux > "$T/sys-live" 2>&1; _ss=$?
 _l=$(guard_env "$_live" "$_ks" "$T/sys-live" "$_ss"); _s=$?
 if kldstat -q -m linux64elf 2> /dev/null || kldstat -q -m linuxkpi 2> /dev/null || kldstat -q -m linux 2> /dev/null; then
@@ -149,7 +175,7 @@ SUMM="/usr/local/bin/python3 -I $KIT/summarize.py"
 VALID="/usr/local/bin/python3 -I $repo/tests/libnvrm/schema_validate.py $KIT/native-tools-summary.schema.json"
 rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 planned=$($SUMM --planned)
-[ "$(echo $planned | wc -w | tr -d ' ')" = 32 ] && ok "summarize --planned lists the 32 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
+[ "$(echo $planned | wc -w | tr -d ' ')" = 34 ] && ok "summarize --planned lists the 34 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
 mkrun() {	# mkrun <dir> <status of the static rows>
 	mkdir -p "$1"; : > "$1/results.jsonl"
 	for _r in $planned; do
@@ -248,6 +274,18 @@ EOF
 	printf '#!/bin/sh\nexit 0\n' > "$T/nmstub/nm"
 	( PATH="$T/nmstub:$PATH"; guard_undef "$STAGE/nvidia.ko" > /dev/null ); expect 2 $? "guard_undef: an nm that lists no symbol is an error"
 	guard_undef "$STAGE/nvidia.ko" > /dev/null; expect 0 $? "guard_undef: the staged nvidia.ko has no Linux symbol"
+	_kd=$(dirname "$(sysctl -n kern.bootfile)"); LK=; for _m in "$_kd"/linuxkpi*.ko "$_kd"/lindebugfs.ko; do [ -f "$_m" ] && LK="$LK $_m"; done
+	guard_ko_native "$STAGE/nvidia.ko" "$T/kodep" $LK > /dev/null; expect 0 $? "guard_ko_native: the staged nvidia.ko of main is native (compared with$LK)"
+	guard_ko_native "$STAGE/nvidia-modeset.ko" "$T/kodep" $LK > /dev/null; expect 0 $? "guard_ko_native: the staged nvidia-modeset.ko of main is native"
+	guard_ko_native "$STAGE/nvidia.ko" "$T/kodep" > /dev/null; expect 2 $? "guard_ko_native: no LinuxKPI module to compare with is an error"
+	guard_ko_native "$STAGE/nvidia.ko" "$T/elsewhere-dir" $LK > /dev/null; expect 2 $? "guard_ko_native: a scratch directory not ending in /kodep is refused"
+	[ -f "$WORK/logs/uvm-2373/nvidia-v6-phase0.ko" ] && { guard_ko_native "$WORK/logs/uvm-2373/nvidia-v6-phase0.ko" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: the v6 nvidia.ko (linux64elf, linux_common) fails"; }
+	[ -f "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" ] && { guard_ko_native "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" "$T/kodep" $LK > /dev/null; expect 1 $? "guard_ko_native: nvidia-uvm-v5.ko fails"; }
+	# a module calling into LinuxKPI by unprefixed names, with no MODULE_DEPEND on it, is caught by its imports
+	guard_lkpi_imports "$STAGE/nvidia.ko" $LK > /dev/null; expect 0 $? "guard_lkpi_imports: nvidia.ko of main imports nothing LinuxKPI defines"
+	[ -f "$WORK/logs/uvm-2373/nvidia-drm-v5.ko" ] && { guard_lkpi_imports "$WORK/logs/uvm-2373/nvidia-drm-v5.ko" $LK > "$T/lki.out"; expect 1 $? "guard_lkpi_imports: nvidia-drm.ko (a LinuxKPI user) fails: $(cut -c1-90 "$T/lki.out")"; }
+	mkdir -p "$T/nmstub2"; printf '#!/bin/sh\ncase "$1" in -u) echo "                 U idr_alloc"; echo "                 U printf" ;; *) echo "0000000000001000 T idr_alloc" ;; esac\n' > "$T/nmstub2/nm"; chmod 0755 "$T/nmstub2/nm"
+	( PATH="$T/nmstub2:$PATH"; guard_lkpi_imports /x /y > /dev/null ); expect 1 $? "guard_lkpi_imports: an unprefixed LinuxKPI import (idr_alloc) fails"
 	[ -f "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" ] && { guard_undef "$WORK/logs/uvm-2373/nvidia-uvm-v5.ko" > /dev/null; expect 1 $? "guard_undef: nvidia-uvm-v5.ko has Linux symbols"; }
 	guard_copyout_dataset /x zroot/bootenv/cloudbsd-rx7600 zroot/bootenv/cloudbsd-rx7600 > /dev/null; expect 1 $? "guard_copyout_dataset: under a boot environment root named bootenv fails"
 	guard_copyout_dataset /x zroot/ROOT zroot/ROOT/cloudbsd-rx7600 > /dev/null; expect 1 $? "guard_copyout_dataset: the boot environment root itself fails"
@@ -326,7 +364,7 @@ EOF
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:needs-linux render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:needs-linux render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
