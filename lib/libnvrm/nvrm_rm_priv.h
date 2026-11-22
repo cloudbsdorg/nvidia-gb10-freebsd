@@ -41,8 +41,7 @@
 /* ---- backend state ----------------------------------------------------- */
 
 struct nvrm_backend {
-	pid_t			pid;		/* the process that opened it */
-	unsigned		generation;	/* fork_generation when it was opened */
+	nvrm_owner		owner;		/* the process that opened it */
 	int			fd;
 	NvHandle		client;
 	uint32_t		next_handle;

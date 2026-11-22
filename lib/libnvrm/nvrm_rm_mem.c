@@ -30,9 +30,10 @@
  * attributes on arm64"); this file asks for write-combined video memory and
  * cached system memory and the core applies the rule to what it reports.
  *
- * Fork: the RM client belongs to the process that opened it (nvrm_rm_owner).
- * In a child every call that would act on it is refused with NVRM_E_DENIED,
- * and every release is skipped (a success: the parent still owns it).
+ * Fork: the core refuses calls from a child that would act on the parent's
+ * objects, and passes an owner flag to backend releases so they drop only
+ * child-local records.  The RM client itself is still freed only by its owner
+ * (nvrm_rm_owner).
  */
 #include <sys/param.h>
 #include <sys/ioctl.h>
@@ -110,17 +111,6 @@ status_fail(char *err, size_t errlen, const char *what, NvU32 st)
 	snprintf(err, errlen, "%s failed (RM status 0x%x)", what,
 	    (unsigned)st);
 	return (NVRM_E_RM);
-}
-
-/* The calling process owns the session; else say why nothing is done. */
-static int
-own(const nvrm_backend *s, char *err, size_t errlen)
-{
-	if (nvrm_rm_owner(s))
-		return (NVRM_OK);
-	snprintf(err, errlen, "this process did not open the client (it is a "
-	    "fork() child): it may only close it");
-	return (NVRM_E_DENIED);
 }
 
 /* ---- client -------------------------------------------------------------- */
@@ -278,10 +268,7 @@ rmm_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 {
 	char path[32];
 	const char *p = NVRM_CTL_PATH;
-	int rc;
 
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
 	if (kind == NVRM_DESC_MAP) {
 		snprintf(path, sizeof(path), DEVICE_PATH_FMT, c->minor);
 		p = path;
@@ -317,10 +304,7 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 	NV_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bres *r;
 	NvU32 st;
-	int rc;
 
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
 	r = NVRM_CALLOC(1, sizeof(*r));
 	if (r == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -347,14 +331,14 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 	return (NVRM_OK);
 }
 
-/* Free an RM object; a fork child skips it (success). */
+/* Free an RM object, or only acknowledge the child's local record release. */
 static int
-free_object(nvrm_bclient *c, NvHandle h, const char *what, char *err,
-    size_t errlen)
+free_object(nvrm_bclient *c, NvHandle h, int owner, const char *what,
+    char *err, size_t errlen)
 {
 	NvU32 st;
 
-	if (!nvrm_rm_owner(c->s))
+	if (!owner)
 		return (NVRM_OK);
 	st = nvrm_rm_free(c->s, c->device, h);
 	return (st == NV_OK ? NVRM_OK : status_fail(err, errlen, what, st));
@@ -362,12 +346,12 @@ free_object(nvrm_bclient *c, NvHandle h, const char *what, char *err,
 
 /* On a refusal the reservation is kept, so the core can retry it. */
 static int
-rmm_va_release(nvrm_bres *r, char *err, size_t errlen)
+rmm_va_release(nvrm_bres *r, int owner, char *err, size_t errlen)
 {
 	nvrm_bres **pp;
 	int rc;
 
-	rc = free_object(r->c, r->h, "freeing the VA reservation", err,
+	rc = free_object(r->c, r->h, owner, "freeing the VA reservation", err,
 	    errlen);
 	if (rc != NVRM_OK)
 		return (rc);
@@ -430,276 +414,6 @@ page_size_of(NvU32 attr, NvU32 attr2)
 	return (0);
 }
 
-static int
-rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
-    nvrm_bmem_info *out, char *err, size_t errlen)
-{
-	NV_MEMORY_ALLOCATION_PARAMS p;
-	nvrm_bmem *m;
-	NvU32 st, cls;
-	uint64_t got;
-	int vid = a->place == NVRM_PLACE_VIDMEM;
-	int rc;
-
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
-	m = NVRM_CALLOC(1, sizeof(*m));
-	if (m == NULL) {
-		snprintf(err, errlen, "out of memory");
-		return (NVRM_E_NOMEM);
-	}
-	fill_alloc(&p, a->bytes);
-	p.attr = DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH) |
-	    (vid ? DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM) |
-		DRF_DEF(OS32, _ATTR, _COHERENCY, _WRITE_COMBINE) :
-		DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
-		DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED));
-	if (page_size_attrs(a->page_size, &p.attr, &p.attr2) != NVRM_OK) {
-		free(m);
-		snprintf(err, errlen, "a page size of %ju bytes cannot be "
-		    "asked of the RM", (uintmax_t)a->page_size);
-		return (NVRM_E_NOTSUP);
-	}
-	if (a->alignment != 0) {
-		p.flags |= NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE;
-		p.alignment = a->alignment;
-	}
-	cls = vid ? NV01_MEMORY_LOCAL_USER : NV01_MEMORY_SYSTEM;
-	m->c = c;
-	m->h = nvrm_rm_new_handle(c->s);
-	st = nvrm_rm_alloc(c->s, c->device, &m->h, cls, &p, sizeof(p));
-	if (st != NV_OK) {
-		free(m);
-		return (status_fail(err, errlen, vid ? "video memory "
-		    "allocation" : "system memory allocation", st));
-	}
-	/* attr and attr2 are IN/OUT: the RM writes back what it allocated.
-	 * DEFAULT means the field was left as is; a size the table does not
-	 * have means the RM used a page this library cannot check mappings
-	 * against, so the object is given back. */
-	got = page_size_of(p.attr, p.attr2);
-	if (got == 0 && DRF_VAL(OS32, _ATTR, _PAGE_SIZE, p.attr) !=
-	    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
-		(void)nvrm_rm_free(c->s, c->device, m->h);
-		free(m);
-		snprintf(err, errlen, "the RM allocated with a page size this "
-		    "library does not know");
-		return (NVRM_E_NOTSUP);
-	}
-	m->bytes = p.size;
-	m->place = a->place;
-	out->bytes = p.size;
-	out->page_size = got != 0 ? got : a->page_size;
-	out->place = a->place;
-	out->coherency = NVRM_COH_CACHED;
-	*mp = m;
-	return (NVRM_OK);
-}
-
-static int
-rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
-    nvrm_bmem_info *out, char *err, size_t errlen)
-{
-	NV_OS_DESC_MEMORY_ALLOCATION_PARAMS p;
-	nvrm_bmem *m;
-	NvU32 st;
-	int rc;
-
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
-	m = NVRM_CALLOC(1, sizeof(*m));
-	if (m == NULL) {
-		snprintf(err, errlen, "out of memory");
-		return (NVRM_E_NOMEM);
-	}
-	memset(&p, 0, sizeof(p));
-	p.type = NVOS32_TYPE_IMAGE;
-	p.attr = DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
-	    DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH) |
-	    DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED);
-	p.descriptor = NV_PTR_TO_NvP64(addr);
-	p.limit = bytes - 1;
-	p.descriptorType = NVOS32_DESCRIPTOR_TYPE_VIRTUAL_ADDRESS;
-	m->c = c;
-	m->h = nvrm_rm_new_handle(c->s);
-	st = nvrm_rm_alloc(c->s, c->device, &m->h,
-	    NV01_MEMORY_SYSTEM_OS_DESCRIPTOR, &p, sizeof(p));
-	if (st != NV_OK) {
-		free(m);
-		return (status_fail(err, errlen, "registering user pages",
-		    st));
-	}
-	m->bytes = bytes;
-	m->place = NVRM_PLACE_SYSMEM;
-	out->bytes = bytes;
-	out->page_size = 4096;
-	out->place = NVRM_PLACE_SYSMEM;
-	out->coherency = NVRM_COH_CACHED;
-	*mp = m;
-	return (NVRM_OK);
-}
-
-/* The core has no handle left after this, so the record goes either way; a
- * refused free leaves the object with the RM client until it closes. */
-static int
-rmm_mem_free(nvrm_bmem *m, char *err, size_t errlen)
-{
-	int rc;
-
-	rc = free_object(m->c, m->h, "freeing the memory object", err, errlen);
-	free(m);
-	return (rc);
-}
-
-/* ---- GPU mappings -------------------------------------------------------- */
-
-static int
-rmm_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
-    uint64_t length, int read_only, char *err, size_t errlen)
-{
-	NVOS46_PARAMETERS p;
-	nvrm_bclient *c = m->c;
-	int rc;
-
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
-	memset(&p, 0, sizeof(p));
-	p.hClient = c->s->client;
-	p.hDevice = c->device;
-	p.hDma = r->h;
-	p.hMemory = m->h;
-	p.offset = offset;
-	p.length = length;
-	p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) |
-	    (read_only ? DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_ONLY) :
-		DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_WRITE)) |
-	    (m->place == NVRM_PLACE_SYSMEM ?
-		DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE) : 0);
-	p.dmaOffset = va;
-	if (SYS->ioctl(c->s->fd, IOC_MAP_DMA, &p) != 0)
-		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY_DMA",
-		    IOCTL_FAILED));
-	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
-	    "NV_ESC_RM_MAP_MEMORY_DMA", p.status));
-}
-
-static int
-rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
-    char *err, size_t errlen)
-{
-	NVOS47_PARAMETERS p;
-	nvrm_bclient *c = m->c;
-
-	if (!nvrm_rm_owner(c->s))
-		return (NVRM_OK);
-	memset(&p, 0, sizeof(p));
-	p.hClient = c->s->client;
-	p.hDevice = c->device;
-	p.hDma = r->h;
-	p.hMemory = m->h;
-	p.dmaOffset = va;
-	p.size = length;
-	if (SYS->ioctl(c->s->fd, IOC_UNMAP_DMA, &p) != 0)
-		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY_DMA",
-		    IOCTL_FAILED));
-	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
-	    "NV_ESC_RM_UNMAP_MEMORY_DMA", p.status));
-}
-
-/* ---- CPU mappings -------------------------------------------------------- */
-
-static int
-rm_unmap_memory(nvrm_bmem *m, char *err, size_t errlen)
-{
-	NVOS34_PARAMETERS p;
-	nvrm_bclient *c = m->c;
-
-	if (!nvrm_rm_owner(c->s))
-		return (NVRM_OK);
-	memset(&p, 0, sizeof(p));
-	p.hClient = c->s->client;
-	p.hDevice = c->device;
-	p.hMemory = m->h;
-	p.pLinearAddress = m->cookie;
-	if (SYS->ioctl(c->s->fd, IOC_UNMAP_MEMORY, &p) != 0)
-		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY",
-		    IOCTL_FAILED));
-	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
-	    "NV_ESC_RM_UNMAP_MEMORY", p.status));
-}
-
-static int
-rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
-    size_t errlen)
-{
-	nv_ioctl_nvos33_parameters_with_fd p;
-	nvrm_bclient *c = m->c;
-	char scratch[8];
-	void *a;
-	int rc;
-
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
-	memset(&p, 0, sizeof(p));
-	p.params.hClient = c->s->client;
-	p.params.hDevice = c->device;
-	p.params.hMemory = m->h;
-	p.params.offset = 0;
-	p.params.length = m->bytes;
-	p.fd = fd;
-	if (SYS->ioctl(c->s->fd, IOC_MAP_MEMORY, &p) != 0)
-		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY",
-		    IOCTL_FAILED));
-	if (p.params.status != NV_OK)
-		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY",
-		    p.params.status));
-	m->cookie = p.params.pLinearAddress;
-	/* The OS layer set the mapping context on this descriptor; the
-	 * offset is not used (nvidia_mmap_dev_single). */
-	a = mmap(NULL, m->bytes, ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
-	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0), MAP_SHARED, fd, 0);
-	if (a == MAP_FAILED) {
-		snprintf(err, errlen, "mmap of the device failed: %s",
-		    strerror(errno));
-		/* The mmap error is the one to report. */
-		(void)rm_unmap_memory(m, scratch, sizeof(scratch));
-		return (NVRM_E_IO);
-	}
-	*addr = a;
-	return (NVRM_OK);
-}
-
-static int
-rmm_unmap_cpu(nvrm_bmem *m, void *addr, char *err, size_t errlen)
-{
-	munmap(addr, m->bytes);
-	return (rm_unmap_memory(m, err, errlen));
-}
-
-/* ---- sharing ------------------------------------------------------------- */
-
-static int
-rmm_export_fd(nvrm_bmem *m, int fd, char *err, size_t errlen)
-{
-	NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS p;
-	nvrm_bclient *c = m->c;
-	NvU32 st;
-	int rc;
-
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
-	memset(&p, 0, sizeof(p));
-	p.object.type = NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TYPE_RM;
-	p.object.data.rmObject.hDevice = c->device;
-	p.object.data.rmObject.hParent = c->device;
-	p.object.data.rmObject.hObject = m->h;
-	p.fd = fd;
-	st = nvrm_rm_control(c->s, c->s->client,
-	    NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD, &p, sizeof(p));
-	return (st == NV_OK ? NVRM_OK : status_fail(err, errlen,
-	    "NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD", st));
-}
-
 /*
  * The page size of an imported object.  Surface info reports the ATTR word
  * only, not ATTR2, so a huge page is 2 MiB or 512 MiB: 2 MiB is reported,
@@ -740,9 +454,15 @@ import_coherency(NvU32 attr)
 	}
 }
 
-/* Size, page size, place and CPU coherency of an imported object. */
+typedef struct surface_raw {
+	uint64_t	bytes;
+	NvU32		attr, space;
+} surface_raw;
+
+/* Query without interpreting DEFAULT, so allocation can tell it from an RM
+ * control failure without looking at an error message. */
 static int
-surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
+surface_query(nvrm_bclient *c, NvHandle h, surface_raw *out, char *err,
     size_t errlen)
 {
 	NV0041_CTRL_GET_SURFACE_INFO_PARAMS p;
@@ -763,19 +483,34 @@ surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
 		return (status_fail(err, errlen,
 		    "NV0041_CTRL_CMD_GET_SURFACE_INFO", st));
 	out->bytes = (uint64_t)list[1].data << 32 | list[0].data;
-	if (import_page_size(list[2].data, &out->page_size) !=
-	    NVRM_OK) {
+	out->attr = list[2].data;
+	out->space = list[3].data;
+	return (NVRM_OK);
+}
+
+/* Size, page size, place and CPU coherency of an imported object. */
+static int
+surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
+    size_t errlen)
+{
+	surface_raw raw;
+	int rc;
+
+	rc = surface_query(c, h, &raw, err, errlen);
+	if (rc != NVRM_OK)
+		return (rc);
+	out->bytes = raw.bytes;
+	if (import_page_size(raw.attr, &out->page_size) != NVRM_OK) {
 		snprintf(err, errlen, "the imported object does not say its "
 		    "page size, so its mappings cannot be checked");
 		return (NVRM_E_NOTSUP);
 	}
-	out->coherency = import_coherency(list[2].data);
+	out->coherency = import_coherency(raw.attr);
 	/* ctrl0041.h, NV0041_CTRL_SURFACE_INFO_INDEX_ADDR_SPACE_TYPE: "Returned
 	 * values are described by NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE". */
-	if (list[3].data == NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_VIDMEM)
+	if (raw.space == NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_VIDMEM)
 		out->place = NVRM_PLACE_VIDMEM;
-	else if (list[3].data ==
-	    NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_SYSMEM)
+	else if (raw.space == NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_SYSMEM)
 		out->place = NVRM_PLACE_SYSMEM;
 	else {
 		snprintf(err, errlen, "the imported object is neither video "
@@ -783,6 +518,281 @@ surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
 		return (NVRM_E_RM);
 	}
 	return (NVRM_OK);
+}
+
+static int
+rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
+    nvrm_bmem_info *out, char *err, size_t errlen)
+{
+	NV_MEMORY_ALLOCATION_PARAMS p;
+	nvrm_bmem *m;
+	surface_raw surface;
+	NvU32 st, cls;
+	uint64_t got;
+	int vid = a->place == NVRM_PLACE_VIDMEM;
+	int rc;
+
+	m = NVRM_CALLOC(1, sizeof(*m));
+	if (m == NULL) {
+		snprintf(err, errlen, "out of memory");
+		return (NVRM_E_NOMEM);
+	}
+	fill_alloc(&p, a->bytes);
+	p.attr = DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH) |
+	    (vid ? DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM) |
+		DRF_DEF(OS32, _ATTR, _COHERENCY, _WRITE_COMBINE) :
+		DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
+		DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED));
+	if (page_size_attrs(a->page_size, &p.attr, &p.attr2) != NVRM_OK) {
+		free(m);
+		snprintf(err, errlen, "a page size of %ju bytes cannot be "
+		    "asked of the RM", (uintmax_t)a->page_size);
+		return (NVRM_E_NOTSUP);
+	}
+	if (a->alignment != 0) {
+		p.flags |= NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE;
+		p.alignment = a->alignment;
+	}
+	cls = vid ? NV01_MEMORY_LOCAL_USER : NV01_MEMORY_SYSTEM;
+	m->c = c;
+	m->h = nvrm_rm_new_handle(c->s);
+	st = nvrm_rm_alloc(c->s, c->device, &m->h, cls, &p, sizeof(p));
+	if (st != NV_OK) {
+		free(m);
+		return (status_fail(err, errlen, vid ? "video memory "
+		    "allocation" : "system memory allocation", st));
+	}
+	/* attr and attr2 are IN/OUT: the RM writes back what it allocated.
+	 * DEFAULT names no size, so ask the new object's surface info instead of
+	 * assuming that the RM used the requested size. */
+	got = page_size_of(p.attr, p.attr2);
+	if (got == 0 && DRF_VAL(OS32, _ATTR, _PAGE_SIZE, p.attr) ==
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
+		rc = surface_query(c, m->h, &surface, err, errlen);
+		if (rc != NVRM_OK) {
+			(void)nvrm_rm_free(c->s, c->device, m->h);
+			free(m);
+			return (rc);
+		} else if (DRF_VAL(OS32, _ATTR, _PAGE_SIZE, surface.attr) ==
+		    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
+			(void)nvrm_rm_free(c->s, c->device, m->h);
+			free(m);
+			snprintf(err, errlen, "the RM did not say which page "
+			    "size it used; ask for an explicit page size");
+			return (NVRM_E_NOTSUP);
+		} else
+			(void)import_page_size(surface.attr, &got);
+	}
+	/* A size the table does not have means the RM used a page this library
+	 * cannot check mappings against, so the object is given back. */
+	if (got == 0) {
+		(void)nvrm_rm_free(c->s, c->device, m->h);
+		free(m);
+		snprintf(err, errlen, "the RM allocated with a page size this "
+		    "library does not know");
+		return (NVRM_E_NOTSUP);
+	}
+	m->bytes = p.size;
+	m->place = a->place;
+	out->bytes = p.size;
+	out->page_size = got;
+	out->place = a->place;
+	out->coherency = NVRM_COH_CACHED;
+	*mp = m;
+	return (NVRM_OK);
+}
+
+static int
+rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
+    nvrm_bmem_info *out, char *err, size_t errlen)
+{
+	NV_OS_DESC_MEMORY_ALLOCATION_PARAMS p;
+	nvrm_bmem *m;
+	NvU32 st;
+
+	m = NVRM_CALLOC(1, sizeof(*m));
+	if (m == NULL) {
+		snprintf(err, errlen, "out of memory");
+		return (NVRM_E_NOMEM);
+	}
+	memset(&p, 0, sizeof(p));
+	p.type = NVOS32_TYPE_IMAGE;
+	p.attr = DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
+	    DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH) |
+	    DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED);
+	p.descriptor = NV_PTR_TO_NvP64(addr);
+	p.limit = bytes - 1;
+	p.descriptorType = NVOS32_DESCRIPTOR_TYPE_VIRTUAL_ADDRESS;
+	m->c = c;
+	m->h = nvrm_rm_new_handle(c->s);
+	st = nvrm_rm_alloc(c->s, c->device, &m->h,
+	    NV01_MEMORY_SYSTEM_OS_DESCRIPTOR, &p, sizeof(p));
+	if (st != NV_OK) {
+		free(m);
+		return (status_fail(err, errlen, "registering user pages",
+		    st));
+	}
+	m->bytes = bytes;
+	m->place = NVRM_PLACE_SYSMEM;
+	out->bytes = bytes;
+	out->page_size = 4096;
+	out->place = NVRM_PLACE_SYSMEM;
+	out->coherency = NVRM_COH_CACHED;
+	*mp = m;
+	return (NVRM_OK);
+}
+
+/* The core has no handle left after this, so the record goes either way; a
+ * refused free leaves the object with the RM client until it closes. */
+static int
+rmm_mem_free(nvrm_bmem *m, int owner, char *err, size_t errlen)
+{
+	int rc;
+
+	rc = free_object(m->c, m->h, owner, "freeing the memory object", err,
+	    errlen);
+	free(m);
+	return (rc);
+}
+
+/* ---- GPU mappings -------------------------------------------------------- */
+
+static int
+rmm_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
+    uint64_t length, int read_only, char *err, size_t errlen)
+{
+	NVOS46_PARAMETERS p;
+	nvrm_bclient *c = m->c;
+
+	memset(&p, 0, sizeof(p));
+	p.hClient = c->s->client;
+	p.hDevice = c->device;
+	p.hDma = r->h;
+	p.hMemory = m->h;
+	p.offset = offset;
+	p.length = length;
+	p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) |
+	    (read_only ? DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_ONLY) :
+		DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_WRITE)) |
+	    (m->place == NVRM_PLACE_SYSMEM ?
+		DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE) : 0);
+	p.dmaOffset = va;
+	if (SYS->ioctl(c->s->fd, IOC_MAP_DMA, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY_DMA",
+		    IOCTL_FAILED));
+	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV_ESC_RM_MAP_MEMORY_DMA", p.status));
+}
+
+static int
+rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
+    int owner, char *err, size_t errlen)
+{
+	NVOS47_PARAMETERS p;
+	nvrm_bclient *c = m->c;
+
+	if (!owner)
+		return (NVRM_OK);
+	memset(&p, 0, sizeof(p));
+	p.hClient = c->s->client;
+	p.hDevice = c->device;
+	p.hDma = r->h;
+	p.hMemory = m->h;
+	p.dmaOffset = va;
+	p.size = length;
+	if (SYS->ioctl(c->s->fd, IOC_UNMAP_DMA, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY_DMA",
+		    IOCTL_FAILED));
+	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV_ESC_RM_UNMAP_MEMORY_DMA", p.status));
+}
+
+/* ---- CPU mappings -------------------------------------------------------- */
+
+static int
+rm_unmap_memory(nvrm_bmem *m, int owner, char *err, size_t errlen)
+{
+	NVOS34_PARAMETERS p;
+	nvrm_bclient *c = m->c;
+
+	if (!owner)
+		return (NVRM_OK);
+	memset(&p, 0, sizeof(p));
+	p.hClient = c->s->client;
+	p.hDevice = c->device;
+	p.hMemory = m->h;
+	p.pLinearAddress = m->cookie;
+	if (SYS->ioctl(c->s->fd, IOC_UNMAP_MEMORY, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY",
+		    IOCTL_FAILED));
+	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV_ESC_RM_UNMAP_MEMORY", p.status));
+}
+
+static int
+rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
+    size_t errlen)
+{
+	nv_ioctl_nvos33_parameters_with_fd p;
+	nvrm_bclient *c = m->c;
+	char scratch[8];
+	void *a;
+
+	memset(&p, 0, sizeof(p));
+	p.params.hClient = c->s->client;
+	p.params.hDevice = c->device;
+	p.params.hMemory = m->h;
+	p.params.offset = 0;
+	p.params.length = m->bytes;
+	p.fd = fd;
+	if (SYS->ioctl(c->s->fd, IOC_MAP_MEMORY, &p) != 0)
+		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY",
+		    IOCTL_FAILED));
+	if (p.params.status != NV_OK)
+		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY",
+		    p.params.status));
+	m->cookie = p.params.pLinearAddress;
+	/* The OS layer set the mapping context on this descriptor; the
+	 * offset is not used (nvidia_mmap_dev_single). */
+	a = mmap(NULL, m->bytes, ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
+	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0), MAP_SHARED, fd, 0);
+	if (a == MAP_FAILED) {
+		snprintf(err, errlen, "mmap of the device failed: %s",
+		    strerror(errno));
+		/* The mmap error is the one to report. */
+		(void)rm_unmap_memory(m, 1, scratch, sizeof(scratch));
+		return (NVRM_E_IO);
+	}
+	*addr = a;
+	return (NVRM_OK);
+}
+
+static int
+rmm_unmap_cpu(nvrm_bmem *m, void *addr, int owner, char *err, size_t errlen)
+{
+	munmap(addr, m->bytes);
+	return (rm_unmap_memory(m, owner, err, errlen));
+}
+
+/* ---- sharing ------------------------------------------------------------- */
+
+static int
+rmm_export_fd(nvrm_bmem *m, int fd, char *err, size_t errlen)
+{
+	NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS p;
+	nvrm_bclient *c = m->c;
+	NvU32 st;
+
+	memset(&p, 0, sizeof(p));
+	p.object.type = NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TYPE_RM;
+	p.object.data.rmObject.hDevice = c->device;
+	p.object.data.rmObject.hParent = c->device;
+	p.object.data.rmObject.hObject = m->h;
+	p.fd = fd;
+	st = nvrm_rm_control(c->s, c->s->client,
+	    NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD, &p, sizeof(p));
+	return (st == NV_OK ? NVRM_OK : status_fail(err, errlen,
+	    "NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD", st));
 }
 
 static int
@@ -795,8 +805,6 @@ rmm_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	NvU32 st;
 	int rc;
 
-	if ((rc = own(c->s, err, errlen)) != NVRM_OK)
-		return (rc);
 	m = NVRM_CALLOC(1, sizeof(*m));
 	if (m == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -820,7 +828,7 @@ rmm_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	rc = surface_info(c, m->h, out, err, errlen);
 	if (rc != NVRM_OK) {
 		/* The surface-info error is the one to report. */
-		(void)free_object(c, m->h, "freeing the import", scratch,
+		(void)free_object(c, m->h, 1, "freeing the import", scratch,
 		    sizeof(scratch));
 		free(m);
 		return (rc);

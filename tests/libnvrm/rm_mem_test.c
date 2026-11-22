@@ -19,6 +19,7 @@
 #include <sys/capsicum.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 #include <errno.h>
@@ -115,8 +116,8 @@ static struct {
 	/* record */
 	int		session_fd;	/* the last session's descriptor */
 	int		nversion, ndevice, nvaspace, nvirtual, nvid, nsys, nos;
-	int		nmapdma, nunmapdma, nmapmem, nunmapmem, nexport, nimport;
-	int		nsurf, nmine_free, map_opens;
+	int		nmapdma, nunmapdma, nmapmem, nunmapmem, nmunmap;
+	int		nexport, nimport, nsurf, nmine_free, map_opens, open_calls;
 	NVOS46_PARAMETERS last46;
 	NV_MEMORY_ALLOCATION_PARAMS last_alloc;
 	char		last_map_path[64];
@@ -138,6 +139,14 @@ reset_all(void)
 	M.fail_nr = M.status_nr = -1;
 	M.fail_cls = NOVERRIDE;
 	M.fail_ctl = NOVERRIDE;
+}
+
+/* Interpose the memory backend's process-local unmap as part of mem_sys. */
+int
+munmap(void *addr, size_t len)
+{
+	M.nmunmap++;
+	return (syscall(SYS_munmap, addr, len));
 }
 
 static mobj *
@@ -222,6 +231,7 @@ m_open(const char *path, int flags)
 	char want[32];
 	int fd;
 
+	M.open_calls++;
 	if (strcmp(path, "/dev/nvidiactl") == 0) {
 		fd = k_open(path, flags);
 		if (M.enum_fd < 0)
@@ -266,22 +276,11 @@ m_open(const char *path, int flags)
 /* ---- allocations ---------------------------------------------------------- */
 
 static void
-alloc_memory(int fd, NVOS21_PARAMETERS *p)
+check_memory_class(int fd, NVOS21_PARAMETERS *p,
+    NV_MEMORY_ALLOCATION_PARAMS *a)
 {
-	NV_MEMORY_ALLOCATION_PARAMS *a = NvP64_VALUE(p->pAllocParms);
-	mobj *o, *vas;
+	mobj *vas;
 
-	if (p->paramsSize != sizeof(*a)) {
-		bad("memory allocation parameter size");
-		p->status = NV_ERR_INVALID_PARAM_STRUCT;
-		return;
-	}
-	M.last_alloc = *a;
-	if (find(fd, p->hObjectParent) == NULL ||
-	    find(fd, p->hObjectParent)->cls != NV01_DEVICE_0)
-		bad("memory not allocated under the session's device");
-	if (a->owner == 0 || a->size == 0)
-		bad("memory allocation without owner or size");
 	if (p->hClass == NV50_MEMORY_VIRTUAL) {
 		vas = find(fd, a->hVASpace);
 		if (vas == NULL || vas->cls != FERMI_VASPACE_A)
@@ -301,6 +300,26 @@ alloc_memory(int fd, NVOS21_PARAMETERS *p)
 			bad("system memory without the PCI location");
 		M.nsys++;
 	}
+}
+
+static void
+alloc_memory(int fd, NVOS21_PARAMETERS *p)
+{
+	NV_MEMORY_ALLOCATION_PARAMS *a = NvP64_VALUE(p->pAllocParms);
+	mobj *o;
+
+	if (p->paramsSize != sizeof(*a)) {
+		bad("memory allocation parameter size");
+		p->status = NV_ERR_INVALID_PARAM_STRUCT;
+		return;
+	}
+	M.last_alloc = *a;
+	if (find(fd, p->hObjectParent) == NULL ||
+	    find(fd, p->hObjectParent)->cls != NV01_DEVICE_0)
+		bad("memory not allocated under the session's device");
+	if (a->owner == 0 || a->size == 0)
+		bad("memory allocation without owner or size");
+	check_memory_class(fd, p, a);
 	if (M.wb_page != NOVERRIDE)
 		a->attr = FLD_SET_DRF_NUM(OS32, _ATTR, _PAGE_SIZE, M.wb_page,
 		    a->attr);
@@ -316,6 +335,53 @@ alloc_memory(int fd, NVOS21_PARAMETERS *p)
 }
 
 static void
+m_alloc_device(int fd, NVOS21_PARAMETERS *p)
+{
+	NV0080_ALLOC_PARAMETERS *a = NvP64_VALUE(p->pAllocParms);
+
+	if (p->hRoot != CLIENT || p->hObjectParent != CLIENT)
+		bad("device not under the session's client");
+	if (p->paramsSize != sizeof(*a) || a->deviceId != 0 ||
+	    a->vaMode != NV_DEVICE_ALLOCATION_VAMODE_MULTIPLE_VASPACES)
+		bad("device allocation parameters");
+	add(fd, p->hObjectNew, p->hClass);
+	M.ndevice++;
+}
+
+static void
+m_alloc_vaspace(int fd, NVOS21_PARAMETERS *p)
+{
+	NV_VASPACE_ALLOCATION_PARAMETERS *v = NvP64_VALUE(p->pAllocParms);
+
+	if (p->paramsSize != sizeof(*v) ||
+	    v->index != NV_VASPACE_ALLOCATION_INDEX_GPU_NEW)
+		bad("VA space allocation parameters");
+	if (find(fd, p->hObjectParent) == NULL)
+		bad("VA space not under the session's device");
+	v->vaBase = M.va_base;
+	v->vaSize = M.va_size;
+	add(fd, p->hObjectNew, p->hClass);
+	M.nvaspace++;
+}
+
+static void
+m_alloc_osdesc(int fd, NVOS21_PARAMETERS *p)
+{
+	NV_OS_DESC_MEMORY_ALLOCATION_PARAMS *d =
+	    NvP64_VALUE(p->pAllocParms);
+	mobj *o;
+
+	if (p->paramsSize != sizeof(*d) ||
+	    d->descriptorType != NVOS32_DESCRIPTOR_TYPE_VIRTUAL_ADDRESS ||
+	    NvP64_VALUE(d->descriptor) == NULL)
+		bad("user pages allocation parameters");
+	o = add(fd, p->hObjectNew, p->hClass);
+	o->size = d->limit + 1;
+	o->attr = d->attr;
+	M.nos++;
+}
+
+static void
 m_alloc(int fd, NVOS21_PARAMETERS *p)
 {
 	p->status = NV_OK;
@@ -325,52 +391,20 @@ m_alloc(int fd, NVOS21_PARAMETERS *p)
 		return;
 	}
 	switch (p->hClass) {
-	case NV01_DEVICE_0: {
-		NV0080_ALLOC_PARAMETERS *a = NvP64_VALUE(p->pAllocParms);
-
-		if (p->hRoot != CLIENT || p->hObjectParent != CLIENT)
-			bad("device not under the session's client");
-		if (p->paramsSize != sizeof(*a) || a->deviceId != 0 ||
-		    a->vaMode != NV_DEVICE_ALLOCATION_VAMODE_MULTIPLE_VASPACES)
-			bad("device allocation parameters");
-		add(fd, p->hObjectNew, p->hClass);
-		M.ndevice++;
+	case NV01_DEVICE_0:
+		m_alloc_device(fd, p);
 		return;
-	}
-	case FERMI_VASPACE_A: {
-		NV_VASPACE_ALLOCATION_PARAMETERS *v = NvP64_VALUE(p->pAllocParms);
-
-		if (p->paramsSize != sizeof(*v) ||
-		    v->index != NV_VASPACE_ALLOCATION_INDEX_GPU_NEW)
-			bad("VA space allocation parameters");
-		if (find(fd, p->hObjectParent) == NULL)
-			bad("VA space not under the session's device");
-		v->vaBase = M.va_base;
-		v->vaSize = M.va_size;
-		add(fd, p->hObjectNew, p->hClass);
-		M.nvaspace++;
+	case FERMI_VASPACE_A:
+		m_alloc_vaspace(fd, p);
 		return;
-	}
 	case NV50_MEMORY_VIRTUAL:
 	case NV01_MEMORY_LOCAL_USER:
 	case NV01_MEMORY_SYSTEM:
 		alloc_memory(fd, p);
 		return;
-	case NV01_MEMORY_SYSTEM_OS_DESCRIPTOR: {
-		NV_OS_DESC_MEMORY_ALLOCATION_PARAMS *d =
-		    NvP64_VALUE(p->pAllocParms);
-		mobj *o;
-
-		if (p->paramsSize != sizeof(*d) ||
-		    d->descriptorType != NVOS32_DESCRIPTOR_TYPE_VIRTUAL_ADDRESS ||
-		    NvP64_VALUE(d->descriptor) == NULL)
-			bad("user pages allocation parameters");
-		o = add(fd, p->hObjectNew, p->hClass);
-		o->size = d->limit + 1;
-		o->attr = d->attr;
-		M.nos++;
+	case NV01_MEMORY_SYSTEM_OS_DESCRIPTOR:
+		m_alloc_osdesc(fd, p);
 		return;
-	}
 	default:
 		bad("a class the memory backend should not allocate");
 		p->status = NV_ERR_INVALID_CLASS;
@@ -756,6 +790,16 @@ failed(nvrm_client *cl)
 
 #define HAS(cl, s)	CHECK(strstr(nvrm_client_errmsg(cl), (s)) != NULL)
 
+static void
+has_surface_error(nvrm_client *cl)
+{
+	char want[128];
+
+	snprintf(want, sizeof(want), "NV0041_CTRL_CMD_GET_SURFACE_INFO failed "
+	    "(RM status 0x%x)", (unsigned)NV_ERR_INVALID_OBJECT);
+	CHECK_STR(nvrm_client_errmsg(cl), want);
+}
+
 /* ---- the client ------------------------------------------------------------- */
 
 static void
@@ -977,11 +1021,6 @@ test_alloc(void)
 {
 	nvrm_client *cl;
 	nvrm_mem *m;
-	nvrm_balloc ba;
-	nvrm_bmem *bm;
-	nvrm_bmem_info bi;
-	char err[200];
-	static char pages[2 * 65536] __attribute__((aligned(65536)));
 
 	up();
 	cl = client(0);
@@ -1012,18 +1051,56 @@ test_alloc(void)
 	    NVOS32_ATTR2_PAGE_SIZE_HUGE_512MB);
 	CHECK_EQ(page_of(m), 512 * MiB);
 	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	down("alloc");
+}
+
+static void
+test_alloc_page_writeback(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	int frees;
+
+	up();
+	cl = client(0);
 	/* the page size the RM writes back is the one reported */
 	M.wb_page = NVOS32_ATTR_PAGE_SIZE_HUGE;
 	M.wb_huge = NVOS32_ATTR2_PAGE_SIZE_HUGE_2MB;
 	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 4 * MiB, 64 * KiB, &m), NVRM_OK);
 	CHECK_EQ(page_of(m), 2 * MiB);
 	nvrm_mem_free(m);
-	/* ... unless it writes back none, or one the table does not have */
+	/* DEFAULT is not the requested size: surface info names the real one. */
 	M.wb_page = NVOS32_ATTR_PAGE_SIZE_DEFAULT;
 	M.wb_huge = NOVERRIDE;
-	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 1 * MiB, 64 * KiB, &m), NVRM_OK);
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_BIG);
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m), NVRM_OK);
 	CHECK_EQ(page_of(m), 64 * KiB);
 	nvrm_mem_free(m);
+	/* If neither answer names a size, the allocation is undone. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT);
+	frees = M.nmine_free;
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m),
+	    NVRM_E_NOTSUP);
+	HAS(cl, "RM did not say which page size it used");
+	CHECK(m == NULL);
+	CHECK_EQ(M.nmine_free, frees + 1);
+	CHECK_EQ(not_freed_explicitly(), 0);
+	/* A failed surface-info control keeps its own status and message. */
+	M.surf_attr = NOVERRIDE;
+	M.fail_ctl = NV0041_CTRL_CMD_GET_SURFACE_INFO;
+	M.status_val = NV_ERR_INVALID_OBJECT;
+	frees = M.nmine_free;
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m),
+	    NVRM_E_RM);
+	has_surface_error(cl);
+	CHECK(m == NULL);
+	CHECK_EQ(M.nmine_free, frees + 1);
+	CHECK_EQ(not_freed_explicitly(), 0);
+	M.surf_attr = NOVERRIDE;
+	M.wb_page = M.wb_huge = NOVERRIDE;
 	/* a page the table does not have: the object is given back */
 	M.wb_page = NVOS32_ATTR_PAGE_SIZE_HUGE;
 	M.wb_huge = NVOS32_ATTR2_PAGE_SIZE_HUGE_256GB;
@@ -1032,6 +1109,23 @@ test_alloc(void)
 	CHECK(m == NULL);
 	CHECK_EQ(not_freed_explicitly(), 0);
 	M.wb_page = M.wb_huge = NOVERRIDE;
+	nvrm_client_close(cl);
+	down("alloc page writeback");
+}
+
+static void
+test_alloc_sysmem(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	nvrm_balloc ba;
+	nvrm_bmem *bm;
+	nvrm_bmem_info bi;
+	char err[200];
+	static char pages[2 * 65536] __attribute__((aligned(65536)));
+
+	up();
+	cl = client(0);
 	/* system memory: PCI, cached, 4 KiB; an alignment is forced */
 	{
 		nvrm_mem_params p = { 0, NVRM_MEM_SYSMEM, 0, 0, 8192, 1 * MiB, 0 };
@@ -1083,7 +1177,7 @@ test_alloc(void)
 	CHECK_EQ(failed(cl), 1);
 	CHECK_EQ(not_freed_explicitly(), 1);	/* the refused one */
 	nvrm_client_close(cl);
-	down("alloc");
+	down("alloc sysmem");
 }
 
 /* ---- mappings ------------------------------------------------------------------ */
@@ -1292,7 +1386,7 @@ test_share(void)
 	M.fail_ctl = NV0041_CTRL_CMD_GET_SURFACE_INFO;
 	M.status_val = NV_ERR_INVALID_OBJECT;
 	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_E_RM);
-	HAS(b, "GET_SURFACE_INFO failed");
+	has_surface_error(b);
 	/* the import refused, and allocation failures */
 	M.fail_ctl = NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD;
 	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_E_RM);
@@ -1321,18 +1415,19 @@ other_pid(void)
 }
 
 /* A forked child shares the descriptor, and with it the RM client: every
- * call that would act on it is refused, and every release is skipped. */
+ * call that would act on it is refused; releases stay local to the child. */
 static void
 test_fork_child(void)
 {
-	nvrm_client *cl;
-	nvrm_mem *m, *x;
+	nvrm_client *cl, *cl2;
+	NVOS00_PARAMETERS parent_free;
+	nvrm_mem *m, *m2, *x;
 	nvrm_va_params vp = { 0, 0, 1 * MiB, 0, 0 };
 	nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 4096, 0, 0 };
 	nvrm_gpu_map_params gp;
 	static char pages[65536] __attribute__((aligned(65536)));
 	uint64_t va, va2;
-	int fd, frees;
+	int fd, frees, opens, parent_fd;
 	void *p;
 
 	up();
@@ -1341,7 +1436,13 @@ test_fork_child(void)
 	CHECK_EQ(alloc(cl, NVRM_MEM_SYSMEM, 64 * KiB, 0, &m), NVRM_OK);
 	CHECK_EQ(map_gpu(m, va, 0), NVRM_OK);
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p), NVRM_OK);
+	/* Leave a second client's memory and reservation for the close loops. */
+	cl2 = client(0);
+	parent_fd = M.session_fd;
+	(void)reserve(cl2, 2 * MiB, 0);
+	CHECK_EQ(alloc(cl2, NVRM_MEM_SYSMEM, 64 * KiB, 0, &m2), NVRM_OK);
 	frees = M.nmine_free;
+	opens = M.open_calls;
 	nvrm_getpid_hook = other_pid;
 	CHECK_EQ(nvrm_va_reserve(cl, &vp, &va2), NVRM_E_DENIED);
 	HAS(cl, "fork() child");
@@ -1351,7 +1452,9 @@ test_fork_child(void)
 	CHECK_EQ(nvrm_mem_map_gpu(m, &gp), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_import_fd(cl, 0, &x), NVRM_E_DENIED);
-	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);	/* skipped, not refused */
+	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+	CHECK_EQ(M.nmunmap, 1);		/* the child's own mapping is removed */
+	CHECK_EQ(M.nunmapmem, 0);	/* but the parent's RM mapping is not */
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_OK);
 	nvrm_mem_free(m);
@@ -1360,16 +1463,20 @@ test_fork_child(void)
 	CHECK_EQ(M.nmine_free, frees);	/* the child freed nothing */
 	CHECK_EQ(M.nunmapdma, 0);
 	CHECK_EQ(M.nunmapmem, 0);
-	{
-		nvrm_bclient *bc = cl->bc;
-		int dfd;
-		char err[100];
-
-		CHECK_EQ(nvrm_rm_mem_ops.desc_open(bc, NVRM_DESC_EXPORT, &dfd,
-		    err, sizeof(err)), NVRM_E_DENIED);
-	}
-	/* the parent closes: its client takes everything with it */
+	/* The core refuses every create/act call before desc_open: the child
+	 * makes no descriptor open, whether from a spare or directly. */
+	CHECK_EQ(M.open_calls, opens);
+	/* Closing another child client releases its records without an RM free. */
+	nvrm_client_close(cl2);
+	CHECK_EQ(M.nmine_free, frees);
+	CHECK_EQ(M.nunmapdma, 0);
+	CHECK_EQ(M.nunmapmem, 0);
+	/* This in-process simulation must also close the second RM session as
+	 * its parent; a real fork parent still has its own client core. */
 	nvrm_getpid_hook = NULL;
+	memset(&parent_free, 0, sizeof(parent_free));
+	parent_free.hObjectOld = CLIENT;
+	CHECK_EQ(m_ioctl(parent_fd, IOC_RM_FREE, &parent_free), 0);
 	nvrm_client_close(cl);
 	down("fork child");
 }
@@ -1383,6 +1490,8 @@ main(void)
 	test_open_failures();
 	test_reserve();
 	test_alloc();
+	test_alloc_page_writeback();
+	test_alloc_sysmem();
 	test_map_gpu();
 	test_map_cpu();
 	test_share();
