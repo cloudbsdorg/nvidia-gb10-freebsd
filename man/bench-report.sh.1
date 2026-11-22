@@ -51,9 +51,13 @@ overrides it.
 .It Ev MODELS
 Model directory, for example
 .Pa /path/to/models .
+When unset, the default is
+.Pa models/
+under the work root.
 .It Ev ONLY
 Space-separated subset of
 .Cm 3b 7b ornith qwen .
+When unset, all four run.
 .El
 .Sh EXIT STATUS
 0 when every run succeeded; 1 when a run failed; 2 for a usage error or a running stress test.

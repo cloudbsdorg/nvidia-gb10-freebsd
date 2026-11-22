@@ -18,13 +18,27 @@ later. On a fresh system, run this one-time setup as root:
 
 ```sh
 pkg install -y doas git
-grep -qx "permit $(logname)" /usr/local/etc/doas.conf 2>/dev/null || echo "permit $(logname)" >> /usr/local/etc/doas.conf
+buser=$(logname 2>/dev/null)
+case $buser in
+''|root|*[!A-Za-z0-9_.-]*|[!A-Za-z0-9_]*)
+    echo "no valid build user (logname gave '$buser'): edit the buser= line above to your account name, then run this block again" >&2
+    false ;;
+*)
+    grep -F -x -q -- "permit $buser" /usr/local/etc/doas.conf 2>/dev/null || {
+        [ -z "$(tail -c 1 /usr/local/etc/doas.conf 2>/dev/null)" ] || echo >> /usr/local/etc/doas.conf
+        echo "permit $buser" >> /usr/local/etc/doas.conf
+    } ;;
+esac
 ```
 
 `logname` is the user who opened the root shell with `su`, and that user gets the `permit`
-line. If root logged in directly, replace `$(logname)` with the user name that will run the
-build. The line is added only when it is missing, so an existing `/usr/local/etc/doas.conf`
-keeps its other rules. (`sudo`, if you set it up yourself, works as well.)
+line. The block never reads `buser` from the environment: it sets it itself. If root logged in
+directly, `logname` names root or fails, and the block refuses (exit status 1) and writes
+nothing; change its second line to `buser=alice`, with the name of the account that will run
+the build, and run it again. A name must start with a letter, digit or underscore and contain
+only letters, digits, `_`, `.` and `-`. The line is added only when it is missing (compared
+literally), on a line of its own, so an existing `/usr/local/etc/doas.conf` keeps its other
+rules. (`sudo`, if you set it up yourself, works as well.)
 
 Then, as that user:
 
@@ -33,6 +47,10 @@ git clone https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git
 cd nvidia-gb10-freebsd
 make install ACCEPT_NVIDIA_LICENSE=1
 ```
+
+This install path has not yet been run end to end on a stock FreeBSD VM. Its pieces are
+tested separately, so expect rough edges. Report them at
+<https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues>.
 
 That one command runs the preflight, installs the prerequisites, fetches and verifies the
 sources, builds what is needed, and installs the result. It asks once before doing anything as
@@ -198,7 +216,7 @@ Developers who need the individual build and test-load commands should use
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort; the latest fix (3414fd7) is committed and waits for test boot 6 |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | waits for a test boot: it ran earlier on the tested machine (numbers below); the BAR0 mapping fix (register window as Device memory, not cached) is committed and not yet run on hardware; Linux-only, last resort |
 | CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
 | CUDA, native | in progress: full compile and link work with stubs; every launch returns `cudaErrorNotSupported` (801); no GPU execution yet (Track #2362) |
 | Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. A framebuffer without NVIDIA memory is refused with `EINVAL` |
@@ -214,7 +232,7 @@ FreeBSD. It comes from the clean-room module
 Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
 UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
-**Numbers.** Linux-only, last resort: the official Ubuntu arm64 llama.cpp b12531 builds on
+**Numbers.** These predate the BAR0 mapping fix, which waits for a test boot. Linux-only, last resort: the official Ubuntu arm64 llama.cpp b12531 builds on
 NVIDIA's Linux libraries, under the Linuxulator (`llama-bench`, defaults otherwise), in tokens per
 second. They are not native numbers; there is no native NVIDIA path to measure yet. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
 speed over 128 tokens.
@@ -360,11 +378,12 @@ not write-back. On arm64 that is Normal non-cacheable.
 Code compiled against linuxkpi (here `nvidia-drm`) gets Linux's `PAGE_MASK`: linuxkpi's
 `linux/page.h` redefines it as `~(PAGE_SIZE - 1)`, the page address, where FreeBSD's
 `PAGE_MASK` is `PAGE_SIZE - 1`, the offset within the page. So `addr & PAGE_MASK` is the
-opposite test in the two worlds. A FreeBSD-style alignment check in `nvidia-drm` rejects every
-video-memory window as "not page aligned", so no dumb buffer can be created. In FreeBSD-only
-code that includes linuxkpi headers, test alignment with `addr & (PAGE_SIZE - 1)`. `nvidia.ko`
-is native FreeBSD code, where `PAGE_MASK` means what FreeBSD says.
-`tests/drm_fault_index_test.sh` fails if the registration code tests `& PAGE_MASK`.
+opposite test in the two worlds: a FreeBSD-style alignment check in `nvidia-drm` rejects every
+video-memory window as "not page aligned", so no dumb buffer can be created. The registration
+code tests `start & (PAGE_SIZE - 1)` (`patches/patch-nvidia-drm_nvidia-drm-gem-nvkms-memory.c`),
+and `tests/drm_fault_index_test.sh` fails if it tests `& PAGE_MASK`. In FreeBSD-only code
+that includes linuxkpi headers, test alignment with `addr & (PAGE_SIZE - 1)`. `nvidia.ko` is
+native FreeBSD code, where `PAGE_MASK` means what FreeBSD says.
 
 ## Cross-GPU buffers (PRIME import)
 
@@ -523,7 +542,8 @@ $R/noble/lib/ld-linux-aarch64.so.1 --library-path "$R/noble/lib/aarch64-linux-gn
     <program> ...
 ```
 
-`vulkaninfo --summary` lists "NVIDIA GeForce RTX 5060 Ti" on the tested machine. The USERMODE
+Status: waits for a test boot (see [What works](#what-works)). Before the BAR0 mapping fix,
+`vulkaninfo --summary` listed "NVIDIA GeForce RTX 5060 Ti" on the tested machine. The USERMODE
 register window uses the mapping rule in [Memory attributes on arm64](#memory-attributes-on-arm64).
 The ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
 

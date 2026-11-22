@@ -129,6 +129,10 @@ else
 fi
 
 RC=$MNT/usr/local/etc/rc.d/kernel_patches_testboot
+MARKER=$MNT/usr/local/etc/kernel_patches_testboot.marker
+chk "the dead-man marker exists" [ -f "$MARKER" ]
+chk "the dead-man marker names $BE" [ "$(cat "$MARKER" 2> /dev/null)" = "$BE" ]
+chk "the dead-man marker is mode 0444" [ "$(stat -f %Lp "$MARKER" 2> /dev/null)" = 444 ]
 chk "the recorder is the kit's" cmp -s "$RC" "$KITDIR/kernel_patches_testboot"
 chk "the recorder is root-owned, mode 0555" [ "$(stat -f '%Su %Lp' "$RC" 2> /dev/null)" = "root 555" ]
 chk "the recorder's hash is in the hash list" [ "$(awk '$2 == "kernel_patches_testboot" {print $1}' "$HL" 2> /dev/null)" = "$(sha256 -q "$RC" 2> /dev/null)" ]
@@ -141,11 +145,34 @@ _others=$(cat "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" "$MNT"/etc/rc.conf.d/*
     grep -E '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=.?[Yy]' | grep -v '^kernel_patches_testboot_enable=' || true)
 chk "no other test-boot kit is enabled" [ -z "$_others" ]
 
-_dm=$(grep -nF 'shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1' "$RC" | head -1 | cut -d: -f1)
+_dm=$(grep -nF '"$kernel_patches_testboot_shutdown" -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1' "$RC" | head -1 | cut -d: -f1)
 _cancel=$(grep -nF 'kill "$DM_CHILD"' "$RC" | head -1 | cut -d: -f1)
 _ld=$(grep -n 'kldload amdgpu >' "$RC" | head -1 | cut -d: -f1)
 chk "dead-man: the timer (line ${_dm:-none}) is armed before the kldload of amdgpu (line ${_ld:-none})" [ -n "$_dm" -a -n "$_ld" -a "${_dm:-0}" -lt "${_ld:-0}" ]
 chk "dead-man: cancellation uses the confirmed child pid (line ${_cancel:-none})" [ -n "$_cancel" -a -n "$_dm" -a "${_cancel:-0}" -gt "${_dm:-0}" ]
+chk "dead-man: host tests can override kernel_patches_testboot_shutdown" grep -qF ': "${kernel_patches_testboot_shutdown:=$kernel_patches_testboot_real_shutdown}"' "$RC"
+# the one bare-call detector, shared with the host test (bare_shutdown_lines FILE)
+. "$(dirname "$0")/bare-shutdown-check.sh"
+# dead-man overrides are for host tests only: no rc.conf file of the clone may set them
+dm_override_lines()
+{
+	cat "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" "$MNT"/etc/rc.conf.d/* "$MNT/usr/local/etc/rc.conf" "$MNT"/usr/local/etc/rc.conf.d/* 2> /dev/null |
+	    grep -E '^[[:space:]]*(export[[:space:]]+)?kernel_patches_testboot_(shutdown|marker|bectl)=' || true
+}
+_bare=$(bare_shutdown_lines "$RC")
+if [ -n "$_bare" ]; then
+	bad "dead-man: the recorder contains a bare shutdown call: $_bare"
+else
+	ok "dead-man: the recorder contains no bare shutdown call"
+fi
+_ovr=$(dm_override_lines)
+if [ -n "$_ovr" ]; then
+	bad "dead-man: an rc.conf file sets a test override: $_ovr"
+else
+	ok "dead-man: no rc.conf file sets kernel_patches_testboot_shutdown, _marker or _bectl"
+fi
+chk "dead-man: the real-boot decision function dm_decide is there" grep -q '^dm_decide()' "$RC"
+chk "dead-man: a real boot needs rc_fast" grep -qF 'rc_fast' "$RC"
 chk "dead-man: no timer, no amdgpu load (the DM_OK gate)" grep -q 'if \[ "$DM_OK" != 1 \]; then' "$RC"
 _def=$(sed -n 's/^: "${kernel_patches_testboot_deadman:=\([0-9]*\)}"$/\1/p' "$RC")
 chk "dead-man: the default is ${_def:-unset} minutes" [ -n "$_def" -a "${_def:-0}" -gt 0 ]

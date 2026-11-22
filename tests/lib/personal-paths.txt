@@ -1,0 +1,5 @@
+/home/
+/Users/
+$HOME/work
+${HOME}/work
+~/work
