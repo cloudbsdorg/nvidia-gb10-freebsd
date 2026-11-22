@@ -41,15 +41,120 @@ KIT=$repo/tests/native-tools-testboot
 WORK=${GB10_WORK:-$HOME/work/gb10}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/nvnt-kit.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+
+# (guard) no path reaches /sbin/shutdown during host tests.  G1: these sentinels and the override exist before any kit code runs.
+SENT=$T/sentinel
+SENT2=$T/sentinel-real
+mkdir -p "$SENT/shutdown-child" "$SENT2"
+cat > "$SENT/shutdown" <<EOF
+#!/bin/sh
+printf 'REACHED %s %s\n' "\$0" "\$*" >> "$SENT/hits"
+exit 99
+EOF
+cat > "$SENT2/real-shutdown" <<EOF
+#!/bin/sh
+printf 'REAL REACHED %s\n' "\$*" >> "$SENT2/hits"
+exit 99
+EOF
+cp /bin/sleep "$SENT/shutdown-child/shutdown"
+nvidia_native_tools_testboot_shutdown=$T/shutdown-stub
+cat > "$nvidia_native_tools_testboot_shutdown" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$T/shutdown-args"
+"$SENT/shutdown-child/shutdown" 300 &
+_child=\$!
+printf '%s\n' "\$_child" >> "$T/shutdown-children"
+# F6: the pid is not printed until the child is a process named shutdown (the fork has exec'd); a bounded poll on ps, no sleep
+_i=0
+while [ "\$(ps -o comm= -p "\$_child" 2> /dev/null | tr -d ' ')" != shutdown ]; do
+	_i=\$((_i + 1))
+	[ "\$_i" -lt 2000 ] || exit 1
+done
+printf 'shutdown: [pid %s]\n' "\$_child"
+exit 0
+EOF
+chmod 0755 "$SENT/shutdown" "$SENT2/real-shutdown" "$nvidia_native_tools_testboot_shutdown"
+PATH=$SENT:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
+export PATH nvidia_native_tools_testboot_shutdown
+DM_DECOY=
+reap_stub_children() {
+	[ ! -f "$T/shutdown-children" ] || while IFS= read -r _child; do
+		case $_child in '' | *[!0-9]*) continue ;; esac
+		[ "$(ps -o uid= -o comm= -p "$_child" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ] && kill "$_child" 2> /dev/null || :
+	done < "$T/shutdown-children"
+	[ ! -e "$T/shutdown-children" ] || : > "$T/shutdown-children"
+}
+cleanup() {
+	reap_stub_children
+	case $DM_DECOY in '' | *[!0-9]*) ;; *) kill "$DM_DECOY" 2> /dev/null || :; wait "$DM_DECOY" 2> /dev/null || : ;; esac
+	DM_DECOY=
+	rm -rf "$T"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -z "$nvidia_native_tools_testboot_shutdown" ] || [ "$nvidia_native_tools_testboot_shutdown" = /sbin/shutdown ]; then
+	echo "guard: the harness left nvidia_native_tools_testboot_shutdown at /sbin/shutdown" >&2
+	exit 1
+fi
+if [ ! -f "$nvidia_native_tools_testboot_shutdown" ] || [ ! -x "$nvidia_native_tools_testboot_shutdown" ] || [ -u "$nvidia_native_tools_testboot_shutdown" ]; then
+	echo "guard: the nvidia_native_tools_testboot_shutdown stub is not a non-setuid executable file" >&2
+	exit 1
+fi
+if [ "$(id -u)" = 0 ]; then
+	echo "guard: the host-only test must run as the current non-root user" >&2
+	exit 1
+fi
 STAGE=$T/stage
 SHAFILE=$STAGE/SHA256.txt
 pass=0; fail=0
 ok() { pass=$((pass + 1)); echo "ok   $*"; }
 no() { fail=$((fail + 1)); echo "FAIL $*"; }
 skip() { echo "skip $1: $2 not set ($3)"; }
+ok "G1 sentinels are first in PATH and the exported shutdown override is a non-setuid executable stub"
 expect() {	# expect <want status> <got status> <what>
 	if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (exit $2, wanted $1)"; fi
+}
+. "$KIT/bare-shutdown-check.sh"	# the one detector, shared with check-be.sh: bare_shutdown_lines FILE prints the offending lines
+bare_shutdown() {	# bare_shutdown <rc file>: 0 when the file calls shutdown other than through the guarded variable
+	[ -n "$(bare_shutdown_lines "$1")" ]
+}
+guard_static() {	# guard_static <rc copy> <reason log>: the G4 static contract, without running the file
+	_gs_file=$1; _gs_log=$2; _gs_bad=0
+	: > "$_gs_log"
+	_gs_guard=$(sed -n '/^deadman_allowed()/,/^}/p' "$_gs_file")
+	_gs_dec=$(sed -n '/^dm_decide()/,/^}/p' "$_gs_file")
+	_gs_both=$(printf '%s\n%s\n' "$_gs_dec" "$_gs_guard")
+	[ -n "$_gs_guard" ] || { echo "deadman_allowed is missing" >> "$_gs_log"; _gs_bad=1; }
+	[ -n "$_gs_dec" ] || { echo "dm_decide is missing" >> "$_gs_log"; _gs_bad=1; }
+	printf '%s\n' "$_gs_guard" | grep -qF 'dm_decide' || { echo "deadman_allowed does not call dm_decide" >> "$_gs_log"; _gs_bad=1; }
+	printf '%s\n' "$_gs_guard" | grep -qF 'id -u' || { echo "deadman_allowed lacks id -u" >> "$_gs_log"; _gs_bad=1; }
+	for _gs_needle in autoboot rc_fast rc_arg nvidia_native_tools_testboot_marker; do
+		printf '%s\n' "$_gs_both" | grep -qF "$_gs_needle" || { echo "the guard lacks $_gs_needle" >> "$_gs_log"; _gs_bad=1; }
+	done
+	printf '%s\n' "$_gs_guard" | grep -q 'nvidia_native_tools_testboot_bectl.*list -H' || { echo "deadman_allowed lacks the bectl list query" >> "$_gs_log"; _gs_bad=1; }
+	printf '%s\n' "$_gs_guard" | grep -qF '$2 ~ /N/' || { echo "deadman_allowed lacks the active-BE query" >> "$_gs_log"; _gs_bad=1; }
+	printf '%s\n' "$_gs_dec" | grep -qF '[ "$6" != "$5" ]' || { echo "dm_decide lacks the current-BE/marker comparison" >> "$_gs_log"; _gs_bad=1; }
+	[ "$(grep -oF '/sbin/shutdown' "$_gs_file" | wc -l | tr -d ' ')" = 1 ] || { echo "the real shutdown path does not occur exactly once" >> "$_gs_log"; _gs_bad=1; }
+	[ "$(grep -c '^[[:space:]]*"\$nvidia_native_tools_testboot_shutdown" -r ' "$_gs_file")" = 1 ] || { echo "the quoted shutdown-variable call does not occur exactly once" >> "$_gs_log"; _gs_bad=1; }
+	if bare_shutdown "$_gs_file"; then echo "a bare shutdown call remains" >> "$_gs_log"; _gs_bad=1; fi
+	grep -Eq 'pgrep|pkill' "$_gs_file" && { echo "pgrep/pkill remains" >> "$_gs_log"; _gs_bad=1; }
+	grep -qF 'ps -o uid= -o comm= -p "$1"' "$_gs_file" || { echo "exact-pid ps confirmation is missing" >> "$_gs_log"; _gs_bad=1; }
+	grep -qF 'DM_CHILD=$_dm_pid' "$_gs_file" || { echo "the confirmed pid is not recorded" >> "$_gs_log"; _gs_bad=1; }
+	grep -qF 'kill "$DM_CHILD"' "$_gs_file" || { echo "exact-pid cancellation is missing" >> "$_gs_log"; _gs_bad=1; }
+	return "$_gs_bad"
+}
+# dm_table <rc file>: the dm_decide result of every single-condition failure and of the all-true row, as one line
+dm_table() {
+	sed -n '/^dm_decide()/,/^}/p' "$1" > "$T/dm_decide.fn"
+	_t=
+	for _row in "1001 yes yes start M M" "0 no yes start M M" "0 - yes start M M" "0 yes - start M M" "0 yes yes stop M M" "0 yes yes start - M" "0 yes yes start M OTHER" "0 yes yes start M -" "0 yes yes start M M"; do
+		set -- $_row
+		_a2=$2; _a3=$3; _a4=$4; _a5=$5; _a6=$6
+		[ "$_a2" != - ] || _a2=; [ "$_a3" != - ] || _a3=; [ "$_a5" != - ] || _a5=; [ "$_a6" != - ] || _a6=
+		sh -c '. "$1"; shift; dm_decide "$@" > /dev/null' dm "$T/dm_decide.fn" "$1" "$_a2" "$_a3" "$_a4" "$_a5" "$_a6"; _t="$_t $?"
+	done
+	echo "${_t# }"
 }
 . "$KIT/guard.sh"
 
@@ -309,7 +414,7 @@ else
 		rm -rf "$1"; mkdir -p "$1/etc/rc.conf.d" "$1/boot/modules" "$1/boot/kernel" "$1/sbin" "$1/usr/local/etc/rc.d"
 		printf 'hostname="t"\nlinux_enable="YES"\nkld_list="filemon amdgpu /boot/kernel/linux64.ko"\nother_testboot_enable="YES"\n' > "$1/etc/rc.conf"
 		printf 'zfs_load="YES"\n' > "$1/boot/loader.conf"
-		cp /sbin/shutdown "$1/sbin/shutdown"
+		printf '#!/bin/sh\nexit 0\n' > "$1/sbin/shutdown"; chmod 0755 "$1/sbin/shutdown"
 		mkdir -p "$1/usr/local/bin"; printf '#!/bin/sh\n' > "$1/usr/local/bin/python3"; chmod 0755 "$1/usr/local/bin/python3"
 	}
 	cat > "$T/bectl" <<EOF
@@ -336,6 +441,10 @@ EOF
 	mkclone "$T/clone/root"
 	MB -D 20990102 -m "$STAGE" -o "$WORK/logs/native-tools-testboot" > "$T/mb.out" 2>&1; expect 0 $? "make-be.sh builds the fake clone"
 	R=$T/clone/root
+	# G6: the clone's marker names the one-shot BE, is read-only, and is checked by check-be.sh.
+	_marker=$R/usr/local/etc/nvidia_native_tools_testboot.marker
+	[ "$(cat "$_marker" 2> /dev/null)" = nvidia-native-tools-test-20990102-1 ] && [ "$(stat -f %Lp "$_marker" 2> /dev/null)" = 444 ] \
+	    && ok "G6 make-be.sh writes the BE marker with mode 0444" || no "G6 make-be.sh marker is '$(cat "$_marker" 2> /dev/null)', mode $(stat -f %Lp "$_marker" 2> /dev/null)"
 	[ "$(sysrc -f "$R/etc/rc.conf" -n linux_enable)" = NO ] && ok "make-be.sh: linux_enable is NO" || no "make-be.sh: linux_enable is $(sysrc -f "$R/etc/rc.conf" -n linux_enable)"
 	[ "$(sysrc -f "$R/etc/rc.conf" -n kld_list)" = filemon ] && ok "make-be.sh: amdgpu and linux64 are stripped from kld_list" || no "make-be.sh: kld_list is $(sysrc -f "$R/etc/rc.conf" -n kld_list)"
 	sysrc -f "$R/etc/rc.conf" -n devmatch_blocklist | grep -q 'amdgpu .*linuxkpi' && ok "make-be.sh: devmatch_blocklist is set in rc.conf" || no "make-be.sh: no devmatch_blocklist in rc.conf"
@@ -382,6 +491,35 @@ EOF
 	# pass for a work tree installed with NVNT_NO_GIT_CHECK; every other check must
 	_cbf=$(grep '^FAIL' "$T/cb.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
 	[ -z "$_cbf" ] && ok "check-be.sh: every check but the commit comparison passes on the fake clone ($(grep -c '^ok' "$T/cb.out") ok)" || no "check-be.sh on the fake clone: $_cbf"
+	chmod u+w "$_marker"; printf 'wrong-be\n' > "$_marker"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-marker-mutant.out" 2>&1
+	grep -q "^FAIL the marker holds 'wrong-be'" "$T/cb-marker-mutant.out" && ok "G6 control: a wrong marker is seen" || no "G6 control: check-be.sh did not reject the wrong marker"
+	printf 'nvidia-native-tools-test-20990102-1\n' > "$_marker"; chmod 0444 "$_marker"
+	# F1 control: an rc.conf.local that sets the shutdown override is refused by check-be.sh
+	printf 'nvidia_native_tools_testboot_shutdown="/usr/bin/true"\n' > "$R/etc/rc.conf.local"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-ovr-mutant.out" 2>&1
+	grep -q "^FAIL dead-man: an rc.conf file of the clone sets nvidia_native_tools_testboot_shutdown" "$T/cb-ovr-mutant.out" && ok "F1 control: a shutdown override in rc.conf.local is seen by check-be.sh" || no "F1 control: check-be.sh did not reject the shutdown override"
+	rm -f "$R/etc/rc.conf.local"
+	# G2 (fix 3): the shared detector file is used by BOTH check-be.sh and the host test; a blinded copy makes each miss a planted bare call
+	_rcins=$R/usr/local/etc/rc.d/nvidia_native_tools_testboot
+	if [ -f "$_rcins" ]; then
+		cp "$_rcins" "$T/rc-installed.orig"; chmod u+w "$_rcins" "$R/usr/local/etc/rc.d" 2> /dev/null
+		printf '%s\n' 'sh -c "shutdown -r now"' >> "$_rcins"
+		env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-m6.out" 2>&1
+		grep -q "^FAIL dead-man: the installed rc script contains a bare shutdown call" "$T/cb-m6.out" && ok "check-be.sh sees a planted sh -c shutdown call (shared detector)" || no "check-be.sh does not see a planted sh -c shutdown call"
+		mkdir -p "$T/kit-blind/tests"; cp -R "$KIT" "$T/kit-blind/tests/native-tools-testboot"
+		_kb=$T/kit-blind/tests/native-tools-testboot
+		printf 'bare_shutdown_lines() {\n\treturn 0\n}\n' > "$_kb/bare-shutdown-check.sh"
+		if cmp -s "$KIT/bare-shutdown-check.sh" "$_kb/bare-shutdown-check.sh"; then no "control: the blinded shared detector does not differ"; else
+			env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$_kb/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-blind.out" 2>&1
+			grep -q "^ok   dead-man: the installed rc script contains no bare shutdown call" "$T/cb-blind.out" && ok "control: a blinded shared detector makes check-be.sh miss the planted call (seen)" || no "control: check-be.sh still saw the call with a blinded shared detector: the file is not what it sources"
+			( . "$_kb/bare-shutdown-check.sh"; [ -z "$(bare_shutdown_lines "$_rcins")" ] ) && ok "control: a blinded shared detector makes the host test miss the planted call (seen)" || no "control: the host test still sees the planted call with a blinded shared detector"
+			[ -n "$(bare_shutdown_lines "$_rcins")" ] && ok "the real shared detector sees the same planted call in the host test" || no "the real shared detector misses the planted call in the host test"
+		fi
+		cp "$T/rc-installed.orig" "$_rcins"
+	else
+		no "G2 the installed rc script is not in the fake clone"
+	fi
 	for _f in gpu-detect.sh testboot-return; do
 		_w=$(awk -v f="$_f" '$1 == "file" && $3 == f { on = 1; next } $1 == "file" { on = 0 } on && $1 == "sha256" { print $3; exit }' "$KIT/VENDOR")
 		[ "$(sha256 -q "$KIT/$_f")" = "$_w" ] && ok "$_f of the work tree equals its VENDOR pin" || no "$_f of the work tree differs from its VENDOR pin"
@@ -520,22 +658,30 @@ case "$*" in
 *) exit 0 ;;
 esac
 EOF
-	printf '#!/bin/sh\nexit 0\n' > "$S/shutdown"; printf '#!/bin/sh\nexit 0\n' > "$S/pgrep"; printf '#!/bin/sh\nexit 0\n' > "$S/pkill"
 	printf '#!/bin/sh\necho "dmesg stub"\n' > "$S/dmesg"; printf '#!/bin/sh\nprintf "t\\tNR\\n"\n' > "$S/bectl"
 	printf '#!/bin/sh\n[ "$*" = "-n linux_enable" ] && echo NO\n' > "$S/sysrc"
 	printf '#!/bin/sh\necho "testboot-return $*" > "%s/returned"\n' "$T" > "$T/return"
 	chmod 0755 "$S"/* "$T/return"
+	rc_env() {
+		if [ "${RC_UNSET_SHUTDOWN:-0}" = 1 ]; then
+			env -u nvidia_native_tools_testboot_shutdown "$@"
+		else
+			env nvidia_native_tools_testboot_shutdown="${RC_SHUTDOWN:-$nvidia_native_tools_testboot_shutdown}" "$@"
+		fi
+	}
 	rcrun() {	# rcrun <work dir> <copy-out dir> <return script> [extra stub dir first in PATH]
-		env PATH="${4:+$4:}$S:$PATH" nvidia_native_tools_testboot_enable=YES nvidia_native_tools_testboot_foreground=YES \
+		rc_env PATH="${4:+$4:}$S:$PATH" nvidia_native_tools_testboot_enable=YES nvidia_native_tools_testboot_foreground=YES \
 		    nvidia_native_tools_testboot_kit="$T/kitroot" nvidia_native_tools_testboot_mods="$T/mods" \
 		    nvidia_native_tools_testboot_work="$1" nvidia_native_tools_testboot_fallback="$1.fallback" \
 		    nvidia_native_tools_testboot_copyout="$2" nvidia_native_tools_testboot_return="$3" \
 		    nvidia_native_tools_testboot_devdir="$T/dev" nvidia_native_tools_testboot_vram=17179869184 nvidia_native_tools_testboot_sm=12.0 \
-		    nvidia_native_tools_testboot_lockfile="$T/nolock" nvidia_native_tools_testboot_version="$T/nover" \
-		    sh "$KIT/nvidia_native_tools_testboot" onestart > "$1.out" 2>&1
+		    nvidia_native_tools_testboot_lockfile="${RC_LOCK:-$T/nolock}" nvidia_native_tools_testboot_version="$T/nover" ${RC_EXTRA:-} \
+		    sh "${RC_SCRIPT:-$KIT/nvidia_native_tools_testboot}" onestart > "$1.out" 2>&1
 		ls -d "$1"/* 2> /dev/null | head -1
 	}
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
+	reap_stub_children
+	grep -q '"row":"deadman","status":"pass","detail":".*stubbed shutdown .* is used' "$RUN/results.jsonl" 2> /dev/null && ok "G3 control: the same stub on a hand run (onestart) is used (decided: a stub cannot reboot)" || no "G3 control: the stub on a hand run was not used: $(grep '"row":"deadman"' "$RUN/results.jsonl" 2> /dev/null)"
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
 		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
@@ -555,41 +701,294 @@ EOF
 	# a copy-out path with a symbolic link in it is refused; the run stays in the boot environment
 	mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$T/linked"
 	RUN2=$(rcrun "$T/work2" "$T/linked/out" "$T/return")
+	reap_stub_children
 	[ -z "$(ls "$T/elsewhere")" ] && grep -q 'COULD NOT copy' "$RUN2/rc.log" && ok "rc one-shot: a copy-out through a symbolic link is refused" || no "rc one-shot: the copy went through the symbolic link ($(ls "$T/elsewhere"))"
 	# a failed return still leaves its record in the copy-out
 	printf '#!/bin/sh\necho "bectl activate failed"\nexit 1\n' > "$T/return-bad"; chmod 0755 "$T/return-bad"
 	RUN3=$(rcrun "$T/work3" "$T/copyout3" "$T/return-bad")
+	reap_stub_children
 	grep -q 'bectl activate failed' "$T/copyout3/$(basename "$RUN3")/testboot-return.txt" 2> /dev/null && ok "rc one-shot: a failed return is recorded in the copy-out" || no "rc one-shot: the failed return is not in the copy-out"
 	# a module that does not load: the rows after it are not-run
 	mkdir -p "$T/kfail"; printf '#!/bin/sh\necho "kldload: cannot load $1" >&2\nexit 1\n' > "$T/kfail/kldload"; chmod 0755 "$T/kfail/kldload"
 	echo > "$T/loaded"
 	RUN4=$(rcrun "$T/work4" "$T/copyout4" "$T/return" "$T/kfail")
+	reap_stub_children
 	_bad=
 	for _r in gpu-node root-open gpu-verify nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module; do
 		[ "$(st "$_r" "$RUN4")" = not-run ] || _bad="$_bad $_r=$(st "$_r" "$RUN4")"
 	done
 	[ -z "$_bad" ] && ok "rc one-shot: after a failed load every later row is not-run" || no "rc one-shot: after a failed load:$_bad"
 	# a dead-man timer that is not pending: nothing is loaded
-	mkdir -p "$T/dmfail"; printf '#!/bin/sh\nexit 1\n' > "$T/dmfail/pgrep"; chmod 0755 "$T/dmfail/pgrep"
+	mkdir -p "$T/dmfail"; printf '#!/bin/sh\nexit 1\n' > "$T/dmfail/shutdown"; chmod 0755 "$T/dmfail/shutdown"
 	echo > "$T/loaded"
-	RUN5=$(rcrun "$T/work5" "$T/copyout5" "$T/return" "$T/dmfail")
+	RC_SHUTDOWN=$T/dmfail/shutdown
+	RUN5=$(rcrun "$T/work5" "$T/copyout5" "$T/return")
+	unset RC_SHUTDOWN
+	reap_stub_children
 	[ -z "$(tr -d '\n' < "$T/loaded")" ] && [ "$(st deadman "$RUN5")" = fail ] && [ "$(st load-nvidia "$RUN5")" = not-run ] && grep -q '"verdict": "fail"' "$RUN5/summary.json" \
 	    && ok "rc one-shot: without a pending dead-man timer nothing is loaded and the verdict is fail" || no "rc one-shot: dead-man not pending: loaded '$(tr '\n' ' ' < "$T/loaded")', deadman $(st deadman "$RUN5"), load-nvidia $(st load-nvidia "$RUN5")"
 	# an evidence file that claims pass is not trusted
 	cp "$T/kitroot/static-rows/render-uapi" "$T/render-uapi.save"; chmod u+w "$T/kitroot/static-rows/render-uapi"; printf 'pass\nplanted\n' > "$T/kitroot/static-rows/render-uapi"
 	echo > "$T/loaded"
 	RUN6=$(rcrun "$T/work6" "$T/copyout6" "$T/return")
+	reap_stub_children
 	cp "$T/render-uapi.save" "$T/kitroot/static-rows/render-uapi"
 	[ "$(st render-uapi "$RUN6")" = error ] && ok "rc one-shot: a static row whose evidence says pass is an error" || no "rc one-shot: render-uapi with a planted pass is $(st render-uapi "$RUN6")"
 	[ "$(st load-nvidia_gsp_ga10x_fw "$RUN4")" = fail ] && ok "rc one-shot: the failed load is a fail row" || no "rc one-shot: load-nvidia_gsp_ga10x_fw is $(st load-nvidia_gsp_ga10x_fw "$RUN4")"
+
+	# Exact-pid cancellation: the recorded child dies, while an earlier same-named decoy stays alive.
+	cat > "$T/return-hold" <<EOF
+#!/bin/sh
+_c=\$(tail -1 "$T/shutdown-children" 2> /dev/null)
+printf '%s %s\n' "\$_c" "\$(ps -o uid= -o comm= -p "\$_c" 2> /dev/null | tr -d ' ')" > "$T/hold-seen"
+exit 3
+EOF
+	chmod 0755 "$T/return-hold"; rm -f "$T/hold-seen"
+	echo > "$T/loaded"
+	"$SENT/shutdown-child/shutdown" 300 &
+	DM_DECOY=$!
+	RUNC=$(rcrun "$T/work-cancel" "$T/copyout-cancel" "$T/return-hold")
+	_cancel_pid=$(sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$RUNC/deadman.txt" 2> /dev/null | head -1)
+	case $_cancel_pid in
+	'' | *[!0-9]*) no "exact-pid cancellation: no numeric child pid was recorded" ;;
+	*)
+		[ "$(cat "$T/hold-seen" 2> /dev/null)" = "$_cancel_pid $(id -u)shutdown" ] && ok "F6 the recorded child $_cancel_pid was a live shutdown of ours just before the cancel" || no "F6 the recorded child was not a live shutdown before the cancel: '$(cat "$T/hold-seen" 2> /dev/null)'"
+		[ -z "$(ps -o uid= -o comm= -p "$_cancel_pid" 2> /dev/null | tr -d ' ')" ] && ok "exact-pid cancellation killed the recorded child $_cancel_pid" || no "exact-pid cancellation left child $_cancel_pid alive"
+		[ "$(ps -o uid= -o comm= -p "$DM_DECOY" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ] && ok "exact-pid cancellation leaves the same-named decoy $DM_DECOY alive" || no "exact-pid cancellation killed or lost the decoy $DM_DECOY"
+		grep -qF "killed only the confirmed dead-man shutdown pid $_cancel_pid" "$RUNC/results.jsonl" && ok "exact-pid cancellation records the confirmed pid" || no "exact-pid cancellation has no exact-pid row"
+		;;
+	esac
+	grep -q 'nvidia_native_tools_testboot dead-man' "$T/shutdown-args" && ok "the foreground stub receives the dead-man wall message" || no "the foreground stub did not receive the dead-man wall message"
+	reap_stub_children
+	kill "$DM_DECOY" 2> /dev/null || :; wait "$DM_DECOY" 2> /dev/null || :; DM_DECOY=
+
+	# A child that exited before cancellation is named in a fail row, and no other process is killed.
+	cat > "$T/return-gone" <<EOF
+#!/bin/sh
+_gone=\$(tail -1 "$T/shutdown-children" 2> /dev/null)
+case \$_gone in '' | *[!0-9]*) ;; *) kill "\$_gone" 2> /dev/null || : ;; esac
+exit 3
+EOF
+	chmod 0755 "$T/return-gone"
+	echo > "$T/loaded"
+	RUNG=$(rcrun "$T/work-gone" "$T/copyout-gone" "$T/return-gone")
+	grep -q '"row":"deadman-cancel","status":"fail","detail":"dead-man pid .* is no longer a shutdown owned by uid .*; killed nothing"' "$RUNG/results.jsonl" \
+	    && ok "cancellation of an already-gone pid says so and kills nothing" || no "cancellation of an already-gone pid did not produce the refusal row"
+	reap_stub_children
+
+	# G3: replace the sole real-path literal in a copy, then run that copy as non-root with no override.
+	RC_G3=$T/rc-g3-sentinel
+	_real_count=$(grep -oF '/sbin/shutdown' "$KIT/nvidia_native_tools_testboot" | wc -l | tr -d ' ')
+	_g3_ready=1
+	if [ "$_real_count" != 1 ]; then
+		no "G3 requires exactly one real shutdown path in the original, found $_real_count"
+		_g3_ready=0
+	else
+		sed "s|/sbin/shutdown|$SENT2/real-shutdown|" "$KIT/nvidia_native_tools_testboot" > "$RC_G3"
+		_copy_count=$(grep -oF '/sbin/shutdown' "$RC_G3" | wc -l | tr -d ' ')
+		if [ "$_copy_count" != 0 ] || cmp -s "$KIT/nvidia_native_tools_testboot" "$RC_G3"; then
+			no "G3 sentinel substitution did not make a distinct copy without the real path"
+			_g3_ready=0
+		else
+			ok "G3 control copy has no real shutdown path and differs from the original"
+		fi
+	fi
+	rm -f "$SENT2/hits"
+	if [ "$_g3_ready" = 1 ]; then
+		RC_SCRIPT=$RC_G3; RC_UNSET_SHUTDOWN=1
+		RUN_G3=$(rcrun "$T/work-g3" "$T/copyout-g3" "$T/return-hold")
+		unset RC_SCRIPT RC_UNSET_SHUTDOWN
+		if [ -n "$RUN_G3" ] && [ -f "$RUN_G3/results.jsonl" ]; then
+			grep -q '"row":"deadman","status":"fail","detail":"REFUSED: not calling shutdown: uid [0-9][0-9]* is not 0: this boot is NOT protected against a hang"' "$RUN_G3/results.jsonl" \
+			    && ok "G3 non-root onestart refuses the real default, names uid, keeps the suffix (F8)" || no "G3 did not produce the uid refusal row: $(grep '"row":"deadman"' "$RUN_G3/results.jsonl")"
+			[ "$(grep -c '"row":"deadman",' "$RUN_G3/results.jsonl")" = 1 ] && ok "G3 refusal writes one deadman row" || no "G3 refusal did not write exactly one deadman row"
+			grep -q '"row":"deadman-cancel","status":"fail","detail":"no confirmed dead-man shutdown pid was recorded; killed nothing"' "$RUN_G3/results.jsonl" \
+			    && ok "cancellation with no recorded pid says so and kills nothing" || no "cancellation with no recorded pid did not produce the refusal row"
+		else
+			no "G3 sentinel copy made no run directory"
+		fi
+		# F1: at an rc boot (autoboot=yes) a stub override is ignored: the real conditions apply (here the uid fails), the stub is not called
+		: > "$T/shutdown-args"
+		RC_SCRIPT=$RC_G3; RC_EXTRA="autoboot=yes rc_fast=yes"
+		RUN_F1=$(rcrun "$T/work-f1" "$T/copyout-f1" "$T/return")
+		unset RC_SCRIPT RC_EXTRA
+		reap_stub_children
+		grep -q '"row":"deadman","status":"fail","detail":"REFUSED: not calling shutdown: uid [0-9][0-9]* is not 0' "$RUN_F1/results.jsonl" 2> /dev/null && [ ! -s "$T/shutdown-args" ] && [ ! -s "$SENT2/hits" ] \
+		    && ok "F1 at an rc boot the stub override is ignored: refused by the real conditions, stub never called" || no "F1 the stub override was honoured at an rc boot: $(grep '"row":"deadman"' "$RUN_F1/results.jsonl" 2> /dev/null) args '$(cat "$T/shutdown-args")'"
+		# F4: a lock file stops the arm before shutdown is called
+		: > "$T/shutdown-args"; : > "$T/lockf"
+		RC_LOCK=$T/lockf
+		RUN_F4=$(rcrun "$T/work-f4" "$T/copyout-f4" "$T/return")
+		unset RC_LOCK
+		reap_stub_children
+		grep -q '"row":"deadman","status":"fail","detail":"the dead-man timer is not pending (lock file .* exists): shutdown was not called: this boot is NOT protected against a hang"' "$RUN_F4/results.jsonl" 2> /dev/null && [ ! -s "$T/shutdown-args" ] \
+		    && ok "F4 a lock file is checked before shutdown is called (stub not called)" || no "F4 lock file: stub called or wrong row: $(grep '"row":"deadman"' "$RUN_F4/results.jsonl" 2> /dev/null) args '$(cat "$T/shutdown-args")'"
+		# G3 (fix 3): an override that is not an absolute, executable, non-setuid file is not a stub: the real conditions apply (non-root: refused)
+		cp "$nvidia_native_tools_testboot_shutdown" "$T/shutdown-stub-suid"; chmod 4755 "$T/shutdown-stub-suid"	# a file mode on our own copy of the stub
+		for _ov in "true:true" "relative:stubs/shutdown-rel" "setuid:$T/shutdown-stub-suid"; do
+			_on=${_ov%%:*}; _ow=${_ov#*:}
+			: > "$T/shutdown-args"; rm -f "$SENT2/hits"
+			RC_SCRIPT=$RC_G3; RC_SHUTDOWN=$_ow
+			RUN_OV=$(rcrun "$T/work-ov-$_on" "$T/copyout-ov-$_on" "$T/return")
+			unset RC_SCRIPT RC_SHUTDOWN
+			reap_stub_children
+			grep -q '"row":"deadman","status":"fail","detail":"REFUSED: not calling shutdown: ' "$RUN_OV/results.jsonl" 2> /dev/null && [ ! -s "$T/shutdown-args" ] && [ ! -e "$SENT2/hits" ] && [ ! -e "$SENT/hits" ] \
+			    && ok "G3 override '$_ow' ($_on) is refused as non-root: REFUSED row, empty stub log, no sentinel hit" || no "G3 override $_on: wrong row or the stub/sentinel was reached: $(grep '"row":"deadman"' "$RUN_OV/results.jsonl" 2> /dev/null) args '$(cat "$T/shutdown-args")'"
+		done
+		rm -f "$T/shutdown-stub-suid"
+	fi
+	[ ! -s "$SENT2/hits" ] && ok "G3 refusal never reaches the substituted real-path sentinel" || no "G3 refusal reached the substituted real-path sentinel"
+
+	# G5/M1: replacing the variable call with a bare command must hit the PATH sentinel.
+	RC_M1=$T/rc-m1-bare
+	sed 's/^\([[:space:]]*\)"\$nvidia_native_tools_testboot_shutdown" -r /\1shutdown -r /' "$KIT/nvidia_native_tools_testboot" > "$RC_M1"
+	# F11: the bare-call mutant runs only when the PATH sentinel is first and the real shutdown cannot be found before it
+	_m1_path=$S:$PATH
+	if [ "${PATH%%:*}" != "$SENT" ] || [ ! -x "$SENT/shutdown" ] || [ -e "$S/shutdown" ] || [ "$(PATH=$_m1_path command -v shutdown)" != "$SENT/shutdown" ]; then
+		no "F11 the PATH sentinel is not first with an executable shutdown: mutant M1 is not run"
+	elif cmp -s "$KIT/nvidia_native_tools_testboot" "$RC_M1" || ! sh -n "$RC_M1"; then
+		no "control: mutant M1 was not made as a distinct valid shell copy"
+	else
+		ok "F11 the PATH sentinel is first and holds an executable shutdown before mutant M1 runs"
+		: > "$SENT/hits"
+		RC_SCRIPT=$RC_M1
+		RUN_M1=$(rcrun "$T/work-m1" "$T/copyout-m1" "$T/return")
+		unset RC_SCRIPT
+		reap_stub_children
+		if grep -q '^REACHED .*shutdown -r ' "$SENT/hits"; then
+			ok "control: mutant M1 is seen"
+		else
+			no "control: mutant M1 is not seen"
+		fi
+		mv "$SENT/hits" "$T/mutant-M1.hits"
+	fi
+
+	# G5/M2: the same sentinel-only copy with its refusal block disabled must hit the second sentinel.
+	RC_M2=$T/rc-m2-no-guard
+	sed 's/if ! deadman_allowed; then/if false; then/' "$RC_G3" > "$RC_M2"
+	if cmp -s "$RC_G3" "$RC_M2" || ! sh -n "$RC_M2"; then
+		no "control: mutant M2 was not made as a distinct valid shell copy"
+	else
+		: > "$SENT2/hits"
+		RC_SCRIPT=$RC_M2; RC_UNSET_SHUTDOWN=1
+		RUN_M2=$(rcrun "$T/work-m2" "$T/copyout-m2" "$T/return")
+		unset RC_SCRIPT RC_UNSET_SHUTDOWN
+		reap_stub_children
+		if grep -q '^REAL REACHED -r ' "$SENT2/hits"; then
+			ok "control: mutant M2 is seen"
+		else
+			no "control: mutant M2 is not seen"
+		fi
+		mv "$SENT2/hits" "$T/mutant-M2.hits"
+	fi
+
+	# G5/M3: a planted pattern kill makes the same G4 static contract fail.  This copy is never run.
+	RC_M3=$T/rc-m3-pattern-cancel
+	sed '/^deadman_cancel()$/a\
+\	pkill -f "nvidia_native_tools_testboot dead-man" > /dev/null 2>\&1 || :' "$KIT/nvidia_native_tools_testboot" > "$RC_M3"
+	if cmp -s "$KIT/nvidia_native_tools_testboot" "$RC_M3"; then
+		no "control: mutant M3 does not differ from the original"
+	elif guard_static "$RC_M3" "$T/m3-static.out"; then
+		no "control: mutant M3 survived G4"
+	elif [ "$(cat "$T/m3-static.out")" = "pgrep/pkill remains" ]; then
+		ok "control: mutant M3 is seen (G4 fails for the pkill rule only)"
+	else
+		no "control: mutant M3 failed G4 for another reason too: $(tr '\n' ';' < "$T/m3-static.out")"
+	fi
+
+	# G5/M4: the call rewritten as a bare call after "if !" is seen by the bare-call detector (and only that rule).  Never run.
+	RC_M4=$T/rc-m4-if-bare
+	sed 's/^\([[:space:]]*\)"\$nvidia_native_tools_testboot_shutdown" -r .*$/\1if ! shutdown -r "+$N" "m"; then :; fi/' "$KIT/nvidia_native_tools_testboot" > "$RC_M4"
+	if cmp -s "$KIT/nvidia_native_tools_testboot" "$RC_M4"; then
+		no "control: mutant M4 does not differ from the original"
+	elif bare_shutdown "$KIT/nvidia_native_tools_testboot"; then
+		no "control: the bare-call detector fires on the real rc script"
+	elif bare_shutdown "$RC_M4"; then
+		ok "control: mutant M4 is seen"
+	else
+		no "control: mutant M4 is not seen by the bare-call detector"
+	fi
+
+	# G1 (fix 3): quoted and evaluated calls are seen; the allowlisted lines, comments and row/echo/printf messages are not.  Never run.
+	RC_M6=$T/rc-m6-sh-c
+	{ cat "$KIT/nvidia_native_tools_testboot"; printf '%s\n' 'sh -c "shutdown -r now"'; } > "$RC_M6"
+	RC_M7=$T/rc-m7-eval
+	{ cat "$KIT/nvidia_native_tools_testboot"; printf '%s\n' "eval 'shutdown -r now'"; } > "$RC_M7"
+	for _mm in M6:$RC_M6 M7:$RC_M7; do
+		_mn=${_mm%%:*}; _mf=${_mm#*:}
+		if cmp -s "$KIT/nvidia_native_tools_testboot" "$_mf"; then
+			no "control: mutant $_mn does not differ from the original"
+		elif bare_shutdown "$_mf" && [ "$(bare_shutdown_lines "$_mf" | wc -l | tr -d ' ')" = 1 ]; then
+			ok "control: mutant $_mn is seen (only the planted line is reported)"
+		else
+			no "control: mutant $_mn is not seen by the bare-call detector: '$(bare_shutdown_lines "$_mf")'"
+		fi
+	done
+	RC_CLEAN=$T/rc-clean-words
+	{
+		cat "$KIT/nvidia_native_tools_testboot"
+		printf '%s\n' '# a comment: shutdown -r now, then if ! shutdown -r +1' \
+		    'row deadman fail "message with shutdown -r now and sh -c shutdown in it"' \
+		    'echo "shutdown -r now" >&2' \
+		    "printf '%s\\n' 'eval shutdown -r now'"
+	} > "$RC_CLEAN"
+	if cmp -s "$KIT/nvidia_native_tools_testboot" "$RC_CLEAN"; then
+		no "control: the clean-words copy does not differ from the original"
+	elif bare_shutdown "$RC_CLEAN"; then
+		no "control: the detector flags comments, allowlisted lines or row/echo/printf messages: '$(bare_shutdown_lines "$RC_CLEAN")'"
+	else
+		ok "control: comments, the allowlisted lines and row/echo/printf messages that hold the word shutdown are not flagged"
+	fi
 fi
 
 # (g) static checks
-for _f in make-be.sh check-be.sh guard.sh nvidia_native_tools_testboot gpu-detect.sh testboot-return; do
+for _f in make-be.sh check-be.sh bare-shutdown-check.sh guard.sh nvidia_native_tools_testboot gpu-detect.sh testboot-return; do
 	sh -n "$KIT/$_f" && ok "$_f is valid sh" || no "$_f has a syntax error"
 done
 /usr/local/bin/python3 -I -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], \"exec\")" "$KIT/summarize.py" 2> /dev/null && ok "summarize.py compiles" || no "summarize.py does not compile"
 grep -v '^[[:space:]]*#' "$KIT/nvidia_native_tools_testboot" | grep -E 'kldload[^"]*linux|kldunload|bectl activate' > /dev/null && no "the rc script loads a linux module, unloads a module or activates a BE" || ok "the rc script loads no linux module, unloads nothing, activates no BE"
+
+# G4: run the complete static contract on the real rc, not on either sentinel copy.
+if guard_static "$KIT/nvidia_native_tools_testboot" "$T/g4-static.out"; then
+	ok "G4 static real-path, boot/BE/marker, exact-pid and no-pattern-kill checks pass"
+else
+	no "G4 static checks failed: $(tr '\n' ';' < "$T/g4-static.out")"
+fi
+
+# F3: the pure decision function, run as a table; every single-condition failure refuses, only the all-true row passes
+_dm_want="1 1 1 1 1 1 1 1 0"
+_dm_got=$(dm_table "$KIT/nvidia_native_tools_testboot")
+[ "$_dm_got" = "$_dm_want" ] && ok "F3 dm_decide table: every single-condition failure refuses, only the all-true row returns 0 ($_dm_got)" || no "F3 dm_decide table is '$_dm_got', not '$_dm_want'"
+_mk_mutant() {	# _mk_mutant <name> <sed expression>: a copy of the rc with one decision condition changed, cmp-checked distinct
+	sed "$2" "$KIT/nvidia_native_tools_testboot" > "$T/rc-mut-$1"
+	if cmp -s "$KIT/nvidia_native_tools_testboot" "$T/rc-mut-$1"; then no "control: dm_decide mutant $1 does not differ from the original"; return 1; fi
+	_got=$(dm_table "$T/rc-mut-$1")
+	if [ "$_got" != "$_dm_want" ]; then ok "control: dm_decide mutant $1 is seen as a wrong table ($_got)"; else no "control: dm_decide mutant $1 gives the right table: it is not seen"; fi
+}
+_mk_mutant uid-dropped 's/if \[ "\$1" != 0 \]; then/if false; then/'
+_mk_mutant autoboot-flipped 's/if \[ "\$2" != yes \]; then/if [ "$2" = yes ]; then/'
+_mk_mutant rc_fast-dropped 's/if \[ "\$3" != yes \]; then/if false; then/'
+_mk_mutant be-dropped 's/if \[ -z "\$6" \] || \[ "\$6" != "\$5" \]; then/if false; then/'
+
+# G6: make-be.sh has no shutdown command; a planted command proves the check can fail.
+if grep -v '^[[:space:]]*#' "$KIT/make-be.sh" | sed 's/"[^"]*"//g' | grep -Eq '(^|[;&|()])[[:space:]]*shutdown([[:space:]]|$)'; then
+	no "G6 make-be.sh contains a shutdown command"
+else
+	ok "G6 make-be.sh contains no shutdown command"
+fi
+{ cat "$KIT/make-be.sh"; printf '\nshutdown -r +1 "planted G6 control"\n'; } > "$T/make-be-shutdown-mutant"
+if grep -v '^[[:space:]]*#' "$T/make-be-shutdown-mutant" | sed 's/"[^"]*"//g' | grep -Eq '(^|[;&|()])[[:space:]]*shutdown([[:space:]]|$)'; then
+	ok "G6 control: a planted make-be.sh shutdown command is seen"
+else
+	no "G6 control: a planted make-be.sh shutdown command is not seen"
+fi
+
+# G2: M1's deliberate hit was moved aside after its control; any other PATH-sentinel hit is a failure.
+if [ ! -s "$SENT/hits" ]; then
+	ok "G2 no unexpected path reached the shutdown sentinel"
+else
+	no "G2 unexpected shutdown sentinel hits: $(cat "$SENT/hits")"
+fi
 
 echo "native_tools_kit_test: $pass passed, $fail failed"
 [ "$fail" = 0 ]

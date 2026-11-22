@@ -346,6 +346,8 @@ chmod -R go-w "$KROOT"
 run install $ROOTOWN -m 0555 "$A/testboot-return" "$MNT/usr/local/sbin/testboot-return"
 run install $ROOTOWN -m 0555 "$A/nvidia_native_tools_testboot" "$MNT/usr/local/etc/rc.d/nvidia_native_tools_testboot"
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.version"
+printf '%s\n' "$BE" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
+chmod 0444 "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
 printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_sm="%s"\n' \
     "$NORMAL" "$COPYOUT" "$VRAM" "$SM" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
 

@@ -29,8 +29,8 @@
 #     testboot-return and this script are the commit's; gpu-detect.sh and testboot-return equal their VENDOR pins;
 #     every static row has a known status;
 #   - dead-man (static): the rc script arms the timer before its first kldload and gates the loads on it, the default
-#     is a positive number of minutes, no rc.conf sets it to 0, shutdown(8) is in the clone; loader.conf has the
-#     panic settings;
+#     is a positive number of minutes, no rc.conf sets it to 0, the marker holds the test BE name, the shutdown call
+#     uses only nvidia_native_tools_testboot_shutdown, and shutdown(8) is in the clone; loader.conf has the panic settings;
 #   - order: the firmware module is loaded before nvidia.ko, the GPU is opened as root before nvrm-info runs;
 #   - the one-shot is enabled, every other *_testboot_enable is NO, and the copy-out directory is absolute and not on
 #     a boot environment dataset (zfs list of its nearest existing parent, on this host).
@@ -99,6 +99,9 @@ if [ -z "$MNT" ]; then
 fi
 SCR=$(mktemp -d "${TMPDIR:-/var/run}/nvnt-check-scr.XXXXXXXX") || exit 2
 
+# the one bare-shutdown detector (shared with tests/native_tools_kit_test.sh)
+. "$(dirname "$0")/bare-shutdown-check.sh" || { echo "check-be.sh: cannot read bare-shutdown-check.sh" >&2; exit 2; }
+
 rc=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; rc=1; }
@@ -112,7 +115,7 @@ echo "check-be.sh: ${BE:-$MNT}, commit ${COMMIT:-none}, list $SHAFILE"
 [ "$NO_GIT" = 0 ] || echo "check-be.sh: no git metadata; the commit comparisons below are expected to FAIL"
 
 linked() { _acc=$MNT; for _c in $(echo "$1" | tr / ' '); do _acc=$_acc/$_c; [ ! -L "$_acc" ] || return 0; done; return 1; }
-for _rel in boot/loader.conf boot/modules.nvnative-test usr/local/share/nvidia-native-tools-test usr/local/etc/rc.d/nvidia_native_tools_testboot usr/local/etc/nvidia_native_tools_testboot.version usr/local/sbin/testboot-return etc/rc.conf etc/rc.conf.d/nvidia_native_tools_testboot sbin/shutdown; do
+for _rel in boot/loader.conf boot/modules.nvnative-test usr/local/share/nvidia-native-tools-test usr/local/etc/rc.d/nvidia_native_tools_testboot usr/local/etc/nvidia_native_tools_testboot.version usr/local/etc/nvidia_native_tools_testboot.marker usr/local/sbin/testboot-return etc/rc.conf etc/rc.conf.d/nvidia_native_tools_testboot sbin/shutdown; do
 	if linked "$_rel"; then bad "$_rel is, or lies below, a symbolic link of the clone"; fi
 done
 [ -z "$(find "$MODS" "$KROOT" -type l 2> /dev/null)" ] || bad "a symbolic link lies in the staged or kit directory of the clone"
@@ -179,6 +182,17 @@ _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/nu
 # the kit
 _ver=$(cat "$MNT/usr/local/etc/nvidia_native_tools_testboot.version" 2> /dev/null || echo none)
 [ "$_ver" = "$COMMIT" ] && ok "the clone records commit $_ver" || bad "the clone records '$_ver', not $COMMIT"
+_marker=$MNT/usr/local/etc/nvidia_native_tools_testboot.marker
+_marked_be=$(sed -n '1p' "$_marker" 2> /dev/null)
+if [ ! -f "$_marker" ]; then
+	bad "the test boot environment marker is not installed"
+elif [ -n "$BE" ]; then
+	[ "$_marked_be" = "$BE" ] && ok "the marker holds the test boot environment name $BE" || bad "the marker holds '$_marked_be', not $BE"
+elif printf '%s\n' "$_marked_be" | grep -Eq '^nvidia-native-tools-test-[0-9]{8}-[1-9][0-9]*$'; then
+	ok "the marker holds a native-tools test boot environment name ($_marked_be)"
+else
+	bad "the marker holds '$_marked_be', not a native-tools test boot environment name"
+fi
 for _p in nvidia_native_tools_testboot:"$RCS" guard.sh:"$KROOT/guard.sh" summarize.py:"$KROOT/summarize.py" gpu-detect.sh:"$KROOT/gpu-detect.sh" native-tools-summary.schema.json:"$KROOT/native-tools-summary.schema.json" testboot-return:"$MNT/usr/local/sbin/testboot-return" check-be.sh:"$KROOT/repo/tests/native-tools-testboot/check-be.sh"; do
 	_n=${_p%%:*}; _dst=${_p#*:}
 	[ -f "$_dst" ] || { bad "$_n is not installed ($_dst)"; continue; }
@@ -205,7 +219,13 @@ if [ -f "$RCS" ]; then
 	[ -n "$_lrc" ] && [ -n "$_def1" ] && [ "$_lrc" -lt "$_def1" ] && ok "rc.conf.d is read (line $_lrc) before the defaults (line $_def1)" || bad "load_rc_config (line ${_lrc:-none}) is not before the defaults (line ${_def1:-none}): settings of rc.conf.d would be ignored"
 	[ -n "$_arm" ] && [ -n "$_first" ] && [ "$_arm" -lt "$_first" ] && ok "dead-man: armed (line $_arm) before the first kldload (line $_first)" || bad "dead-man: not armed before the first kldload (arm ${_arm:-none}, kldload ${_first:-none})"
 	[ -n "$_gate" ] && [ -n "$_first" ] && [ "$_gate" -lt "$_first" ] && ok "dead-man: a timer that is not pending loads nothing (line $_gate)" || bad "dead-man: no gate on the timer before the first kldload"
-	grep -q 'shutdown -r "+\$nvidia_native_tools_testboot_deadman"' "$RCS" && ok "dead-man: the timer is shutdown -r +N" || bad "dead-man: no shutdown -r request"
+	grep -q '"\$nvidia_native_tools_testboot_shutdown" -r "+\$nvidia_native_tools_testboot_deadman"' "$RCS" && ok "dead-man: the timer is shutdown -r +N through nvidia_native_tools_testboot_shutdown" || bad "dead-man: no variable-only shutdown -r request"
+	grep -q 'nvidia_native_tools_testboot_shutdown' "$RCS" && ok "dead-man: the installed rc script has the shutdown override" || bad "dead-man: the installed rc script has no shutdown override"
+	# the one bare-call detector, shared with the host test: bare-shutdown-check.sh (bare_shutdown_lines prints offending lines)
+	_bare=$(bare_shutdown_lines "$RCS")
+	[ -z "$_bare" ] && ok "dead-man: the installed rc script contains no bare shutdown call" || bad "dead-man: the installed rc script contains a bare shutdown call: $_bare"
+	_ovr=$(cat "$RCC" "$MNT"/etc/rc.conf.local "$MNT"/usr/local/etc/rc.conf "$MNT"/usr/local/etc/rc.conf.local 2> /dev/null; find "$MNT/etc/rc.conf.d" "$MNT/usr/local/etc/rc.conf.d" -type f -exec cat {} + 2> /dev/null)
+	printf '%s\n' "$_ovr" | grep -Eq '^[[:space:]]*nvidia_native_tools_testboot_(shutdown|marker|bectl)[[:space:]]*=' && bad "dead-man: an rc.conf file of the clone sets nvidia_native_tools_testboot_shutdown, _marker or _bectl" || ok "dead-man: no rc.conf file of the clone overrides the shutdown, marker or bectl variable"
 	_def=$(sed -n 's/^: "\${nvidia_native_tools_testboot_deadman:=\([0-9]*\)}"$/\1/p' "$RCS")
 	case $_def in '' | 0*) bad "dead-man: the default is '$_def'" ;; *) ok "dead-man: the default is $_def minutes" ;; esac
 	_dm=$(cat "$RCC" "$MNT"/etc/rc.conf.d/nvidia_native_tools_testboot 2> /dev/null | sed -n 's/^[[:space:]]*nvidia_native_tools_testboot_deadman[[:space:]]*=[[:space:]]*"\{0,1\}\([^"#[:space:]]*\).*/V\1/p')

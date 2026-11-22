@@ -64,6 +64,10 @@ load_rc_config $name
 : "${nvidia_native_tools_testboot_sm:=}"
 : "${nvidia_native_tools_testboot_lockfile:=/var/run/noshutdown}"
 : "${nvidia_native_tools_testboot_version:=/usr/local/etc/nvidia_native_tools_testboot.version}"
+nvidia_native_tools_testboot_real_shutdown=/sbin/shutdown
+: "${nvidia_native_tools_testboot_shutdown:=$nvidia_native_tools_testboot_real_shutdown}"
+: "${nvidia_native_tools_testboot_marker:=/usr/local/etc/nvidia_native_tools_testboot.marker}"
+: "${nvidia_native_tools_testboot_bectl:=bectl}"
 
 NORMAL=$nvidia_native_tools_testboot_normal_be
 KIT=$nvidia_native_tools_testboot_kit
@@ -95,19 +99,95 @@ guard_row()
 	row "$1" "$_st" "${2#* }"
 }
 
+# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE: the real-case decision, no side effects.  Prints the
+# reason and returns 1 when the real shutdown must not be called, returns 0 (prints nothing) when every condition holds.
+# /etc/rc.subr strips the one/fast/force prefix, so rc_arg is "start" for onestart too and cannot tell a boot from a
+# hand run; only autoboot=yes (set by /etc/rc at boot) and rc_fast=yes (set by the faststart prefix /etc/rc uses) can.
+# A real boot therefore needs ALL of: autoboot=yes, rc_fast=yes, rc_arg=start.
+dm_decide()
+{
+	if [ "$1" != 0 ]; then echo "uid $1 is not 0"; return 1; fi
+	if [ "$2" != yes ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ "$3" != yes ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ "$4" != start ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ -z "$5" ]; then echo "the marker is missing or has an empty first line"; return 1; fi
+	if [ -z "$6" ] || [ "$6" != "$5" ]; then echo "current boot environment '${6:-none}' does not match marker '$5'"; return 1; fi
+	return 0
+}
+
+deadman_allowed()
+{
+	DM_REFUSE=
+	# at an rc boot (autoboot=yes) the override variable is ignored: the real conditions apply and the call goes to the
+	# real path, so a stray rc.conf line cannot swap in a stub
+	[ "${autoboot:-}" != yes ] || nvidia_native_tools_testboot_shutdown=$nvidia_native_tools_testboot_real_shutdown
+	if [ "$nvidia_native_tools_testboot_shutdown" != "$nvidia_native_tools_testboot_real_shutdown" ]; then
+		# not booting: an override that is an absolute path to an executable, non-setuid file is accepted (it cannot reboot)
+		# decided: a hand run (onestart, root or not) with such a stub override is allowed; a stub cannot reboot the machine
+		case $nvidia_native_tools_testboot_shutdown in
+		/*) if [ -f "$nvidia_native_tools_testboot_shutdown" ] && [ -x "$nvidia_native_tools_testboot_shutdown" ] && [ ! -u "$nvidia_native_tools_testboot_shutdown" ]; then return 0; fi ;;
+		esac
+	fi
+	_dm_want=
+	[ ! -f "$nvidia_native_tools_testboot_marker" ] || _dm_want=$(sed -n '1p' "$nvidia_native_tools_testboot_marker")
+	_dm_be=$("$nvidia_native_tools_testboot_bectl" list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}')
+	DM_REFUSE=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_want" "$_dm_be")
+	[ -z "$DM_REFUSE" ]
+}
+
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+{
+	case ${1:-} in '' | *[!0-9]*) return 1 ;; esac
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
 deadman_arm()
 {
 	DM_OK=0
+	DM_CHILD=
 	case $nvidia_native_tools_testboot_deadman in
 	'' | *[!0-9]* | 0*) DM_WHY="nvidia_native_tools_testboot_deadman is '$nvidia_native_tools_testboot_deadman', not a positive number of minutes"; row deadman fail "$DM_WHY"; return 0 ;;
 	esac
-	shutdown -r "+$nvidia_native_tools_testboot_deadman" "nvidia_native_tools_testboot dead-man: the machine restarts in $nvidia_native_tools_testboot_deadman minutes unless the run finishes" > /dev/null 2>&1 &
-	sleep 1
-	if [ -e "$nvidia_native_tools_testboot_lockfile" ] || ! pgrep -U 0 -f "^shutdown .*nvidia_native_tools_testboot dead-man" > /dev/null 2>&1; then
-		DM_WHY="the dead-man timer is not pending (lock file $nvidia_native_tools_testboot_lockfile, or the shutdown request failed)"
+	# the lock file is checked before anything is called, so a refusal here cannot leave a pending reboot behind
+	if [ -e "$nvidia_native_tools_testboot_lockfile" ]; then
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_native_tools_testboot_lockfile exists): shutdown was not called"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	if ! deadman_allowed; then
+		DM_WHY="REFUSED: not calling shutdown: $DM_REFUSE"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	"$nvidia_native_tools_testboot_shutdown" -r "+$nvidia_native_tools_testboot_deadman" "nvidia_native_tools_testboot dead-man: the machine restarts in $nvidia_native_tools_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
+	fi
+	if [ -n "$_dm_fail" ]; then
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_native_tools_testboot_lockfile, or the shutdown request failed): $_dm_fail"
 		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
 	else
-		row deadman pass "a dead-man timer is pending for $nvidia_native_tools_testboot_deadman minutes"
+		DM_CHILD=$_dm_pid
+		if [ "$nvidia_native_tools_testboot_shutdown" != "$nvidia_native_tools_testboot_real_shutdown" ]; then
+			row deadman pass "a dead-man timer is pending for $nvidia_native_tools_testboot_deadman minutes as pid $DM_CHILD; stubbed shutdown $nvidia_native_tools_testboot_shutdown is used"
+		else
+			row deadman pass "a dead-man timer is pending for $nvidia_native_tools_testboot_deadman minutes as pid $DM_CHILD"
+		fi
 		DM_OK=1
 	fi
 	sync
@@ -115,7 +195,15 @@ deadman_arm()
 
 deadman_cancel()
 {
-	pkill -U 0 -f "^shutdown .*nvidia_native_tools_testboot dead-man" > /dev/null 2>&1 || :
+	if [ -z "${DM_CHILD:-}" ]; then
+		row deadman-cancel fail "no confirmed dead-man shutdown pid was recorded; killed nothing"
+	elif ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman-cancel fail "dead-man pid $DM_CHILD is no longer a shutdown owned by uid $(id -u); killed nothing"
+	elif kill "$DM_CHILD" > /dev/null 2>&1; then
+		row deadman-cancel pass "killed only the confirmed dead-man shutdown pid $DM_CHILD"
+	else
+		row deadman-cancel fail "could not kill confirmed dead-man shutdown pid $DM_CHILD"
+	fi
 }
 
 # env_snapshot <name> [<required kld file>...]: the guard on the system as it is now; the listing is kept as <name>.kldstat
