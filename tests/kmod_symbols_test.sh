@@ -223,6 +223,9 @@ fresh_reason() {
 		case $_fr_name in
 		patch-*) _fr_src=$_fr_repo/patches/$_fr_name ;;
 		src/*) _fr_src=$_fr_repo/$_fr_name ;;
+		# an MIT interface header copied from the pinned open RM core
+		# checkout (prepare-tree.sh copy_repo_src)
+		ogkm:*) _fr_src=$WORK/sources/open-gpu-kernel-modules-580.178.04/${_fr_name#ogkm:} ;;
 		*)
 			echo "unknown manifest entry: $_fr_name"
 			return 1

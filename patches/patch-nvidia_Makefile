@@ -1,6 +1,6 @@
 --- nvidia/Makefile.orig
 +++ nvidia/Makefile
-@@ -13,12 +13,35 @@
+@@ -13,12 +13,74 @@
  include nvidia-sources.mk
  
  SRCS=		${NVIDIA_SOURCES}
@@ -32,6 +32,45 @@
 +		nv_kthread_q_stop \
 +		nv_import_pages \
 +		nv_unimport_pages
++# The UVM interface nvidia-uvm.ko links against (nv-uvm-interface.c).
++EXPORT_SYMS+=	nvUvmInterfaceSessionCreate nvUvmInterfaceSessionDestroy \
++		nvUvmInterfaceRegisterUvmCallbacks nvUvmInterfaceDeRegisterUvmOps \
++		nvUvmInterfaceRegisterGpu nvUvmInterfaceUnregisterGpu \
++		nvUvmInterfaceGetGpuInfo nvUvmInterfaceDeviceCreate \
++		nvUvmInterfaceDeviceDestroy nvUvmInterfaceGetFbInfo \
++		nvUvmInterfaceQueryCaps nvUvmInterfaceAddressSpaceCreate \
++		nvUvmInterfaceAddressSpaceDestroy nvUvmInterfaceGetEccInfo \
++		nvUvmInterfaceGetNvlinkInfo nvUvmInterfaceGetPmaObject \
++		nvUvmInterfacePmaRegisterEvictionCallbacks \
++		nvUvmInterfacePmaUnregisterEvictionCallbacks \
++		nvUvmInterfaceQueryCopyEnginesCaps \
++		nvUvmInterfaceMemoryAllocSys nvUvmInterfaceMemoryAllocFB \
++		nvUvmInterfaceMemoryFree nvUvmInterfaceMemoryCpuMap \
++		nvUvmInterfaceMemoryCpuUnMap nvUvmInterfaceDupAllocation \
++		nvUvmInterfaceTsgAllocate nvUvmInterfaceTsgDestroy \
++		nvUvmInterfaceChannelAllocate nvUvmInterfaceChannelDestroy \
++		nvUvmInterfaceSetPageDirectory nvUvmInterfaceUnsetPageDirectory \
++		nvUvmInterfaceDupAddressSpace \
++		nvUvmInterfaceInitFaultInfo nvUvmInterfaceDestroyFaultInfo \
++		nvUvmInterfaceHasPendingNonReplayableFaults \
++		nvUvmInterfaceGetNonReplayableFaults \
++		nvUvmInterfaceFlushReplayableFaultBuffer \
++		nvUvmInterfaceTogglePrefetchFaults \
++		nvUvmInterfaceReportNonReplayableFault \
++		nvUvmInterfaceOwnPageFaultIntr \
++		nvUvmInterfaceServiceDeviceInterruptsRM \
++		nvUvmInterfaceRetainChannel nvUvmInterfaceReleaseChannel \
++		nvUvmInterfaceGetChannelResourcePtes \
++		nvUvmInterfaceBindChannelResources nvUvmInterfaceStopChannel \
++		nvUvmInterfaceDupMemory nvUvmInterfaceFreeDupedHandle \
++		nvUvmInterfaceGetExternalAllocPtes \
++		nvUvmInterfacePmaAllocPages nvUvmInterfacePmaPinPages \
++		nvUvmInterfacePmaFreePages \
++		nvUvmInterfaceP2pObjectCreate nvUvmInterfaceP2pObjectDestroy \
++		nvUvmInterfaceGetP2PCaps \
++		nvUvmInterfaceInitAccessCntrInfo nvUvmInterfaceDestroyAccessCntrInfo \
++		nvUvmInterfaceEnableAccessCntr nvUvmInterfaceDisableAccessCntr \
++		nvUvmInterfaceReportFatalError
 +.endif
 +
  include ../common/optional-cflags.mk

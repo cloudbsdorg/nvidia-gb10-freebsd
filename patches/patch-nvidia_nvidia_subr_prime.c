@@ -1,9 +1,10 @@
 --- nvidia/nvidia_subr.c.orig
 +++ nvidia/nvidia_subr.c
-@@ -17,6 +17,7 @@
+@@ -17,7 +17,8 @@
  #include "nv-freebsd.h"
  #include "nv-caps.h"
  #include "nv-firmware.h"
+ #include "nv-uvm-interface.h"	/* UVM top half, suspend/resume hooks (gb10) */
 +#include "gb10_pageimport.h"	/* cross-GPU import core, docs/PRIME-IMPORT.md */
  
  #include <sys/consio.h>

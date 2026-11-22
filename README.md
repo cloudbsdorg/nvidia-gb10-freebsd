@@ -259,6 +259,7 @@ sh scripts/build-rmcore.sh --core=nvidia-modeset   # NVIDIA's open modeset core,
 sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "build: OK" and its sha256
 DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
 sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
+sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
 ```
 
 `build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
@@ -503,6 +504,36 @@ sysctl hw.nvidia.altra_device_wc_active
 
 Forcing `0` on an Altra brings back the unsafe Normal accesses to BARs. Use it only to test.
 
+## The UVM interface in nvidia.ko
+
+CUDA needs `nvidia-uvm.ko`, a separate kernel module that is a client of the resource
+manager (RM) inside `nvidia.ko`. NVIDIA's FreeBSD OS layer does not export the kernel
+interface that module needs, although the open RM core already contains the implementation
+("gpu-ops"). `src/gb10-uvm/nv-uvm-interface.[ch]`, built into `nvidia.ko`, adds it:
+
+- the `nvUvmInterface*` entry points, each a wrapper that allocates an RM stack and calls
+  the matching gpu-ops function of the core; `nvidia.ko` exports them
+  (`patches/patch-nvidia_Makefile`, `EXPORT_SYMS`) for `nvidia-uvm.ko` to link against;
+- GPU lookup by UUID (`nvUvmInterfaceRegisterGpu`): opens each attached device so RM knows its
+  UUID, keeps the open reference on the match and raises RM's external-kernel-client count;
+  returns the PCI `device_t` and the DMA window the OS layer recorded;
+- the callback table UVM installs (`nvUvmInterfaceRegisterUvmCallbacks`); removing it waits
+  for every callback in flight;
+- the interrupt order UVM needs: `nvidia_intr()` runs UVM's top half before `rm_isr()`, and
+  stops copying MMU faults itself while a UVM table is installed (RM fills UVM's shadow buffer);
+  `nv_schedule_uvm_isr`, the hook RM calls, runs the same top half;
+- suspend and resume: UVM is told before RM's standby (it may veto) and after RM's resume;
+- the two RM stacks the lock-free fault calls use, allocated by `nvUvmInterfaceInitFaultInfo`.
+
+Three MIT-licensed interface headers of the open RM core that the FreeBSD tarball does not
+ship (`nv_uvm_types.h`, `nv_uvm_user_types.h`, `nvgputypes.h`) are copied into the tree by
+`scripts/prepare-tree.sh` from the pinned checkout and recorded in the tree's manifest as
+`ogkm:<path>`. `tests/uvm_glue_test.sh` checks the exports, the structure layouts against the
+UVM specification, the interrupt order and the manifest.
+
+The module itself lives in its own repository (`nvidia-uvm-freebsd`), written clean-room
+from a specification; this repository holds only the `nvidia.ko` side.
+
 ## nvidia-smi
 
 Not built here. NVIDIA's Linux arm64 `nvidia-smi` of the same version runs through the
@@ -583,8 +614,10 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
+| `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
+| `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
 
 ## Licence
 

@@ -102,6 +102,17 @@ printf 'int a(void) { return 0; }\n' > "$STAGE/$TOPDIR/src/nvidia/a.c"
 printf 'fake firmware image\n' > "$STAGE/$TOPDIR/firmware/gsp_ga10x/gsp_ga10x.bin"
 tar -cJf "$TESTROOT/sources/$TOPDIR.tar.xz" -C "$STAGE" "$TOPDIR"
 
+# The UVM glue step of copy_repo_src copies three MIT interface headers from
+# the pinned open RM core checkout under $WORK/sources: give the fake work
+# root stub copies at the same paths (their content is irrelevant here; the
+# step only copies and hashes them).
+OGKMSTUB="$TESTROOT/sources/open-gpu-kernel-modules-580.178.04"
+mkdir -p "$OGKMSTUB/src/nvidia/interface" "$OGKMSTUB/src/common/sdk/nvidia/inc"
+for f in src/nvidia/interface/nv_uvm_types.h src/nvidia/interface/nv_uvm_user_types.h \
+    src/common/sdk/nvidia/inc/nvgputypes.h; do
+	printf '/* stub for prepare-tree_test.sh */\n' > "$OGKMSTUB/$f"
+done
+
 # Test SOURCES pinning the fake tarball's real sha256, so the script's
 # checksum verification passes for cases (a)-(f); (g) overrides it.
 printf 'nvidia_freebsd_sha256 %s\n' \
@@ -114,8 +125,12 @@ mkdir -p "$TESTROOT/patches-empty"
 rc=0
 GB10_WORK="$TESTROOT" PATCHES="$TESTROOT/patches-empty" \
 	sh "$SCRIPT" "$TESTROOT/build/tree-a" >"$TESTROOT/out-a" 2>&1 || rc=$?
-if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/tree-a/nvidia/a.c" ]; then
-	ok "(a) no patches: nvidia/a.c present, exit 0"
+if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/tree-a/nvidia/a.c" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv-uvm-interface.c" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv_uvm_types.h" ] \
+    && grep -q '^src/gb10-uvm/nv-uvm-interface.c  ' "$TESTROOT/build/tree-a/.prepared" \
+    && grep -q '^ogkm:src/nvidia/interface/nv_uvm_types.h  ' "$TESTROOT/build/tree-a/.prepared"; then
+	ok "(a) no patches: nvidia/a.c present, UVM glue and MIT headers copied and recorded, exit 0"
 else
 	fail "(a) no patches: rc=$rc out=$(cat "$TESTROOT/out-a")"
 fi
@@ -284,6 +299,7 @@ fi
 # run cannot stop earlier at the tarball check.
 mkdir -p "$TESTROOT/work-k/sources"
 cp "$TESTROOT/sources/$TOPDIR.tar.xz" "$TESTROOT/work-k/sources/"
+cp -R "$OGKMSTUB" "$TESTROOT/work-k/sources/"
 rc=0
 GB10_WORK="$TESTROOT/work-k" PATCHES="$TESTROOT/patches-empty" \
 	sh "$SCRIPT" "$TESTROOT/work-k/build" >"$TESTROOT/out-k" 2>"$TESTROOT/err-k" || rc=$?
