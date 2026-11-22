@@ -430,7 +430,12 @@ EOF
 	_rm=$(root_method)
 	case $_rm in
 	none)
-		if destdir_user_owned; then
+		# Packages (and the pkg bootstrap) always install as root, whoever
+		# owns DESTDIR: a missing root method is then a blocker up front.
+		_rootpk=$(pkgs_needed | sort -u | tr '\n' ' ')
+		if [ -n "$_rootpk" ] && [ "$(id -u)" != 0 ]; then
+			add_item root missing "packages must be installed as root ($_rootpk), and there is no doas rule or sudo for $(id -un)" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf"
+		elif destdir_user_owned; then
 			add_item root ok "no root helper needed for a user-owned DESTDIR install" ""
 		elif [ -n "$DESTDIR" ]; then
 			add_item root missing "DESTDIR $DESTDIR is not owned by $(id -un): installing there needs root, and there is no doas rule or sudo for $(id -un)" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf, or use a DESTDIR you own"
@@ -1134,8 +1139,17 @@ EOF
 # explanations or file lists.
 install_blockers=
 install_records=
+# Blocker fields are joined with "|", so a field holding a path with "|" would
+# split the record.  Fields are stored escaped (backslash as \b, pipe as \p)
+# and unescaped when rendered.
+blk_esc() {
+	printf '%s' "$1" | sed 's/\\/\\b/g; s/|/\\p/g'
+}
+blk_unesc() {
+	printf '%s' "$1" | sed 's/\\p/|/g; s/\\b/\\/g'
+}
 install_add_blocker() {
-	install_blockers="$install_blockers$1|$2|$3
+	install_blockers="$install_blockers$(blk_esc "$1")|$(blk_esc "$2")|$(blk_esc "$3")
 "
 }
 
@@ -1305,6 +1319,7 @@ install_summary() {
 		printf '{"schema_version":"1.0","tool":"install","outcome":"%s","blockers":[' "$_outcome"
 		_i=0
 		printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+			_n=$(blk_unesc "$_n"); _r=$(blk_unesc "$_r"); _f=$(blk_unesc "$_f")
 			[ "$_i" = 0 ] || printf ','
 			printf '{"index":%s,"name":"%s","reason":"%s","fix":"%s"}' \
 			    "$_i" "$(json_str "$_n")" "$(json_str "$_r")" "$(json_str "$_f")"
@@ -1331,6 +1346,7 @@ install_summary() {
 		return 0
 	fi
 	printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+		_n=$(blk_unesc "$_n"); _r=$(blk_unesc "$_r"); _f=$(blk_unesc "$_f")
 		printf 'blocked %s: %s\n' "$_n" "$_r"
 		[ -z "$_f" ] || printf 'fix: %s\n' "$_f"
 	done
@@ -1386,9 +1402,18 @@ do_install() {
 			install_summary blocked
 			return 1
 		fi
-		[ -d "$_lp" ] || mkdir -m 755 -- "$_lp"
+		if [ ! -d "$_lp" ] && ! mkdir -m 755 -- "$_lp" 2>/dev/null; then
+			install_add_blocker logs "cannot create the log directory $_lp" "make $WORK/logs writable by you"
+			install_summary blocked
+			return 1
+		fi
 	done
-	install_logdir=$(mktemp -d "$WORK/logs/make-install/run.XXXXXX") || die "cannot create a private log directory in $WORK/logs/make-install"
+	if ! install_logdir=$(mktemp -d "$WORK/logs/make-install/run.XXXXXX" 2>/dev/null); then
+		install_logdir=
+		install_add_blocker logs "cannot create a private log directory in $WORK/logs/make-install" "make $WORK/logs writable by you"
+		install_summary blocked
+		return 1
+	fi
 	if ! install_run_phase prereqs "rerun make install after correcting the prerequisite error" \
 	    sh "$repo/scripts/make.sh" _install-prereqs-auto; then
 		install_summary blocked
@@ -1540,12 +1565,22 @@ txn_backup() {
 }
 
 # txn_state PATH: what PATH holds now, as one line: "A" nothing, "F:SHA256" a
-# file, "L:TARGET" a symbolic link, "O" anything else.
+# file, "L:TARGET" a symbolic link, "O" anything else, "U" unknown.  A failed
+# read is never an empty hash or target: unknown must not compare as a match.
 txn_state() {
+	_ts=
 	if [ -L "$1" ]; then
-		printf 'L:%s\n' "$(readlink "$1")"
+		if _ts=$(readlink "$1") && [ -n "$_ts" ]; then
+			printf 'L:%s\n' "$_ts"
+		else
+			printf 'U\n'
+		fi
 	elif [ -f "$1" ]; then
-		printf 'F:%s\n' "$(sha256 -q "$1")"
+		if _ts=$(sha256 -q "$1") && [ -n "$_ts" ]; then
+			printf 'F:%s\n' "$_ts"
+		else
+			printf 'U\n'
+		fi
 	elif [ -e "$1" ]; then
 		printf 'O\n'
 	else
@@ -1561,12 +1596,27 @@ txn_intend() {
 	printf '%s %s\n' "$1" "$2" >> "$_txn_intents"
 }
 
-# txn_orig_state N KIND: the state txn_backup saved as backup N.
+# txn_orig_state N KIND: the state txn_backup saved as backup N, or U when
+# the saved bytes or target cannot be read.  Only the explicit absent kind is A.
 txn_orig_state() {
+	_tos=
 	case $2 in
-	file) printf 'F:%s\n' "$(sha256 -q "$_txn_dir/$1.file")" ;;
-	link) printf 'L:%s\n' "$(cat "$_txn_dir/$1.target")" ;;
-	*) printf 'A\n' ;;
+	file)
+		if _tos=$(sha256 -q "$_txn_dir/$1.file") && [ -n "$_tos" ]; then
+			printf 'F:%s\n' "$_tos"
+		else
+			printf 'U\n'
+		fi
+		;;
+	link)
+		if _tos=$(cat "$_txn_dir/$1.target") && [ -n "$_tos" ]; then
+			printf 'L:%s\n' "$_tos"
+		else
+			printf 'U\n'
+		fi
+		;;
+	absent) printf 'A\n' ;;
+	*) printf 'U\n' ;;
 	esac
 }
 
@@ -1579,7 +1629,11 @@ txn_signal() {
 
 # txn_rollback_fail PATH WHY: a path the rollback left as it found it.
 txn_rollback_fail() {
-	printf 'rollback-failed %s: %s\n' "$1" "$2"
+	_trf_why=$2
+	if [ "$1" = /boot/modules/linker.hints ] && [ "${_txn_hints:-0}" = 1 ]; then
+		_trf_why="not restored: kldxref /boot/modules needs to run"
+	fi
+	printf 'rollback-failed %s: %s\n' "$1" "$_trf_why"
 	_txn_failed=1
 }
 
@@ -1598,50 +1652,98 @@ txn_exit() {
 		[ "$_txn_rc" != 0 ] || _txn_rc=1
 		_txn_failed=0
 		note "install: failed; restoring every replaced file and removing new files"
-		if [ "${_txn_hints:-0}" = 1 ]; then
-			# kldxref ran (or was cut short) under this install
-			txn_intend /boot/modules/linker.hints "$(txn_state "$_txn_root/boot/modules/linker.hints")"
-		fi
 		if [ -n "$_txn_records" ] && [ -f "$_txn_records" ]; then
 			while read -r _tb_n _tb_kind _tb_path; do
 				[ -n "$_tb_path" ] || continue
 				_tb_dest=$_txn_root$_tb_path
-				rm -f -- "$_tb_dest.new" "$_tb_dest.rollback" 2>/dev/null || true
 				_tb_cur=$(txn_state "$_tb_dest")
 				_tb_orig=$(txn_orig_state "$_tb_n" "$_tb_kind")
+				if [ "$_tb_cur" = U ] || [ "$_tb_orig" = U ]; then
+					txn_rollback_fail "$_tb_path" "not restored: its current or original state is unknown"
+					continue
+				fi
 				if [ "$_tb_cur" = "$_tb_orig" ]; then
 					continue
 				fi
-				if ! grep -qxF -- "$_tb_path $_tb_cur" "$_txn_intents" 2>/dev/null; then
+				_tb_may_restore=0
+				if grep -qxF -- "$_tb_path $_tb_cur" "$_txn_intents" 2>/dev/null; then
+					_tb_may_restore=1
+				elif [ "$_tb_kind" = link ] && [ "$_tb_cur" = A ] \
+				    && awk -v p="$_tb_path" '$1 == p && substr($2, 1, 2) == "L:" { found = 1 } END { exit !found }' "$_txn_intents"; then
+					# ln -sfh can have unlinked the old link before its failed
+					# replacement.  Absence is that failed write, not tampering.
+					_tb_may_restore=1
+				fi
+				if [ "$_tb_may_restore" = 0 ]; then
 					txn_rollback_fail "$_tb_path" "not restored: changed by another process since this install wrote it"
 					continue
 				fi
+				_tb_why=
 				case $_tb_kind in
 				absent)
-					rm -f -- "$_tb_dest" 2>/dev/null || txn_rollback_fail "$_tb_path" "not restored: could not remove it"
+					rm -f -- "$_tb_dest" 2>/dev/null || _tb_why="could not remove it"
 					;;
 				file)
-					if cp -p -- "$_txn_dir/$_tb_n.file" "$_tb_dest.rollback" 2>/dev/null \
-					    && mv -f -- "$_tb_dest.rollback" "$_tb_dest" 2>/dev/null; then :
+					# Never borrow a fixed neighbour: it may predate this install.
+					# mktemp gives rollback a path which this run certainly created.
+					_tb_tmp=
+					if _tb_tmp=$(mktemp "$_tb_dest.rollback.XXXXXX" 2>/dev/null); then
+						if cp -p -- "$_txn_dir/$_tb_n.file" "$_tb_tmp" 2>/dev/null \
+						    && mv -f -- "$_tb_tmp" "$_tb_dest" 2>/dev/null; then :
+						else
+							rm -f -- "$_tb_tmp" 2>/dev/null \
+							    || txn_rollback_fail "$_tb_tmp" "could not remove the private restore file"
+							_tb_why="could not put the original back"
+						fi
 					else
-						txn_rollback_fail "$_tb_path" "not restored: could not put the original back"
+						_tb_why="could not create a private restore file"
 					fi
 					;;
 				link)
-					rm -f -- "$_tb_dest" 2>/dev/null || true
-					ln -s "$(cat "$_txn_dir/$_tb_n.target")" "$_tb_dest" 2>/dev/null \
-					    || txn_rollback_fail "$_tb_path" "not restored: could not put the original link back"
+					if ! _tb_target=$(cat "$_txn_dir/$_tb_n.target" 2>/dev/null); then
+						_tb_why="could not read the original link target"
+					else
+						if [ "$_tb_cur" != A ]; then
+							rm -f -- "$_tb_dest" 2>/dev/null || _tb_why="could not remove the replacement link"
+						fi
+						if [ -z "$_tb_why" ]; then
+							ln -s "$_tb_target" "$_tb_dest" 2>/dev/null \
+							    || _tb_why="could not put the original link back"
+						fi
+					fi
 					;;
+				*) _tb_why="the backup record has an unknown kind" ;;
 				esac
+				if [ -n "$_tb_why" ]; then
+					txn_rollback_fail "$_tb_path" "not restored: $_tb_why"
+					continue
+				fi
+				_tb_after=$(txn_state "$_tb_dest")
+				if [ "$_tb_after" = U ]; then
+					txn_rollback_fail "$_tb_path" "not restored: its state is unknown after the restore"
+				elif [ "$_tb_after" != "$_tb_orig" ]; then
+					txn_rollback_fail "$_tb_path" "not restored: verification after the restore failed"
+				fi
 			done < "$_txn_records"
 		fi
 		# The transaction lives below STATEDIR.  Remove it after the backups
 		# have been used but before the new directories, or STATEDIR and its
-		# new parents cannot be empty when their turn comes.
-		[ -z "$_w" ] || rm -rf -- "$_w" 2>/dev/null || true
-		printf '%s\n' "$_newdirs" | awk 'NF' | sort -r | while read -r _dir; do
-			rmdir -- "$_txn_root$_dir" 2>/dev/null || true
-		done
+		# new parents cannot be empty when their turn comes.  Cleanup is part of
+		# restoration: a failed removal is reported, never hidden by "restored".
+		if [ -n "$_w" ] && { [ -e "$_w" ] || [ -L "$_w" ]; }; then
+			if ! rm -rf -- "$_w" 2>/dev/null || [ -e "$_w" ] || [ -L "$_w" ]; then
+				txn_rollback_fail "$_w" "could not remove the private transaction directory"
+			fi
+		fi
+		_sorted_dirs=$(printf '%s\n' "$_newdirs" | awk 'NF' | sort -ru)
+		while read -r _dir; do
+			[ -n "$_dir" ] || continue
+			[ -e "$_txn_root$_dir" ] || [ -L "$_txn_root$_dir" ] || continue
+			rmdir -- "$_txn_root$_dir" 2>/dev/null \
+			    || txn_rollback_fail "$_dir" "not removed: could not remove the directory this install created"
+		done <<EOF
+$_sorted_dirs
+EOF
 		[ "$_txn_failed" = 1 ] || printf 'rollback: restored\n'
 	fi
 	exit "$_txn_rc"
@@ -1733,6 +1835,11 @@ $_newdirs"
 			still_ours "$_d" "$_prev" "$_f" || die "refusing to replace $_d$_f: it changed since make install wrote it"
 		fi
 		txn_backup "$_f"
+		# Regular files are written through this neighbour.  It is part of the
+		# transaction too: a pre-existing neighbour is never rollback garbage.
+		if [ ! -L "$_s$_f" ]; then
+			txn_backup "$_f.new"
+		fi
 	done < "$_w/list"
 	# Save files which a smaller stage would remove before creating anything.
 	_stale=$(awk '$1 !~ /^@/ && $2 != "dir" { print $1 }' "$_prev" | sort -u)
@@ -1772,9 +1879,11 @@ $_dir"
 		if [ -L "$_s$_f" ]; then
 			ln -sfh "$(readlink "$_s$_f")" "$_d$_f" || die "install: cannot replace the link $_d$_f"
 		else
+			txn_intend "$_f.new" "$(txn_state "$_s$_f")"
 			# shellcheck disable=SC2086
 			install $_own -m "$(stat -f '%Lp' "$_s$_f")" -- "$_s$_f" "$_d$_f.new" \
 			    || die "install: cannot write $_d$_f"
+			txn_intend "$_f.new" A
 			mv -f -- "$_d$_f.new" "$_d$_f" || die "install: cannot replace $_d$_f"
 		fi
 	done < "$_w/list"
@@ -1792,7 +1901,6 @@ $_dir"
 			continue
 		fi
 		safe_parents "$_d" "$_f" "$_mode" || continue
-		rm -f -- "$_d$_f.new"
 		if still_ours "$_d" "$_prev" "$_f"; then
 			txn_intend "$_f" A
 			rm -f -- "$_d$_f" || die "install: cannot remove the obsolete $_d$_f"
@@ -1818,9 +1926,19 @@ EOF
 	_kldxref=$(test_hook make.sh GB10_TEST_KLDXREF /usr/sbin/kldxref) || die "install: refused the kldxref test hook"
 	_txn_hints=1
 	if [ -z "$_d" ]; then
-		"$_kldxref" /boot/modules || die "install: kldxref /boot/modules failed"
+		if "$_kldxref" /boot/modules; then
+			# Only a state observed after a successful kldxref is a write of
+			# this run.  A failure or interrupt never adopts whatever it finds.
+			txn_intend /boot/modules/linker.hints "$(txn_state "$_d/boot/modules/linker.hints")"
+		else
+			die "install: kldxref /boot/modules failed"
+		fi
 	else
-		"$_kldxref" "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
+		if "$_kldxref" "$_d/boot/modules"; then
+			txn_intend /boot/modules/linker.hints "$(txn_state "$_d/boot/modules/linker.hints")"
+		else
+			note "kldxref $_d/boot/modules failed (DESTDIR staging)"
+		fi
 	fi
 	_txn_hints=0
 	_txn_active=0

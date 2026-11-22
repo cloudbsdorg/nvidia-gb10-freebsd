@@ -267,6 +267,7 @@ if [ ! -d "$D1/usr/local/lib" ] || [ ! -f "$D1/boot/modules/nvidia.ko" ]; then
 	bad "partial rollback precondition: the first install did not create its files"
 else
 	printf 'replacement nvidia module\n' > "$W1/build/tree/nvidia/nvidia.ko"
+	printf 'pre-existing rollback neighbour\n' > "$D1/boot/modules/nvidia.ko.rollback"
 	chmod 555 "$D1/usr/local/lib"
 	snap "$D1" > "$S/partial.before"
 	run_install "$W1" "$D1" "$S/partial.out" ACCEPT_NVIDIA_LICENSE=1
@@ -280,6 +281,167 @@ else
 	else
 		bad "partial rollback (rc $rc): $(diff "$S/partial.before" "$S/partial.after" | head -n 8 | tr '\n' ' ')"
 	fi
+	if [ "$(cat "$D1/boot/modules/nvidia.ko.rollback" 2>/dev/null)" = 'pre-existing rollback neighbour' ]; then
+		ok "R2 defect 1: rollback leaves a pre-existing file it never created or backed up"
+	else
+		bad "R2 defect 1: rollback removed or replaced a pre-existing rollback neighbour"
+	fi
+fi
+
+# ---- review round R3: log directory setup and blocker records --------------
+
+# A log directory which cannot be created is a blocker in the normal summary.
+W14=$S/w14
+D14=$S/d14
+plant_work "$W14"
+new_dest "$D14"
+mkdir -p -- "$W14/logs"
+chmod 555 "$W14/logs"
+run_install "$W14" "$D14" "$S/logfail.out" ACCEPT_NVIDIA_LICENSE=1
+rc=$?
+run_install "$W14" "$D14" "$S/logfail.json" ACCEPT_NVIDIA_LICENSE=1 JSON=1
+rcj=$?
+chmod 755 "$W14/logs"
+if [ "$rc" = 1 ] && grep -q '^blocked logs:' "$S/logfail.out" \
+    && grep -q 'fix: make .*/logs writable by you' "$S/logfail.out" \
+    && grep -q '^install: blocked$' "$S/logfail.out" \
+    && [ "$rcj" = 1 ] && python3 -I - "$S/logfail.json" <<'PEOF'
+import json, sys
+d = json.loads(open(sys.argv[1]).read().split('\n')[0])
+assert d["outcome"] == "blocked", d
+b = [x for x in d["blockers"] if x["name"] == "logs"]
+assert b and "writable by you" in b[0]["fix"], d["blockers"]
+PEOF
+then ok "R3 defect 5: a log directory setup failure is a blocker in English and JSON"
+else bad "R3 defect 5: log setup (rc $rc/$rcj): $(tail -n 3 "$S/logfail.out" | tr '\n' ' ') $(head -c 200 "$S/logfail.json")"; fi
+
+# A pipe in a path must not corrupt the pipe-separated blocker record.
+W15="$S/w|15"
+D15=$S/d15
+plant_work "$W15"
+new_dest "$D15"
+mkdir -p -- "$S/elsewhere15"
+ln -s "$S/elsewhere15" "$W15/logs"
+run_install "$W15" "$D15" "$S/pipe.out" ACCEPT_NVIDIA_LICENSE=1
+rc=$?
+run_install "$W15" "$D15" "$S/pipe.json" ACCEPT_NVIDIA_LICENSE=1 JSON=1
+rcj=$?
+if [ "$rc" = 1 ] && grep -qF "blocked logs: $W15/logs is a symbolic link" "$S/pipe.out" \
+    && grep -qxF 'fix: remove the symbolic link' "$S/pipe.out" \
+    && [ "$rcj" = 1 ] && python3 -I - "$S/pipe.json" "$W15" <<'PEOF'
+import json, sys
+d = json.loads(open(sys.argv[1]).read().split('\n')[0])
+b = [x for x in d["blockers"] if x["name"] == "logs"]
+assert len(b) == 1 and sys.argv[2] + "/logs is a symbolic link" in b[0]["reason"], d["blockers"]
+assert b[0]["fix"] == "remove the symbolic link", b
+PEOF
+then ok "R3 defect 6: a pipe in a path survives the blocker record"
+else bad "R3 defect 6: pipe path (rc $rc/$rcj): $(tail -n 3 "$S/pipe.out" | tr '\n' ' ')"; fi
+
+# ---- review round R2: rollback restore proof ------------------------------
+
+# Exercise the real transaction functions with command stubs for failures which
+# cannot be induced portably as a normal user.  No installer or reboot runs here.
+awk '/^txn_backup\(\) \{/{copy=1} /^install_stage\(\) \{/{copy=0} copy' \
+    "$repo/scripts/make.sh" > "$S/txn-functions.sh"
+cat > "$S/txn-test-lib.sh" <<'XEOF'
+. "$S/txn-functions.sh"
+note() { printf 'make.sh: %s\n' "$*"; }
+txn_fixture() {
+	_txn_root=$1
+	_w=$1-work
+	_txn_dir=$_w/backups
+	_txn_records=$_w/backup.list
+	_txn_intents=$_w/intents
+	_txn_hints=0
+	_txn_n=0
+	_txn_active=1
+	_newdirs=
+	mkdir -p -- "$_txn_root" "$_txn_dir"
+	: > "$_txn_records"
+	: > "$_txn_intents"
+}
+XEOF
+
+# A failed removal of a directory this run created is not a proven restore.
+TH=$S/txn-directory
+(
+	. "$S/txn-test-lib.sh"
+	txn_fixture "$TH/root"
+	mkdir -- "$_txn_root/newdir"
+	_newdirs=/newdir
+	rmdir() { return 1; }
+	false
+	txn_exit
+) > "$TH.out" 2>&1
+rc=$?
+if [ "$rc" = 1 ] && grep -q 'rollback-failed /newdir:' "$TH.out" \
+    && ! grep -q '^rollback: restored$' "$TH.out"; then
+	ok "R2 defect 2: a failed directory restore is listed, not reported restored"
+else
+	bad "R2 defect 2: directory restore failure: $(tr '\n' ' ' < "$TH.out")"
+fi
+
+# sha256/readlink (and reading an original link) failures all produce U.  A
+# pair of failed hashes must never compare equal and prove rollback restored.
+TH=$S/txn-unknown
+_unknown=$(
+	. "$S/txn-test-lib.sh"
+	txn_fixture "$TH/root"
+	printf 'current\n' > "$_txn_root/file"
+	ln -s current "$_txn_root/link"
+	printf 'original\n' > "$_txn_dir/7.file"
+	printf 'original-target\n' > "$_txn_dir/8.target"
+	sha256() { return 1; }
+	readlink() { return 1; }
+	cat() { return 1; }
+	txn_state "$_txn_root/file"
+	txn_state "$_txn_root/link"
+	txn_orig_state 7 file
+	txn_orig_state 8 link
+)
+if [ "$_unknown" = "$(printf 'U\nU\nU\nU')" ]; then
+	ok "R2 defect 2: failed hashes and link reads have unknown state"
+else
+	bad "R2 defect 2: failed state reads: $(printf '%s' "$_unknown" | tr '\n' ' ')"
+fi
+(
+	. "$S/txn-test-lib.sh"
+	txn_fixture "$TH/hash-root"
+	printf 'current\n' > "$_txn_root/file"
+	printf 'original\n' > "$_txn_dir/0.file"
+	printf '0 file /file\n' > "$_txn_records"
+	sha256() { return 1; }
+	false
+	txn_exit
+) > "$TH.hash.out" 2>&1
+rc=$?
+if [ "$rc" = 1 ] && grep -q 'rollback-failed /file:' "$TH.hash.out" \
+    && ! grep -q '^rollback: restored$' "$TH.hash.out"; then
+	ok "R2 defect 2: unknown states are never accepted as restore proof"
+else
+	bad "R2 defect 2: unknown-state rollback: $(tr '\n' ' ' < "$TH.hash.out")"
+fi
+
+# A failed replacement can leave A after the old link was unlinked.  The new
+# link was intended, so this is this run's failed write, not third-party input.
+TH=$S/txn-link
+(
+	. "$S/txn-test-lib.sh"
+	txn_fixture "$TH/root"
+	ln -s original-target "$_txn_root/link"
+	txn_backup /link
+	rm -f -- "$_txn_root/link"
+	printf '/link L:replacement-target\n' > "$_txn_intents"
+	false
+	txn_exit
+) > "$TH.out" 2>&1
+rc=$?
+if [ "$rc" = 1 ] && [ "$(readlink "$TH/root/link" 2>/dev/null)" = original-target ] \
+    && grep -q '^rollback: restored$' "$TH.out"; then
+	ok "R2 defect 2: a failed symlink replacement restores the original link"
+else
+	bad "R2 defect 2: failed symlink replacement: $(tr '\n' ' ' < "$TH.out")"
 fi
 
 # ---- review round R1b: defects 1 to 10 ------------------------------------
@@ -306,7 +468,7 @@ run_tty() {
 		cd "$1" && shift
 		exec env -u ACCEPT_NVIDIA_LICENSE -u ACCEPT_ALL_LICENSES -u ACCEPT_EULA \
 		    GB10_TEST_HOOKS=1 FETCH=/bin/false SHA256="$HOOKDIR/sha256" GIT="$HOOKDIR/git" \
-		    PAGER=cat GB10_TEST_ROOT_METHOD=none make install "$@"' \
+		    PAGER=cat GB10_TEST_ROOT_METHOD=${TEST_ROOT_METHOD:-none} make install "$@"' \
 	    sh "$repo" WORK="$_w" DESTDIR="$_d" SYSDIR="$_w/src/sys" \
 	    BSDSRCTOP="$_w/src" DRMKMODDIR="$_w-drm" "$@" > "$_o" 2>&1
 }
@@ -354,13 +516,29 @@ snap "$D7" > "$S/ask.before"
  run_install "$W7" "$D7" "$S/ask1.out" ACCEPT_NVIDIA_LICENSE=1)
 rc=$?
 snap "$D7" > "$S/ask.after"
-if [ "$rc" = 1 ] && grep -q 'YES=1 or on a terminal' "$S/ask1.out" \
+if [ "$rc" = 1 ] && grep -q 'blocked root:' "$S/ask1.out" \
+    && grep -q 'nvgb10-test-pkg' "$S/ask1.out" \
+    && ! grep -q 'blocked confirm:' "$S/ask1.out" \
     && cmp -s "$S/ask.before" "$S/ask.after" && [ ! -e "$W7/logs" ]; then
-	ok "defect 2: root steps without a terminal and without YES=1 are a blocker, nothing done"
+	ok "R2 defect 4: missing packages and no root method block before any write"
 else
-	bad "defect 2: no terminal (rc $rc): $(tail -n 3 "$S/ask1.out" | tr '\n' ' ')"
+	bad "R2 defect 4: package/root preflight (rc $rc): $(tail -n 3 "$S/ask1.out" | tr '\n' ' ')"
 fi
-(export GB10_TEST_PKG_NEEDED=nvgb10-test-pkg
+_pkg_preflight=$(env GB10_TEST_HOOKS=1 GB10_TEST_PKG_NEEDED=nvgb10-test-pkg \
+    GB10_TEST_ROOT_METHOD=none MK_WORK="$W7" MK_DESTDIR="$D7" MK_SYSDIR="$W7/src/sys" \
+    MK_BSDSRCTOP="$W7/src" MK_DRMKMODDIR="$W7-drm" MK_ACCEPT_NVIDIA_LICENSE=1 \
+    sh "$repo/scripts/make.sh" preflight --json 2>/dev/null)
+if printf '%s\n' "$_pkg_preflight" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+r = [x for x in d["status"] if x["name"] == "root"][0]
+assert r["state"] == "missing" and "nvgb10-test-pkg" in r["reason"], r
+assert "no root helper needed" not in r["reason"], r'; then
+	ok "R2 defect 4: preflight never says root is unneeded when packages are missing"
+else
+	bad "R2 defect 4: package/root JSON: $(printf '%s' "$_pkg_preflight" | head -c 300)"
+fi
+(export GB10_TEST_PKG_NEEDED=nvgb10-test-pkg TEST_ROOT_METHOD=doas
  run_tty "$W7" "$D7" "$S/ask2.out" 'n\n' ACCEPT_NVIDIA_LICENSE=1)
 snap "$D7" > "$S/ask.after2"
 if [ "$(grep -c '\[y/N\]' "$S/ask2.out")" = 1 ] && grep -q 'nvgb10-test-pkg' "$S/ask2.out" \
@@ -422,6 +600,24 @@ if [ "$rc" = 1 ] && [ "$(cat "$D10/boot/modules/nvidia.ko")" = 'changed by someo
 else
 	bad "defect 3: upgrade tamper (rc $rc): $(tail -n 4 "$S/up2.out" | tr '\n' ' ')"
 fi
+
+# linker.hints is not a blanket rollback exception.  A kldxref-time change
+# which is not a recorded write of this run stays in place with its own fix.
+D13=$S/d13
+new_dest "$D13"
+(export TEST_SIGNAL=1 TEST_TAMPER=$D13/boot/modules/linker.hints GB10_TEST_KLDXREF=$H/kldxref
+ run_install "$W8" "$D13" "$S/hints.json" ACCEPT_NVIDIA_LICENSE=1 JSON=1)
+rc=$?
+if [ "$rc" = 1 ] && [ "$(cat "$D13/boot/modules/linker.hints" 2>/dev/null)" = 'changed by someone else' ] \
+    && python3 -I - "$S/hints.json" <<'PEOF'
+import json, sys
+d = json.loads(open(sys.argv[1]).read().split('\n')[0])
+b = [x for x in d["blockers"] if "/boot/modules/linker.hints" in x["reason"]]
+assert b and "kldxref /boot/modules needs to run" in " ".join(x["reason"] for x in b), d["blockers"]
+assert not any("were restored" in x["reason"] for x in d["blockers"]), d["blockers"]
+PEOF
+then ok "R2 defect 3: linker.hints is restored only across a recorded write"
+else bad "R2 defect 3: linker.hints guard (rc $rc): $(head -c 500 "$S/hints.json" | tr '\n' ' ')"; fi
 
 # 5. the licence question appears on the terminal, not in a captured log.
 W11=$S/w11
