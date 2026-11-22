@@ -12,9 +12,9 @@
 # Usage: scripts/build-firmware.sh [TREE] [LOG]
 #   TREE      prepared working tree (from scripts/prepare-tree.sh, which
 #             extracts firmware/); defaults to
-#             ${GB10_WORK:-$HOME/work/gb10}/build/tree
+#             ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree
 #   LOG       build log to write; defaults to
-#             ${GB10_WORK:-$HOME/work/gb10}/logs/build-firmware-<UTC stamp>.log
+#             ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/logs/build-firmware-<UTC stamp>.log
 #             The same rule build-shim.sh enforces applies (log_path_safe
 #             in scripts/lib.sh): a symlink is refused, and so is any path
 #             whose directory does not resolve under $WORK/logs.
@@ -42,7 +42,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 SYSDIR=${SYSDIR:-/usr/src/sys}
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

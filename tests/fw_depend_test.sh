@@ -52,7 +52,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 SYSDIR=${SYSDIR:-/usr/src/sys}
 command -v mandoc >/dev/null 2>&1 || { echo "FAIL: mandoc is not installed (needed for the man page lint)"; exit 1; }
 command -v cc >/dev/null 2>&1 || { echo "FAIL: cc is not installed"; exit 1; }

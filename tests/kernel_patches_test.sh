@@ -36,7 +36,7 @@
 #       same paragraph.
 #
 # Scratch files go under an mktemp(1) directory in
-# ${GB10_WORK:-$HOME/work/gb10}/tmp, removed on exit; never /tmp.
+# ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp, removed on exit; never /tmp.
 
 set -u
 LC_ALL=C
@@ -113,7 +113,7 @@ else
 fi
 
 # (g) apply.sh against a scratch tree and a scratch series.
-base=${GB10_WORK:-$HOME/work/gb10}/tmp
+base=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp
 mkdir -p -- "$base" || exit 1
 t=$(mktemp -d "$base/kernel_patches_test.XXXXXX") || exit 1
 trap 'rm -rf -- "$t"' EXIT

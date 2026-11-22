@@ -43,7 +43,7 @@ RTX 5060 Ti).
 | `bench-report.sh` (branch `agent/2289-llama-cuda`) | Runs the two Linux launchers above, NVIDIA only. | Cannot convert; labelled as above. Native Radeon and CPU sets are run with the native build (`$GB10_WORK/llm/b12627`). |
 | `build_history.py`, `bench-history.json` | Records had no path field; the NVIDIA stack strings said "via Linuxulator" only. | Every record now carries `path` (native or linuxulator) and `path_status` (native, superseded, last-resort); NVIDIA stacks say "Linux-only, last resort". |
 | `pages/build_current_cuda.py` (Two GPUs page) | Describes the NVIDIA rows as official Ubuntu builds under the Linuxulator; does not say last resort. | Owned by the page orchestrator: the NVIDIA rows are to be labelled "Linux-only, last resort (no native NVIDIA path)", the Radeon rows "native b12627". |
-| README and `docs/llm.md` | Listed the Linuxulator Vulkan, CUDA and `nvidia-smi` rows as plain successes; hard-coded `/dev/nvidia0` <!-- hw-preflight: example -->. | Rows relabelled "Linux-only, last resort"; device nodes found by detection; `docs/llm.md` has the native b12627 numbers. |
+| README and `docs/llm.md` | Listed the Linuxulator Vulkan, CUDA and `nvidia-smi` rows as plain successes; hard-coded a fixed NVIDIA device node. | Rows relabelled "Linux-only, last resort"; device nodes found by detection; `docs/llm.md` has the native b12627 numbers. |
 
 No Radeon or CPU benchmark in the history ran through the Linuxulator, so no record is superseded
 today: every Linuxulator record is NVIDIA (or the split with an NVIDIA half), all last resort.

@@ -24,7 +24,7 @@
 +    NV_OS_DESC_MEMORY_ALLOCATION_PARAMS memAllocParams = {0};
 +    struct NvKmsKapiMemory *memory = NULL;
 +    NvU32 hRmHandle;
- 
++
 +    if (pPagesTaken == NULL) {
 +        return NULL;
 +    }
@@ -36,7 +36,7 @@
 +    }
 +
 +    memory = AllocMemoryObjectAndHandle(device, &hRmHandle);
-+
+ 
 +    if (!memory) {
 +        return NULL;
 +    }
@@ -87,7 +87,48 @@
  static NvBool RmGc6BlockerRefCntAction(const struct NvKmsKapiDevice *device,
                                         NvU32 action)
  {
-@@ -4073,8 +4152,14 @@
+@@ -4061,7 +4140,40 @@
+                                    &params, sizeof(params));
+     if (!status) {
+         nvKmsKapiLogDeviceDebug(device, "NVKMS FramebufferConsoleDisabled failed");
++    }
++}
++
++static NvBool SetConsoleOwner(
++    struct NvKmsKapiDevice *device,
++    void (*yield)(void *arg),
++    void (*reclaim)(void *arg),
++    void *arg)
++{
++    struct NvKmsCbsdSetConsoleOwnerParams params = { };
++    NvBool status;
++
++    if (device->hKmsDevice == 0x0) {
++        nvKmsKapiLogDevice(device,
++                           "NVKMS SetConsoleOwner: the KAPI device has no "
++                           "NVKMS device handle");
++        return NV_FALSE;
+     }
++
++    params.request.deviceHandle = device->hKmsDevice;
++    params.request.yield = yield;
++    params.request.reclaim = reclaim;
++    params.request.arg = arg;
++
++    status = nvkms_ioctl_from_kapi(device->pKmsOpen,
++                                   NVKMS_IOCTL_CBSD_SET_CONSOLE_OWNER,
++                                   &params, sizeof(params));
++    if (!status) {
++        nvKmsKapiLogDevice(device,
++                           "NVKMS SetConsoleOwner: the ioctl was refused (not "
++                           "a kernel client, not the modeset owner, or "
++                           "mismatched callbacks)");
++    }
++    return status;
+ }
+ 
+ NvBool nvKmsKapiGetFunctionsTableInternal
+@@ -4073,8 +4185,14 @@
          return NV_FALSE;
      }
  
@@ -104,7 +145,7 @@
          return NV_FALSE;
      }
  
-@@ -4111,6 +4196,8 @@
+@@ -4111,6 +4229,8 @@
      funcsTable->getSystemMemoryHandleFromSgt = GetSystemMemoryHandleFromSgt;
      funcsTable->getSystemMemoryHandleFromDmaBuf =
          GetSystemMemoryHandleFromDmaBuf;
@@ -113,3 +154,11 @@
  
      funcsTable->mapMemory   = MapMemory;
      funcsTable->unmapMemory = UnmapMemory;
+@@ -4148,6 +4268,7 @@
+     funcsTable->cancelDisplaySemaphore = nvKmsKapiCancelDisplaySemaphore;
+     funcsTable->signalVrrSemaphore = SignalVrrSemaphore;
+     funcsTable->checkLutNotifier = CheckLutNotifier;
++    funcsTable->setConsoleOwner = SetConsoleOwner;
+ 
+     return NV_TRUE;
+ }

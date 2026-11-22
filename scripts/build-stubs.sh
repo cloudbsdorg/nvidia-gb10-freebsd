@@ -11,7 +11,7 @@
 #
 # Environment:
 #   GB10_WORK   work root holding build/ and logs/; defaults to
-#               $HOME/work/gb10
+#               <repo>/work
 #   CORE_OBJ    RM core object; defaults to
 #               $GB10_WORK/build/nv-kernel-aarch64.o
 #   STUBS_SRC   stub source; defaults to
@@ -35,7 +35,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 # GB10_WORK must be an ABSOLUTE path: the build below cd's into the ogkm
 # copy before it compiles and links, so a relative work root would break
 # the build and could leave a stray directory behind (pass-3 u09 #1).
@@ -83,8 +83,8 @@ trap 'exit 143' TERM
 # The RM core's own compile flags, copied verbatim from the first "cc"
 # line that compiles a file under src/libraries/libspdm/ in the
 # orchestrator's verbose diagnostic log
-# (~/work/gb10/logs/rmcore-arm64-diag-1.log, whose paths point at
-# ~/work/gb10/build/diag-rm - the flags are relative to src/nvidia and
+# (<work>/logs/rmcore-arm64-diag-1.log, whose paths point at
+# <work>/build/diag-rm - the flags are relative to src/nvidia and
 # identical for the ogkm copy this script cd's into). -Werror is ours,
 # on top: a stub whose prototype drifts from its header must fail the
 # build, which is what tests/stubs_test.sh falsifies.

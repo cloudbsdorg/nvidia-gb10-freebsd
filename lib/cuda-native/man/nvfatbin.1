@@ -1,0 +1,131 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt NVFATBIN 1
+.Os
+.Sh NAME
+.Nm nvfatbin ,
+.Nm fatbinary
+.Nd wrap device payloads in the cuda-native fatbinary stub
+.Sh SYNOPSIS
+.Nm
+.Op Fl 64
+.Fl -create
+.Ar file
+.Fl -image3 Ns = Ns Cm kind= Ns Ar kind Ns Cm ,sm= Ns Ar number Ns Cm ,file= Ns Ar input
+.Op Ar image ...
+.Pp
+.Nm
+.Fl -version
+.Op Fl -json
+.Sh DESCRIPTION
+.Nm
+and its installed alias
+.Nm fatbinary
+are the same POSIX shell program.
+They accept the option subset that clang 23 emits when it collects CUDA device
+images.
+At least one
+.Fl -image3
+is required.
+Images are retained in argument order; each kind is
+.Cm elf
+or
+.Cm ptx ,
+and each SM value is a decimal number.
+.Pp
+The output starts with the line
+.Li CUDA-NATIVE-STUB-FATBIN 1 .
+One metadata line per input follows:
+.Bd -literal -offset indent
+member kind=KIND sm=N size=BYTES sha256=HEX
+.Ed
+A line containing only
+.Li ---
+separates the metadata from the complete member payloads, which follow in
+argument order with no added bytes.
+Each input is copied once into the private build directory; its size, SHA-256
+and appended payload all come from that copy, so they describe the same bytes.
+The output is built privately in its destination directory and renamed into
+place only after every image has been read.
+.Pp
+.Fl 64
+and
+.Fl g
+are accepted for clang compatibility.
+.Fl -create
+also accepts an equals sign before its value.
+.Fl h
+and
+.Fl -help
+print usage.
+Every unsupported option, malformed image specification or extra argument is
+refused instead of being ignored.
+.Pp
+.Fl -version
+prints
+.Ql nvfatbin (cuda-native) VERSION stub .
+With
+.Fl -json
+it prints one JSON object containing
+.Dv tool ,
+.Dv version ,
+.Dv version_major ,
+.Dv version_minor ,
+.Dv version_patch ,
+.Dv stub
+and
+.Dv track .
+The version string and its three integer parts come from
+.Dv CUDA_NATIVE_VERSION
+in
+.Pa sdk/include/cuda.h
+when
+.Pa mksdk.sh
+installs the tool.
+The object validates against
+.Pa share/cuda-native/schema/cuda-native-tool-1.schema.json .
+.Sh ENVIRONMENT
+.Bl -tag -width CUDA_NATIVE_TRACE
+.It Ev CUDA_NATIVE_TRACE
+When nonempty, append one JSON record after a successful container write.
+The record has
+.Dv tool ,
+.Dv schema ,
+.Dv output ,
+.Dv images
+and
+.Dv stub
+fields.
+The image array records each kind, numeric SM value and input path in order.
+The record is validated by
+.Pa share/cuda-native/schema/nvfatbin-trace-1.schema.json
+in the SDK tree.
+Arguments containing control bytes or malformed UTF-8 are refused before
+writing output or a trace.
+Valid UTF-8 paths are accepted, and JSON metacharacters are escaped, keeping
+every emitted string parseable as UTF-8 JSON.
+.El
+.Sh EXIT STATUS
+.Ex -std
+In detail, exit status 0 means that the stub container was written, 2 reports
+usage or an unsupported argument, and 1 reports an input, output or trace
+error.
+A failed image read leaves no output at the requested path.
+.Sh EXAMPLES
+Wrap one ELF-labelled payload and its PTX source:
+.Bd -literal -offset indent
+fatbinary -64 --create kernel.fatbin \e
+    --image3=kind=elf,sm=121,file=kernel.o \e
+    --image3=kind=ptx,sm=121,file=kernel.ptx
+.Ed
+.Sh SEE ALSO
+.Xr nvptxas 1 ,
+.Xr libcudart-stub 3 ,
+.Xr cuda-native-toolchain 7
+.Sh CAVEATS
+The container is a cuda-native diagnostic format, not an NVIDIA fatbinary.
+It neither assembles PTX nor makes device code executable.
+The stub runtime validates and counts its metadata for host-side registration,
+but never registers its contents with a GPU.
+No NVIDIA CUDA toolkit file is used.

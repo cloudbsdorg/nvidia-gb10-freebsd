@@ -39,7 +39,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TREE=${1:-$WORK/build/tree}
 SYSDIR=${SYSDIR:-/usr/src/sys}
 TOPDIR=NVIDIA-FreeBSD-x86_64-580.178.04

@@ -71,7 +71,7 @@
 #
 # The gate-name check (D6) parses nvidia-drm-freebsd-lkpi.c and nvidia-drm-drv.c with clang and the module's own
 # compile line (clang -Xclang -ast-dump=json): it needs clang in PATH and a prepared nvidia-drm build tree,
-# PRIME_BUILD_TREE (default build/tree under GB10_WORK, which is ~/work/gb10 when unset; scripts/prepare-tree.sh and scripts/build-shim.sh
+# PRIME_BUILD_TREE (default build/tree under GB10_WORK, which is <repo>/work when unset; scripts/prepare-tree.sh and scripts/build-shim.sh
 # --module=nvidia-drm make one).  It never skips: without them the suite fails.
 
 set -u
@@ -81,7 +81,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOURCES"; exit 1; }
 OGKMSRC=$WORK/sources/open-gpu-kernel-modules-$ver
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src

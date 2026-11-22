@@ -14,24 +14,23 @@
 + * nvidia-drm.ko's table.  Both modules append this tag to the version string
 + * they compare, and nvidia-modeset.ko compares before it writes any member.
 + * Bump the number whenever a member is added or the table changes.  (The
-+ * nvidia_modeset kld version (the number in the tag) and the
-+ * matching MODULE_DEPEND in nvidia-drm make kldload refuse a
-+ * mix before any code runs.)
++ * nvidia_modeset kld version and the matching MODULE_DEPEND in nvidia-drm
++ * make kldload refuse a mix before any code runs.)
++ * 3 adds setConsoleOwner.
 + */
-+#define NVKMS_KAPI_CBSD_LAYOUT "+cbsd-kapi.2"
++#define NVKMS_KAPI_CBSD_LAYOUT "+cbsd-kapi.3"
  
  struct NvKmsKapiFunctionsTable {
  
-@@ -1606,6 +1620,41 @@
+@@ -1606,6 +1620,59 @@
      (
          struct NvKmsKapiDevice *device
      );
 +
 +    /*
 +     * CloudBSD (Track #2228): import an array of wired pages as a memory
-+     * handle.  This member is last on purpose: nvidia-drm.ko and
-+     * nvidia-modeset.ko each keep a copy of this table and are built
-+     * from this header together.
++     * handle.  nvidia-drm.ko and nvidia-modeset.ko each keep a copy of this
++     * table and are built from this header together.
 +     *
 +     * \param [in]  device  A device allocated using allocateDevice().
 +     *
@@ -61,6 +60,25 @@
 +        NvU32 limit,
 +        NvBool *pPagesTaken
 +    );
++
++    /*
++     * CloudBSD (Track #2448): make this device the console owner.  The device
++     * must hold modeset ownership.  When another client grabs ownership,
++     * NVKMS calls yield(arg) and hands ownership over.  When that client
++     * releases it, NVKMS calls reclaim(arg) instead of restoring the firmware
++     * console.  NULL for both callbacks clears the console owner.
++     *
++     * Both callbacks run with the NVKMS lock held; they must not call into
++     * the KAPI table or take a lock that a KAPI caller holds.  NVKMS timers on
++     * FreeBSD run under the same lock, so there is no lock-free context to
++     * defer to.  reclaim may be called more than once for one release
++     * (release, the console restore timer, resume), so it must be idempotent.
++     * yield is called once per grab.
++     */
++    NvBool (*setConsoleOwner)(struct NvKmsKapiDevice *device,
++                              void (*yield)(void *arg),
++                              void (*reclaim)(void *arg),
++                              void *arg);
  };
  
  /** @} */

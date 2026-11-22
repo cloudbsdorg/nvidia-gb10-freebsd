@@ -9,7 +9,7 @@
 #
 # The header is pure (no kernel includes), so this test compiles it into a
 # small C program under an unpredictable mktemp(1) directory in
-# ${GB10_WORK:-$HOME/work/gb10}/tmp and checks:
+# ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp and checks:
 #   (a) every cell of the BAR policy table, both altra values:
 #         request          BAR, not Altra  BAR, Altra
 #         CACHED           DEVICE          DEVICE  (a BAR is never cacheable)
@@ -54,7 +54,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 export TMPDIR="$WORK/tmp"
 HEADER=$REPO/src/gb10-memattr/gb10_memattr.h
 

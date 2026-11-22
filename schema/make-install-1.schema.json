@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:make-install:1.0",
+  "version": "1.0",
+  "title": "make install JSON=1 summary (or final JSONL=1 record) of nvidia-gb10-freebsd",
+  "type": "object",
+  "required": ["schema_version", "tool", "outcome", "blockers", "installed", "next"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "tool": {"const": "install"},
+    "outcome": {"enum": ["installed", "blocked", "interrupted"]},
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "name", "reason", "fix"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "name": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "installed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "mode"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "pattern": "^/"},
+          "mode": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "next": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -7,7 +7,7 @@
 #
 # Usage: scripts/prepare-tree.sh [TREE]
 #   TREE      working tree to build; defaults to
-#             ${GB10_WORK:-$HOME/work/gb10}/build/tree
+#             ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree
 #
 # Environment:
 #   GB10_WORK work root holding sources/ and the default TREE
@@ -66,7 +66,7 @@ LC_ALL=C
 export PATH LC_ALL
 
 TOPDIR=NVIDIA-FreeBSD-x86_64-580.178.04
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TARBALL=$WORK/sources/$TOPDIR.tar.xz
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

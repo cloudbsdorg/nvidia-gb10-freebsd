@@ -26,7 +26,7 @@ export PATH LC_ALL
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$HERE/.." && pwd)
-GB10=${GB10_WORK:-$HOME/work/gb10}
+GB10=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TAG=$(awk '$1 == "ogkm_tag" { print $2 }' "$REPO/SOURCES")
 OGKM=${OGKM:-$GB10/sources/open-gpu-kernel-modules-$TAG}
 mkdir -p "$GB10/tmp" || exit 1

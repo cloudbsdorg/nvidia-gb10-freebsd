@@ -298,8 +298,89 @@ Gate: round 1 receipt 540b18e5 (24 findings, 23 accepted, quality.7 rejected wit
 ## 2026-11-22 merge of a2e0546 (1452fc1) and the README Installation steps 4-6 (Track #2363)
 Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed the both-sides overlap (JOURNAL.md, README.md), receipt d2183dcf93943be2d97aa75c0d874665adfe9f930412bda22fd172ed43ae3142. The commit after it corrects Installation steps 4-6: nvidia.ko no longer loads linux64; the two providers and rc.d/nvidia_linux are installed for nvidia-smi and Linux CUDA/Vulkan; nvidia_linux_mode is set. linux_bridge_test (j) has the Opus B grep test: no 'also loads linux64' or 'plus linux64, linux_common', and the Installation section names nvidia_linux.ko, nvidia_modeset_linux.ko, rc.d/nvidia_linux and nvidia_linux_mode, with two plants.
 
+## 2026-11-22 Track 2440: make install on a stock FreeBSD arm64, and the stock-install harness
+- Root Makefile on main: merge d01503806c665d6fca95a8e993f5c906317c3e4f (PR 7, commit 23c18da).
+- This commit: scripts/fetch-trees.sh (the running kernel's source and the pinned drm-kmod), drm.ko and dmabuf.ko
+  built from drm-kmod (the FreeBSD packages are amd64-only), the NVIDIA licence acceptance (ACCEPT_NVIDIA_LICENSE=1,
+  ACCEPT_ALL_LICENSES=1, or a terminal answer; YES=1 alone never accepts), make configure (loader.conf, rc.conf, with
+  an exact undo), devd/nvidia_gb10.conf, the kernel-patch warnings in preflight, install hardening, the schemas and
+  the harness tests/install-e2e (guest.sh, run.sh, README.md, expected.manifest).
+- Proof: every module, drm.ko and dmabuf.ko build natively on amp001 against the stock 16.0-CURRENT snapshot source
+  main-n291235-611046b15dbb with drm_v6.12.110_1, linked by LLD, all module dependencies resolved.
+- Open:
+  1. The aarch64 vmm backend: amp001 is not a cloudbsd-vmm worker yet (#2163: the arm64 bhyve branches are unmerged,
+     cloudbsd-vmd needs console= passthrough, no arm64 package yet). run.sh reports it as blocked (exit 3).
+  2. run.sh vmm: vm.create with cloud-init user data, and the result read-back, are not wired.
+  3. The guest clones from a read-only mirror amp001 serves on the VM network (Mark: no keys, no GitHub in the VM).
+  4. uvm-bsd: install and deinstall targets, the stock source fetch, a harness run.
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
+# Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain
+
+## 2026-11-22T06:20Z start
+Mark card 2026-11-22: native CUDA runs in parallel with NVK. Order from docs/NATIVE-CUDA.md section 8: C1.1 (toolchain spike, deps none) is the first stage that needs no libnvrm S2; C1.2 (PTX front end) needs only C0 (done); C1.4 needs S5. Installed llvm23-23.1.5 from pkg (sudo pkg install llvm23); its NVPTX lists sm_120/120a/120f/121/121a/121f and ptx90-93. clang 23 detects a --cuda-path tree from include/, bin/, nvvm/libdevice/libdevice.10.bc and version.json; it defaults to --offload-new-driver. Header surface found by probing with empty files: cuda.h, host_defines.h, driver_types.h, host_config.h, cuda_runtime.h, crt/host_runtime.h, then execution-space macros.
+Round 1 (an opencode round): brief ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md, report ~/work/gb10/tmp/2380-r1/ROUND-REPORT.md. Scope: lib/cuda-native SDK tree, mksdk.sh, test kernels, tests/cuda_native_toolchain_test.sh, root Makefile (contract; SUPERSEDED, see 07:10Z), cuda-native-toolchain(7), README section.
+Next: review round 1, gate x2, commit, push; file C1.x work packages under #2380.
+
+## 2026-11-22T06:40Z PAUSE for a test boot (orchestrator). RESUME here.
+Brief in short: start native CUDA stage C1.1 (llvm23 toolchain, our own --cuda-path SDK tree, headers, PTX for sm_120/sm_121) in parallel with NVK; libnvrm S2 (wt-libnvrm-s2) is not touched; code by opencode rounds, strict gate (2 rounds per commit), push after each commit.
+Done:
+- llvm23-23.1.5 installed from pkg on amp001 (NVPTX sm_120/121 with a/f, ptx90-93).
+- Track: C1 work packages filed under #2380 (epic #2362): C1.1 #2425 (In progress), C1.2 #2426, C1.3 #2427, C1.4a #2428 (libcuda API surface, fake backend, no S2), C1.4b #2429 (on libnvrm, needs S2-S5), C1.5 #2430, C1.6 #2431, C1.7 #2432, C1.8 #2433, C1.9 #2434, C1.10 #2435, C1.11 #2436. C4 not filed yet (goes under #2362, relates #2382).
+- Round 1 brief written: ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md. Its run made no change: no permitted round model was available (free models are not to be used for this code).
+Next:
+1. Rerun round 1 from this worktree: ocrun.sh 5400 <model> ~/work/gb10/briefs/2380-cuda-c1-r1-sdk.md ~/work/gb10/tmp/2380-r1/round.log with the watchdog (empty round.status first). Model: the usual round model once its quota is back.
+2. Review the round (provenance: no toolkit text), gate round 1 and 2, commit, push, Track comment on #2425 and #2380.
+3. Then C1.1 round 2: libclc-based libdevice, nvptxas/nvfatbin stubs, stub libcudart link, offload-new-driver notes, mma.cuh PTX. Then C1.4a (libcuda headers + fake backend).
+Note: the repo has no root Makefile; makefile-check refuses any commit without one, so round 1 adds it (tell the merge agent). SUPERSEDED at 07:10Z: another agent landed the root Makefile on main; this branch adds none.
+
+## 2026-11-22T07:10Z resumed after the test boot
+Orchestrator: no permitted round model is available (free models are not to be used for this code), so C1.1 round 1 is implemented directly by the agent. Do not add a root Makefile: another agent lands it on main. Watch STATUS.md for "ROOT MAKEFILE ON MAIN <sha>", then merge main into this branch.
+Done: lib/cuda-native, with the SDK headers, the libdevice placeholder, mksdk.sh and the cuda-native-toolchain(7) man page; tests/cuda-native/{vector_add,builtins}.cu; tests/cuda_native_toolchain_test.sh. The test was red before staging (the fresh copy lacked the files) and is green after: 51 passed, 0 failed.
+Findings while doing it:
+- clang 23 takes the SDK version from CUDA_VERSION in include/cuda.h. It ignores version.json, and it needs bin/ to accept the tree.
+- libdevice.10.bc must carry the nvptx64 data layout of the same clang, so mksdk.sh takes the layout from clang.
+- atomicAdd lowers to atom.relaxed.sys, which is stronger than the gpu scope CUDA uses; to revisit in C1.2/C1.6.
+README section, layout row and PROVENANCE entry written.
+Next: gate round 1, then gate round 2, then wait for the root Makefile on main, merge main, commit, push, and comment on Track #2425.
+
+## 2026-11-22T07:20Z commit 1 landed, commit 2 started
+Commit 1: 461afd3, on main d015038 (with the root Makefile), pushed. It went through 2 gate rounds plus a receipt over the rebased diff; open findings are recorded as Review-open lines.
+Commit 2 (open findings of commit 1), staged:
+- mksdk.sh: strips trailing slashes before the symlink refusal; probes in the build directory; shows the clang error plus a remedy; refuses missing sources; mv -h, checks the result after mv, recreates OUTDIR if mv fails.
+- Test: a failing llvm-as case that reaches the cleanup; a trailing-slash symlink case; provenance catches non-regular entries and grep errors; includes_exactly runs on the deadstub mutant; noglobal uses entry_only.cu; skip needs clang 23; failure cap 76; noinline and vector type checks with mutants.
+- host_defines.h: no __noinline__ macro (it broke __attribute__((__noinline__))).
+- README -o; man page exit wording.
+Test: 75 passed, 0 failed. Next: gate rounds 1 and 2, commit, push, Track.
+
+## 2026-11-22T07:12Z commit 2 landed; RESUME here
+Commit 2: befd07d, pushed. 81 checks green, 2 gate rounds.
+Correction to the 07:20Z entry: the layout probe runs before anything is created, not in the build directory.
+Next, commit 3:
+1. The Review-open items of befd07d:
+   - a mutated-copy test for a directory created between rmdir and mv;
+   - no rm through a link after mv;
+   - the ls status in the rmdir message;
+   - LLVM_MIN in the skip message and the header cap;
+   - the test asks mksdk.sh for the version check;
+   - show the mv and rmdir errors;
+   - the remedy example.
+2. libdevice from libclc. The ports devel/libclc has flavors up to llvm22 only, so an llvm23 flavor is needed (cloudbsd-ports), or a build from the llvm23 source.
+3. nvptxas and nvfatbin stubs in bin/, plus a stub libcudart, so a full compile and link works.
+4. PTX from the ggml mma.cuh.
+Then C1.4a (#2428).
+This entry is not committed yet.
+
+## 2026-11-22T11:20Z commit 3 round A (Kimi k3.1-pro in opencode)
+The Review-open items of befd07d are closed by round A. Brief: ~/work/gb10/briefs/2425-c1.1-r2-review-open.md. Report: ~/work/gb10/tmp/2425-rA/ROUND-REPORT.md; the round left its final sections unfilled, so it was judged by the tree.
+Changes:
+- mksdk.sh --check-llvm is now the one version check, used by builds and by the test skip.
+- After mv, nothing is removed through a link.
+- The rmdir message is told apart for an unreadable OUT, and the real mv and rmdir errors are shown.
+- The remedy names the current prefix.
+- Mutated-copy tests cover the nested-move and post-mv-link branches.
+Test: 87 passed, 0 failed. Next: gate rounds 1 and 2, commit, push. Then round B: nvptxas, nvfatbin and libcudart stubs, so a full compile and link works.
+
 
 ## 2026-11-22 libnvrm S2 (Track 2419; first written on agent/2378-libnvrm-s2 from 9d17827, now on agent/2419-libnvrm-s2 as WIP)
 First stop (test boot): nothing was saved in git then. Second stop (test boot, 2026-11-22): saved as WIP, see RESUME below. Work is uncommitted in this worktree; diff copy: ~/work/gb10/tmp/libnvrm-s2-wip-20261122.patch.
@@ -323,6 +404,58 @@ NEXT: 1) last nvrm_mem.c branch; 2) add nvrm_va.c nvrm_mem.c nvrm_fake_mem.c nvr
 - Left as DEBT: quality.9 (fake test API in nvrm_internal.h), quality.14 (session bring-up written twice), the four lizard waivers.
 - Resume: if the suite is green, gate round 1 of the staged fix commit, answers, round 2, commit with Review-open lines, push, Track comment.
 
+## 2026-11-22T12:40Z commit 3b (stubs), written by Kimi k3.1-pro in two passes
+The tree now has four tools in bin/: nvptxas and ptxas, which write a CUDA-NATIVE-STUB-CUBIN 1 placeholder after checking the .target line, and nvfatbin and fatbinary, which write a CUDA-NATIVE-STUB-FATBIN 1 container. Both tools answer --version and --version --json.
+It also has lib64/libcudart.so.13, a stub runtime. The stub checks the wrapper magic 0x466243b1 and the fatbin header, records the kernels, and returns 801 from every launch. With CUDA_NATIVE_STUB_TRACE=1 it writes one JSONL trace line per call.
+There are four schemas. Man pages: nvptxas(1), nvfatbin(1), libcudart-stub(3).
+A full clang++ -x cuda compile and link of launch_main.cu now builds, runs and prints launch=801.
+Correction to the 07:12Z entry: its last line ("This entry is not committed yet.") is superseded; that entry was committed in ab2bc4e.
+Test: 161 passed, 0 failed, 0 skipped. Next: gate rounds 1 and 2, then commit.
+
+## 2026-11-22T13:36Z after the ZFS panic and reboot (about 13:24Z)
+Both Kimi rounds died. Nothing was lost: the staged work of round B pass 4 is intact; items 1-10 were done and item 11 was half done (181 passed, 1 failed).
+Resumed with ~/work/gb10/briefs/2425-c1.1-r3e-resume.md (items 11-15). Commit 3b is still uncommitted. Its gate round 1 receipt fa052367 is spent; round 2 comes after this pass.
+C1.4a pass 3 is resumed in wt-cuda-c14a with ~/work/gb10/briefs/2428-c1.4a-r1d-resume.md. Its gate round 1 receipt 5ec434ec is spent.
+# Journal native CUDA C1.4a (Track #2428), branch agent/2428-libcuda-api, worktree wt-cuda-c14a
+
+## 2026-11-22T12:50Z round 1 (Kimi k3.1-pro in opencode)
+Branch cut from the C1.1 head ab2bc4e.
+Contents:
+- cuda.h Driver API subset;
+- lib/libcuda (libcuda.so.1, version node CUDA_1.0) with a provider registry and two providers, fake (profiles gb206 and gb10) and nvrm (a stub);
+- 16 calls, including cuGetProcAddress and CUDA_VISIBLE_DEVICES;
+- cuda-native-info with --json, --jsonl and --schema;
+- man pages libcuda(3) and cuda-native-info(1);
+- tests/libcuda_test.sh: 84 checks green, red first.
+Brief: ~/work/gb10/briefs/2428-c1.4a-r1-libcuda-api.md. Report: ~/work/gb10/tmp/2428-r1/ROUND-REPORT.md.
+Orchestrator finding: tests/libcuda/schema_validate.py duplicates tests/libnvrm/schema_validate.py; the brief said to reuse it.
+Next: gate rounds 1 and 2, commit, push.
+
+## 2026-11-22T14:50Z C1.4a pass 3 done (Kimi k3.1-pro; it was resumed twice, after the ZFS panic and after an opencode SQL error)
+The review fixes are in:
+- one pthread_once initialization;
+- cuGetProcAddress_v2, with the header mapping;
+- JSON that stays valid UTF-8;
+- the visibility cap;
+- better messages and tests.
+Test: 119 checks green, cpd clean (PMD language cpp).
+The orchestrator finding of the 12:50Z entry (the duplicate schema_validate.py) is resolved: the copy is deleted and tests use tests/libnvrm/schema_validate.py.
+Next: rebase onto main, then gate round 2, then commit, PR and merge.
+
+## 2026-11-22T15:10Z commit 3c (Kimi k3.1-pro): the Review-open items of 4c2938c
+Work in this commit:
+- The two DEFECTs: dash-prefixed input paths in nvptxas, and the fatbin header read is bounded by the limit.
+- The 64 KiB bound is tested.
+- One --version block, in the shared library.
+- Each image is copied once, then hashed.
+- Absolute RUNPATH in the examples.
+- The stub trace is ignored under issetugid().
+- An unwritable trace is reported.
+- Real-path lookup of the shared helpers.
+- Trace lines are valid JSON.
+- Usage and man page fixes.
+- The README status row for native CUDA.
+Test: 219 passed. Next: rebase onto main, then gate rounds 1 and 2.
 ## 2026-11-22T11:45Z libnvrm S3 (Track 2437, branch agent/2437-libnvrm-s3)
 - Main sync: fast-forwarded to origin/main 4a745c7. A --no-ff merge was refused by merge-proof (MERGE_HEAD brings the GitHub merge commit 4a745c7 with no per-commit receipt); b98157c is an ancestor of main, so the fast-forward carries no branch content.
 - Baseline tests/libnvrm_test.sh: 478 ok, 0 failed.

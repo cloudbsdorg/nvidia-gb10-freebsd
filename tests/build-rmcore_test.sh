@@ -5,7 +5,7 @@
 # build-rmcore_test.sh - offline tests for scripts/build-rmcore.sh.
 #
 # Builds a tiny fake open-gpu-kernel-modules git checkout under an
-# unpredictable mktemp(1) directory in $HOME/work/gb10/tmp, points GB10_WORK
+# unpredictable mktemp(1) directory in $(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp, points GB10_WORK
 # at the test root and
 # SOURCES at a test pin file, and fakes gmake through the script's GMAKE
 # override, so no network and no real RM build are involved. The fake
@@ -92,7 +92,7 @@ export PATH LC_ALL
 OGKMDIR=open-gpu-kernel-modules-580.178.04
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT="$TESTSDIR/../scripts/build-rmcore.sh"
-TESTROOT=$(mktemp -d "$HOME/work/gb10/tmp/rmcore-test.XXXXXXXX") || exit 1
+TESTROOT=$(mktemp -d "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp/rmcore-test.XXXXXXXX") || exit 1
 
 PASSED=0
 FAILED=0

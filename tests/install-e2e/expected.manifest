@@ -1,0 +1,50 @@
+# The files and links make install writes on a stock FreeBSD arm64 install
+# (PREFIX=/usr/local, no other drm.ko installed): path mode owner:group, or
+# path link target.  tests/install-e2e/guest.sh compares the installed
+# manifest (/var/db/nvidia-gb10-freebsd/installed.manifest) with this file.
+/boot/modules/dmabuf.ko 555 root:wheel
+/boot/modules/drm.ko 555 root:wheel
+/boot/modules/nvidia-drm.ko 555 root:wheel
+/boot/modules/nvidia-modeset.ko 555 root:wheel
+/boot/modules/nvidia.ko 555 root:wheel
+/boot/modules/nvidia_gsp_ga10x_fw.ko 555 root:wheel
+/boot/modules/nvidia_linux.ko 555 root:wheel
+/boot/modules/nvidia_modeset_linux.ko 555 root:wheel
+/usr/local/etc/devd/nvidia_gb10.conf 444 root:wheel
+/usr/local/etc/rc.d/nvidia_linux 555 root:wheel
+/usr/local/include/nvrm/nvrm.h 444 root:wheel
+/usr/local/lib/libnvrm.a 444 root:wheel
+/usr/local/lib/libnvrm.so link libnvrm.so.1
+/usr/local/lib/libnvrm.so.1 444 root:wheel
+/usr/local/sbin/nvrm-info 555 root:wheel
+/usr/local/share/licenses/nvidia-gb10-freebsd/LICENSE 444 root:wheel
+/usr/local/share/licenses/nvidia-gb10-freebsd/NVIDIA-LICENSE 444 root:wheel
+/usr/local/share/man/man3/nvrm.3 444 root:wheel
+/usr/local/share/man/man3/nvrm_backend_name.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_cap_name.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_close.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_device_count.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_device_get.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_device_info_get.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_device_refresh.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_enumerate.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_error_id.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_info_field.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_info_nfields.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_device.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_document.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_end.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_error.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_header.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_json_schema.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_reason_id.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_reason_text.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_rm_running_version.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_source_name.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_strerror.3 link nvrm.3
+/usr/local/share/man/man4/nvidia.4 444 root:wheel
+/usr/local/share/man/man4/nvidia_drm_render.4 444 root:wheel
+/usr/local/share/man/man4/nvidia_linux.4 444 root:wheel
+/usr/local/share/man/man7/nvrm.7 444 root:wheel
+/usr/local/share/man/man8/nvrm-info.8 444 root:wheel
+/usr/local/share/nvrm/schema/nvrm-info-1.schema.json 444 root:wheel

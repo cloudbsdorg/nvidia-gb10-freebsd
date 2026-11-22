@@ -1,0 +1,38 @@
+[
+  {
+    "build_commit": "b12531",
+    "build_number": 12531,
+    "cpu_info": "CPU",
+    "gpu_info": "AMD Radeon RX 7600",
+    "backends": "Vulkan,RPC",
+    "model_filename": "Ornith-1.5-9B-Q4_K_M.gguf",
+    "model_type": "9B",
+    "n_batch": 2048,
+    "n_ubatch": 512,
+    "n_threads": 8,
+    "n_gpu_layers": 99,
+    "flash_attn": 1,
+    "n_prompt": 2048,
+    "n_gen": 0,
+    "avg_ts": 1204.331000,
+    "stddev_ts": 41.208000
+  },
+  {
+    "build_commit": "b12531",
+    "build_number": 12531,
+    "cpu_info": "CPU",
+    "gpu_info": "AMD Radeon RX 7600",
+    "backends": "Vulkan,RPC",
+    "model_filename": "Ornith-1.5-9B-Q4_K_M.gguf",
+    "model_type": "9B",
+    "n_batch": 2048,
+    "n_ubatch": 512,
+    "n_threads": 8,
+    "n_gpu_layers": 99,
+    "flash_attn": 1,
+    "n_prompt": 0,
+    "n_gen": 128,
+    "avg_ts": 45.460031,
+    "stddev_ts": 0.735000
+  }
+]
