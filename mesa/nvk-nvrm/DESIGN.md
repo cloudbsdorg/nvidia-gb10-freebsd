@@ -38,18 +38,28 @@ Mesa is MIT. CloudBSD keeps a private fork, `cloudbsdorg/mesa-cloudbsd`
 submits it upstream. Mesa's `AGENTS.md` governs contributions to the Mesa
 project, not this fork. In the fork, agents write the nvkmd nvrm backend and
 any `src/nouveau` change, including the `graphics/mesa-devel` patches (#2309)
-and the NAK work for native CUDA. Mesa's `AGENTS.md` and `CLAUDE.md` stay
-unedited, and the fork's `FORK-NOTES.md` records the policy and why. No
-`Generated-by` trailers are added: our no-tool-trailers rule stands. Who
-writes the code (which models, and the fallback) is recorded once, in
-`JOURNAL.md`.
+and the NAK work for native CUDA. No `Generated-by` trailers are added: our
+no-tool-trailers rule stands. Who writes the code (which models, and the
+fallback) is recorded once, in `JOURNAL.md`.
+
+Later the same day, Mark made two more decisions for the fork:
+- **Our own `AGENTS.md`** (fork commit 084b498fbbe). It governs every agent
+  in the fork. Mesa's text is kept as `UPSTREAM-AGENTS.md`, for any patch
+  that would ever leave the fork. `FORK-NOTES.md` records why.
+- **No "nouveau" in anything a user sees** (fork commit 019a93c8543): the
+  library, the ICD, the driver name and the reports.
+- **The nouveau kernel-driver code goes** (fork commits 4b21c1c37f2 and
+  00e288210ac). Deleted: the nvkmd nouveau backend, the nouveau winsys,
+  `src/nouveau/drm`, the drm-shim, the NAK and MME hardware tests, the
+  loader's nouveau GL selection and `nouveau_drm.h`. The gallium nouveau
+  driver and winsys are out of the build, but their files are not deleted
+  in a commit yet (see the journal). NVK, NAK, nil and the hardware headers
+  stay, and so does the directory name `src/nouveau`.
 
 The analysis below is kept for the record. It recommended option (a), a
 person writing the `src/nouveau` patches. Mark chose otherwise: agents write
 them in a private fork, which is option (b) without the trailer. Option (a)
-is not being pursued. The schedule that applies is "Under option (b)" in
-section 10. The first native number there means the first llama.cpp Vulkan
-benchmark on the RTX 5060 Ti through this backend.
+is not being pursued.
 
 The Mesa 26.3.1 tarball ships an `AGENTS.md` (also as `CLAUDE.md`) at its root.
 It says that AI agents must not make changes in `src/nouveau`, and it refers to
@@ -644,7 +654,10 @@ Since the section 0 answer, the code and its build live in the private fork
 - the backend in `src/nouveau/vulkan/nvkmd/nvrm/`.
 
 `make build NVRM_SRC=<a checkout of this repository>` builds libnvrm from its
-`lib/libnvrm`, then NVK with `-Dnvk-kmd=nvrm`. With `NVRM_SRC` unset, the
+`lib/libnvrm`, then NVK with `-Dvulkan-drivers=nvk -Dnvk-kmd=nvrm`, and
+installs it into `WORK/prefix`. The installed library is
+`libvulkan_nvk_nvrm.so`, and the ICD is `nvk_nvrm_icd.<arch>.json`;
+`make configure` prints the full option list. With `NVRM_SRC` unset, the
 default is `$HOME/work/gb10/nvidia-gb10-freebsd`, and the build stops with
 "no libnvrm at ..." when that checkout has none. "Purpose fork" is the
 project-makefile-contract term for a thin wrapper around an upstream build.
@@ -663,9 +676,8 @@ mesa/nvk-nvrm/
 ```
 
 The Makefile follows the project-makefile-contract skill. The meson line for
-arm64 is `-Dvulkan-drivers=nouveau -Dgallium-drivers= -Dplatforms=
--Dnvk-kmd=nvrm`. The last option is new: it chooses the nvrm backend and
-leaves `nvkmd/nouveau/` and its libdrm dependency out. The dependencies are the
+arm64 is `-Dvulkan-drivers=nvk -Dgallium-drivers= -Dplatforms=
+-Dnvk-kmd=nvrm`. The last option is new: it chooses the nvrm backend. The dependencies are the
 ones `graphics/mesa-devel` (#2309) already proved on arm64 (rust, bindgen,
 libclc, spirv-tools, llvm).
 
@@ -692,7 +704,7 @@ The nvidia driver is loaded only inside the test-boot kit, never on the build ho
 
 Every row runs with the same environment:
 
-- `VK_ICD_FILENAMES=<kit>/nouveau_icd.json`, with `VK_LOADER_DRIVERS_SELECT`
+- `VK_ICD_FILENAMES=<kit>/nvk_nvrm_icd.<arch>.json`, with `VK_LOADER_DRIVERS_SELECT`
   unset, so an installed NVIDIA ICD cannot answer in its place;
 - `NVK_I_WANT_A_BROKEN_VULKAN_DRIVER=1`, because NVK hides devices it does not
   list as conformant, and a GB206 on this backend is not.
@@ -746,61 +758,30 @@ and the hardware-preflight-and-verify skill (by PCI address or UUID), never by
 S5 (compute dispatch and the QMD builder) is **not** on the path to NVK. NVK
 builds its own QMDs with NAK. S5 is for native CUDA (#2380).
 
-## 10. Estimate: the first native llama.cpp Vulkan number on the RTX 5060 Ti
+## 10. Order of work to the first native llama.cpp Vulkan number on the RTX 5060 Ti
 
-Unit: 1 pw (person-week) is one calendar week of one implementer, with the
-review rounds and the gate included.
+No durations or dates are given (Mark, 2026-11-22). The work goes in this
+order, and each step has a gate:
 
-| Item | pw | Depends on |
+| Step | Work | Gate before the next step |
 |---|---|---|
-| S2 finish (#2419, in progress) | 0.5 | none |
-| S3 (#2437) | 3 | S2 |
-| S4 poll path (#2438, first half) | 0.5 | S3 |
-| S4 kevent and `d_kqfilter` (#2438, second half) | 1 | S4 poll; not needed for the first number |
-| S1 and S2 extensions (#2439) | 1 | S2 |
-| Backend, the part that needs no channels (enumeration, memory, VA, sync type, on the fake backend) | 1.5 | #2439; the section 0 decision |
-| Backend, the part that needs real channels | 1 | S4 poll; the backend part with no channels |
-| Bring-up on the card and test boots (S3 NOP and semaphore; then `vulkaninfo` and the dEQP compute subset; then `llama-bench`) | 1 | all of the above except kevent |
-| **Total** | **9.5** | of which 8.5 come before the first number |
+| 1 | libnvrm S2, memory and VA (#2419) | committed and merged; S2 rows of section 3 re-checked |
+| 2 | libnvrm S1/S2 extensions for NVK (#2439), alongside S3 | fake-backend tests green |
+| 3 | libnvrm S3, channels and submit (#2437), including the spike items of section 9 | NOP and semaphore release complete on the card in a test boot |
+| 4 | libnvrm S4, the poll path (#2438) | a CPU wait wakes on a GPU release, fake and hardware |
+| 5 | the nvkmd nvrm backend from stub to V1 compute, in the fork | dEQP compute subset on the fake backend, then in a test boot |
+| 6 | bring-up on the card | `vulkaninfo --summary` lists the GPU; the dEQP compute subset passes in a test boot |
+| 7 | the first native llama.cpp Vulkan number | `llama-bench` on the RTX 5060 Ti in a test boot, with no `linux*` module loaded |
+| later | S4 kevent and `d_kqfilter` (#2438) | not needed for the first number |
 
-The two backend rows (2.5 pw) are Mesa patches under `src/nouveau`, and the
-bring-up row (1 pw) runs them on the card; together they are 3.5 pw.
-
-**The plan that applies is "Under option (b)" below** (section 0: agents
-write the backend in the private fork). The option (a) plan is kept for the
-record only.
-
-**Under option (a)** (not taken; a person writes the backend):
-
-- The agent lanes do S2, S3, S4 and #2439: about 6 pw. With two implementers
-  that is about 4 weeks, to about 2026-12-21.
-- The person's lane is the 3.5 pw of backend work: 1.5 pw from the decision
-  date, then 1 pw once channels exist, then bring-up together with the agents.
-- First number: the later of (decision date + 1.5 weeks) and 2026-12-21, plus
-  2 weeks. That is again about 2027-01-04 if the person starts by about
-  2026-12-10, and it moves with that person's start date, week for week.
-
-**Under option (b)** (the same implementers write the backend):
-
-- *One implementer:* 8.5 pw in series to the first number, about
-  **2027-01-22** if work starts on 2026-11-23, with the kevent half (1 pw)
-  after it. This needs the section 0 decision before the backend part with
-  no channels starts in series order, at about 2026-12-28.
-- *Two implementers*, from 2026-11-23:
-  - Lane A (critical path): S2 0.5, S3 3 and the S4 poll path 0.5 give real
-    channels at week 4, about 2026-12-21. Then the channel part of the
-    backend (1) and bring-up (1) take it to week 6, about **2027-01-04**.
-  - Lane B: #2439 from about 2026-11-26 to 2026-12-03, then the backend part
-    with no channels (1.5). The channel part depends on it, so it must be
-    done by 2026-12-21 and must start by about 2026-12-10. The kevent half of
-    S4 follows, off the critical path.
-  - So 2027-01-04 holds if **the section 0 decision arrives by about
-    2026-12-10**. Each week it comes later adds about a week.
+Steps 1, 3 and 4 are the critical path. Step 2, and the parts of step 5 that
+need no channels (enumeration, memory, VA and the sync type on the fake
+backend), can run beside step 3. The rest of step 5 needs steps 3 and 4.
 
 Two risks remain:
 
-- The RM channel-setup details in S3 week 1 (USERD placement, the token on user
-  channels).
+- The RM channel-setup details in the S3 spike (USERD placement, the token on
+  user channels).
 - NVK behaviour on GB206 with RM-placed memory (the PTE kinds behind
   `alloc_tiled_mem`). Compute-only llama.cpp paths need the tiled allocations
   only for images, so they can run before that gap closes.

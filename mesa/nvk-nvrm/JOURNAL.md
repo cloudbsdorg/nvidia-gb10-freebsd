@@ -149,25 +149,40 @@ Done:
     stopped by exact PID for the test-boot pause before it changed any file
     (the working tree is clean at 019a93c8543).
 
-## RESUME (paused 2026-11-22 about 09:40Z for test boots)
+- Log: 2026-11-22 resumed after the test boots. Mark: all code goes through
+  opencode Kimi (kimi-k3.1-pro, then kimi-k3, then kimi-k2.7-code); Sonnet
+  or Haiku only when no opencode model is available.
+- The nouveau kernel-driver removal, by Kimi rounds r4, r6 and r7:
+  - Fork commit 4b21c1c37f2 (A): every wiring edit plus the smaller
+    deletions (nvkmd nouveau backend, winsys, src/nouveau/drm, drm-shim,
+    method dumper, drm_is_nouveau.h, nouveau_drm.h); the loader picks no GL
+    driver for NVIDIA fds; new make test checks for nouveau uAPI headers in
+    ninja deps and a nouveau winsys target in the build graph, each with a
+    planted fixture. make build test 35/35. Two gate rounds.
+  - Fork commit 00e288210ac (B): the NAK and MME hardware-test files that A
+    leaves unreferenced (6.5k lines), plus the FORK-NOTES section on the
+    removal. A commit that only deletes files is refused by the receipt
+    check (no scanner has content to examine), so each deletion commit
+    carries a documentation change with content.
+  - The gallium nouveau driver and winsys (131k lines) are deleted on disk,
+    unreferenced and unbuilt since A, but NOT committed: the review voices
+    fail with "Prompt is too long" on a diff that size. Needs a decision:
+    many small commits, or a gate mode that reviews a pure deletion by its
+    file list and a reference check.
 
-State: fork cloudbsd/26.3 at 019a93c8543, pushed, clean tree. This branch
-(agent/2379-nvk-nvrm) carries the docs. No round or watchdog is running.
+## RESUME
+
+State: fork cloudbsd/26.3 at 00e288210ac (pushed). In the worktree, the
+gallium nouveau deletions are unstaged (on disk only).
 
 Resume order:
-1. Rerun Kimi r4 (the deletion) from the brief above, unchanged:
-   sh $W/build/nvk-nvrm/rounds/start-round.sh $W/build/nvk-nvrm/rounds/r4 dgx-mlapointe/kimi-k3.1-pro
-   then /bin/pwait on the watchdog pid it prints. Empty r4/round.status
-   first is done by the script. Review the diff, run make build test (30
-   checks plus the new "no nouveau uAPI in the build" check), two gate
-   rounds, commit as its own commit, push, Track comment.
-2. Fold in the open round 2 findings of 019a93c8543 (mesa_opts unquoted, so
-   a WORK with spaces breaks meson setup; the regular-file rule for the
-   UPSTREAM copies is not enforced; failing name checks do not list files;
-   help line width; README placeholders; usage string).
-3. Update DESIGN.md and this journal for the renames (libvulkan_nvk_nvrm,
-   -Dvulkan-drivers=nvk, the ICD names) once the deletion lands.
-4. Then the older items below.
+1. The gallium deletion: wait for the decision above. Until then, do not
+   stage src/gallium/drivers/nouveau or src/gallium/winsys/nouveau.
+2. Open findings of 019a93c8543 and 4b21c1c37f2 (listed in their commit
+   messages), through Kimi: mesa_opts quoting, the default configure with
+   nvk-kmd fixed to nvrm, the tegra leftovers, the predicate name, the
+   uAPI check on an empty build, the CPD ranges.
+3. Then the older items below.
 
 Next (open work only):
 1. Follow-up fork commit for the gate round 2 findings (Kimi for the
