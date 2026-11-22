@@ -2,7 +2,7 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# boot_nvrm_info.sh - the live proof of libnvrm S1 (Track #2378), meant to run
+# boot_nvrm_info.sh - the live proof of libnvrm (Track #2378; memory #2419), meant to run
 # once in a one-shot test boot environment where the NVIDIA driver is loaded
 # (rc one-shot, self-recording).  It runs nvrm-info in all its modes against the
 # real driver and compares what libnvrm reports with what the loaded driver
@@ -35,7 +35,18 @@
 # linuxkpi_video.ko, ...) are not a Linux layer and do not fail this check:
 # another GPU's driver may be loaded.
 #
-# usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m \
+# Memory (Track #2419): BOOT_MEM_PROBE names the kit's mem_probe binary
+# (tests/libnvrm/mem_probe.c, linked to the libnvrm under test; default: a
+# mem_probe next to this script).  It runs on
+# every GPU the library finds, between the nvrm-info runs and the second Linux
+# check: client open with CPU mapping, VA reservation, video and system memory,
+# GPU and CPU mappings, a pattern written and read back, export and import into
+# a second client, and nothing left after the frees.  Its PASS and FAIL lines
+# join results.txt, and its whole output is OUTDIR/mem_probe.txt.  A missing
+# probe is a FAIL; only BOOT_S1_ONLY=1 (a discovery-only kit) turns that into
+# an INFO line, and the run records that it was set.
+#
+# usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] \
 #            boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
 # Writes OUTDIR/results.txt (one PASS/FAIL/INFO line per check, last line
 # "== done rc=N"), OUTDIR/nvrm-info.json, nvrm-info.jsonl, sysctl.txt,
@@ -144,7 +155,21 @@ if [ -n "$SCHEMA" ] && [ -f "$SCHEMA" ]; then
 	python3 -I "$V" "$SCHEMA" "$OUT/nvrm-info.jsonl" >>"$R" 2>&1 && pass "--jsonl validates against the schema" || fail "--jsonl does not validate"
 fi
 
-# the Linux layer again, after the last nvrm-info run
+# the memory calls on the real driver
+PROBE=${BOOT_MEM_PROBE:-$HERE/mem_probe}
+if [ -x "$PROBE" ]; then
+	"$PROBE" >"$OUT/mem_probe.txt" 2>&1
+	rc=$?
+	grep -E '^(PASS|FAIL|INFO) ' "$OUT/mem_probe.txt" >>"$R"
+	if [ $rc -eq 0 ]; then pass "mem_probe: every memory step passed on every GPU"
+	else fail "mem_probe exited $rc ($OUT/mem_probe.txt)"; fi
+elif [ "${BOOT_S1_ONLY:-}" = 1 ]; then
+	info "memory probe not run: BOOT_S1_ONLY=1 (a discovery-only kit)"
+else
+	fail "memory probe missing: $PROBE is not an executable (set BOOT_MEM_PROBE, or BOOT_S1_ONLY=1 for a discovery-only kit)"
+fi
+
+# the Linux layer again, after the last nvrm-info run (and the memory probe)
 $KLD >"$OUT/kldstat-after.txt" 2>&1
 linux_check "after nvrm-info ran" "$OUT/kldstat-after.txt"
 

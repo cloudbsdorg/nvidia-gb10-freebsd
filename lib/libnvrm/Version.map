@@ -35,3 +35,27 @@ NVRM_1.0 {
 	local:
 		*;
 };
+
+/* API minor 1: memory and virtual address space (nvrm_mem(3)). */
+NVRM_1.1 {
+	global:
+		nvrm_client_open;
+		nvrm_client_close;
+		nvrm_client_errmsg;
+		nvrm_client_stats_get;
+		nvrm_vaspace_info_get;
+		nvrm_va_reserve;
+		nvrm_va_release;
+		nvrm_mem_alloc;
+		nvrm_mem_register_user;
+		nvrm_mem_free;
+		nvrm_mem_info_get;
+		nvrm_mem_map_gpu;
+		nvrm_mem_unmap_gpu;
+		nvrm_mem_map_cpu;
+		nvrm_mem_unmap_cpu;
+		nvrm_mem_read;
+		nvrm_mem_write;
+		nvrm_mem_export_fd;
+		nvrm_mem_import_fd;
+} NVRM_1.0;

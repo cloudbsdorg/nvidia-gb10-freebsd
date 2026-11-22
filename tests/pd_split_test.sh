@@ -18,12 +18,22 @@
 #                                        restore of pd-slot.bin, then a
 #                                        completion - restore before it
 #   (e) output:                          prints the saved/restored lines and
-#                                        "split output == decode-server-alone
-#                                        output: True"; each stub answers with
-#                                        its own text, so a comparison with
-#                                        the prefill server's output fails
+#                                        "split == decode-server-alone: True";
+#                                        each stub answers with its own text,
+#                                        so the comparison with the prefill
+#                                        server's output is False
 #   (f) trailing slash on a URL:         accepted; no "//" in any request
 #                                        path
+#   (g) --slot-file other.bin:           both stub servers see other.bin in
+#                                        the save and in the restore request
+#   (h) the option tests:                tests/pd_split_options_test.py (the
+#                                        python suite of the new options)
+#                                        runs from here and must pass; the
+#                                        number of tests that ran is checked
+#                                        against a floor, because a suite that
+#                                        lost its test cases still exits 0
+#   (i) the script is executable:        scripts/pd_split.py keeps its mode
+#                                        755 (it has a shebang)
 #
 # Run: sh tests/pd_split_test.sh
 
@@ -34,8 +44,12 @@ LC_ALL=C
 export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SCRIPT=$TESTSDIR/../scripts/pd_split.py
-TESTROOT=$(mktemp -d "$HOME/work/gb10/tmp/pd-split-test.XXXXXXXX") || exit 1
+REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
+SCRIPT=$REPO/scripts/pd_split.py
+# Scratch inside the repository (tmp/ is git-ignored), not in the system
+# temporary directory and not outside the repository.
+mkdir -p "$REPO/tmp"
+TESTROOT=$(mktemp -d "$REPO/tmp/pd-split-test.XXXXXXXX") || exit 1
 
 PASSED=0
 FAILED=0
@@ -193,7 +207,7 @@ fi
 
 if grep -q '^saved slot: 10 tokens, 1234 bytes' "$TESTROOT/d.out" &&
     grep -q '^restored slot: 10 tokens' "$TESTROOT/d.out" &&
-    grep -q '^split output == decode-server-alone output: True$' "$TESTROOT/d.out"; then
+    grep -q '^split == decode-server-alone: True$' "$TESTROOT/d.out"; then
 	ok "(e) output: save, restore and comparison lines"
 else
 	fail "(e) output: $(cat "$TESTROOT/d.out")"
@@ -203,6 +217,46 @@ if ! grep -q '^POST //' "$TESTROOT/pre.log" "$TESTROOT/dec.log"; then
 	ok "(f) trailing slash: no // in request paths"
 else
 	fail "(f) trailing slash: $(grep '^POST //' "$TESTROOT/dec.log")"
+fi
+
+# (g) --slot-file other.bin: the name must reach both stub servers, the
+# prefill one in the save request and the decode one in the restore request.
+rc=0
+python3 -I "$SCRIPT" "$PRE" "$DEC" 4 --slot-file other.bin \
+    > "$TESTROOT/g.out" 2> "$TESTROOT/g.err" || rc=$?
+p_save_other=$(grep -c 'POST /slots/0?action=save {"filename": "other.bin"}' \
+    "$TESTROOT/pre.log" || true)
+d_restore_other=$(grep -c 'POST /slots/0?action=restore {"filename": "other.bin"}' \
+    "$TESTROOT/dec.log" || true)
+if [ "$rc" -eq 0 ] && [ "$p_save_other" -ge 1 ] && [ "$d_restore_other" -ge 1 ]; then
+	ok "(g) --slot-file other.bin: both servers see the name"
+else
+	fail "(g) --slot-file other.bin: rc=$rc saves=$p_save_other restores=$d_restore_other stderr=$(cat "$TESTROOT/g.err")"
+fi
+
+# (h) The python suite of the new options (--slot-file, --json, --label-*).
+# The floor on the number of tests that ran: a python suite that lost its
+# test cases still exits 0 ("Ran 0 tests ... OK"), so the exit code alone
+# would keep the gate green over nothing.
+MIN_TESTS=22
+if TMPDIR="$REPO/tmp" python3 -I "$TESTSDIR/pd_split_options_test.py" -v \
+    > "$TESTROOT/h.out" 2>&1; then
+	n_ok=$(grep -c '\.\.\. ok$' "$TESTROOT/h.out" || true)
+	if [ "$n_ok" -ge "$MIN_TESTS" ]; then
+		ok "(h) pd_split_options_test.py: $n_ok tests passed"
+	else
+		fail "(h) pd_split_options_test.py: only $n_ok tests ran, $MIN_TESTS required"
+	fi
+else
+	fail "(h) pd_split_options_test.py: $(tail -n 25 "$TESTROOT/h.out")"
+fi
+
+# (i) The script keeps its executable bit: it has a shebang and is run
+# directly.
+if [ -x "$SCRIPT" ]; then
+	ok "(i) scripts/pd_split.py is executable"
+else
+	fail "(i) scripts/pd_split.py is not executable"
 fi
 
 echo "passed: $PASSED failed: $FAILED"

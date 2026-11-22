@@ -48,8 +48,11 @@ runs, one by one.
   (`DRMKMODDIR=`, an absolute path), and the FreeBSD source headers (`BSDSRCTOP=`, the parent
   of `SYSDIR` by default).
 - A host with an Ampere Altra CPU (not to be confused with the GPU generation) needs PCIe
-  workarounds in the kernel. They are in a separate kernel tree, not in this repository; ask
-  for it when you report (see the end of this section). Other arm64 machines do not need them.
+  workarounds in the kernel, and `nvidia-drm` (like every drm-kmod driver) needs a LinuxKPI fix
+  on any arm64 machine. Both are FreeBSD kernel patches in
+  [`kernel-patches/`](kernel-patches/README.md), with a step-by-step guide to apply them, build
+  the kernel and boot it next to the stock one. `nvidia.ko` alone on an arm64 machine that is
+  not an Altra needs none of them.
 
 ### 2. Get the code and sources
 
@@ -285,8 +288,13 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
 It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
 Linux ioctl bridges are the optional modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
 (see [Linux bridges](#linux-bridges-nvidia_linuxko) below). An **Ampere Altra** does need kernel workarounds for its PCIe
-(32-bit configuration reads, emulation of misaligned device accesses); those are kernel
-changes kept in a separate kernel tree, not here. Other arm64 machines should not need them.
+(32-bit configuration reads, emulation of misaligned device accesses), and `nvidia-drm`, like
+every drm-kmod driver, needs LinuxKPI to map write-combining memory non-cacheable on arm64.
+Those are FreeBSD kernel patches, kept in [`kernel-patches/`](kernel-patches/README.md) with a
+step-by-step guide (check whether you need them, fetch the matching source, apply, build,
+install as `kernel.patched`, test once with `nextboot`, make it the default, go back, redo after
+updates), a helper `kernel-patches/apply.sh` and the manual page `kernel-patches(7)`. Other
+arm64 machines need only the LinuxKPI patch, and only for `nvidia-drm`.
 
 On the Altra the driver also maps write-combining BARs as Device memory. It decides this itself
 from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_active`; see
@@ -327,6 +335,10 @@ sh scripts/build-shim.sh --module=nvidia-modeset   # nvidia-modeset.ko; prints "
 DRMKMODDIR=~/rx7600/drm-kmod sh scripts/build-shim.sh --module=nvidia-drm   # nvidia-drm.ko
 sh tests/kmod_symbols_test.sh    # every undefined symbol resolves as the kernel linker will resolve it
 sh tests/linux_cuda_test.sh      # Linux CUDA test programs and shim: build, abstract-socket test; skips without LINUXROOT
+sh tests/pd_split_test.sh        # the prefill/decode split client, against two stub servers
+sh tests/bench_compare_test.sh   # the llama-bench comparison tables
+sh tests/run-nv-vulkan_test.sh   # the Vulkan launcher, without a GPU and without a Linux root
+sh tests/manpages_test.sh        # the man pages of the commands pass "mandoc -T lint -W warning"
 ```
 
 `build-shim.sh` runs twice because `build-stubs.sh` checks the core against the compiled OS
@@ -457,8 +469,9 @@ a cacheable load from a register page is a synchronous external abort, which the
 
 On the Altra, Normal memory accesses to PCIe BARs are not safe (the root complex mishandles
 some of them), so write-combining requests fall back to Device-nGnRE there as well. The
-FreeBSD kernel tree applies the same rule to its own write-combining mappings, Device for the
-kernel and Normal non-cacheable for user processes. `nvidia.ko` applies its table to the
+FreeBSD kernel patches in [`kernel-patches/`](kernel-patches/README.md) apply the same rule to
+LinuxKPI's write-combining mappings, Device for the kernel and Normal non-cacheable for user
+processes (`compat.linuxkpi.altra_82288`). `nvidia.ko` applies its table to the
 mappings it makes itself, the kernel ones and the user ones alike.
 
 ## Video memory and fictitious pages (nvidia-drm)
@@ -662,19 +675,26 @@ $R/noble/lib/ld-linux-aarch64.so.1 --library-path "$R/noble/lib/aarch64-linux-gn
 USERMODE register window (see [Memory attributes on arm64](#memory-attributes-on-arm64)). The
 ioctl `0xc23046d7` failing with `EINVAL` ("unknown NVRM ioctl") in a `ktrace` is harmless.
 
+[`scripts/run-nv-vulkan.sh`](scripts/run-nv-vulkan.sh) wraps all of this: it sets the two
+variables, runs the programs from the llama directory (so they find their backends, also under
+`daemon(8)`) and starts them through the Ubuntu root's own dynamic linker. It is described in
+[`docs/llm.md`](docs/llm.md#nvidia).
+
 ## Running LLMs
 
-How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured, and
-splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
+How to run llama.cpp on this kind of machine (Vulkan on the AMD card, the numbers measured,
+splitting prefill and decode between two servers, the NVIDIA Vulkan launcher and the llama-bench
+comparison tables): [`docs/llm.md`](docs/llm.md).
 
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `SOURCES` | pins for NVIDIA's sources |
-| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client of [`docs/llm.md`](docs/llm.md) |
+| `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client, `bench_compare.py`, the llama-bench comparison tables, and `run-nv-vulkan.sh`, the Vulkan launcher of [`docs/llm.md`](docs/llm.md) |
 | `patches/` | one unified diff per changed file of NVIDIA's FreeBSD OS layer |
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
+| `kernel-patches/` | patches to the FreeBSD kernel itself (LinuxKPI write-combining on arm64; Ampere Altra PCIe workarounds), `apply.sh`, `kernel-patches(7)` and a [step-by-step README](kernel-patches/README.md) |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
 | `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` |
@@ -820,10 +840,25 @@ class list, VRAM, BAR1, page sizes, capability flags). Every value is available 
 reason; the layers are abstract device, class, family (a generation table keyed by class ids)
 and board decorators (none yet). Backends are providers: `rm` and `fake`
 (`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
-capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; this
-version has no call that maps device memory). No GPU is a success with zero devices. The interface is provisional
+capability mode (the descriptors keep RM control and free, plus allocate with `NVRM_ENUM_ALLOW_ALLOC`; the
+enumeration descriptors never carry a mapping right). No GPU is a success with zero devices. The interface is provisional
 until the first package release. A context is not thread-safe, and a forked child must only
 `nvrm_close` it (see `nvrm(3)`). `nvrm-info [--json | --jsonl | --schema]` prints the result; the schema is
 `lib/libnvrm/schema/nvrm-info-1.schema.json`, generated from the field table of the library, and
-the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
+the build fails when it drifts. Man pages: `nvrm(3)`, `nvrm_mem(3)`, `nvrm(7)`, `nvrm-info(8)`. The build needs
 the NVIDIA headers from `scripts/fetch-sources.sh`. Tests: `sh tests/libnvrm_test.sh`.
+
+GPU memory (`nvrm_mem(3)`, API minor 1, symbol version `NVRM_1.1`) is what NVK and a native CUDA
+runtime build on. `nvrm_client_open()` makes a client for one GPU: its own RM session, its own GPU
+virtual address space (the library hands out the addresses), and every object made through it.
+On it: VA reservations (sparse or not), video and system memory with a chosen page size (4 KiB,
+64 KiB, 2 MiB, 512 MiB), registered user pages, GPU mappings at fixed addresses, CPU mappings,
+and sharing by descriptor (export, import). CPU mapping needs `NVRM_OPEN_ALLOW_MAP`: the client then
+opens spare descriptors of this GPU's own device node (`/dev/nvidiaN`, N reported by the driver), so
+it keeps working after `cap_enter()`; each CPU mapping or export uses one. The
+CPU attribute of a mapping follows the rule in `nvrm(7)` (on arm64, video memory is Device unless the
+OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()` obey it. A release the
+RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
+software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
+API is tested without hardware; the RM backend is tested against a scripted kernel
+(`tests/libnvrm/rm_mem_test.c`).

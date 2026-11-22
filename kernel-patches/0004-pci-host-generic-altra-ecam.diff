@@ -1,0 +1,498 @@
+Subject: pci_host_generic: Ampere Altra ECAM quirk, 32-bit config reads only
+SPDX-License-Identifier: BSD-2-Clause
+Applies to: sys/dev/pci (pci_host_generic*, new pci_host_generic_quirks.h),
+tests/sys/pci (new ATF test), etc/mtree/BSD.tests.dist, tests/sys/Makefile.
+Needed on: Ampere Altra hosts (ACPI MCFG OEM ID "Ampere", OEM table ID
+"Altra", OEM revision 1).  No tunable; inert on every other MCFG.
+
+On the Altra, 8- and 16-bit PCI configuration reads can return wrong data
+(a GPU's PCIe switch read as device 0, class 0), so devices go missing or
+show the wrong IDs and drivers do not attach.  With the quirk every config
+read is an aligned 32-bit read and the wanted bytes are extracted.  The
+MCFG OEM quirk table moves to a header of pure helpers, which the new
+tests/sys/pci/pci_host_generic_quirks_test exercises.  The existing
+Marvell DesignWare entries are unchanged.  See kernel-patches/README.md.
+
+diff --git a/etc/mtree/BSD.tests.dist b/etc/mtree/BSD.tests.dist
+index e828cfd3c..e4de9d5fb 100644
+--- a/etc/mtree/BSD.tests.dist
++++ b/etc/mtree/BSD.tests.dist
+@@ -953,6 +953,8 @@
+         ..
+         opencrypto
+         ..
++        pci
++        ..
+         pjdfstest
+             chflags
+             ..
+diff --git a/sys/dev/pci/pci_host_generic.c b/sys/dev/pci/pci_host_generic.c
+index dc6139cf2..1ad79e672 100644
+--- a/sys/dev/pci/pci_host_generic.c
++++ b/sys/dev/pci/pci_host_generic.c
+@@ -319,6 +319,15 @@ generic_pcie_read_config(device_t dev, u_int bus, u_int slot,
+ 
+ 	offset = PCIE_ADDR_OFFSET(bus - sc->bus_start, slot, func, reg);
+ 
++	/*
++	 * The low bits of the ECAM offset are reg's, so clearing two of them
++	 * gives the dword that holds the register.
++	 */
++	if ((sc->quirks & PCIE_ECAM_32BIT_READ_QUIRK) != 0) {
++		data = le32toh(bus_read_4(sc->res, offset & ~(uint64_t)3));
++		return (pcie_ecam_extract(data, reg, bytes));
++	}
++
+ 	switch (bytes) {
+ 	case 1:
+ 		data = bus_read_1(sc->res, offset);
+diff --git a/sys/dev/pci/pci_host_generic.h b/sys/dev/pci/pci_host_generic.h
+index a97c1ab43..3f6341d72 100644
+--- a/sys/dev/pci/pci_host_generic.h
++++ b/sys/dev/pci/pci_host_generic.h
+@@ -33,6 +33,7 @@
+ #define	__PCI_HOST_GENERIC_H_
+ 
+ #include "pci_if.h"
++#include <dev/pci/pci_host_generic_quirks.h>
+ 
+ /* Assembling ECAM Configuration Address */
+ #define	PCIE_BUS_SHIFT		20
+@@ -85,11 +86,6 @@ struct generic_pcie_core_softc {
+ 	uint32_t		quirks;
+ };
+ 
+-/* Quirks */
+-#define PCIE_ECAM_DESIGNWARE_QUIRK	(1 << 0)
+-/* Child will map resources to access config registers */
+-#define PCIE_CUSTOM_CONFIG_SPACE_QUIRK	(1 << 1)
+-
+ DECLARE_CLASS(generic_pcie_core_driver);
+ 
+ int pci_host_generic_core_attach(device_t);
+diff --git a/sys/dev/pci/pci_host_generic_acpi.c b/sys/dev/pci/pci_host_generic_acpi.c
+index 43ae4a3f2..42b171183 100644
+--- a/sys/dev/pci/pci_host_generic_acpi.c
++++ b/sys/dev/pci/pci_host_generic_acpi.c
+@@ -87,19 +87,8 @@
+ #define	PROPS_CELL_SIZE		1
+ #define	PCI_ADDR_CELL_SIZE	2
+ 
+-static struct {
+-	char		oem_id[ACPI_OEM_ID_SIZE + 1];
+-	char		oem_table_id[ACPI_OEM_TABLE_ID_SIZE + 1];
+-	uint32_t	quirks;
+-} pci_acpi_quirks[] = {
+-	{ "MRVL  ", "CN9130  ", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MRVL  ", "CN913X  ", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MVEBU ", "ARMADA7K", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MVEBU ", "ARMADA8K", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MVEBU ", "CN9130  ", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MVEBU ", "CN9131  ", PCIE_ECAM_DESIGNWARE_QUIRK },
+-	{ "MVEBU ", "CN9132  ", PCIE_ECAM_DESIGNWARE_QUIRK },
+-};
++CTASSERT(ACPI_OEM_ID_SIZE == PCI_ACPI_OEM_ID_SIZE);
++CTASSERT(ACPI_OEM_TABLE_ID_SIZE == PCI_ACPI_OEM_TABLE_ID_SIZE);
+ 
+ /* Forward prototypes */
+ 
+@@ -202,17 +191,9 @@ static void
+ pci_host_acpi_get_oem_quirks(struct generic_pcie_acpi_softc *sc,
+     ACPI_TABLE_HEADER *hdr)
+ {
+-	size_t i;
+-
+-	for (i = 0; i < nitems(pci_acpi_quirks); i++) {
+-		if (memcmp(hdr->OemId, pci_acpi_quirks[i].oem_id,
+-		    ACPI_OEM_ID_SIZE) != 0)
+-			continue;
+-		if (memcmp(hdr->OemTableId, pci_acpi_quirks[i].oem_table_id,
+-		    ACPI_OEM_TABLE_ID_SIZE) != 0)
+-			continue;
+-		sc->base.quirks |= pci_acpi_quirks[i].quirks;
+-	}
++
++	sc->base.quirks |= pci_acpi_oem_quirks(hdr->OemId, hdr->OemTableId,
++	    hdr->OemRevision);
+ }
+ 
+ static int
+@@ -257,6 +238,8 @@ pci_host_acpi_get_ecam_resource(device_t dev)
+ 		pci_host_acpi_get_oem_quirks(sc, hdr);
+ 		if (sc->base.quirks & PCIE_ECAM_DESIGNWARE_QUIRK)
+ 			device_set_desc(dev, "Synopsys DesignWare PCIe Controller");
++		if (sc->base.quirks & PCIE_ECAM_32BIT_READ_QUIRK)
++			device_printf(dev, "32-bit config space reads only\n");
+ 	} else {
+ 		status = acpi_GetInteger(handle, "_CBA", &val);
+ 		if (ACPI_SUCCESS(status))
+diff --git a/sys/dev/pci/pci_host_generic_quirks.h b/sys/dev/pci/pci_host_generic_quirks.h
+new file mode 100644
+index 000000000..96d4ee576
+--- /dev/null
++++ b/sys/dev/pci/pci_host_generic_quirks.h
+@@ -0,0 +1,132 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 REVYTECH, Inc.
++ */
++
++/*
++ * Quirks of the generic ECAM PCIe host driver, and the pure helpers that
++ * implement them.  Nothing here touches hardware, so the file can be
++ * included from a userland test as well as from the kernel.
++ */
++
++#ifndef __PCI_HOST_GENERIC_QUIRKS_H_
++#define	__PCI_HOST_GENERIC_QUIRKS_H_
++
++#include <sys/types.h>
++
++/* Quirks */
++#define	PCIE_ECAM_DESIGNWARE_QUIRK	(1 << 0)
++/* Child will map resources to access config registers */
++#define	PCIE_CUSTOM_CONFIG_SPACE_QUIRK	(1 << 1)
++/*
++ * Only aligned 32-bit config space reads return correct data; 8- and
++ * 16-bit reads are done as a 32-bit read and the lane is extracted.
++ * Writes of every width work and are left alone.
++ */
++#define	PCIE_ECAM_32BIT_READ_QUIRK	(1 << 2)
++
++#define	PCI_ACPI_OEM_ID_SIZE		6
++#define	PCI_ACPI_OEM_TABLE_ID_SIZE	8
++
++/*
++ * The value of a "bytes"-wide config register at offset "reg", taken from
++ * the aligned dword "dword" that contains it (already in host byte order).
++ * Only the low two bits of "reg" are used: they select the byte lane.
++ * A register that does not fit inside its dword (a word at lane 3, a
++ * dword at any lane but 0), or an unsupported width, reads as all-ones.
++ */
++static __inline uint32_t
++pcie_ecam_extract(uint32_t dword, u_int reg, int bytes)
++{
++	u_int shift;
++
++	shift = (reg & 3) * 8;
++	switch (bytes) {
++	case 1:
++		return ((dword >> shift) & 0xff);
++	case 2:
++		if ((reg & 3) == 3)
++			return (~0U);
++		return ((dword >> shift) & 0xffff);
++	case 4:
++		if ((reg & 3) != 0)
++			return (~0U);
++		return (dword);
++	default:
++		return (~0U);
++	}
++}
++
++/*
++ * memcmp() without <string.h> or libkern, so that the header stays usable
++ * from userland tests and from any kernel file that includes it.
++ */
++static __inline int
++pci_acpi_oem_field_eq(const char *a, const char *b, u_int len)
++{
++	u_int i;
++
++	for (i = 0; i < len; i++)
++		if (a[i] != b[i])
++			return (0);
++	return (1);
++}
++
++/*
++ * The quirks of the host bridges described by an ACPI MCFG table with the
++ * given header fields.  The ids are compared over their full fixed width,
++ * so the table spells them with their space padding.
++ */
++static __inline uint32_t
++pci_acpi_oem_quirks(const char *oem_id, const char *oem_table_id,
++    uint32_t oem_revision)
++{
++	static const struct {
++		char		oem_id[PCI_ACPI_OEM_ID_SIZE + 1];
++		char		oem_table_id[PCI_ACPI_OEM_TABLE_ID_SIZE + 1];
++		int		match_revision;
++		uint32_t	oem_revision;
++		uint32_t	quirks;
++	} quirks[] = {
++		{ "MRVL  ", "CN9130  ", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MRVL  ", "CN913X  ", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MVEBU ", "ARMADA7K", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MVEBU ", "ARMADA8K", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MVEBU ", "CN9130  ", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MVEBU ", "CN9131  ", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		{ "MVEBU ", "CN9132  ", 0, 0,
++		    PCIE_ECAM_DESIGNWARE_QUIRK },
++		/*
++		 * Ampere Altra: sub-32-bit config reads return wrong data
++		 * (an AMD GPU's switch reads as device 0, class 0).  Linux
++		 * (AMPERE_ECAM_MCFG) matches OEM revision 1 the same way.
++		 */
++		{ "Ampere", "Altra   ", 1, 1, PCIE_ECAM_32BIT_READ_QUIRK },
++	};
++	uint32_t found;
++	u_int i;
++
++	found = 0;
++	for (i = 0; i < sizeof(quirks) / sizeof(quirks[0]); i++) {
++		if (!pci_acpi_oem_field_eq(oem_id, quirks[i].oem_id,
++		    PCI_ACPI_OEM_ID_SIZE))
++			continue;
++		if (!pci_acpi_oem_field_eq(oem_table_id,
++		    quirks[i].oem_table_id, PCI_ACPI_OEM_TABLE_ID_SIZE))
++			continue;
++		if (quirks[i].match_revision &&
++		    quirks[i].oem_revision != oem_revision)
++			continue;
++		found |= quirks[i].quirks;
++	}
++	return (found);
++}
++
++#endif /* __PCI_HOST_GENERIC_QUIRKS_H_ */
+diff --git a/tests/sys/Makefile b/tests/sys/Makefile
+index 9205e5749..9efdee67d 100644
+--- a/tests/sys/Makefile
++++ b/tests/sys/Makefile
+@@ -31,6 +31,7 @@ TESTS_SUBDIRS+=		netlink
+ TESTS_SUBDIRS+=		netmap
+ TESTS_SUBDIRS+=		netpfil
+ TESTS_SUBDIRS+=		opencrypto
++TESTS_SUBDIRS+=		pci
+ TESTS_SUBDIRS+=		${_pmc}
+ TESTS_SUBDIRS+=		posixshm
+ TESTS_SUBDIRS+=		ses
+diff --git a/tests/sys/pci/Makefile b/tests/sys/pci/Makefile
+new file mode 100644
+index 000000000..a49bf0d96
+--- /dev/null
++++ b/tests/sys/pci/Makefile
+@@ -0,0 +1,7 @@
++TESTSDIR=	${TESTSBASE}/sys/pci
++
++ATF_TESTS_C=	pci_host_generic_quirks_test
++
++CFLAGS+=	-I${SRCTOP}/sys/dev/pci
++
++.include <bsd.test.mk>
+diff --git a/tests/sys/pci/Makefile.depend b/tests/sys/pci/Makefile.depend
+new file mode 100644
+index 000000000..1af0c88e0
+--- /dev/null
++++ b/tests/sys/pci/Makefile.depend
+@@ -0,0 +1,17 @@
++# Autogenerated - do NOT edit!
++
++DIRDEPS = \
++	gnu/lib/csu \
++	include \
++	include/xlocale \
++	lib/${CSU_DIR} \
++	lib/atf/libatf-c \
++	lib/libc \
++	lib/libcompiler_rt \
++
++
++.include <dirdeps.mk>
++
++.if ${DEP_RELDIR} == ${_DEP_RELDIR}
++# local dependencies - needed for -jN in clean tree
++.endif
+diff --git a/tests/sys/pci/pci_host_generic_quirks_test.c b/tests/sys/pci/pci_host_generic_quirks_test.c
+new file mode 100644
+index 000000000..d61b6ac32
+--- /dev/null
++++ b/tests/sys/pci/pci_host_generic_quirks_test.c
+@@ -0,0 +1,178 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 REVYTECH, Inc.
++ */
++
++/*
++ * Tests for the pure helpers of the generic ECAM PCIe host driver: the
++ * ACPI MCFG OEM quirk table and the narrow-read extraction used by
++ * controllers that only answer aligned 32-bit configuration reads.
++ */
++
++#include <sys/param.h>
++
++#include "pci_host_generic_quirks.h"
++
++#include <atf-c.h>
++
++/* Config space dword at offset 0 of an AMD 1002:1478 switch, little end. */
++#define	DW_ID		0x14781002u
++/* Dword at offset 8: class 0x060400, revision 0x12. */
++#define	DW_CLASS	0x06040012u
++
++ATF_TC_WITHOUT_HEAD(ecam_extract_dword);
++ATF_TC_BODY(ecam_extract_dword, tc)
++{
++
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x00, 4), DW_ID);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x08, 4), DW_CLASS);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0xffc, 4), DW_CLASS);
++}
++
++ATF_TC_WITHOUT_HEAD(ecam_extract_word);
++ATF_TC_BODY(ecam_extract_word, tc)
++{
++
++	/* PCIR_VENDOR (0x00) and PCIR_DEVICE (0x02). */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x00, 2), 0x1002u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x02, 2), 0x1478u);
++	/* PCIR_SUBCLASS/PCIR_CLASS as a word at 0x0a. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x0a, 2), 0x0604u);
++	/* Only the low two bits of the offset select the lane. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x102, 2), 0x1478u);
++}
++
++ATF_TC_WITHOUT_HEAD(ecam_extract_byte);
++ATF_TC_BODY(ecam_extract_byte, tc)
++{
++
++	ATF_CHECK_EQ(pcie_ecam_extract(0xddccbbaau, 0x0, 1), 0xaau);
++	ATF_CHECK_EQ(pcie_ecam_extract(0xddccbbaau, 0x1, 1), 0xbbu);
++	ATF_CHECK_EQ(pcie_ecam_extract(0xddccbbaau, 0x2, 1), 0xccu);
++	ATF_CHECK_EQ(pcie_ecam_extract(0xddccbbaau, 0x3, 1), 0xddu);
++	/* PCIR_REVID, PCIR_PROGIF, PCIR_SUBCLASS, PCIR_CLASS. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x08, 1), 0x12u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x09, 1), 0x00u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x0a, 1), 0x04u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_CLASS, 0x0b, 1), 0x06u);
++}
++
++ATF_TC_WITHOUT_HEAD(ecam_extract_every_lane);
++ATF_TC_BODY(ecam_extract_every_lane, tc)
++{
++	uint32_t dw;
++	u_int reg;
++
++	/* Every byte of every dword of a 4 KiB config space. */
++	for (reg = 0; reg <= 0xfff; reg++) {
++		dw = 0x01010101u * (reg & ~3u) ^ 0xa5c3e1f0u;
++		ATF_CHECK_EQ(pcie_ecam_extract(dw, reg, 1),
++		    (dw >> ((reg & 3) * 8)) & 0xff);
++		if ((reg & 3) != 3)
++			ATF_CHECK_EQ(pcie_ecam_extract(dw, reg, 2),
++			    (dw >> ((reg & 3) * 8)) & 0xffff);
++		if ((reg & 3) == 0)
++			ATF_CHECK_EQ(pcie_ecam_extract(dw, reg, 4), dw);
++	}
++}
++
++ATF_TC_WITHOUT_HEAD(ecam_extract_misaligned);
++ATF_TC_BODY(ecam_extract_misaligned, tc)
++{
++
++	/* A word at lane 1 is inside the dword. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x01, 2), 0x7810u);
++	/* A word or dword that would cross its dword reads as all-ones. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x03, 2), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x103, 2), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x01, 4), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x02, 4), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x03, 4), ~0u);
++	/* Unsupported widths. */
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x00, 0), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x00, 3), ~0u);
++	ATF_CHECK_EQ(pcie_ecam_extract(DW_ID, 0x00, 8), ~0u);
++}
++
++/* The MCFG header of an Ampere Altra (Mt. Jade) as acpidump shows it. */
++ATF_TC_WITHOUT_HEAD(quirks_ampere_altra);
++ATF_TC_BODY(quirks_ampere_altra, tc)
++{
++
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "Altra   ", 1),
++	    PCIE_ECAM_32BIT_READ_QUIRK);
++}
++
++ATF_TC_WITHOUT_HEAD(quirks_ampere_other);
++ATF_TC_BODY(quirks_ampere_other, tc)
++{
++
++	/* Linux matches OEM revision 1 only; so do we. */
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "Altra   ", 0), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "Altra   ", 2), 0);
++	/* Other Ampere tables (AmpereOne, eMAG) are not Altra. */
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "AmpereOn", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "eMAG    ", 1), 0);
++	/* The id is compared over its full width, padding included. */
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Ampere", "AltraMax", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("Amper ", "Altra   ", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("AMPERE", "ALTRA   ", 1), 0);
++}
++
++ATF_TC_WITHOUT_HEAD(quirks_others_inert);
++ATF_TC_BODY(quirks_others_inert, tc)
++{
++
++	/* Typical MCFG OEM ids of other arm64 and amd64 machines. */
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("ALASKA", "A M I   ", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("BOCHS ", "BXPC    ", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("AMAZON", "AMZNFACP", 0), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("NVIDIA", "TEGRA194", 1), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("HISI  ", "HIP08   ", 0), 0);
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("\0\0\0\0\0\0", "\0\0\0\0\0\0\0\0",
++	    0), 0);
++}
++
++ATF_TC_WITHOUT_HEAD(quirks_marvell_unchanged);
++ATF_TC_BODY(quirks_marvell_unchanged, tc)
++{
++	static const struct {
++		const char *oem_id;
++		const char *oem_table_id;
++	} dw[] = {
++		{ "MRVL  ", "CN9130  " },
++		{ "MRVL  ", "CN913X  " },
++		{ "MVEBU ", "ARMADA7K" },
++		{ "MVEBU ", "ARMADA8K" },
++		{ "MVEBU ", "CN9130  " },
++		{ "MVEBU ", "CN9131  " },
++		{ "MVEBU ", "CN9132  " },
++	};
++	size_t i;
++
++	/* The DesignWare entries match any OEM revision, as before. */
++	for (i = 0; i < nitems(dw); i++) {
++		ATF_CHECK_EQ(pci_acpi_oem_quirks(dw[i].oem_id,
++		    dw[i].oem_table_id, 0), PCIE_ECAM_DESIGNWARE_QUIRK);
++		ATF_CHECK_EQ(pci_acpi_oem_quirks(dw[i].oem_id,
++		    dw[i].oem_table_id, 0x20180901), PCIE_ECAM_DESIGNWARE_QUIRK);
++	}
++	ATF_CHECK_EQ(pci_acpi_oem_quirks("MVEBU ", "ARMADA9K", 0), 0);
++}
++
++ATF_TP_ADD_TCS(tp)
++{
++
++	ATF_TP_ADD_TC(tp, ecam_extract_dword);
++	ATF_TP_ADD_TC(tp, ecam_extract_word);
++	ATF_TP_ADD_TC(tp, ecam_extract_byte);
++	ATF_TP_ADD_TC(tp, ecam_extract_every_lane);
++	ATF_TP_ADD_TC(tp, ecam_extract_misaligned);
++	ATF_TP_ADD_TC(tp, quirks_ampere_altra);
++	ATF_TP_ADD_TC(tp, quirks_ampere_other);
++	ATF_TP_ADD_TC(tp, quirks_others_inert);
++	ATF_TP_ADD_TC(tp, quirks_marvell_unchanged);
++
++	return (atf_no_error());
++}
