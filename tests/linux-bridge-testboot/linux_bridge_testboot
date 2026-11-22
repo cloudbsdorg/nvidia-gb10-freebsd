@@ -25,9 +25,15 @@
 # Phase A (no Linux layer): the modules are loaded, no linux* kmod is loaded,
 #   /dev/nvidiactl and /dev/nvidia0 exist, nvrm-info (libnvrm, Track #2378)
 #   runs its whole proof against the real driver.
-# Phase B (the Linux layer on top): linux64 is loaded (service linux
-#   onestart), then nvidia_linux and nvidia_modeset_linux load; the Linux CUDA
-#   smoke runs (needs nvidia-uvm.ko in the BE; skipped otherwise).
+# Provenance: rows P1-staged and A1-staged-* / B2-staged-* prove that the modules the
+#   kernel loaded (kldstat -v path, sha256 of that file) are the ones make-be.sh staged;
+#   HASH-staged and HASH-loaded rows carry both hashes for summarize.sh, and the start
+#   row names the kit commit.
+# Phase B (the Linux layer on top): linux64 is loaded (the linux service), then
+#   rc.d/nvidia_linux runs in AUTO mode with linux_enable=YES (the user-facing path) and
+#   loads nvidia_linux and nvidia_modeset_linux; a Linux process sends one NVKMS ioctl
+#   (B3-nvkms-ioctl); the Linux CUDA smoke runs (needs nvidia-uvm.ko in the BE; skipped
+#   otherwise).
 # Phase B also records the kldstat Refs of nvidia and nvidia-modeset before and after
 #   each provider loads (rows B2-refs-*): the provider must add exactly one.
 # Phase C (unload order): kldunload nvidia and nvidia-modeset must be REFUSED
@@ -38,9 +44,10 @@
 #   nothing holds the device; it is skipped when the nvidia-drm module is
 #   loaded (it depends on the core).
 #
-# This script never reboots: the dead-man timer of deadman_arm() is armed at
-# the start and cancelled at the done row, and lets the BE fall back if a step
-# hangs. Overrides (rc.conf): linux_bridge_testboot_logroot (a root-owned
+# The last step is testboot-return (vendored, see VENDOR): after the results are copied out
+# it brings the host back to the normal boot environment. The dead-man timer of deadman_arm()
+# is armed at the start and lets the BE fall back if a step hangs; it stays pending through the
+# return unless the return is held. Overrides (rc.conf): linux_bridge_testboot_logroot (a root-owned
 # directory, default /var/log/linux_bridge_testboot; the run directory under it
 # is made with mktemp), _nvrm_info, _nvrm_proof, _cudarun and _user (both
 # unset by default: row B4 is then a skip), _deadman (minutes, 0 disables).
@@ -60,6 +67,13 @@ stop_cmd=:
 : "${linux_bridge_testboot_deadman:=45}"
 : "${linux_bridge_testboot_owner:=0}"	# the uid that must own the log root (the tests use their own)
 : "${linux_bridge_testboot_version:=/usr/local/etc/linux_bridge_testboot.version}"
+: "${linux_bridge_testboot_hashes:=/usr/local/etc/linux_bridge_testboot.sha256}"	# "<sha256> <file>" of the staged modules, written by make-be.sh
+: "${linux_bridge_testboot_stagedir:=/boot/modules.nvtest}"
+: "${linux_bridge_testboot_probe:=/usr/local/libexec/nvkms_ioctl_probe}"	# the Linux NVKMS ioctl probe; unset or absent: row B3-nvkms-ioctl is a skip
+: "${linux_bridge_testboot_rcconfd:=/etc/rc.conf.d}"	# where phase B turns the Linuxulator and rc.d/nvidia_linux on (the tests use their own)
+: "${linux_bridge_testboot_normal_be:=}"	# the boot environment to return to; make-be.sh always writes it (no default: a host-specific name would drift)
+: "${linux_bridge_testboot_return:=/usr/local/sbin/testboot-return}"
+: "${linux_bridge_testboot_copyout:=}"	# a directory in the home dataset (survives the return to the normal BE); make-be.sh sets it
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=
@@ -73,6 +87,34 @@ row()	# row <name> <pass|fail|info|skip|running|done> <detail>
 running() { row "$1" running "$2"; }
 
 loaded() { kldstat -q -m "$1" 2>/dev/null; }
+
+# staged_hash <file name>: the sha256 make-be.sh recorded for the staged file
+staged_hash() { awk -v f="$1" '$2 == f { print $1; exit }' "$linux_bridge_testboot_hashes" 2>/dev/null; }
+
+# loaded_path <module file name>: the path kldstat -v prints for the loaded file
+loaded_path() { kldstat -v -n "$1" 2>/dev/null | sed -n '2s/.*(\(.*\))$/\1/p'; }
+
+# loaded_proof <row> <file name>: the file the kernel loaded is the staged one: kldstat -v
+# names its path, the path is the staged directory's, and the sha256 of that file is the
+# staged hash. HASH-staged and HASH-loaded rows carry both hashes for summarize.sh.
+loaded_proof()
+{
+	_lp=$(loaded_path "$2")
+	_sh=$(staged_hash "$2")
+	_lh=
+	[ -z "$_lp" ] || _lh=$(sha256 -q "$_lp" 2>/dev/null)
+	row HASH-staged info "$2 ${_sh:-none}"
+	row HASH-loaded info "$2 ${_lh:-none}"
+	if [ -z "$_lp" ] || [ -z "$_sh" ] || [ -z "$_lh" ]; then
+		row "$1" fail "cannot prove $2 is the staged file (kldstat path [$_lp], staged hash [$_sh], loaded hash [$_lh])"
+	elif [ "$_lp" != "$linux_bridge_testboot_stagedir/$2" ]; then
+		row "$1" fail "$2 was loaded from $_lp, not from $linux_bridge_testboot_stagedir"
+	elif [ "$_lh" != "$_sh" ]; then
+		row "$1" fail "$_lp has sha256 $_lh, the staged file has $_sh"
+	else
+		row "$1" pass "$2 loaded from $_lp with the staged sha256 $_sh"
+	fi
+}
 
 # refs_of <file name>: the Refs column of kldstat -n (a FILE name: nvidia, nvidia-modeset).
 refs_of() { kldstat -n "$1" 2>/dev/null | awk 'NR == 2 { print $2 }'; }
@@ -132,6 +174,21 @@ linux_bridge_testboot_start()
 	echo "== phase A: no Linux layer"
 	loaded nvidia && row A1-nvidia pass "nvidia is loaded" || row A1-nvidia fail "nvidia is not loaded"
 	loaded nvidia_modeset && row A1-modeset pass "nvidia_modeset is loaded" || row A1-modeset fail "nvidia_modeset is not loaded: add it to kld_list"
+	# provenance: the staged directory still holds what make-be.sh staged, and what the kernel loaded is it
+	_bad=
+	while read -r _h _f; do
+		[ -n "$_f" ] || continue
+		[ "$(sha256 -q "$linux_bridge_testboot_stagedir/$_f" 2>/dev/null)" = "$_h" ] || _bad="$_bad $_f"
+	done < "$linux_bridge_testboot_hashes" 2>/dev/null
+	if [ ! -s "$linux_bridge_testboot_hashes" ]; then
+		row P1-staged fail "no hash list at $linux_bridge_testboot_hashes (make-be.sh writes it into the boot environment)"
+	elif [ -n "$_bad" ]; then
+		row P1-staged fail "the staged files differ from the hash list in $linux_bridge_testboot_stagedir:$_bad"
+	else
+		row P1-staged pass "every module in $linux_bridge_testboot_hashes has the staged sha256 in $linux_bridge_testboot_stagedir"
+	fi
+	loaded nvidia && loaded_proof A1-staged-nvidia nvidia.ko
+	loaded nvidia_modeset && loaded_proof A1-staged-modeset nvidia-modeset.ko
 	_l=$(linux_kmods | tr '\n' ' ')
 	[ -z "$_l" ] && row A2-no-linux pass "no linux, linux64 or linux_common kmod is loaded" \
 	    || row A2-no-linux fail "Linuxulator modules are loaded: $_l"
@@ -152,34 +209,59 @@ linux_bridge_testboot_start()
 
 	echo "== phase B: the Linux layer on top"
 	running B1-load "linux64 and the providers load now"
+	# the user-facing path: rc.d/nvidia_linux in AUTO mode with the Linuxulator configured,
+	# as a user would have it (the BE shipped linux_enable=NO so that phase A stayed clean)
+	printf 'linux_enable="YES"\n' > "$linux_bridge_testboot_rcconfd/linux"
+	printf 'nvidia_linux_mode="AUTO"\n' > "$linux_bridge_testboot_rcconfd/nvidia_linux"
 	service linux onestart > "$OUT/linux-start.txt" 2>&1
 	loaded linux64elf && row B1-linux64 pass "linux64elf is loaded" || row B1-linux64 fail "linux64elf did not load: $(tail -1 "$OUT/linux-start.txt")"
 	_r0=$(refs_of nvidia)
 	kldstat -v > "$OUT/refs-B2-refs-nvidia-before.txt" 2>&1
-	if kldload nvidia_linux > "$OUT/kldload-nvidia_linux.txt" 2>&1; then
-		row B2-nvidia_linux pass "nvidia_linux loaded"
+	_m0=
+	if loaded nvidia_modeset; then
+		_m0=$(refs_of nvidia-modeset)
+		kldstat -v > "$OUT/refs-B2-refs-modeset-before.txt" 2>&1
+	fi
+	service nvidia_linux onestart > "$OUT/rc-nvidia_linux.txt" 2>&1
+	_rc=$?
+	[ "$_rc" -eq 0 ] && row B2-rc pass "rc.d/nvidia_linux (AUTO, linux_enable=YES) exited 0" \
+	    || row B2-rc fail "rc.d/nvidia_linux exited $_rc: $(tail -2 "$OUT/rc-nvidia_linux.txt")"
+	if loaded nvidia_linux; then
+		row B2-nvidia_linux pass "nvidia_linux loaded by rc.d/nvidia_linux"
 		refs_row B2-refs-nvidia nvidia "$_r0" "$(refs_of nvidia)" nvidia_linux
+		loaded_proof B2-staged-nvidia_linux nvidia_linux.ko
 	else
-		row B2-nvidia_linux fail "kldload nvidia_linux: $(tail -1 "$OUT/kldload-nvidia_linux.txt")"
+		row B2-nvidia_linux fail "rc.d/nvidia_linux did not load nvidia_linux: $(tail -1 "$OUT/rc-nvidia_linux.txt")"
 		row B2-refs-nvidia fail "nvidia_linux did not load: no reference count to compare"
 	fi
 	if loaded nvidia_modeset; then
-		_r0=$(refs_of nvidia-modeset)
-		kldstat -v > "$OUT/refs-B2-refs-modeset-before.txt" 2>&1
-		if kldload nvidia_modeset_linux > "$OUT/kldload-nvidia_modeset_linux.txt" 2>&1; then
-			row B2-modeset_linux pass "nvidia_modeset_linux loaded"
-			refs_row B2-refs-modeset nvidia-modeset "$_r0" "$(refs_of nvidia-modeset)" nvidia_modeset_linux
+		if loaded nvidia_modeset_linux; then
+			row B2-modeset_linux pass "nvidia_modeset_linux loaded by rc.d/nvidia_linux"
+			refs_row B2-refs-modeset nvidia-modeset "$_m0" "$(refs_of nvidia-modeset)" nvidia_modeset_linux
+			loaded_proof B2-staged-modeset_linux nvidia_modeset_linux.ko
 		else
-			row B2-modeset_linux fail "kldload nvidia_modeset_linux: $(tail -1 "$OUT/kldload-nvidia_modeset_linux.txt")"
+			row B2-modeset_linux fail "rc.d/nvidia_linux did not load nvidia_modeset_linux: $(tail -1 "$OUT/rc-nvidia_linux.txt")"
 			row B2-refs-modeset fail "nvidia_modeset_linux did not load: no reference count to compare"
 		fi
 	else
 		row B2-modeset_linux skip "nvidia_modeset is not loaded"
 		row B2-refs-modeset skip "nvidia_modeset is not loaded"
 	fi
+	# one Linux NVKMS ioctl through nvidia_modeset_linux, as root in the Linuxulator
+	if ! loaded nvidia_modeset_linux; then
+		row B3-nvkms-ioctl skip "nvidia_modeset_linux is not loaded"
+	elif [ ! -x "$linux_bridge_testboot_probe" ]; then
+		row B3-nvkms-ioctl skip "no $linux_bridge_testboot_probe in this BE"
+	else
+		running B3-nvkms-ioctl "a Linux process sends the NVKMS ioctl"
+		timeout -k 5 60 "$linux_bridge_testboot_probe" > "$OUT/nvkms-probe.txt" 2>&1
+		_rc=$?
+		[ "$_rc" -eq 0 ] && row B3-nvkms-ioctl pass "the NVKMS ioctl of a Linux process reached nvidia-modeset: $(tail -1 "$OUT/nvkms-probe.txt")" \
+		    || row B3-nvkms-ioctl fail "the Linux NVKMS probe exited $_rc: $(tail -1 "$OUT/nvkms-probe.txt")"
+	fi
 	kldstat -v > "$OUT/kldstat-linux.txt" 2>&1
-	if [ -f /boot/modules.nvtest/nvidia-uvm.ko ] && ! loaded nvidia_uvm; then
-		kldload /boot/modules.nvtest/nvidia-uvm.ko > "$OUT/kldload-uvm.txt" 2>&1 || row B3-uvm fail "kldload nvidia-uvm: $(tail -1 "$OUT/kldload-uvm.txt")"
+	if [ -f "$linux_bridge_testboot_stagedir/nvidia-uvm.ko" ] && ! loaded nvidia_uvm; then
+		kldload "$linux_bridge_testboot_stagedir/nvidia-uvm.ko" > "$OUT/kldload-uvm.txt" 2>&1 || row B3-uvm fail "kldload nvidia-uvm: $(tail -1 "$OUT/kldload-uvm.txt")"
 	fi
 	if [ -n "$linux_bridge_testboot_user" ] && [ -f "$linux_bridge_testboot_cudarun" ] && loaded nvidia_uvm; then
 		running B4-cuda "Linux CUDA smoke through nvidia_linux"
@@ -253,9 +335,59 @@ linux_bridge_testboot_start()
 	fi
 	kldstat -v > "$OUT/kldstat-end.txt" 2>&1
 	dmesg > "$OUT/dmesg-end.txt" 2>&1
-	deadman_cancel
 	row done info "finished $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo "linux_bridge_testboot: results in $OUT"
+	# copy out: the home directory is a separate dataset and survives the return to the normal boot
+	# environment; the destination is made here (never reused) and is not a symbolic link
+	_dst=
+	if [ -n "$linux_bridge_testboot_copyout" ]; then
+		_dst=$linux_bridge_testboot_copyout/$(basename "$OUT")
+		# root writes into a path a user owns: refuse a copy-out directory that is a link, and make the
+		# run directory fresh (mkdir fails on anything that exists, a link included)
+		if [ ! -L "$linux_bridge_testboot_copyout" ] && mkdir -p "$linux_bridge_testboot_copyout" && [ ! -L "$linux_bridge_testboot_copyout" ] && mkdir "$_dst" && cp -Rp "$OUT/." "$_dst/"; then
+			echo "== copied the run to $_dst"
+		else
+			_be=$(mount -p / 2> /dev/null | awk 'NR == 1 { print $1 }')
+			row copyout fail "could not copy the run to $_dst: it stays in $OUT of the boot environment ${_be:-unknown} (the test BE, kept until it is destroyed)"
+			row done info "after a failed copy-out"
+			echo "== COULD NOT copy the run to $_dst: it stays in $OUT of the boot environment ${_be:-unknown}"
+			_dst=
+		fi
+	fi
+	sync
+	# the last step, always: back to the normal boot environment. The dead-man timer stays pending
+	# unless the return is deliberately held (exit 3: a live agent holds the host); a failed return
+	# must still end in a restart.
+	if [ -z "$linux_bridge_testboot_normal_be" ]; then
+		row return fail "no linux_bridge_testboot_normal_be: the host is NOT returned to a normal boot environment by this kit (the dead-man timer, if armed, still restarts it)"
+		row done info "after the missing return"
+		[ -z "$_dst" ] || cp "$OUT/results.jsonl" "$_dst/" 2> /dev/null
+		echo "== no normal BE named: testboot-return not called"
+		return 0
+	fi
+	"$linux_bridge_testboot_return" "$linux_bridge_testboot_normal_be" > "$OUT/testboot-return.txt" 2>&1
+	_trc=$?
+	echo "== testboot-return exit $_trc"
+	cat "$OUT/testboot-return.txt"
+	# the return's own output is not in the copy made above: add it, so a failed return leaves a record
+	[ -z "$_dst" ] || cp "$OUT/testboot-return.txt" "$_dst/" 2> /dev/null
+	# only a return that did not restart the host is seen here: 3 is a held return (not a failure), 0 is
+	# the host already on the normal boot environment, anything else failed and is a row in the results,
+	# which then end with a second done row (and are copied out again)
+	case $_trc in
+	0) ;;
+	3)
+		row return info "testboot-return is held (exit 3): the return is still owed"
+		row done info "after a held return"
+		[ -z "$_dst" ] || cp "$OUT/results.jsonl" "$_dst/" 2> /dev/null
+		deadman_cancel
+		;;
+	*)
+		row return fail "testboot-return exited $_trc: $(tail -1 "$OUT/testboot-return.txt")"
+		row done info "after a failed return"
+		[ -z "$_dst" ] || cp "$OUT/results.jsonl" "$_dst/" 2> /dev/null
+		;;
+	esac
 	return 0
 }
 

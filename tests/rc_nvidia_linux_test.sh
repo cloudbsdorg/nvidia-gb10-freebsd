@@ -164,5 +164,17 @@ STUB_LOADED=$TMPD/loaded STUB_LOG=$TMPD/log PATH=$TMPD/bin:$PATH NVIDIA_LINUX_RC
     && fail "start reported success although kldload failed" || pass "start fails when kldload fails"
 unset STUB_KLDLOAD_FAIL
 
+# the script reads rc.conf.d/linux (where linux_enable may live) as well as its own: load_rc_config linux
+# comes before load_rc_config $name, which comes before run_rc_command
+rc_loads_linux() {	# rc_loads_linux <script>
+	_a=$(grep -n '^load_rc_config linux$' "$1" | head -1 | cut -d: -f1)
+	_b=$(grep -n '^load_rc_config \$name$' "$1" | head -1 | cut -d: -f1)
+	_c=$(grep -n '^run_rc_command' "$1" | head -1 | cut -d: -f1)
+	[ -n "$_a" ] && [ -n "$_b" ] && [ -n "$_c" ] && [ "$_a" -lt "$_b" ] && [ "$_b" -lt "$_c" ]
+}
+rc_loads_linux "$RC" && pass "the script loads the rc.conf.d of linux before its own" || fail "the script does not load rc.conf.d/linux (linux_enable may be set there)"
+grep -v '^load_rc_config linux$' "$RC" > "$TMPD/plant-nolinuxconf.sh"
+rc_loads_linux "$TMPD/plant-nolinuxconf.sh" && fail "plant: a script that never loads rc.conf.d/linux passed" || pass "plant: a script that never loads rc.conf.d/linux is refused"
+
 if [ "$fails" -ne 0 ]; then echo "rc_nvidia_linux_test: $fails FAILED" >&2; exit 1; fi
 echo "rc_nvidia_linux_test: all passed"

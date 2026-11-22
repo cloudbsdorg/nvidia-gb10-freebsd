@@ -119,6 +119,8 @@ nvidia_linux_status()
 # The tests source this file to reach the functions above.
 [ -n "${NVIDIA_LINUX_RC_SOURCE_ONLY:-}" ] && return 0 2>/dev/null
 
+# linux_enable belongs to rc.d/linux: its rc.conf.d/linux is a file load_rc_config $name does not read
+load_rc_config linux
 load_rc_config $name
 : ${nvidia_linux_mode:=AUTO}
 run_rc_command "$1"
