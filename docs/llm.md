@@ -2,8 +2,74 @@
 
 How to run llama.cpp on an arm64 FreeBSD machine with a GPU, and what it does on the one
 machine measured so far: an Ampere Altra running FreeBSD 16.0-CURRENT with an AMD Radeon RX
-7600 and an NVIDIA GeForce RTX 5060 Ti. The AMD card works today, from packages. The NVIDIA
-card does not run llama.cpp yet (see [NVIDIA](#nvidia) below).
+7600 and an NVIDIA GeForce RTX 5060 Ti. The AMD card and the CPU run llama.cpp natively. The
+NVIDIA card has no native path yet; it runs only through NVIDIA's Linux libraries under the
+Linuxulator, as a last resort (see [NVIDIA](#nvidia) below).
+
+Rule: if the native underpinnings exist, the workload is native. A Linuxulator run where a
+native path exists is invalid. `scripts/native-path-check`
+([native-path-check(1)](../man/native-path-check.1)) checks a benchmark history against
+the registry [`native-paths.json`](native-paths.json); see
+[Linux dependencies](LINUX-DEPENDENCY-AUDIT.md) for every layer.
+
+## Native build from source (b12627)
+
+The newest llama.cpp release is b12627 (225a5345b, 2026-11-22; the `v1.0.0` tag is older than
+b12531). It builds natively with the base compiler; two settings are needed on FreeBSD:
+
+```sh
+# b12627 by commit, so a moved tag cannot change what is built
+git init src && git -C src fetch --depth 1 https://github.com/ggml-org/llama.cpp \
+    225a5345bbb0e0c70859af5441ba922beb666fcf && git -C src checkout --detach FETCH_HEAD
+cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_NATIVE=ON -DGGML_VULKAN=ON -DGGML_RPC=ON \
+    -DGGML_RPC_RDMA=OFF \
+    -DCMAKE_SHARED_LINKER_FLAGS=-pthread \
+    -DLLAMA_CURL=OFF -DLLAMA_BUILD_UI=OFF
+ninja -C build
+```
+
+- `GGML_RPC_RDMA=OFF`: CMake turns RDMA on when it finds base `libibverbs`, which is too old
+  (`IBV_GID_TYPE_IB` and `ibv_gid_entry` are missing).
+- `-pthread` for shared libraries: otherwise `libggml-rpc.so` fails to link
+  (`undefined reference: pthread_create`).
+- A CPU-only build is the same with `-DGGML_VULKAN=OFF -DGGML_RPC=OFF`.
+
+Pick the card by PCI bus, not by number. `pciconf -l` shows the AMD card (vendor 0x1002) and
+its bus in decimal; `llama-bench --list-devices` prints `VulkanN: <name>` in ggml's order, which
+skips CPU devices such as llvmpipe. When two devices have the same name, match the bus: in
+`vulkaninfo`, `pciDomain`/`pciBus`/`pciDevice` (decimal) under each GPU; count only the
+non-CPU GPUs to get N.
+
+```sh
+pciconf -l | grep 'vendor=0x1002'                      # vgapciM@pciD:B:S:F
+llama-bench --list-devices                              # Vulkan0: AMD Radeon RX 7600 (RADV NAVI33)
+vulkaninfo | grep -E '^GPU[0-9]|deviceType|pciDomain|pciBus'
+```
+
+## Native numbers, 2026-11-22
+
+`llama-bench -ngl 99 -t 8 -r 3 -p 512 -n 128` (`-t 64` for the 64-thread row), tokens per
+second; `fa` is flash attention (`-fa`). RX 7600 on Mesa RADV 26.2.2. b12627 and b12531 were run
+back to back, twice, in alternating order; the table gives the second pass. The CPU was measured
+with b12627 only (n/a: not run).
+
+| Card | Model | fa | b12627 pp512 | b12531 pp512 | b12627 tg128 | b12531 tg128 |
+|---|---|---|---|---|---|---|
+| RX 7600 | Llama 3.2 3B Q4_K_M | 1 | 2340.30 ± 5.71 | 2355.83 ± 21.74 | 78.64 ± 0.05 | 79.07 ± 0.04 |
+| RX 7600 | Llama 2 7B Q4_0 | 0 | 1143.79 ± 2.22 | 1147.08 ± 3.45 | 48.31 ± 0.08 | 48.27 ± 0.06 |
+| RX 7600 | Llama 2 7B Q4_0 | 1 | 1349.08 ± 2.99 | 1354.96 ± 1.63 | 51.68 ± 0.05 | 51.65 ± 0.02 |
+| CPU, 8 threads | Llama 3.2 3B Q4_K_M | 1 | 83.44 ± 0.16 | n/a | 25.16 ± 0.15 | n/a |
+| CPU, 8 threads | Llama 2 7B Q4_0 | 0 | 46.93 ± 0.24 | n/a | 15.61 ± 0.07 | n/a |
+| CPU, 8 threads | Llama 2 7B Q4_0 | 1 | 55.13 ± 0.01 | n/a | 17.21 ± 0.09 | n/a |
+| CPU, 64 threads | Llama 2 7B Q4_0 | 1 | 405.03 ± 0.23 | n/a | 29.85 ± 0.03 | n/a |
+
+b12627 and b12531 are within 1% of each other on the Radeon. Against the published RX 7600
+Vulkan scoreboard row
+([llama.cpp discussion #10879](https://github.com/ggml-org/llama.cpp/discussions/10879)):
+pp512 −2.0% (fa 0) and −0.3% (fa 1), tg128 −16.7% and −15.1%. The raw `llama-bench` JSON is
+kept in the bench history (`$GB10_WORK/llm/history/runs/20261122T05*-native-*`).
+
 
 ## llama.cpp from packages, Vulkan on the AMD card
 
@@ -109,16 +175,26 @@ vLLM's disaggregated prefill needs CUDA or ROCm, and FreeBSD arm64 has neither.
 
 ## NVIDIA
 
-Not yet. llama.cpp's Vulkan backend needs NVIDIA's Linux Vulkan ICD under the Linuxulator
-(see the [README](../README.md#vulkan-linux-icd-under-the-linuxulator)). The official
-llama.cpp `ubuntu-vulkan-arm64` build already runs that way from a private Ubuntu 24.04 root,
-started through that root's dynamic linker with `GGML_BACKEND_PATH` pointing at its
-`libggml-vulkan.so`. It finds no device without the ICD; with the ICD it stops at the same
-`SIGBUS` as `vulkaninfo`. The fix (3414fd7) waits for a test boot; after it, the plan is the
-same `llama-bench` run (pp512, tg128) for a comparison with the RX 7600. For CUDA see the
-next section.
+No native path exists yet, so there is no native NVIDIA number:
 
-## CUDA (Linux libcuda through the Linuxulator)
+- Vulkan: NVIDIA publishes FreeBSD drivers for x86 and x86_64 only, so there is no FreeBSD
+  arm64 Vulkan ICD. Mesa NVK needs a kernel backend; nouveau is ruled out, and NVK on libnvrm
+  (RM-direct: talking to `nvidia.ko`, no nouveau) is Track
+  [#2379](https://track.cloudbsd.org/work_packages/2379).
+- CUDA: there is no FreeBSD CUDA driver or runtime. libnvrm S1 only enumerates GPUs. Native CUDA
+  is Track [#2362](https://track.cloudbsd.org/work_packages/2362).
+
+Linux-only, last resort: until then, llama.cpp runs on the NVIDIA card only as the official
+Ubuntu arm64 builds (`ubuntu-vulkan-arm64`, `ubuntu-cuda-13.5-arm64`) on NVIDIA's Linux
+libraries under the Linuxulator (see the
+[README](../README.md#vulkan-linux-icd-under-the-linuxulator)). A FreeBSD llama.cpp cannot load
+NVIDIA's Linux ICD or `libcuda`, so the whole process has to be Linux. The NVIDIA numbers (the
+README's [Numbers](../README.md#what-works-status-2026-11-20) and the bench history) are
+recorded with `"path": "linuxulator"` and `"path_status": "last-resort"`, and are replaced as
+soon as a native path exists.
+The Linux CUDA path is described in the next section.
+
+## CUDA (Linux libcuda through the Linuxulator; Linux-only, last resort)
 
 NVIDIA's Linux `libcuda.so.1` (580.178.04) runs under the Linuxulator against `nvidia.ko`
 and the clean-room `nvidia-uvm.ko` (uvm-bsd).

@@ -1,0 +1,13 @@
+{
+ "records": [
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "amd-rx7600",
+   "backend": "vulkan",
+   "path": "linuxulator",
+   "path_status": "superseded",
+   "model": "m",
+   "superseded_by": "20261122T0537Z-native-radv-b12627"
+  }
+ ]
+}

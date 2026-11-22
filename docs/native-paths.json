@@ -1,0 +1,10 @@
+{"version": 1,
+ "rule": "If the native underpinnings exist, the workload is native; a Linuxulator run where a native path exists is invalid.",
+ "paths": [
+  {"card": "amd-rx7600", "backend": "vulkan", "native": true, "how": "Mesa RADV + native FreeBSD llama.cpp build", "blocker": null, "tickets": [2424]},
+  {"card": "cpu-altra", "backend": "cpu", "native": true, "how": "native FreeBSD llama.cpp CPU build", "blocker": null, "tickets": [2424]},
+  {"card": "nvidia-rtx5060ti", "backend": "vulkan", "native": false, "how": null, "blocker": "no FreeBSD arm64 NVIDIA Vulkan ICD (NVIDIA ships FreeBSD x86/x86_64 only); Mesa NVK has no RM-direct (libnvrm) backend yet", "tickets": [2379]},
+  {"card": "nvidia-rtx5060ti", "backend": "cuda", "native": false, "how": null, "blocker": "no native CUDA driver or runtime on FreeBSD; libnvrm S1 only enumerates", "tickets": [2362, 2380]},
+  {"card": "split", "backend": "vulkan", "native": false, "how": null, "blocker": "the NVIDIA half of the RPC layer split has no native path (see nvidia-rtx5060ti vulkan)", "tickets": [2379]},
+  {"card": "both-concurrent", "backend": "vulkan", "native": false, "how": null, "blocker": "two servers at once, one per card; the NVIDIA server has no native path (see nvidia-rtx5060ti vulkan)", "tickets": [2379]}
+ ]}
