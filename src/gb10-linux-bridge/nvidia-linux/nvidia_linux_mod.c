@@ -124,5 +124,4 @@ NVBRIDGE_PROVIDER_MODULE(nvlinux, nvidia_linux);
 MODULE_VERSION(nvidia_linux, 1);
 /* nvidia 1 is today's core, 2 is the core with the #2373 client table. */
 MODULE_DEPEND(nvidia_linux, nvidia, 1, 2, 2);
-MODULE_DEPEND(nvidia_linux, linux64elf, 1, 1, 1);
-MODULE_DEPEND(nvidia_linux, linux_common, 1, 1, 1);
+NVBRIDGE_LINUXULATOR_DEPEND(nvidia_linux);

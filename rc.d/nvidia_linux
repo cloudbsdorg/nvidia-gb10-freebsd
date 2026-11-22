@@ -30,7 +30,7 @@ stop_cmd="${name}_stop"
 status_cmd="${name}_status"
 extra_commands="status"
 
-# nvidia_linux_wanted <mode> <linux_enable> <native-module-loaded 0|1>
+# nvidia_linux_wanted <mode> <YES|NO: checkyesno linux_enable> <native-module-loaded 0|1>
 # prints yes, no, or no-native (AUTO with the Linuxulator on and the native
 # module not loaded: the one refusal worth a message).
 nvidia_linux_wanted()
@@ -60,7 +60,7 @@ nvidia_linux_loaded()
 # the core's provider says it: a compute-only host has no nvidia_modeset).
 nvidia_linux_load_one()
 {
-	_want=$(nvidia_linux_wanted "$nvidia_linux_mode" "${linux_enable:-NO}" "$(nvidia_linux_loaded "$2")")
+	_want=$(nvidia_linux_wanted "$nvidia_linux_mode" "${nvidia_linux_linux_on:-NO}" "$(nvidia_linux_loaded "$2")")
 	case $_want in
 	yes) ;;
 	no-native)
@@ -73,6 +73,20 @@ nvidia_linux_load_one()
 	kldload "$1"
 }
 
+# nvidia_linux_linux_on: YES when the Linuxulator is configured, decided once per start.
+# rc.d/linux decides with checkyesno(), which accepts YES, TRUE, ON and 1 (any
+# case): AUTO must follow the same rule, or the Linuxulator starts and the
+# providers are silently skipped. An unset linux_enable is NO (the default is
+# set first so that checkyesno does not warn about an unset variable); an
+# unparsable value warns once, from checkyesno, and counts as NO.
+nvidia_linux_decide_linux()
+{
+	linux_enable=${linux_enable:-NO}
+	nvidia_linux_linux_on=NO
+	checkyesno linux_enable && nvidia_linux_linux_on=YES
+	return 0
+}
+
 nvidia_linux_start()
 {
 	case $nvidia_linux_mode in
@@ -80,6 +94,7 @@ nvidia_linux_start()
 	*) warn "nvidia_linux_mode must be AUTO, YES or NO (got '$nvidia_linux_mode'); loading nothing"; return 0 ;;
 	esac
 	_rc=0
+	nvidia_linux_decide_linux
 	nvidia_linux_load_one nvidia_linux nvidia 1 || _rc=1
 	nvidia_linux_load_one nvidia_modeset_linux nvidia_modeset 0 || _rc=1
 	return $_rc

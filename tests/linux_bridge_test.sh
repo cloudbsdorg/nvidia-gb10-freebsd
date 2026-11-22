@@ -10,7 +10,9 @@
 # Usage: tests/linux_bridge_test.sh [TREE]
 #   TREE  prepared and built working tree; default
 #         ${GB10_WORK:-$HOME/work/gb10}/build/tree-2363
-#   LINUX_BRIDGE_SKIP_FUZZ=1 skips the fresh-archive fuzz 0 apply (slow).
+#   LINUX_BRIDGE_SKIP_FUZZ=1 skips the fresh-archive fuzz 0 apply (slow);
+#   LINUX_BRIDGE_SKIP_AMD64=1 skips the amd64 cross-build (k). A skip is not a
+#   pass: with nothing failed and something skipped the exit status is 2.
 #
 # Checks, on the built modules:
 #   (a) nvidia.ko: no MODULE_DEPEND on linux, linuxelf, linux64elf or
@@ -20,12 +22,20 @@
 #   (c) nvidia.ko exports the bridge KPI (nvidia_bridge_register,
 #       nvidia_bridge_unregister), and defines no linux_ioctl handler;
 #   (d) nvidia-modeset.ko: the same as (a) and (b);
-#   (e) nvidia_linux.ko depends on exactly {nvidia, linux64elf, linux_common}
+#   (e) nvidia_linux.ko depends on exactly {nvidia, <L64>, linux_common}
 #       (kernel allowed), accepts nvidia 2 (vmax >= 2) and nvidia 1, and every
 #       undefined symbol resolves in the kernel, nvidia.ko or the Linuxulator
-#       modules it depends on;
-#   (f) nvidia_modeset_linux.ko depends on exactly {nvidia_modeset,
-#       linux64elf, linux_common};
+#       modules it depends on. <L64> is the 64-bit Linuxulator interface of the
+#       module's architecture: linux64elf on arm64, linux64 on amd64 (read from
+#       the ELF machine);
+#   (f) nvidia_modeset_linux.ko depends on exactly {nvidia_modeset, <L64>,
+#       linux_common};
+#   (k) both providers cross-built for amd64 (cc -target x86_64, SYSDIR from
+#       the environment; LINUX_BRIDGE_SKIP_AMD64=1 skips it) depend on linux64,
+#       not linux64elf, and kldxref(8) reads the same dependencies;
+#   (l) the provider constants match the pinned NVIDIA sources: the cdevsw
+#       names, the NVKMS ioctl command, and the core's glue (the zz patches)
+#       announces and removes each device with the same name and minor.
 #   (g) the patches apply to a fresh extraction of NVIDIA's archive with fuzz 0
 #       (patch -F0) and no rejects, in lexical order;
 #   (h) the core's nv-freebsd.h no longer defines NV_SUPPORT_LINUX_COMPAT
@@ -40,6 +50,7 @@ LC_ALL=C
 export PATH LC_ALL
 
 WORK=${GB10_WORK:-$HOME/work/gb10}
+NVPIN=580.178.04	# the pinned NVIDIA release every source path below names
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
 TREE=${1:-$WORK/build/tree-2363}
@@ -52,9 +63,16 @@ BRKO=$TREE/nvidia-linux/nvidia_linux.ko
 MSBRKO=$TREE/nvidia-modeset-linux/nvidia_modeset_linux.ko
 
 fails=0
+skips=0
 fail() {
 	echo "FAIL: $*" >&2
 	fails=$((fails + 1))
+}
+# skip <what>: a check that did not run. It is never a pass: the suite exits 2, not 0, when
+# nothing failed but something was skipped.
+skip() {
+	echo "SKIP: $*"
+	skips=$((skips + 1))
 }
 pass() {
 	echo "PASS: $*"
@@ -69,6 +87,14 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# the tools the checks read with: a missing one must not look like a module defect
+for _t in nm readelf cc mandoc; do
+	command -v "$_t" > /dev/null 2>&1 || { echo "FAIL: $_t not found on PATH ($PATH)" >&2; exit 1; }
+done
+# kldxref is needed by (k) only; it is checked there
+# the target triple of the cross-builds and plants (amd64 and the architecture refused below)
+XOS=freebsd$(uname -r | sed 's/[-.].*//').0
 
 # deps_of <obj>: sorted module names the object declares with MODULE_DEPEND.
 deps_of() {
@@ -111,6 +137,37 @@ check_exact_deps() {
 	_want=$(printf '%s\n' "$@" | sort -u)
 	_have=$(deps_of "$_obj" | grep -v '^kernel$' || true)
 	[ "$_have" = "$_want" ]
+}
+
+# l64_of <obj>: the 64-bit Linuxulator interface the object's architecture
+# needs: linux64elf on aarch64, linux64 on amd64 (FreeBSD's own shims do the
+# same: arm64/linux/linux_sysvec.c has MODULE_VERSION(linux64elf, 1),
+# amd64/linux/linux_sysvec.c MODULE_VERSION(linux64, 1)). Prints nothing for any
+# other machine.
+l64_of() {
+	case $(readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p') in
+	AArch64) echo linux64elf ;;
+	"Advanced Micro Devices X86-64") echo linux64 ;;
+	esac
+}
+
+# check_provider <obj> <native module>: the provider's dependency set is exactly
+# {native, the L64 name of its architecture, linux_common}.
+check_provider() {
+	_l64=$(l64_of "$1")
+	[ -n "$_l64" ] || { echo "unknown ELF machine in $1" >&2; return 1; }
+	check_exact_deps "$1" "$2" "$_l64" linux_common
+}
+
+# kx_deps_of <ko>: the dependency names kldxref -d reads from the module
+# (kernel left out), one per line, sorted. kldxref wants an absolute directory.
+kx_deps_of() {
+	_kd=$TMPD/kx.$$
+	rm -rf "$_kd"
+	mkdir -p "$_kd"
+	cp "$1" "$_kd/"
+	kldxref -d "$_kd" 2>/dev/null | sed -n 's/^ *depends on \([^ ]*\) .*/\1/p' | sed 's/\.[0-9]*$//' | grep -v '^kernel$' | sort -u
+	rm -rf "$_kd"
 }
 
 # dep_range <ko> <module> <dep>: struct mod_depend is three ints (minimum,
@@ -228,6 +285,18 @@ echo zz_undefined_sym > "$TMPD/somedefs"
 [ -z "$(unresolved_of "$TMPD/plant_unres.o" "$TMPD/somedefs")" ] && pass "control (e): a defined import resolves" || fail "control (e): a defined import was refused"
 # (f) the modeset provider set shares check_exact_deps: the same plants apply
 check_exact_deps "$TMPD/plant_extra_dep.o" nvidia_modeset linux64elf linux_common && fail "plant (f): a wrong dependency set was accepted" || pass "plant (f): a wrong modeset provider set is refused"
+# (e)/(f) per architecture: the L64 name follows the ELF machine. amd64 objects with linux64elf
+# (the defect: no such interface on amd64) are refused, linux64 is accepted, and the reverse on arm64.
+for _a in x86_64 aarch64; do
+	for _n in linux64 linux64elf; do
+		printf 'int _x_depend_on_nvidia;\nint _x_depend_on_linux_common;\nint _x_depend_on_%s;\n' "$_n" > "$TMPD/plant_arch_$_a$_n.c"
+		cc -c -target "$_a-unknown-$XOS" -o "$TMPD/plant_arch_$_a$_n.o" "$TMPD/plant_arch_$_a$_n.c" || { fail "cannot build the $_a plant"; continue; }
+	done
+done
+check_provider "$TMPD/plant_arch_x86_64linux64elf.o" nvidia && fail "plant (e): an amd64 provider depending on linux64elf was accepted" || pass "plant (e): an amd64 provider depending on linux64elf is refused"
+check_provider "$TMPD/plant_arch_x86_64linux64.o" nvidia && pass "control (e): an amd64 provider depending on linux64 is accepted" || fail "control (e): an amd64 provider depending on linux64 was refused"
+check_provider "$TMPD/plant_arch_aarch64linux64.o" nvidia && fail "plant (e): an arm64 provider depending on linux64 was accepted" || pass "plant (e): an arm64 provider depending on linux64 is refused"
+check_provider "$TMPD/plant_arch_aarch64linux64elf.o" nvidia && pass "control (e): an arm64 provider depending on linux64elf is accepted" || fail "control (e): an arm64 provider depending on linux64elf was refused"
 
 # ------------------------------------------------------- built modules
 need() {
@@ -251,7 +320,7 @@ else
 fi
 
 if need "$BRKO"; then
-	if check_exact_deps "$BRKO" nvidia linux64elf linux_common; then pass "(e) nvidia_linux.ko depends on exactly nvidia, linux64elf, linux_common"; else fail "(e) nvidia_linux.ko dependency set is: $(deps_of "$BRKO" | tr '\n' ' ')"; fi
+	if check_provider "$BRKO" nvidia; then pass "(e) nvidia_linux.ko depends on exactly nvidia, $(l64_of "$BRKO"), linux_common"; else fail "(e) nvidia_linux.ko dependency set is: $(deps_of "$BRKO" | tr '\n' ' ') (want nvidia, $(l64_of "$BRKO"), linux_common)"; fi
 	if _r=$(dep_range "$BRKO" nvidia_linux nvidia); then
 		if range_ok "$BRKO" nvidia_linux nvidia; then pass "(e) nvidia_linux.ko accepts nvidia 1 through 2 (range $_r)"; else fail "(e) nvidia_linux.ko nvidia range is $_r, want min <= 1 and max >= 2"; fi
 	else
@@ -269,7 +338,7 @@ if need "$BRKO"; then
 fi
 
 if need "$MSBRKO"; then
-	if check_exact_deps "$MSBRKO" nvidia_modeset linux64elf linux_common; then pass "(f) nvidia_modeset_linux.ko depends on exactly nvidia_modeset, linux64elf, linux_common"; else fail "(f) nvidia_modeset_linux.ko dependency set is: $(deps_of "$MSBRKO" | tr '\n' ' ')"; fi
+	if check_provider "$MSBRKO" nvidia_modeset; then pass "(f) nvidia_modeset_linux.ko depends on exactly nvidia_modeset, $(l64_of "$MSBRKO"), linux_common"; else fail "(f) nvidia_modeset_linux.ko dependency set is: $(deps_of "$MSBRKO" | tr '\n' ' ') (want nvidia_modeset, $(l64_of "$MSBRKO"), linux_common)"; fi
 fi
 
 # --------------------------------------------- (h) the define is no longer unconditional
@@ -282,7 +351,7 @@ else
 	fail "no $HDR"
 fi
 # plant for (h): the pristine header defines it unconditionally
-SRCHDR=$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04/src/nvidia/nv-freebsd.h
+SRCHDR=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN/src/nvidia/nv-freebsd.h
 if [ -f "$SRCHDR" ]; then
 	_bad=$(unconditional_define "$SRCHDR" NV_SUPPORT_LINUX_COMPAT 1)
 	if [ -n "$_bad" ]; then pass "plant (h): the pristine header is refused (line $_bad)"; else fail "plant (h): the check accepted the pristine unconditional define"; fi
@@ -297,7 +366,7 @@ if [ -f "$MSSRC" ]; then
 else
 	fail "no $MSSRC"
 fi
-MSPRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04/src/nvidia-modeset/nvidia-modeset-freebsd.c
+MSPRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN/src/nvidia-modeset/nvidia-modeset-freebsd.c
 if [ -f "$MSPRISTINE" ]; then
 	_bad=$(unconditional_define "$MSPRISTINE" NVKMS_SUPPORT_LINUX_COMPAT 0)
 	if [ -n "$_bad" ]; then pass "plant (h2): the pristine modeset source is refused (line $_bad)"; else fail "plant (h2): the check accepted the pristine unconditional define"; fi
@@ -305,10 +374,10 @@ fi
 
 # ----------------------------------------- (g) fuzz 0 on a fresh archive
 if [ "${LINUX_BRIDGE_SKIP_FUZZ:-0}" = 1 ]; then
-	echo "SKIP: (g) fuzz 0 apply (LINUX_BRIDGE_SKIP_FUZZ=1)"
+	skip "(g) fuzz 0 apply (LINUX_BRIDGE_SKIP_FUZZ=1)"
 else
-	TARBALL=$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04.tar.xz
-	TOP=NVIDIA-FreeBSD-x86_64-580.178.04
+	TARBALL=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN.tar.xz
+	TOP=NVIDIA-FreeBSD-x86_64-$NVPIN
 	if [ -f "$TARBALL" ]; then
 		FZ=$TMPD/fz
 		mkdir -p "$FZ"
@@ -355,7 +424,7 @@ docs_missing() {
 for pg in nvidia nvidia_linux; do
 	if [ -f "$REPO/man/$pg.4" ]; then
 		# a missing referenced page is allowed only when it is a page of this repo
-		_lint=$(mandoc -T lint -W warning "$REPO/man/$pg.4" 2>&1 | grep -v -E 'referenced manual not found: Xr (nvidia|nvidia_linux|nvidia_drm_render) 4' || true)
+		_lint=$(mandoc -T lint -W style "$REPO/man/$pg.4" 2>&1 | grep -v -E 'referenced manual not found: Xr (nvidia|nvidia_linux|nvidia_drm_render) 4' || true)
 		if [ -z "$_lint" ]; then pass "(i) man/$pg.4 is lint clean"; else fail "(i) man/$pg.4 lint: $_lint"; fi
 	else
 		fail "(i) no man/$pg.4"
@@ -369,6 +438,9 @@ if [ -f "$REPO/man/nvidia.4" ]; then
 	_m=$(docs_missing "$REPO/man/nvidia.4" nvidia_bridge_register nvidia_bridge_unregister NVIDIA_BRIDGE_KPI_VERSION NV_CORE_LINUX_COMPAT)
 	if [ -z "$_m" ]; then pass "(i) nvidia(4) documents the KPI and the legacy switch"; else fail "(i) nvidia(4) lacks: $_m"; fi
 fi
+# plant: -W style must catch a line over 80 bytes (the check used to run -W warning, which hides STYLE)
+{ printf '.Dd November 22, 2026\n.Dt PLANT 4\n.Os\n.Sh NAME\n.Nm plant\n.Nd plant\n.Sh DESCRIPTION\n'; printf 'word %.0s' $(seq 1 25); printf '\n'; } > "$TMPD/long.4"
+if [ -n "$(mandoc -T lint -W style "$TMPD/long.4" 2>&1 | grep 'longer than 80')" ] && [ -z "$(mandoc -T lint -W warning "$TMPD/long.4" 2>&1 | grep 'longer than 80')" ]; then pass "plant (i): -W style flags a line over 80 bytes, -W warning does not"; else fail "plant (i): the style lint cannot see a line over 80 bytes"; fi
 # plant: a page without the words is refused
 printf '.Dd x\n' > "$TMPD/empty.4"
 if [ -n "$(docs_missing "$TMPD/empty.4" nvidia_bridge_register)" ]; then pass "plant (i): a page without the KPI is refused"; else fail "plant (i): an empty page was accepted"; fi
@@ -382,8 +454,8 @@ grep -q 'nvidia_linux' "$REPO/README.md" && pass "(i) README names nvidia_linux"
 # the modeset provider repeats two numbers of the native driver: compare them
 BRDIR=$REPO/src/gb10-linux-bridge
 MPROV=$BRDIR/nvidia-modeset-linux/nvidia_modeset_linux_mod.c
-CHARNUM=$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04/src/nvidia/nv-chardev-numbers.h
-MSPRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-580.178.04/src/nvidia-modeset/nvidia-modeset-freebsd.c
+CHARNUM=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN/src/nvidia/nv-chardev-numbers.h
+MSPRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN/src/nvidia-modeset/nvidia-modeset-freebsd.c
 # num_of <file> <macro>: the number a "#define <macro> <n>" line gives
 num_of() { sed -n "s/^[[:space:]]*#[[:space:]]*define[[:space:]]*$2[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$1" | head -1; }
 if [ -f "$CHARNUM" ] && [ -f "$MSPRISTINE" ]; then
@@ -432,6 +504,15 @@ grep -q 'Track #2363' "$TMPD/doc_bad.md" && pass "plant (j): the Track-reference
 if ! sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep -q 'kld_list='; then fail "(j) the nvidia_linux(4) synopsis has no kld_list line to check"
 elif sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep 'kld_list=' | grep -q '_linux'; then fail "(j) the nvidia_linux(4) synopsis puts a provider in kld_list"; else pass "(j) the nvidia_linux(4) synopsis kld_list holds no provider"; fi
 printf 'kld_list="nvidia nvidia_linux"\n' | grep 'kld_list=' | grep -q '_linux' && pass "plant (j): the synopsis pattern fires" || fail "plant (j): the synopsis pattern cannot fire"
+# every build-shim.sh command in the README names its module with --module=
+readme_shim_ok() { grep -E 'build-shim\.sh +(nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux)( |$)' "$1" | grep -q . && return 1; return 0; }
+if readme_shim_ok "$REPO/README.md"; then pass "(j) no README build-shim.sh command names its module as a bare word"; else fail "(j) a README build-shim.sh command names the module as a bare word, not --module="; fi
+printf '  sh scripts/build-shim.sh nvidia\n' > "$TMPD/readme_shim.md"
+readme_shim_ok "$TMPD/readme_shim.md" && fail "plant (j): a build-shim.sh command with a bare module name was accepted" || pass "plant (j): a build-shim.sh command with a bare module name is refused"
+# the amd64 limit (no 32-bit Linux binary) is stated where the provider modules are described
+for d in README.md man/nvidia_linux.4; do
+	grep -q '32-bit' "$REPO/$d" && pass "(j) $d states the 32-bit limit of the providers on amd64" || fail "(j) $d does not state that a 32-bit Linux binary is not served on amd64"
+done
 # the README loads the providers by path (nothing installs them)
 readme_block() { sed -n '/^## Linux bridges/,/^## Licence/p' "$1"; }
 sed 's/^## Linux bridges/### Linux bridges/' "$REPO/README.md" > "$TMPD/README.retitled"
@@ -440,8 +521,186 @@ if ! readme_block "$REPO/README.md" | grep -q '^kldload \$GB10_WORK/build/tree/n
 elif readme_block "$REPO/README.md" | grep '^kldload' | grep -v '^kldload \$GB10_WORK/' | grep -q .; then fail "(j) a README kldload line loads by module name with no install step"; else pass "(j) every README kldload line in the bridges block is a path"; fi
 printf 'kldload nvidia_linux\n' | grep '^kldload' | grep -v '^kldload \$GB10_WORK/' | grep -q . && pass "plant (j): the README pattern fires" || fail "plant (j): the README pattern cannot fire"
 
+
+# ------------------------------------- (k) amd64 cross-build of the providers
+# The in-tree build is arm64 only (build-shim.sh), so the amd64 dependency name
+# is checked on a cross-built copy: the providers are single files that need
+# SYSDIR's headers and cc -target, no RM core. kldxref reads the same
+# dependencies the kernel linker resolves.
+xbuild_provider() {	# xbuild_provider <provider dir> <ko> <out dir> [nvbridge_ioctl.h override] ; XMACH and XTARGET select the architecture
+	mkdir -p "$3"
+	cp "$BRDIR/$1"/* "$BRDIR/nvbridge_ioctl.h" "$BRDIR/nvidia_bridge.h" "$3/"
+	[ -z "${4:-}" ] || cp "$4" "$3/nvbridge_ioctl.h"
+	env -u MAKEFLAGS -u MAKEOBJDIR -u MAKEOBJDIRPREFIX make -C "$3" MACHINE="${XMACH:-amd64}" MACHINE_ARCH="${XMACH:-amd64}" SYSDIR="$SYSDIR" \
+	    CC="cc -target ${XTARGET:-x86_64}-unknown-$XOS" LD=/usr/bin/ld OBJCOPY=/usr/bin/objcopy all > "$3/make.out" 2>&1 && [ -s "$3/$2" ]
+}
+# xcheck <ko> <native module>: the amd64 dependency set, by nm and by kldxref; prints the detail on a failure
+xcheck() {
+	_xw=$(printf '%s\n' "$2" linux64 linux_common | sort -u | tr '\n' ' ')
+	if ! check_provider "$1" "$2"; then
+		echo "nm [$(deps_of "$1" | tr '\n' ' ')] (want $2, linux64, linux_common)"
+		return 1
+	fi
+	_kx=$(kx_deps_of "$1" | tr '\n' ' ')
+	if [ "$_kx" != "$_xw" ]; then
+		echo "kldxref [$_kx] (want $_xw)"
+		return 1
+	fi
+	return 0
+}
+BRDIR=$REPO/src/gb10-linux-bridge
+PROVIDERS="nvidia-linux:nvidia_linux.ko:nvidia nvidia-modeset-linux:nvidia_modeset_linux.ko:nvidia_modeset"
+if [ "${LINUX_BRIDGE_SKIP_AMD64:-0}" = 1 ]; then
+	skip "(k) amd64 cross-build (LINUX_BRIDGE_SKIP_AMD64=1)"
+elif ! command -v kldxref > /dev/null 2>&1; then
+	fail "(k) kldxref not found on PATH ($PATH): put /usr/sbin on PATH (LINUX_BRIDGE_SKIP_AMD64=1 skips (k))"
+elif [ ! -d "$SYSDIR/amd64/include" ]; then
+	fail "(k) no $SYSDIR/amd64/include: the amd64 provider build needs the kernel sources (LINUX_BRIDGE_SKIP_AMD64=1 skips it)"
+else
+	for _p in $PROVIDERS; do
+		_d=${_p%%:*}
+		_rest=${_p#*:}
+		_ko=${_rest%%:*}
+		_native=${_rest#*:}
+		if xbuild_provider "$_d" "$_ko" "$TMPD/x-$_d"; then
+			if _det=$(xcheck "$TMPD/x-$_d/$_ko" "$_native"); then pass "(k) $_ko built for amd64 depends on $_native, linux64, linux_common (nm and kldxref)"; else fail "(k) amd64 $_ko dependencies: $_det"; fi
+		else
+			fail "(k) $_ko does not build for amd64: $(grep -m2 ' error' "$TMPD/x-$_d/make.out" 2>/dev/null | tr '\n' ' ')"
+		fi
+	done
+	# plant: the old rule (linux64elf on every architecture) must be refused by the same check:
+	# the architecture guard of NVBRIDGE_LINUXULATOR_DEPEND (the #if line before its #define) forced true
+	awk '/^#if defined\(__aarch64__\)$/ { held = $0; next } held != "" { if ($0 ~ /^#define NVBRIDGE_LINUXULATOR_DEPEND/) print "#if 1"; else print held; held = "" } { print }' "$BRDIR/nvbridge_ioctl.h" > "$TMPD/hdr_old.h"
+	if cmp -s "$BRDIR/nvbridge_ioctl.h" "$TMPD/hdr_old.h"; then
+		fail "plant (k): the awk did not change nvbridge_ioctl.h (is the architecture guard of NVBRIDGE_LINUXULATOR_DEPEND gone?)"
+	elif xbuild_provider nvidia-linux nvidia_linux.ko "$TMPD/x-old" "$TMPD/hdr_old.h"; then
+		if xcheck "$TMPD/x-old/nvidia_linux.ko" nvidia > /dev/null; then fail "plant (k): a provider depending on linux64elf on amd64 was accepted"; else pass "plant (k): the unconditional linux64elf dependency is refused on amd64"; fi
+	else
+		fail "plant (k): the mutant does not build: $(grep -m2 ' error' "$TMPD/x-old/make.out" | tr '\n' ' ')"
+	fi
+	# the macro itself, per architecture, preprocessed on its own (the include section of the header
+	# refuses an unknown architecture first, so a build cannot reach the macro's own #error)
+	macro_for() {	# macro_for <header> <target arch>: the preprocessed MODULE_DEPEND lines, or the error
+		{ printf '#define MODULE_DEPEND(m, d, a, b, c) m depends_on d\n'
+		  awk 'BEGIN { inb = 0 } /^#if defined\(__aarch64__\)$/ { buf = $0; getline; if ($0 ~ /^#define NVBRIDGE_LINUXULATOR_DEPEND/) { inb = 1; print buf } else { next } } inb { print } inb && /^#endif/ { exit }' "$1"
+		  printf 'NVBRIDGE_LINUXULATOR_DEPEND(x);\n'
+		} > "$TMPD/macro.c"
+		cc -E -P -target "$2-unknown-$XOS" "$TMPD/macro.c" 2>&1
+	}
+	_ma=$(macro_for "$BRDIR/nvbridge_ioctl.h" aarch64 | tr '\n' ' ')
+	_mx=$(macro_for "$BRDIR/nvbridge_ioctl.h" x86_64 | tr '\n' ' ')
+	_mi=$(macro_for "$BRDIR/nvbridge_ioctl.h" i386 | tr '\n' ' ')
+	case $_ma in *'x depends_on linux64elf'*'x depends_on linux_common'*) pass "(k) the macro gives linux64elf and linux_common on aarch64" ;; *) fail "(k) the macro on aarch64: $_ma" ;; esac
+	case $_mx in *'x depends_on linux64;'*'x depends_on linux_common'*) pass "(k) the macro gives linux64 and linux_common on amd64" ;; *) fail "(k) the macro on amd64: $_mx" ;; esac
+	case $_mi in *'no 64-bit Linuxulator interface known'*) pass "(k) the macro refuses an architecture it does not know (i386)" ;; *) fail "(k) the macro on i386 does not refuse: $_mi" ;; esac
+	# plant: a macro whose #else gives linux64 (no #error) must turn the i386 row red
+	sed '/^#error "NVBRIDGE_LINUXULATOR_DEPEND/d' "$BRDIR/nvbridge_ioctl.h" > "$TMPD/hdr_noerr.h"
+	_mp=$(macro_for "$TMPD/hdr_noerr.h" i386 | tr '\n' ' ')
+	case $_mp in *'no 64-bit Linuxulator interface known'*) fail "plant (k): the #error was deleted and the i386 row still refused" ;; *) pass "plant (k): without its #error the macro lets i386 through (the row above would fail)" ;; esac
+	# an architecture with no known Linuxulator interface must not build at all (it would otherwise
+	# record a dependency that never resolves)
+	if XMACH=i386 XTARGET=i386 xbuild_provider nvidia-linux nvidia_linux.ko "$TMPD/x-386"; then
+		fail "(k) the provider built for i386, an architecture with no known 64-bit Linuxulator interface"
+	elif grep -q 'support arm64 and amd64 only\|no 64-bit Linuxulator interface known' "$TMPD/x-386/make.out"; then
+		pass "(k) the provider does not build for i386 (the header refuses an unknown architecture)"
+	else
+		fail "(k) the i386 build failed, but not at the architecture guard: $(grep -m2 ' error' "$TMPD/x-386/make.out" | tr '\n' ' ')"
+	fi
+fi
+
+# ---------------- (l) provider constants and core glue against the pinned sources
+NVSRC=$WORK/sources/NVIDIA-FreeBSD-x86_64-$NVPIN/src
+# d_name_of <file> <cdevsw variable>: the d_name string of a cdevsw definition
+d_name_of() {
+	awk -v sw="$2" '$0 ~ ("struct cdevsw[ \t]+" sw "[ \t]*=") { f = 1 } f && /\.d_name/ { match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2); exit }' "$1"
+}
+# names_of <provider file> <array>: the strings of a "<array>[] = { "a", "b", NULL }" line, sorted
+names_of() {
+	sed -n "s/.*$2\[\] = {\(.*\)}.*/\1/p" "$1" | tr ',' '\n' | tr -d ' "' | grep -v -e '^NULL$' -e '^$' | sort -u
+}
+# names_match <provider file> <array> <expected names...>
+names_match() {
+	_f=$1 _a=$2
+	shift 2
+	[ "$(names_of "$_f" "$_a")" = "$(printf '%s\n' "$@" | sort -u)" ]
+}
+# ioctl_matches <provider file> <nvkms-ioctl.h>: NVKMS_LINUX_IOCTL is _IOC(0, <NVKMS_IOCTL_MAGIC>, <NVKMS_IOCTL_CMD>, 0)
+ioctl_matches() {
+	_mag=$(sed -n "s/^#define NVKMS_IOCTL_MAGIC[[:space:]]*\('.'\).*/\1/p" "$2")
+	_cmd=$(sed -n 's/^#define NVKMS_IOCTL_CMD[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$2")
+	[ -n "$_mag" ] && [ -n "$_cmd" ] || return 1
+	[ "$(sed -n 's/^#define NVKMS_LINUX_IOCTL[[:space:]]*\(.*\)$/\1/p' "$1")" = "_IOC(0, $_mag, $_cmd, 0)" ]
+}
+NLMOD=$BRDIR/nvidia-linux/nvidia_linux_mod.c
+if [ -f "$NVSRC/nvidia/nvidia_ctl.c" ] && [ -f "$NVSRC/nvidia/nvidia_dev.c" ] && [ -f "$NVSRC/nvidia-modeset/nvidia-modeset-freebsd.c" ] && [ -f "$NVSRC/nvidia-modeset/nvkms-ioctl.h" ]; then
+	_ctl=$(d_name_of "$NVSRC/nvidia/nvidia_ctl.c" nvidia_ctl_cdevsw)
+	_dev=$(d_name_of "$NVSRC/nvidia/nvidia_dev.c" nvidia_dev_cdevsw)
+	_kms=$(d_name_of "$NVSRC/nvidia-modeset/nvidia-modeset-freebsd.c" nvkms_cdevsw)
+	if [ -n "$_ctl" ] && [ -n "$_dev" ] && [ -n "$_kms" ]; then pass "(l) the pinned cdevsw names are $_ctl, $_dev, $_kms"; else fail "(l) cannot read the pinned cdevsw names ([$_ctl] [$_dev] [$_kms])"; fi
+	if names_match "$NLMOD" nvlinux_names "$_ctl" "$_dev"; then pass "(l) nvidia_linux.ko filters on the cdevsw names $_ctl and $_dev"; else fail "(l) nvidia_linux.ko names [$(names_of "$NLMOD" nvlinux_names | tr '\n' ' ')] differ from the pinned d_name $_ctl, $_dev"; fi
+	if names_match "$MPROV" nvmlinux_names "$_kms"; then pass "(l) nvidia_modeset_linux.ko filters on the cdevsw name $_kms"; else fail "(l) nvidia_modeset_linux.ko names [$(names_of "$MPROV" nvmlinux_names | tr '\n' ' ')] differ from the pinned d_name $_kms"; fi
+	if ioctl_matches "$MPROV" "$NVSRC/nvidia-modeset/nvkms-ioctl.h"; then pass "(l) NVKMS_LINUX_IOCTL is the NVKMS ioctl of nvkms-ioctl.h"; else fail "(l) NVKMS_LINUX_IOCTL differs from NVKMS_IOCTL_MAGIC and NVKMS_IOCTL_CMD"; fi
+	# plants: a wrong name and a wrong command are refused
+	sed 's/{ "nvidiactl", "nvidia", NULL }/{ "nvidiact1", "nvidia", NULL }/' "$NLMOD" > "$TMPD/nl_badname.c"
+	if names_match "$TMPD/nl_badname.c" nvlinux_names "$_ctl" "$_dev"; then fail "plant (l): a provider filtering on nvidiact1 was accepted"; else pass "plant (l): a wrong provider cdevsw name is refused"; fi
+	sed 's/{ "nvidia-modeset", NULL }/{ "nvidia-modest", NULL }/' "$MPROV" > "$TMPD/ml_badname.c"
+	if names_match "$TMPD/ml_badname.c" nvmlinux_names "$_kms"; then fail "plant (l): a modeset provider filtering on nvidia-modest was accepted"; else pass "plant (l): a wrong modeset cdevsw name is refused"; fi
+	sed "s/_IOC(0, 'm', 0, 0)/_IOC(0, 'm', 1, 0)/" "$MPROV" > "$TMPD/ml_badcmd.c"
+	if ioctl_matches "$TMPD/ml_badcmd.c" "$NVSRC/nvidia-modeset/nvkms-ioctl.h"; then fail "plant (l): an NVKMS provider on 0x6d01 was accepted"; else pass "plant (l): a wrong NVKMS ioctl command is refused"; fi
+else
+	fail "(l) no pinned NVIDIA sources under $NVSRC to compare the provider constants with"
+fi
+
+# glue_args <file> <function>: the argument lists of every call, one per line, joined and without blanks
+glue_args() {
+	awk -v fn="$2" '
+		index($0, fn "(") { buf = ""; inc = 1 }
+		inc { buf = buf $0; if (index(buf, ");")) { i = index(buf, fn "("); t = substr(buf, i + length(fn) + 1); sub(/\);.*/, "", t); gsub(/[ \t]/, "", t); print t; inc = 0 } }
+	' "$1"
+}
+# glue_ok <file>: exactly one added and one removed call, with the same device name expression
+# and the same minor on both sides. added(name, major, minor), removed(name, minor).
+glue_ok() {
+	_a=$(glue_args "$1" nvidia_bridge_cdev_added)
+	_r=$(glue_args "$1" nvidia_bridge_cdev_removed)
+	[ "$(printf '%s\n' "$_a" | grep -c .)" = 1 ] && [ "$(printf '%s\n' "$_r" | grep -c .)" = 1 ] || return 1
+	[ "$(echo "$_a" | cut -d, -f1)" = "$(echo "$_r" | cut -d, -f1)" ] || return 2
+	_am=$(echo "$_a" | cut -d, -f3-)
+	[ "$_am" = "$(echo "$_r" | cut -d, -f2-)" ] || return 3
+	return 0
+}
+for f in nvidia_ctl.c nvidia_dev.c; do
+	if [ -f "$TREE/nvidia/$f" ]; then
+		_rc=0
+		glue_ok "$TREE/nvidia/$f" || _rc=$?
+		case $_rc in
+		0) pass "(l) $f announces and removes its device with the same name and minor" ;;
+		1) fail "(l) $f does not call nvidia_bridge_cdev_added and nvidia_bridge_cdev_removed exactly once each" ;;
+		2) fail "(l) $f passes a different device name to nvidia_bridge_cdev_added and nvidia_bridge_cdev_removed" ;;
+		*) fail "(l) $f passes a different minor to nvidia_bridge_cdev_added and nvidia_bridge_cdev_removed" ;;
+		esac
+	else
+		fail "(l) no $TREE/nvidia/$f"
+	fi
+done
+# plants on copies of the prepared files: a dropped removal, a wrong name, a wrong minor
+if [ -f "$TREE/nvidia/nvidia_dev.c" ] && [ -f "$TREE/nvidia/nvidia_ctl.c" ]; then
+	grep -v 'nvidia_bridge_cdev_removed' "$TREE/nvidia/nvidia_dev.c" > "$TMPD/dev_noremove.c"
+	glue_ok "$TMPD/dev_noremove.c" && fail "plant (l): a detach that never tells the core was accepted" || pass "plant (l): a dropped nvidia_bridge_cdev_removed is refused"
+	sed 's/nvidia_bridge_cdev_removed(sc->cdev->si_name,/nvidia_bridge_cdev_removed(nvidia_dev_cdevsw.d_name,/' "$TREE/nvidia/nvidia_dev.c" > "$TMPD/dev_badname.c"
+	if cmp -s "$TREE/nvidia/nvidia_dev.c" "$TMPD/dev_badname.c"; then fail "plant (l): the wrong-name sed changed nothing"; else glue_ok "$TMPD/dev_badname.c" && fail "plant (l): a removal under the cdevsw name was accepted" || pass "plant (l): a removal under the wrong name is refused"; fi
+	sed 's/nvidia_bridge_cdev_removed(nvidia_ctl_cdevsw.d_name, CDEV_CTL_MINOR)/nvidia_bridge_cdev_removed(nvidia_ctl_cdevsw.d_name, 0)/' "$TREE/nvidia/nvidia_ctl.c" > "$TMPD/ctl_badminor.c"
+	if cmp -s "$TREE/nvidia/nvidia_ctl.c" "$TMPD/ctl_badminor.c"; then fail "plant (l): the wrong-minor sed changed nothing"; else glue_ok "$TMPD/ctl_badminor.c" && fail "plant (l): a removal under the wrong minor was accepted" || pass "plant (l): a removal under the wrong minor is refused"; fi
+	grep -v 'nvidia_bridge_cdev_added' "$TREE/nvidia/nvidia_ctl.c" > "$TMPD/ctl_noadd.c"
+	glue_ok "$TMPD/ctl_noadd.c" && fail "plant (l): a probe that never announces was accepted" || pass "plant (l): a dropped nvidia_bridge_cdev_added is refused"
+fi
+
 if [ "$fails" -ne 0 ]; then
 	echo "linux_bridge_test: $fails FAILED" >&2
 	exit 1
+fi
+if [ "$skips" -ne 0 ]; then
+	echo "linux_bridge_test: nothing failed, but $skips check(s) were SKIPPED: not a pass (exit 2)" >&2
+	exit 2
 fi
 echo "linux_bridge_test: all passed"

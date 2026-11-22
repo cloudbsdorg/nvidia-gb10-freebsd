@@ -72,7 +72,9 @@
 # or is absent while objects of unknown origin are present - `make clean`
 # runs before the build. The stamp also records the BSDSRCTOP and the
 # DRMKMODDIR of the nvidia-drm module, whose objects are built against
-# those two trees' headers.
+# those two trees' headers. It also records NV_CORE_LINUX_COMPAT and
+# NVKMS_CORE_LINUX_COMPAT (the legacy Linux bridge switches), so switching
+# either one cleans the objects first.
 # The log is never /tmp; scratch files stay under $WORK/tmp.
 
 set -eu
@@ -302,8 +304,17 @@ STAMPFILE=$TREE/$MODDIR/.gb10-sysdir
 sysver=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" { print $3; exit }' \
     "$SYSDIR/sys/param.h" 2>/dev/null) || sysver=
 [ -n "$sysver" ] || sysver=unknown
+# NV_CORE_LINUX_COMPAT and NVKMS_CORE_LINUX_COMPAT (the legacy in-core Linux
+# bridge, Track #2363) choose which sources the objects are compiled from; make
+# reads them from the environment. They are in the stamp so that switching one
+# cleans first: without them an up-to-date native tree relinks the native objects,
+# prints "build: OK" and the module has no Linuxulator dependency.
+# (The patched Makefiles take the legacy path only for the value "yes", so an
+# unset and an empty switch are the same build and the same stamp line.)
 sysstamp="sysdir $SYSDIR
-version $sysver"
+version $sysver
+nv_core_linux_compat ${NV_CORE_LINUX_COMPAT:-}
+nvkms_core_linux_compat ${NVKMS_CORE_LINUX_COMPAT:-}"
 # The nvidia-drm module's objects are built against the drm-kmod tree's
 # headers and against the FreeBSD source tree BSDSRCTOP points at, so
 # both belong in the stamp: a changed one must clean the objects (the
@@ -321,24 +332,40 @@ if [ -L "$STAMPFILE" ]; then
 fi
 oldstamp=$(cat "$STAMPFILE" 2>/dev/null) || oldstamp=
 need_clean=0
+clean_why=
 if [ "$sysver" = unknown ]; then
 	# An unreadable sys/param.h cannot prove the objects match: clean
 	# always, even when an earlier run left the same "unknown" stamp.
 	need_clean=1
+	clean_why="$SYSDIR/sys/param.h is unreadable, so the objects cannot be proven to match"
 elif [ -n "$oldstamp" ]; then
-	[ "$oldstamp" = "$sysstamp" ] || need_clean=1
+	if [ "$oldstamp" != "$sysstamp" ]; then
+		need_clean=1
+		clean_why=
+		# name every stamp line that differs: the key is its first word; a key missing on one side is <absent>
+		printf '%s\n' "$sysstamp" > "$TMPDIR/stamp-new.$$"
+		printf '%s\n' "$oldstamp" > "$TMPDIR/stamp-old.$$"
+		for _k in $(awk '{ print $1 }' "$TMPDIR/stamp-new.$$" "$TMPDIR/stamp-old.$$" | sort -u); do
+			_n=$(awk -v k="$_k" '$1 == k { f = 1; sub(/^[^ ]* ?/, ""); print; exit } END { if (!f) print "<absent>" }' "$TMPDIR/stamp-new.$$")
+			_o=$(awk -v k="$_k" '$1 == k { f = 1; sub(/^[^ ]* ?/, ""); print; exit } END { if (!f) print "<absent>" }' "$TMPDIR/stamp-old.$$")
+			[ "$_n" = "$_o" ] || clean_why="$clean_why${clean_why:+; }$_k '$_o' -> '$_n'"
+		done
+		rm -f "$TMPDIR/stamp-new.$$" "$TMPDIR/stamp-old.$$"
+		[ -n "$clean_why" ] || clean_why="the stamp format changed"
+	fi
 else
 	# No stamp: any object already in the tree is of unknown origin.
 	for _f in "$TREE/$MODDIR"/*.o "$TREE/$MODDIR"/*.kld "$TREE/$MODDIR"/*.ko; do
 		if [ -e "$_f" ]; then
 			need_clean=1
+			clean_why="no stamp, and objects of unknown origin are in the tree"
 			break
 		fi
 	done
 fi
 : > "$LOG"
 if [ "$need_clean" -eq 1 ]; then
-	echo "build-shim: SYSDIR ($SYSDIR, __FreeBSD_version $sysver) differs from the stamp; running make clean first"
+	echo "build-shim: running make clean first: $clean_why"
 	crc=0
 	env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX \
 	    make -C "$TREE/$MODDIR" \

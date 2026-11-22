@@ -99,6 +99,36 @@ r=$(run_start AUTO YES nvidia)
 [ "$r" = "nvidia_linux " ] && pass "AUTO loads only the provider of a loaded driver" || fail "AUTO/YES nvidia only: got [$r]"
 r=$(run_start AUTO NO nvidia nvidia_modeset)
 [ -z "$r" ] && pass "AUTO with the Linuxulator off loads nothing" || fail "AUTO/NO: got [$r]"
+# rc.d/linux enables itself through checkyesno(), which also takes TRUE, ON and 1 (any case):
+# AUTO must follow the same rule
+for _v in TRUE ON 1 true on Yes; do
+	r=$(run_start AUTO "$_v" nvidia nvidia_modeset)
+	[ "$r" = "nvidia_linux nvidia_modeset_linux " ] && pass "AUTO with linux_enable=$_v loads both providers" || fail "AUTO/linux_enable=$_v: got [$r]"
+done
+for _v in NO FALSE OFF 0 maybe ""; do
+	r=$(run_start AUTO "$_v" nvidia nvidia_modeset)
+	[ -z "$r" ] && pass "AUTO with linux_enable=[$_v] loads nothing" || fail "AUTO/linux_enable=[$_v]: got [$r]"
+done
+# an unparsable linux_enable warns once per start (checkyesno), not once per provider
+run_start AUTO maybe nvidia nvidia_modeset > /dev/null
+_n=$(grep -c 'not set properly' "$TMPD/start.out")
+[ "$_n" = 1 ] && pass "an unparsable linux_enable is warned about once" || fail "linux_enable=maybe: $_n warning lines (want 1): $(head -3 "$TMPD/start.out" | tr '\n' ' ')"
+# plant: deciding per provider (inside nvidia_linux_load_one) warns twice
+sed 's/^	_want=\$(nvidia_linux_wanted/	nvidia_linux_decide_linux\n	_want=$(nvidia_linux_wanted/' "$RC" > "$TMPD/plant-twice.sh"
+if cmp -s "$RC" "$TMPD/plant-twice.sh"; then fail "plant twice: the sed changed nothing"; else
+	: > "$TMPD/loaded"; echo nvidia > "$TMPD/loaded"; echo nvidia_modeset >> "$TMPD/loaded"
+	STUB_LOADED=$TMPD/loaded STUB_LOG=$TMPD/log PATH=$TMPD/bin:$PATH NVIDIA_LINUX_RC_SOURCE_ONLY=1 \
+	    sh -c '. "$1"; nvidia_linux_mode=AUTO; linux_enable=maybe; nvidia_linux_start' sh "$TMPD/plant-twice.sh" > "$TMPD/twice.out" 2>&1
+	[ "$(grep -c 'not set properly' "$TMPD/twice.out")" -ge 2 ] && pass "plant: deciding per provider warns twice (the row above can fail)" || fail "plant twice: the mutant did not warn twice: $(head -3 "$TMPD/twice.out" | tr '\n' ' ')"
+fi
+# plant: the old test of the raw string must turn the TRUE/ON/1 rows red
+sed 's/checkyesno linux_enable && nvidia_linux_linux_on=YES/case $linux_enable in [Yy][Ee][Ss]) nvidia_linux_linux_on=YES ;; esac/' "$RC" > "$TMPD/plant-raw.sh"
+if cmp -s "$RC" "$TMPD/plant-raw.sh"; then fail "plant checkyesno: the sed changed nothing"; else
+	: > "$TMPD/log"; echo nvidia > "$TMPD/loaded"
+	STUB_LOADED=$TMPD/loaded STUB_LOG=$TMPD/log PATH=$TMPD/bin:$PATH NVIDIA_LINUX_RC_SOURCE_ONLY=1 \
+	    sh -c '. "$1"; nvidia_linux_mode=AUTO; linux_enable=TRUE; nvidia_linux_start' sh "$TMPD/plant-raw.sh" > /dev/null 2>&1
+	[ -z "$(cat "$TMPD/log")" ] && pass "plant: a raw YES test skips the provider for linux_enable=TRUE (the rows above would fail)" || fail "plant: the raw-string mutant still loaded the provider"
+fi
 r=$(run_start AUTO YES)
 [ -z "$r" ] && pass "AUTO with no GPU driver loaded loads nothing (the GPU stack is not pulled in)" || fail "AUTO/YES none: got [$r]"
 r=$(run_start NO YES nvidia nvidia_modeset)

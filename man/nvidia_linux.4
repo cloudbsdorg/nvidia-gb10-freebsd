@@ -71,9 +71,16 @@ device name.
 .Pp
 Both depend on the native module they serve and on
 .Dv linux64elf
+(on arm64; on amd64 the 64-bit Linuxulator interface is
+.Dv linux64 )
 and
 .Dv linux_common ,
 so loading one loads the Linuxulator.
+On amd64 only the 64-bit Linuxulator is served: a 32-bit Linux binary gets no
+NVIDIA ioctl translation from these modules.
+A legacy build
+.Pq Ev NV_CORE_LINUX_COMPAT
+keeps the old in-core bridge.
 .Sh LOADING
 .Bl -tag -width indent
 .It Pa /usr/local/etc/rc.d/nvidia_linux
@@ -139,8 +146,8 @@ kldunload nvidia-modeset
 kldunload nvidia
 .Ed
 .Pp
-Unloading a provider waits for any Linux ioctl that is inside its handler, as the
-Linuxulator holds its handler lock while it calls one.
+Unloading a provider waits for any Linux ioctl that is inside its handler,
+as the Linuxulator holds its handler lock while it calls one.
 .Sh FILES
 .Bl -tag -width indent -compact
 .It Pa /boot/modules/nvidia_linux.ko

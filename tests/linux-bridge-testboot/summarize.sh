@@ -6,10 +6,11 @@
 # last row), no row failed, and at least one pass row exists. A trailing
 # "running" row (the machine died in that step) or a missing "done" is a
 # failure. The rows A1-modeset, A2-no-linux, A4-nvrm-info, B2-nvidia_linux,
-# B2-modeset_linux, B4-cuda, C1-veto-modeset and C1-veto-nvidia must be pass (skip only with SUMMARIZE_ALLOW_SKIP=1). Prints
+# B2-modeset_linux, B2-refs-nvidia, B2-refs-modeset (the Refs column of the native module
+# rises by one when its provider loads), B4-cuda, C1-veto-modeset and C1-veto-nvidia must be pass (skip only with SUMMARIZE_ALLOW_SKIP=1). Prints
 # one line per non-info row.
 # The rows the verdict needs; the kit test builds its fixtures from this list.
-REQUIRED_ROWS="A1-modeset A2-no-linux A4-nvrm-info B2-nvidia_linux B2-modeset_linux B4-cuda C1-veto-modeset C1-veto-nvidia"
+REQUIRED_ROWS="A1-modeset A2-no-linux A4-nvrm-info B2-nvidia_linux B2-refs-nvidia B2-modeset_linux B2-refs-modeset B4-cuda C1-veto-modeset C1-veto-nvidia"
 [ "${1:-}" != --required ] || { echo $REQUIRED_ROWS; exit 0; }
 f=${1:?usage: summarize.sh RESULTS.jsonl | --required}
 [ -f "$f" ] || { echo "no $f" >&2; exit 2; }
@@ -21,18 +22,27 @@ case $last in
 '{"row":"done"'*) ;;
 *) echo "FAIL: the run did not end with a done row: last row is $last"; exit 1 ;;
 esac
-[ "$fails" -eq 0 ] || { echo "FAIL: $fails failed rows"; exit 1; }
-[ "$passes" -gt 0 ] || { echo "FAIL: no pass row"; exit 1; }
-# The rows that carry the claim must PASS, not be skipped: a skipped row is a
-# test that did not run. SUMMARIZE_ALLOW_SKIP=1 accepts a skipped row (and says so);
-# a failed or missing row is never accepted.
 hint() {	# hint <row> <result>
 	case $1:$2 in
 	A4-nvrm-info:skip) echo "make-be.sh -i and -p stage nvrm-info and its proof" ;;
+	B2-modeset_linux:skip | B2-refs-modeset:skip) echo "add nvidia-modeset (the file name) to kld_list in the boot environment: the provider rows need nvidia_modeset loaded" ;;
+	B2-refs-nvidia:fail | B2-refs-modeset:fail) echo "$1: compare refs-$1-before.txt and refs-$1-after.txt in the run directory; a module other than the provider that depends on the native module is another holder" ;;
 	B4-cuda:skip) echo "make-be.sh -U, -C and -u stage the Linux CUDA smoke" ;;
 	C1-veto-modeset:skip | C1-veto-nvidia:skip) echo "another module holds the native one (the row's detail names it); a nvidia_drm boot cannot prove this" ;;
 	esac
 }
+if [ "$fails" -ne 0 ]; then
+	echo "FAIL: $fails failed rows"
+	# a Refs row that failed on the numbers (not because the provider did not load) has snapshots to compare
+	for r in B2-refs-nvidia B2-refs-modeset; do
+		grep -q "\"row\":\"$r\",\"result\":\"fail\",\"detail\":\"kldstat Refs of" "$f" && echo "      $(hint "$r" fail)"
+	done
+	exit 1
+fi
+[ "$passes" -gt 0 ] || { echo "FAIL: no pass row"; exit 1; }
+# The rows that carry the claim must PASS, not be skipped: a skipped row is a
+# test that did not run. SUMMARIZE_ALLOW_SKIP=1 accepts a skipped row (and says so);
+# a failed or missing row is never accepted.
 for r in $REQUIRED_ROWS; do
 	res=$(sed -n "s/^{\"row\":\"$r\",\"result\":\"\\([a-z]*\\)\".*/\\1/p" "$f" | tail -n 1)
 	[ "$res" = pass ] && continue

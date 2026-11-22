@@ -185,4 +185,26 @@ prefix##_modevent(module_t mod, int what, void *arg)			\
 static moduledata_t prefix##_mod = { #modname, prefix##_modevent, NULL }; \
 DECLARE_MODULE(modname, prefix##_mod, SI_SUB_DRIVERS, SI_ORDER_ANY)
 
+/*
+ * NVBRIDGE_LINUXULATOR_DEPEND(modname): the provider's dependencies on the
+ * Linuxulator. The 64-bit Linuxulator exports the MODULE_VERSION interface
+ * linux64elf on arm64 and linux64 on amd64 (linux64elf is only a module name
+ * there, which a dependency does not resolve against), and both need
+ * linux_common. A 32-bit Linux binary on amd64 is not served: that needs the
+ * linux interface. tests/linux_bridge_test.sh cross-builds the providers for
+ * amd64 and reads the dependencies back, and checks that another architecture
+ * does not build.
+ */
+#if defined(__aarch64__)
+#define NVBRIDGE_LINUXULATOR_DEPEND(modname)				\
+MODULE_DEPEND(modname, linux64elf, 1, 1, 1);				\
+MODULE_DEPEND(modname, linux_common, 1, 1, 1)
+#elif defined(__amd64__)
+#define NVBRIDGE_LINUXULATOR_DEPEND(modname)				\
+MODULE_DEPEND(modname, linux64, 1, 1, 1);				\
+MODULE_DEPEND(modname, linux_common, 1, 1, 1)
+#else
+#error "NVBRIDGE_LINUXULATOR_DEPEND: no 64-bit Linuxulator interface known for this architecture"
+#endif
+
 #endif /* _NVBRIDGE_IOCTL_H_ */

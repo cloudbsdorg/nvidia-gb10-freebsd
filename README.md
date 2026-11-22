@@ -443,8 +443,11 @@ that belong to the Linuxulator:
 
 | Module | Serves | Depends on |
 |---|---|---|
-| `nvidia_linux.ko` | Linux ioctls 0x4600-0x46ff, Linux device names of `/dev/nvidiactl` and `/dev/nvidiaN` | `nvidia` (1 to 2), `linux64elf`, `linux_common` |
-| `nvidia_modeset_linux.ko` | the NVKMS Linux ioctl and the `nvidia-modeset` device name | `nvidia_modeset`, `linux64elf`, `linux_common` |
+| `nvidia_linux.ko` | Linux ioctls 0x4600-0x46ff, Linux device names of `/dev/nvidiactl` and `/dev/nvidiaN` | `nvidia` (1 to 2), `linux64elf` (`linux64` on amd64), `linux_common` |
+| `nvidia_modeset_linux.ko` | the NVKMS Linux ioctl and the `nvidia-modeset` device name | `nvidia_modeset`, `linux64elf` (`linux64` on amd64), `linux_common` |
+
+On amd64 only the 64-bit Linuxulator is served: a 32-bit Linux binary gets no NVIDIA ioctl
+translation from these modules.
 
 ```sh
 sh scripts/build-shim.sh --module=nvidia-linux           # nvidia_linux.ko
@@ -458,8 +461,10 @@ kldunload nvidia_linux            # unload the bridge first
 
 `rc.d/nvidia_linux` loads them at boot when `linux_enable=YES` and the native module is already
 loaded (`nvidia_linux_mode=AUTO`, `YES` or `NO`). The old behaviour, in which `nvidia.ko` itself
-pulls in the Linuxulator, is still reachable: `make NV_CORE_LINUX_COMPAT=yes` for `nvidia.ko` and
-`NVKMS_CORE_LINUX_COMPAT=yes` for `nvidia-modeset.ko`. `tests/linux_bridge_test.sh` checks the
+pulls in the Linuxulator, is still reachable: set `NV_CORE_LINUX_COMPAT=yes` in the environment of
+`scripts/build-shim.sh` for `nvidia.ko` and `NVKMS_CORE_LINUX_COMPAT=yes` for `nvidia-modeset.ko`
+(for example `NV_CORE_LINUX_COMPAT=yes sh scripts/build-shim.sh --module=nvidia`; the switches are
+in the build stamp, so changing one cleans the objects first). `tests/linux_bridge_test.sh` checks the
 module metadata, the imports and the fuzz 0 patch apply; see `nvidia_linux(4)` and `nvidia(4)`.
 
 ## Licence

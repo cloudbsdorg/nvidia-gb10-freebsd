@@ -87,6 +87,53 @@ order_ok "$TMPD/mut2" && fail "plant: a nvidia veto while nvidia-modeset still h
 move_line "$K" 'veto C1-veto-modeset nvidia-modeset' 'kldunload nvidia_modeset_linux' > "$TMPD/mut-veto-modeset"
 grep -q 'veto C1-veto-modeset nvidia-modeset' "$TMPD/mut-veto-modeset" && pass "plant 3 really moves the line" || fail "plant 3 deleted the line"
 order_ok "$TMPD/mut-veto-modeset" && fail "plant: a modeset veto after the provider unload passed" || pass "plant: the modeset veto after the provider unload fails the order check"
+# the Refs evidence of the veto: refs_row passes only when the provider added exactly one
+# reference (a provider with no MODULE_DEPEND, or one that raced another holder, does not)
+refs_case() {	# refs_case <before> <after>: the result word refs_row writes
+	: > "$TMPD/refs.jsonl"
+	env LINUX_BRIDGE_TESTBOOT_SOURCE_ONLY=1 sh -c '
+		. "$1"; OUT=$2; sync() { :; }
+		refs_row B2-refs-nvidia nvidia "$3" "$4" nvidia_linux' sh "$K" "$TMPD" "$1" "$2" > /dev/null 2>&1
+	mv "$TMPD/results.jsonl" "$TMPD/refs.jsonl" 2> /dev/null
+	sed -n 's/^{"row":"B2-refs-nvidia","result":"\([a-z]*\)".*/\1/p' "$TMPD/refs.jsonl"
+}
+[ "$(refs_case 1 2)" = pass ] && pass "refs_row: one more reference after the provider loads passes" || fail "refs_row: 1 -> 2 is not a pass"
+[ "$(refs_case 1 1)" = fail ] && pass "plant: a provider that adds no reference (no MODULE_DEPEND) fails the Refs row" || fail "plant: 1 -> 1 was accepted"
+[ "$(refs_case 1 3)" = fail ] && pass "plant: two extra references (another holder) fail the Refs row" || fail "plant: 1 -> 3 was accepted"
+[ "$(refs_case "" 2)" = fail ] && pass "plant: an unreadable Refs column fails the row" || fail "plant: an unreadable before value was accepted"
+[ "$(refs_case 1 x)" = fail ] && pass "plant: a non-numeric Refs value fails the row" || fail "plant: a non-numeric after value was accepted"
+# the recorder reads the count before the provider's kldload and after it, for both providers
+refs_struct_ok() {	# refs_struct_ok <recorder>
+	for pair in 'refs_of nvidia)|kldload nvidia_linux |refs_row B2-refs-nvidia ' 'refs_of nvidia-modeset)|kldload nvidia_modeset_linux |refs_row B2-refs-modeset '; do
+		_p=${pair#*|}
+		_b=$(grep -n "_r0=\$(${pair%%|*}" "$1" | head -1 | cut -d: -f1)
+		_l=$(grep -n "${_p%%|*}" "$1" | head -1 | cut -d: -f1)
+		_a=$(grep -n "${_p##*|}" "$1" | awk -F: -v l="${_l:-0}" '$1 > l { print $1; exit }')
+		[ -n "$_b" ] && [ -n "$_l" ] && [ -n "$_a" ] && [ "$_b" -lt "$_l" ] && [ "$_l" -lt "$_a" ] || return 1
+	done
+}
+refs_struct_ok "$K" && pass "the recorder reads Refs before and after each provider's kldload" || fail "the recorder does not read Refs around the provider loads"
+sed 's/refs_row B2-refs/: B2-refs/' "$K" > "$TMPD/mut-norefs"
+refs_struct_ok "$TMPD/mut-norefs" && fail "plant: a recorder without the Refs rows passed the structure check" || pass "plant: a recorder without the Refs rows fails the structure check"
+# plant: only the nvidia row deleted (the modeset row after it must not stand in for it)
+sed 's/refs_row B2-refs-nvidia /: B2-refs-nvidia /' "$K" > "$TMPD/mut-onerow"
+cmp -s "$K" "$TMPD/mut-onerow" && fail "plant: the one-row sed changed nothing" || { refs_struct_ok "$TMPD/mut-onerow" && fail "plant: a recorder without the nvidia Refs row passed the structure check" || pass "plant: deleting only the nvidia Refs row fails the structure check"; }
+# the failure detail points at the before/after snapshots, and summarize.sh hints at them
+refs_case 1 3 > /dev/null
+grep -q 'refs-B2-refs-nvidia' "$TMPD/refs.jsonl" && pass "a failed Refs row names the kldstat snapshots" || fail "a failed Refs row does not name the snapshots"
+sed 's/"row":"B2-refs-nvidia","result":"pass","detail":"ok"/"row":"B2-refs-nvidia","result":"fail","detail":"kldstat Refs of nvidia: 1 before, 3 after"/' "$TMPD/good.jsonl" > "$TMPD/refsfail.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/refsfail.jsonl" 2>&1 | grep -q 'refs-B2-refs-nvidia-before' && pass "summarize.sh hints at the Refs snapshots for a failed Refs row" || fail "no snapshot hint for a failed Refs row"
+sed 's/"row":"B2-modeset_linux","result":"pass"/"row":"B2-modeset_linux","result":"skip"/' "$TMPD/good.jsonl" > "$TMPD/mskip.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/mskip.jsonl" 2>&1 | grep -q 'nvidia-modeset (the file name) to kld_list' && pass "a skipped B2-modeset_linux gets the kld_list hint naming the file" || fail "no hint for a skipped B2-modeset_linux"
+move_line "$K" '_r0=.*refs_of nvidia[)]' 'kldload nvidia_linux ' > "$TMPD/mut-lateref" 2> /dev/null
+grep -q '_r0=.*refs_of nvidia[)]' "$TMPD/mut-lateref" && ! cmp -s "$K" "$TMPD/mut-lateref" && pass "plant: the late-read mutant moved the line and kept it" || fail "plant: the late-read mutant lost or kept the line in place"
+refs_struct_ok "$TMPD/mut-lateref" && fail "plant: reading the Refs after the load passed the structure check" || pass "plant: reading the Refs after the load fails the structure check"
+# a Refs row that failed because the provider did not load has no snapshots: no snapshot hint
+sed 's/"row":"B2-refs-nvidia","result":"pass","detail":"ok"/"row":"B2-refs-nvidia","result":"fail","detail":"nvidia_linux did not load: no reference count"/' "$TMPD/good.jsonl" > "$TMPD/refsnoload.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/refsnoload.jsonl" 2>&1 | grep -q 'refs-B2-refs-nvidia-after' && fail "a Refs row that failed on a load failure gets the snapshot hint" || pass "a Refs row that failed on a load failure gets no snapshot hint"
+# the verdict needs the Refs rows: a run without them is refused
+grep -v 'B2-refs' "$TMPD/good.jsonl" > "$TMPD/norefs.jsonl"
+sh "$KIT/summarize.sh" "$TMPD/norefs.jsonl" > /dev/null && fail "plant: a run without the Refs rows was accepted" || pass "plant: a run without the Refs rows is refused"
 # kldunload takes FILE names: the hyphenated modules must not be named by module name
 if grep -Eq 'kldunload (nvidia_modeset|nvidia_uvm)([^_A-Za-z]|$)' "$K"; then fail "the recorder unloads nvidia_modeset or nvidia_uvm by module name (kldunload takes the file name)"; else pass "the recorder unloads by file name"; fi
 printf 'kldunload nvidia_modeset > x\n' > "$TMPD/mut3"

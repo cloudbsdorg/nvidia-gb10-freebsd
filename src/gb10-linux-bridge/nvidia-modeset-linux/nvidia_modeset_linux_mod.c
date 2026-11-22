@@ -73,5 +73,4 @@ NVBRIDGE_PROVIDER_MODULE(nvmlinux, nvidia_modeset_linux);
 MODULE_VERSION(nvidia_modeset_linux, 1);
 /* nvidia_modeset is at version 2 (the KAPI table of #2228); no symbol is used, so any of 1 to 2 serves. */
 MODULE_DEPEND(nvidia_modeset_linux, nvidia_modeset, 1, 2, 2);
-MODULE_DEPEND(nvidia_modeset_linux, linux64elf, 1, 1, 1);
-MODULE_DEPEND(nvidia_modeset_linux, linux_common, 1, 1, 1);
+NVBRIDGE_LINUXULATOR_DEPEND(nvidia_modeset_linux);

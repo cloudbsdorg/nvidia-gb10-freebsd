@@ -28,6 +28,8 @@
 # Phase B (the Linux layer on top): linux64 is loaded (service linux
 #   onestart), then nvidia_linux and nvidia_modeset_linux load; the Linux CUDA
 #   smoke runs (needs nvidia-uvm.ko in the BE; skipped otherwise).
+# Phase B also records the kldstat Refs of nvidia and nvidia-modeset before and after
+#   each provider loads (rows B2-refs-*): the provider must add exactly one.
 # Phase C (unload order): kldunload nvidia and nvidia-modeset must be REFUSED
 #   (Device busy) while their providers are loaded, and the module must still
 #   be loaded afterwards; then the providers unload in reverse order, then the
@@ -71,6 +73,28 @@ row()	# row <name> <pass|fail|info|skip|running|done> <detail>
 running() { row "$1" running "$2"; }
 
 loaded() { kldstat -q -m "$1" 2>/dev/null; }
+
+# refs_of <file name>: the Refs column of kldstat -n (a FILE name: nvidia, nvidia-modeset).
+refs_of() { kldstat -n "$1" 2>/dev/null | awk 'NR == 2 { print $2 }'; }
+
+# refs_row <row> <native file name> <refs before> <refs after> <provider>: the veto of
+# phase C rests on the provider's MODULE_DEPEND holding a reference on the native
+# module (kern_kldunload: refs > 1 is EBUSY). Record the Refs column before and after
+# the provider loads; the row passes only when the provider added exactly one.
+# Another holder (nvidia's own refusal while a client is open) can then not be
+# mistaken for the provider's veto.
+refs_row()
+{
+	case $3:$4 in
+	*[!0-9:]* | : | :* | *:) row "$1" fail "cannot read Refs of $2 (before [$3], after [$4])"; return 0 ;;
+	esac
+	kldstat -v > "$OUT/refs-$1-after.txt" 2>&1
+	if [ "$4" -eq $(($3 + 1)) ]; then
+		row "$1" pass "kldstat Refs of $2: $3 before $5 loaded, $4 after (the provider holds one reference)"
+	else
+		row "$1" fail "kldstat Refs of $2: $3 before $5 loaded, $4 after: expected exactly one more (no MODULE_DEPEND, or another holder: compare refs-$1-before.txt and refs-$1-after.txt)"
+	fi
+}
 
 linux_kmods()	# the Linuxulator modules in kldstat, one per line
 {
@@ -130,13 +154,28 @@ linux_bridge_testboot_start()
 	running B1-load "linux64 and the providers load now"
 	service linux onestart > "$OUT/linux-start.txt" 2>&1
 	loaded linux64elf && row B1-linux64 pass "linux64elf is loaded" || row B1-linux64 fail "linux64elf did not load: $(tail -1 "$OUT/linux-start.txt")"
-	kldload nvidia_linux > "$OUT/kldload-nvidia_linux.txt" 2>&1 && row B2-nvidia_linux pass "nvidia_linux loaded" \
-	    || row B2-nvidia_linux fail "kldload nvidia_linux: $(tail -1 "$OUT/kldload-nvidia_linux.txt")"
+	_r0=$(refs_of nvidia)
+	kldstat -v > "$OUT/refs-B2-refs-nvidia-before.txt" 2>&1
+	if kldload nvidia_linux > "$OUT/kldload-nvidia_linux.txt" 2>&1; then
+		row B2-nvidia_linux pass "nvidia_linux loaded"
+		refs_row B2-refs-nvidia nvidia "$_r0" "$(refs_of nvidia)" nvidia_linux
+	else
+		row B2-nvidia_linux fail "kldload nvidia_linux: $(tail -1 "$OUT/kldload-nvidia_linux.txt")"
+		row B2-refs-nvidia fail "nvidia_linux did not load: no reference count to compare"
+	fi
 	if loaded nvidia_modeset; then
-		kldload nvidia_modeset_linux > "$OUT/kldload-nvidia_modeset_linux.txt" 2>&1 && row B2-modeset_linux pass "nvidia_modeset_linux loaded" \
-		    || row B2-modeset_linux fail "kldload nvidia_modeset_linux: $(tail -1 "$OUT/kldload-nvidia_modeset_linux.txt")"
+		_r0=$(refs_of nvidia-modeset)
+		kldstat -v > "$OUT/refs-B2-refs-modeset-before.txt" 2>&1
+		if kldload nvidia_modeset_linux > "$OUT/kldload-nvidia_modeset_linux.txt" 2>&1; then
+			row B2-modeset_linux pass "nvidia_modeset_linux loaded"
+			refs_row B2-refs-modeset nvidia-modeset "$_r0" "$(refs_of nvidia-modeset)" nvidia_modeset_linux
+		else
+			row B2-modeset_linux fail "kldload nvidia_modeset_linux: $(tail -1 "$OUT/kldload-nvidia_modeset_linux.txt")"
+			row B2-refs-modeset fail "nvidia_modeset_linux did not load: no reference count to compare"
+		fi
 	else
 		row B2-modeset_linux skip "nvidia_modeset is not loaded"
+		row B2-refs-modeset skip "nvidia_modeset is not loaded"
 	fi
 	kldstat -v > "$OUT/kldstat-linux.txt" 2>&1
 	if [ -f /boot/modules.nvtest/nvidia-uvm.ko ] && ! loaded nvidia_uvm; then
@@ -165,7 +204,7 @@ linux_bridge_testboot_start()
 		kldunload "$2" > "$OUT/veto-$2.txt" 2>&1
 		_rc=$?
 		if [ "$_rc" -ne 0 ] && grep -q 'Device busy' "$OUT/veto-$2.txt" && loaded "$3"; then
-			row "$1" pass "kldunload $2 refused with Device busy and $3 is still loaded"
+			row "$1" pass "kldunload $2 refused with Device busy and $3 is still loaded (kldstat Refs of $2 now $(refs_of "$2"))"
 		else
 			row "$1" fail "kldunload $2: rc $_rc, output [$(tail -1 "$OUT/veto-$2.txt")], $3 loaded: $(loaded "$3" && echo yes || echo no)"
 		fi
