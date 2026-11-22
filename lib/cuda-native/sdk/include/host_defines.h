@@ -23,9 +23,12 @@
 #define __constant__ __attribute__((constant))
 #define __managed__ __attribute__((managed))
 
-/* Inlining and launch bounds. */
+/*
+ * Inlining and launch bounds.  __noinline__ is not defined here: clang
+ * knows it as a keyword in CUDA mode, and a macro would break the
+ * __attribute__((__noinline__)) spelling that system headers use.
+ */
 #define __forceinline__ __inline__ __attribute__((always_inline))
-#define __noinline__ __attribute__((noinline))
 #define __launch_bounds__(...) __attribute__((launch_bounds(__VA_ARGS__)))
 
 /* Alignment and builtin-type markers. */

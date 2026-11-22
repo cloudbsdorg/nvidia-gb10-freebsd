@@ -815,7 +815,7 @@ SDK tree that clang takes as `--cuda-path`. Its headers are written from the pub
 references and from what clang's CUDA runtime wrapper includes by name; no file of NVIDIA's CUDA
 toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg install llvm23`).
 `sh lib/cuda-native/mksdk.sh obj/cuda-native` builds the tree. Then
-`/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S x.cu`
+`/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
 emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
 Not there yet: the libdevice math library, `ptxas`/`fatbinary`, `libcudart` and `libcuda`.
 Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips

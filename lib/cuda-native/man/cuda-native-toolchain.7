@@ -110,12 +110,20 @@ mutants
 exits 0 when the tree is built, 2 when the arguments or
 .Ar outdir
 are refused, the LLVM tools are missing or older than 23, and 1 when a step fails.
-A failed run leaves
+A failed run leaves no partial tree:
 .Ar outdir
-as it was: the tree is built next to it and renamed into place at the end.
+stays absent or empty, because the tree is built next to it and renamed
+into place at the end.
+If
+.Ar outdir
+changes while the tree is built, the run fails and says so.
 .Pp
-The test exits with the number of failed checks, 77 when LLVM 23 is missing
-(the checks that need it are skipped), and 99 when it cannot set up.
+The test exits with the number of failed checks, capped at 76 so that it is
+never confused with 77.
+It exits 77 when no clang 23 or later is found in
+.Pa $LLVM/bin
+and every check that ran passed (the checks that need LLVM are skipped),
+and 99 when it cannot set up.
 .Sh EXAMPLES
 Build the tree and emit PTX for the GB10:
 .Bd -literal -offset indent

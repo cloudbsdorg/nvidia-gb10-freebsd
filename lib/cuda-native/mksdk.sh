@@ -24,6 +24,8 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin
 export PATH
 LLVM=${LLVM:-/usr/local/llvm23}
 LLVM_MIN=23
+# The one remedy every LLVM refusal names.
+LLVM_FIX="install LLVM $LLVM_MIN or later (pkg install llvm$LLVM_MIN), or set LLVM to its prefix, such as LLVM=/usr/local/llvm$LLVM_MIN"
 
 usage() {
 	echo "usage: sh $0 OUTDIR    (env LLVM, default /usr/local/llvm23)"
@@ -46,6 +48,14 @@ esac
 [ $# -eq 1 ] || { usage >&2; exit 2; }
 
 OUT=$1
+# A trailing slash would make the symlink test below look through a link.
+# Time: O(trailing slashes).  Space: O(1).
+while :; do
+	case $OUT in
+	?*/) OUT=${OUT%/} ;;
+	*) break ;;
+	esac
+done
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
 
 [ -L "$OUT" ] && die2 "$OUT is a symbolic link; give a real directory"
@@ -58,12 +68,20 @@ if [ -e "$OUT" ]; then
 fi
 for tool in llvm-as clang; do
 	[ -x "$LLVM/bin/$tool" ] ||
-	    die2 "$LLVM/bin/$tool not found (pkg install llvm23, or set LLVM)"
+	    die2 "$LLVM/bin/$tool not found; $LLVM_FIX"
 done
 major=$("$LLVM/bin/clang" --version 2>/dev/null |
     sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | sed -n 1p)
 [ -n "$major" ] && [ "$major" -ge "$LLVM_MIN" ] ||
-    die2 "$LLVM/bin/clang is version ${major:-unknown}; LLVM $LLVM_MIN or later is needed"
+    die2 "$LLVM/bin/clang is version ${major:-unknown}; LLVM $LLVM_MIN or later is needed; $LLVM_FIX"
+
+# Time: O(1).  Space: O(1).
+for src in sdk/include/cuda.h libdevice/libdevice.ll; do
+	[ -f "$HERE/$src" ] || {
+		echo "mksdk: $HERE/$src is missing; the source tree is incomplete (check out lib/cuda-native again)" >&2
+		exit 1
+	}
+done
 
 # The API level and our release, from the one place they are set: cuda.h.
 macro() {
@@ -77,10 +95,13 @@ rel=$(macro CUDA_NATIVE_VERSION)
 }
 
 # The data layout clang uses for nvptx64; empty output means clang failed.
-layout=$("$LLVM/bin/clang" --target=nvptx64-nvidia-cuda -S -emit-llvm \
-    -x c /dev/null -o - 2>/dev/null | grep '^target datalayout') || layout=
+# This runs before anything is created, so a refused clang leaves nothing.
+probe=$("$LLVM/bin/clang" --target=nvptx64-nvidia-cuda -S -emit-llvm \
+    -x c /dev/null -o - 2>&1)
+layout=$(printf '%s\n' "$probe" | grep '^target datalayout') || layout=
 [ -n "$layout" ] || {
-	echo "mksdk: no nvptx64 data layout from $LLVM/bin/clang" >&2
+	echo "mksdk: $LLVM/bin/clang cannot compile for nvptx64 (built without the NVPTX target?); $LLVM_FIX" >&2
+	printf '%s\n' "$probe" | sed -n 1,5p >&2
 	exit 1
 }
 
@@ -102,9 +123,36 @@ printf '{"cuda":{"name":"cuda-native","version":"%d.%d.%d"},"cuda_native":{"vers
 
 # mktemp made NEW mode 0700; give the tree the usual directory mode.
 chmod 755 "$NEW" || exit 1
+# OUT may have changed while the tree was built: check it again, rename
+# without following a link (mv -h), and verify the result.  A window remains
+# between rmdir and mv: a directory that lands there is caught after mv,
+# anything else makes mv fail.
+RETRY="remove it or give another directory, then run mksdk.sh again"
+[ -L "$OUT" ] && { echo "mksdk: $OUT became a symbolic link during the build; $RETRY" >&2; exit 1; }
+removed=0
 if [ -d "$OUT" ]; then
-	rmdir -- "$OUT" || exit 1
+	if ! rmdir -- "$OUT" 2>/dev/null; then
+		if [ -n "$(ls -A -- "$OUT" 2>/dev/null)" ]; then
+			echo "mksdk: $OUT is no longer empty; $RETRY" >&2
+		else
+			echo "mksdk: cannot remove the empty $OUT to put the tree there; $RETRY" >&2
+		fi
+		exit 1
+	fi
+	removed=1
 fi
-mv -- "$NEW" "$OUT" || exit 1
+if ! mv -h -- "$NEW" "$OUT" 2>/dev/null; then
+	echo "mksdk: cannot put the tree at $OUT (it changed during the build?); $RETRY" >&2
+	# Put back the empty directory the caller gave.
+	[ $removed -eq 1 ] && mkdir -- "$OUT" 2>/dev/null
+	exit 1
+fi
+# mv moves NEW into OUT when a directory appeared there after rmdir: the
+# tree then sits at OUT/<name of NEW>, not at OUT.
+if [ -L "$OUT" ] || [ -e "$OUT/${NEW##*/}" ] || [ ! -f "$OUT/include/cuda.h" ]; then
+	echo "mksdk: $OUT changed during the build; the tree is not in place; $RETRY" >&2
+	rm -rf -- "$OUT/${NEW##*/}"
+	exit 1
+fi
 trap - EXIT
 echo "sdk: $OUT"

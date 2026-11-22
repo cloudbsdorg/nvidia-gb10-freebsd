@@ -19,8 +19,9 @@
 # - mutants of the tree and of the sources that the checks must notice.
 #
 # Every check prints "ok" or "FAIL".  Exit status: the number of failures
-# (at most 96), 77 when LLVM 23 is missing (the checks that need it were
-# skipped; the others ran), 99 when the setup failed (no fresh copy).
+# (at most 76, so it never reads as 77), 77 when LLVM 23 is missing and
+# every check that ran passed (the checks that need LLVM were skipped), 99
+# when the setup failed (no fresh copy).
 # Run: sh tests/cuda_native_toolchain_test.sh
 # Env: LLVM (default /usr/local/llvm23), TMPDIR (scratch, default /tmp).
 
@@ -49,7 +50,7 @@ expect_rc() {
 }
 finish() {
 	printf '%d passed, %d failed\n' "$PASS" "$FAIL"
-	[ "$FAIL" -le 96 ] || FAIL=96
+	[ "$FAIL" -le 76 ] || FAIL=76
 	exit "$FAIL"
 }
 
@@ -72,23 +73,35 @@ CN=$SRC/lib/cuda-native
 K=$SRC/tests/cuda-native
 
 # ---- provenance (no LLVM needed) -----------------------------------------
-# provenance DIR: print each file under DIR that lacks our BSD-2 header (all
-# but this test's own fixtures), names NVIDIA Corporation, or carries a
-# copyright line other than ours.  Exit 0 when nothing is printed, 1 when
-# something is, 2 when a file could not be read.
-# Time: O(total size of DIR).  Space: O(files).
+# provenance PATH: PATH is a file or a directory.  Record each file that
+# lacks our BSD-2 header, names NVIDIA Corporation, or carries a copyright
+# line other than ours, and each entry that is not a regular file or a
+# directory (a symbolic link could point at a toolkit file).  Exit 0 when
+# nothing is recorded, 1 when something is, 2 when a file could not be read.
+# Time: O(total size under PATH).  Space: O(files).
 provenance() {
-	find "$1" -type f | sort >"$W/prov.files" || return 2
 	: >"$W/prov.out"
+	find "$1" ! -type f ! -type d >"$W/prov.odd" || return 2
+	[ -s "$W/prov.odd" ] &&
+	    sed 's/^/not a regular file: /' "$W/prov.odd" >>"$W/prov.out"
+	find "$1" -type f | sort >"$W/prov.files" || return 2
 	while IFS= read -r f; do
 		[ -r "$f" ] || return 2
-		grep -q 'SPDX-License-Identifier: BSD-2-Clause' "$f" &&
-		    grep -q 'Copyright (c) 2026 REVYTECH, Inc\.' "$f" ||
+		# grep: 0 found, 1 not found, anything else is an error.
+		grep -q 'SPDX-License-Identifier: BSD-2-Clause' "$f"
+		g1=$?
+		grep -q 'Copyright (c) 2026 REVYTECH, Inc\.' "$f"
+		g2=$?
+		grep -Eiq 'nvidia[[:space:]]+corp' "$f"
+		g3=$?
+		grep -Ei 'copyright|\(c\)|©' "$f" >"$W/prov.all"
+		g4=$?
+		[ $g1 -le 1 ] && [ $g2 -le 1 ] && [ $g3 -le 1 ] && [ $g4 -le 1 ] || return 2
+		[ $g1 -eq 0 ] && [ $g2 -eq 0 ] ||
 		    echo "no REVYTECH BSD-2 header: ${f#$SRC/}" >>"$W/prov.out"
-		grep -Eiq 'nvidia[[:space:]]+corp' "$f" &&
+		[ $g3 -eq 0 ] &&
 		    echo "names NVIDIA Corporation: ${f#$SRC/}" >>"$W/prov.out"
-		grep -Ei 'copyright|\(c\)|©' "$f" |
-		    grep -v 'Copyright (c) 2026 REVYTECH, Inc\.' >"$W/prov.line"
+		grep -v 'Copyright (c) 2026 REVYTECH, Inc\.' "$W/prov.all" >"$W/prov.line"
 		[ -s "$W/prov.line" ] &&
 		    echo "other copyright line in ${f#$SRC/}: $(sed -n 1p "$W/prov.line")" >>"$W/prov.out"
 	done <"$W/prov.files"
@@ -101,8 +114,10 @@ expect_rc "lib/cuda-native: our BSD-2 header everywhere, no NVIDIA or other copy
 provenance "$K"
 rc=$?
 expect_rc "tests/cuda-native: the same" $rc 0
-grep -q 'SPDX-License-Identifier: BSD-2-Clause' "$SRC/tests/cuda_native_toolchain_test.sh" &&
-    grep -q 'Copyright (c) 2026 REVYTECH, Inc\.' "$SRC/tests/cuda_native_toolchain_test.sh"
+# This script names the patterns it looks for, so only its header (the first
+# three lines) is checked.
+sed -n 1,3p "$SRC/tests/cuda_native_toolchain_test.sh" >"$W/self.sh"
+provenance "$W/self.sh"
 expect_rc "this test carries our BSD-2 header" $? 0
 
 # The check must catch a foreign copyright in any spelling.
@@ -117,9 +132,19 @@ sed -i '' '/SPDX-License-Identifier/d' "$W/prov-m/mksdk.sh"
 provenance "$W/prov-m"
 rc=$?
 expect_rc "mutant: mksdk.sh without its licence header is caught" $rc 1
+rm -rf "$W/prov-m"
+cp -R "$CN" "$W/prov-m"
+ln -s /etc/passwd "$W/prov-m/sdk/include/linked.h"
+provenance "$W/prov-m"
+rc=$?
+expect_rc "mutant: a symbolic link among the headers is caught" $rc 1
 
 # ---- man page (no LLVM needed) ---------------------------------------------
 MAN=$CN/man/cuda-native-toolchain.7
+# The man page states the failure cap of finish(); keep them the same.
+cap=$(sed -n 's/^	\[ "\$FAIL" -le \([0-9]*\) \] || FAIL=\1$/\1/p' "$SRC/tests/cuda_native_toolchain_test.sh")
+[ -n "$cap" ] && [ "$cap" -lt 77 ] && grep -q "capped at $cap" "$MAN"
+expect_rc "the man page states the failure cap of this test (${cap:-none})" $? 0
 mandoc -T lint -W warning "$MAN" >"$W/mandoc.out" 2>&1
 rc=$?
 [ $rc -eq 0 ] && [ ! -s "$W/mandoc.out" ]
@@ -127,8 +152,16 @@ expect_rc "cuda-native-toolchain.7 is mandoc -T lint -W warning clean" $? 0
 [ -s "$W/mandoc.out" ] && sed -n 1,10p "$W/mandoc.out"
 
 # ---- the rest needs LLVM 23 ------------------------------------------------
-if [ ! -x "$CXX" ]; then
-	echo "skip: no $CXX (pkg install llvm23); the checks below did not run"
+# The minimum version is the one mksdk.sh enforces.
+llvm_min=$(sed -n 's/^LLVM_MIN=\([0-9][0-9]*\)$/\1/p' "$CN/mksdk.sh")
+cxx_major=$("$CXX" --version 2>/dev/null |
+    sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | sed -n 1p)
+if [ -z "$llvm_min" ]; then
+	bad "mksdk.sh states LLVM_MIN"
+	finish
+fi
+if [ ! -x "$CXX" ] || [ -z "$cxx_major" ] || [ "$cxx_major" -lt "$llvm_min" ]; then
+	echo "skip: no clang 23 at $CXX (pkg install llvm23, or set LLVM); the checks below did not run"
 	printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 	[ "$FAIL" -eq 0 ] && exit 77
 	finish
@@ -168,6 +201,12 @@ sh "$CN/mksdk.sh" "$W/sdk-link" >/dev/null 2>&1
 rc=$?
 [ $rc -eq 2 ] && [ ! -e "$W/elsewhere" ]
 expect_rc "mksdk.sh refuses a symbolic link and writes nothing through it" $? 0
+mkdir "$W/elsewhere2"
+ln -s "$W/elsewhere2" "$W/sdk-link2"
+sh "$CN/mksdk.sh" "$W/sdk-link2/" >/dev/null 2>&1
+rc=$?
+[ $rc -eq 2 ] && [ -z "$(ls -A "$W/elsewhere2")" ] && [ -L "$W/sdk-link2" ]
+expect_rc "mksdk.sh refuses a symbolic link given with a trailing slash" $? 0
 LLVM=$W/nollvm sh "$CN/mksdk.sh" "$W/sdk-nollvm" >/dev/null 2>&1
 expect_rc "mksdk.sh refuses when the LLVM tools are missing" $? 2
 mkdir "$W/sdk-empty"
@@ -176,26 +215,75 @@ rc=$?
 [ $rc -eq 0 ] && [ -f "$W/sdk-empty/include/cuda.h" ]
 expect_rc "mksdk.sh fills an existing empty directory" $? 0
 
-# Fake LLVM installs: an old clang, and a clang 23 that gives no data layout.
-mkdir -p "$W/llvm19/bin" "$W/llvmbad/bin"
+# Fake LLVM installs: an old clang; a clang 23 without the NVPTX target; a
+# real clang with an llvm-as that fails, so the run fails after the build
+# directory exists and its cleanup is what the check sees.
+mkdir -p "$W/llvm19/bin" "$W/llvmbad/bin" "$W/llvmas/bin"
 printf '#!/bin/sh\necho "clang version 19.1.7"\n' >"$W/llvm19/bin/clang"
-printf '#!/bin/sh\ncase "$1" in --version) echo "clang version 23.1.5";; esac\nexit 0\n' \
+printf '#!/bin/sh\ncase "$1" in --version) echo "clang version 23.1.5"; exit 0;; esac\necho "unknown target triple nvptx64-nvidia-cuda" >&2\nexit 1\n' \
     >"$W/llvmbad/bin/clang"
+printf '#!/bin/sh\necho "llvm-as: planted failure" >&2\nexit 1\n' >"$W/llvmas/bin/llvm-as"
 ln -s "$LLVM/bin/llvm-as" "$W/llvm19/bin/llvm-as"
 ln -s "$LLVM/bin/llvm-as" "$W/llvmbad/bin/llvm-as"
-chmod +x "$W/llvm19/bin/clang" "$W/llvmbad/bin/clang"
-LLVM=$W/llvm19 sh "$CN/mksdk.sh" "$W/sdk-old" >/dev/null 2>&1
+ln -s "$LLVM/bin/clang" "$W/llvmas/bin/clang"
+chmod +x "$W/llvm19/bin/clang" "$W/llvmbad/bin/clang" "$W/llvmas/bin/llvm-as"
+LLVM=$W/llvm19 sh "$CN/mksdk.sh" "$W/sdk-old" >/dev/null 2>"$W/old.err"
 rc=$?
-[ $rc -eq 2 ] && [ ! -e "$W/sdk-old" ]
-expect_rc "mksdk.sh refuses a clang older than 23" $? 0
-mkdir "$W/sdk-fail"
-LLVM=$W/llvmbad sh "$CN/mksdk.sh" "$W/sdk-fail" >/dev/null 2>&1
+[ $rc -eq 2 ] && [ ! -e "$W/sdk-old" ] && grep -q 'set LLVM' "$W/old.err"
+expect_rc "mksdk.sh refuses a clang older than 23 and says what to do" $? 0
+mkdir -p "$W/fail1/sdk"
+LLVM=$W/llvmbad sh "$CN/mksdk.sh" "$W/fail1/sdk" >/dev/null 2>"$W/bad.err"
 rc=$?
-[ $rc -eq 1 ] && [ -z "$(ls -A "$W/sdk-fail")" ] &&
-    [ -z "$(find "$W" -maxdepth 1 -name '.mksdk.*')" ]
-expect_rc "a failed mksdk.sh run leaves the output directory empty" $? 0
-sh "$CN/mksdk.sh" "$W/sdk-fail" >/dev/null 2>&1
+[ $rc -eq 1 ] && [ "$(ls -A "$W/fail1")" = sdk ] && [ -z "$(ls -A "$W/fail1/sdk")" ] &&
+    grep -q 'unknown target triple' "$W/bad.err" && grep -q 'set LLVM' "$W/bad.err"
+expect_rc "a clang without NVPTX: rc 1, the cause and the remedy shown, nothing left" $? 0
+LLVM=$W/llvmbad sh "$CN/mksdk.sh" "$W/fail3/a/sdk" >/dev/null 2>&1
+rc=$?
+[ $rc -eq 1 ] && [ ! -e "$W/fail3" ]
+expect_rc "a refused clang creates no parent directories" $? 0
+mkdir "$W/fail2"
+LLVM=$W/llvmas sh "$CN/mksdk.sh" "$W/fail2/sdk" >/dev/null 2>&1
+rc=$?
+[ $rc -eq 1 ] && [ ! -e "$W/fail2/sdk" ] && [ -z "$(ls -A "$W/fail2")" ]
+expect_rc "a run that fails after the build directory exists leaves nothing behind" $? 0
+sh "$CN/mksdk.sh" "$W/fail1/sdk" >/dev/null 2>&1
 expect_rc "the same directory builds on the next run" $? 0
+
+# OUT changes while the tree is built: an llvm-as that runs the real one and
+# then plants a directory, or a symbolic link, where the tree is to go.
+# Time: O(1) per case.  Space: O(tree).
+mkdir -p "$W/llvmrace/bin" "$W/llvmlink/bin" "$W/llvmfile/bin"
+ln -s "$LLVM/bin/clang" "$W/llvmrace/bin/clang"
+ln -s "$LLVM/bin/clang" "$W/llvmlink/bin/clang"
+ln -s "$LLVM/bin/clang" "$W/llvmfile/bin/clang"
+printf '#!/bin/sh\n"%s/bin/llvm-as" "$@" || exit 1\n: >"%s/file/sdk"\n' \
+    "$LLVM" "$W" >"$W/llvmfile/bin/llvm-as"
+chmod +x "$W/llvmfile/bin/llvm-as"
+printf '#!/bin/sh\n"%s/bin/llvm-as" "$@" || exit 1\nmkdir -p "%s/race/sdk/held"\n' \
+    "$LLVM" "$W" >"$W/llvmrace/bin/llvm-as"
+printf '#!/bin/sh\n"%s/bin/llvm-as" "$@" || exit 1\nmkdir -p "%s/linked"\nln -s "%s/linked" "%s/link/sdk"\n' \
+    "$LLVM" "$W" "$W" "$W" >"$W/llvmlink/bin/llvm-as"
+chmod +x "$W/llvmrace/bin/llvm-as" "$W/llvmlink/bin/llvm-as"
+mkdir "$W/race" "$W/link"
+LLVM=$W/llvmrace sh "$CN/mksdk.sh" "$W/race/sdk" >/dev/null 2>"$W/race.err"
+rc=$?
+[ $rc -eq 1 ] && [ "$(ls -A "$W/race/sdk")" = held ] &&
+    [ -z "$(find "$W/race" -name '.mksdk.*')" ] && grep -q 'no longer empty' "$W/race.err"
+expect_rc "a directory filled during the build: rc 1, the tree is not put into it" $? 0
+LLVM=$W/llvmlink sh "$CN/mksdk.sh" "$W/link/sdk" >/dev/null 2>"$W/link.err"
+rc=$?
+[ $rc -eq 1 ] && [ -z "$(ls -A "$W/linked")" ] &&
+    [ -z "$(find "$W/link" -name '.mksdk.*')" ] && grep -q 'symbolic link' "$W/link.err"
+expect_rc "a symbolic link planted during the build: rc 1, nothing written through it" $? 0
+# A file planted at OUT makes the rename fail: the failure is reported with
+# the remedy, and the build directory is removed.
+mkdir "$W/file"
+LLVM=$W/llvmfile sh "$CN/mksdk.sh" "$W/file/sdk" >/dev/null 2>"$W/file.err"
+rc=$?
+[ $rc -eq 1 ] && [ -f "$W/file/sdk" ] && [ ! -s "$W/file/sdk" ] &&
+    [ -z "$(find "$W/file" -name '.mksdk.*')" ] &&
+    grep -q 'cannot put the tree at' "$W/file.err" && grep -q 'run mksdk.sh again' "$W/file.err"
+expect_rc "a file planted during the build: rc 1, reported with the remedy, nothing left" $? 0
 
 # ---- compiles ----------------------------------------------------------------
 # devptx TREE ARCH SRC OUT [FLAGS...]: one device-only compile; the
@@ -213,19 +301,25 @@ expect_rc "baseline: the plain device compile works (the command the mutants use
 grep -q "Found CUDA installation: $SDK, version 13.0" "$W/v.ptx.log"
 expect_rc "clang finds the cuda-native installation, version 13.0" $? 0
 
-# Every header of the tree is one clang includes: no dead stub, none missing.
+# includes_exactly TREE TAG: the entries under TREE/include (anything but
+# directories) must be exactly the SDK headers clang includes for builtins.cu,
+# device side and host side.  Lists in $W/have-TAG.txt and $W/used-TAG.txt.
 # Time: O(headers).  Space: O(headers).
-(cd "$SDK/include" && find . -type f | sed 's#^\./##' | sort) >"$W/have.txt"
-"$CXX" -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 --cuda-device-only \
-    -M "$K/builtins.cu" >"$W/dep-dev.txt" 2>&1
-"$CXX" -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 --cuda-host-only \
-    -M "$K/builtins.cu" >"$W/dep-host.txt" 2>&1
-tr ' \\' '\n\n' <"$W/dep-dev.txt" | cat - "$W/dep-host.txt" | tr ' \\' '\n\n' |
-    sed -n "s#^$SDK/include/##p" | sort -u >"$W/used.txt"
-cmp -s "$W/have.txt" "$W/used.txt"
+includes_exactly() {
+	(cd "$1/include" && find . ! -type d | sed 's#^\./##' | sort) >"$W/have-$2.txt"
+	"$CXX" -x cuda --cuda-path="$1" --cuda-gpu-arch=sm_120 --cuda-device-only \
+	    -M "$K/builtins.cu" >"$W/dep-dev-$2.txt" 2>&1 || return 2
+	"$CXX" -x cuda --cuda-path="$1" --cuda-gpu-arch=sm_120 --cuda-host-only \
+	    -M "$K/builtins.cu" >"$W/dep-host-$2.txt" 2>&1 || return 2
+	cat "$W/dep-dev-$2.txt" "$W/dep-host-$2.txt" | tr ' \\' '\n\n' |
+	    sed -n "s#^$1/include/##p" | sort -u >"$W/used-$2.txt"
+	[ -s "$W/used-$2.txt" ] || return 2
+	cmp -s "$W/have-$2.txt" "$W/used-$2.txt"
+}
+includes_exactly "$SDK" sdk
 rc=$?
 expect_rc "clang includes exactly the headers of the tree" $rc 0
-[ $rc -eq 0 ] || diff "$W/have.txt" "$W/used.txt" | sed -n 1,10p
+[ $rc -eq 0 ] || diff "$W/have-sdk.txt" "$W/used-sdk.txt" | sed -n 1,10p
 
 # Time: O(arches x kernels x PTX size).  Space: O(1) beyond the PTX files.
 for arch in sm_120 sm_121 sm_120a sm_121a; do
@@ -294,24 +388,67 @@ rc=$?
 [ $rc -ne 0 ] && grep -q 'cannot find CUDA installation' "$W/m-nobin.ptx.log"
 expect_rc "mutant: a tree without bin/ is not a CUDA installation" $? 0
 
-# An empty __global__ makes vadd an ordinary function: no kernel entry.
+# An empty __global__ makes the kernel an ordinary function.  entry_only.cu
+# uses plain C++ only, so it still compiles: the only change is the entry.
+devptx "$SDK" sm_120 "$K/entry_only.cu" "$W/entry_only.ptx"
+rc=$?
+[ $rc -eq 0 ] && grep -q '\.entry _Z10entry_onlyPi' "$W/entry_only.ptx"
+expect_rc "entry_only: the unmutated tree emits the kernel entry" $? 0
 M=$(mutant noglobal) || finish
 sed -i '' 's/^#define __global__ .*/#define __global__/' "$M/include/host_defines.h"
-devptx "$M" sm_120 "$K/vector_add.cu" "$W/m-noglobal.ptx"
+devptx "$M" sm_120 "$K/entry_only.cu" "$W/m-noglobal.ptx"
 rc=$?
-if [ $rc -ne 0 ] || ! grep -q '\.entry _Z4vaddPKfS0_Pfi' "$W/m-noglobal.ptx"; then
-	ok "mutant: an empty __global__ loses the vadd kernel"
-else
-	bad "mutant: an empty __global__ loses the vadd kernel"
-fi
+[ $rc -eq 0 ] && ! grep -q '\.entry _Z10entry_onlyPi' "$W/m-noglobal.ptx"
+expect_rc "mutant: an empty __global__ compiles but loses the kernel entry" $? 0
 
-# A dead stub (a header clang never includes) must fail the include check.
+# A source tree without libdevice.ll must not build.
+cp -R "$CN" "$W/cn-nolibdevice"
+rm -f "$W/cn-nolibdevice/libdevice/libdevice.ll"
+sh "$W/cn-nolibdevice/mksdk.sh" "$W/sdk-nolibdevice" >/dev/null 2>"$W/nolibdevice.err"
+rc=$?
+[ $rc -eq 1 ] && [ ! -e "$W/sdk-nolibdevice" ] &&
+    grep -q 'libdevice.ll is missing; the source tree is incomplete' "$W/nolibdevice.err"
+expect_rc "mutant: mksdk.sh refuses a source tree without libdevice.ll" $? 0
+cp -R "$CN" "$W/cn-nocudah"
+rm -f "$W/cn-nocudah/sdk/include/cuda.h"
+sh "$W/cn-nocudah/mksdk.sh" "$W/sdk-nocudah" >/dev/null 2>"$W/nocudah.err"
+rc=$?
+[ $rc -eq 1 ] && [ ! -e "$W/sdk-nocudah" ] &&
+    grep -q 'cuda.h is missing; the source tree is incomplete' "$W/nocudah.err"
+expect_rc "mutant: mksdk.sh refuses a source tree without cuda.h" $? 0
+
+# __noinline__ must stay the clang keyword: a macro breaks the
+# __attribute__((__noinline__)) spelling, which builtins.cu uses.
+M=$(mutant noinline) || finish
+sed -i '' 's|^#define __forceinline__ |#define __noinline__ __attribute__((noinline))\
+#define __forceinline__ |' "$M/include/host_defines.h"
+devptx "$M" sm_120 "$K/builtins.cu" "$W/m-noinline.ptx"
+rc=$?
+[ $rc -ne 0 ] && grep -q 'noinline' "$W/m-noinline.ptx.log"
+expect_rc "mutant: a __noinline__ macro breaks __attribute__((__noinline__))" $? 0
+
+# The vector types: sizes, alignments and constructors (host and device).
+# The device side stops at PTX (-S): there is no ptxas in bin/ yet.
+for side in --cuda-host-only --cuda-device-only; do
+	"$CXX" -O2 -Werror -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 \
+	    "$side" -S -o "$W/vt$side.s" "$K/vector_types_check.cu" >"$W/vt$side.log" 2>&1
+	rc=$?
+	expect_rc "vector types: sizes, alignments and make_* compile ($side)" $rc 0
+	[ $rc -eq 0 ] || sed -n 1,10p "$W/vt$side.log"
+done
+M=$(mutant badalign) || finish
+sed -i '' 's/^struct __align__(16) float4 {$/struct __align__(8) float4 {/' "$M/include/vector_types.h"
+"$CXX" -x cuda --cuda-path="$M" --cuda-gpu-arch=sm_120 --cuda-host-only -c \
+    -o "$W/m-badalign.o" "$K/vector_types_check.cu" >"$W/m-badalign.log" 2>&1
+rc=$?
+[ $rc -ne 0 ] && grep -q 'static assertion failed' "$W/m-badalign.log"
+expect_rc "mutant: a wrong float4 alignment fails the vector type check" $? 0
+
+# A dead stub (a header clang never includes) must fail the include check,
+# run by the same function on the mutated tree.
 M=$(mutant deadstub) || finish
 cp "$M/include/host_config.h" "$M/include/never_included.h"
-(cd "$M/include" && find . -type f | sed 's#^\./##' | sort) >"$W/have-m.txt"
-cmp -s "$W/have-m.txt" "$W/used.txt"
-rc=$?
-[ $rc -ne 0 ]
-expect_rc "mutant: an extra header that clang never includes is noticed" $? 0
+includes_exactly "$M" deadstub
+expect_rc "mutant: an extra header that clang never includes is noticed" $? 1
 
 finish
