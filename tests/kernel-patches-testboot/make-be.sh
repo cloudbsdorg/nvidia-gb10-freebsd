@@ -253,6 +253,11 @@ for _f in "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" "$MNT/usr/local/etc/rc.con
 	echo "turned off the test-boot kits in ${_f#$MNT}"
 done
 
+# The marker ties use of the real shutdown to this one-shot boot environment.
+install -d -m 0755 "$MNT/usr/local/etc"
+printf '%s\n' "$BE" > "$MNT/usr/local/etc/kernel_patches_testboot.marker"
+chmod 0444 "$MNT/usr/local/etc/kernel_patches_testboot.marker"
+
 # the recorder
 install -d -m 0755 "$MNT/usr/local/etc/rc.d" "$MNT/usr/local/sbin"
 run install -o root -g wheel -m 0555 "$KITDIR/kernel_patches_testboot" "$MNT/usr/local/etc/rc.d/kernel_patches_testboot"
