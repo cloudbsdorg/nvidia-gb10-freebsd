@@ -713,3 +713,13 @@ RESUME:
 - Stray pre-fix working-tree edits found before the merge were saved to tmp/stray-worktree-changes.patch and dropped.
 RESUME: after PR 22 is merged, rebase wt-2378-sysctl on main (drop its nvrm_version.h copy), gate 2 rounds, PR;
 then kit round C; then the staged build, make-be dry run and check-be.
+
+## 2026-11-22T21:59Z #2448 kapi logdevice round 1
+- New patches/ogkm/patch-src_nvidia-modeset_kapi_include_nvkms-kapi-internal.h adds nvKmsKapiLogDevice (nvEvoLog, EVO_LOG_WARN, uses (__device)->gpuId); the patch was missing, so SetConsoleOwner called an undefined symbol. Applies with fuzz 0, no offset, and all ogkm patches apply in sequence.
+- tests/console_owner_patch_test.sh: KAPI_I copied and patched, check_logdevice_macro, check_logdevice_defined, 4 plant controls. 31 passed, 0 failed.
+- docs/CONSOLE-SHARING.md 6.1 paragraph. build-rmcore_test 23/0, enumerate_gpus_patch_test 5/0, kapi_table_test 30/0, prime_import_test 18/1 (D6 needs work/build/tree/nvidia-drm, not present in this worktree; unrelated).
+- scripts/build-rmcore.sh apply_patches globs patch-*; console_owner_patch_test.sh lists the patches it applies in one variable (OGKM_PATCHES).
+
+## 2026-11-22T22:22Z #2448 kapi logdevice round 2
+- Review-gate fixes: checks split so each failure names one cause (called, defined, warning level, own device argument, unconditional and never undefined, same prefix as the Debug macro); 11 new plant controls; one OGKM_PATCHES list for the required check and the apply loop; patch comment says operator and kernel log; test header states the missing macro is a clang implicit-declaration warning and an undefined symbol in the .ko.
+- console_owner_patch_test 42 passed 0 failed; kapi_table_test 30/0; build-rmcore_test 23/0. All ogkm patches apply in lexical order, fuzz 0.
