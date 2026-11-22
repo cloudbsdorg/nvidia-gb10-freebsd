@@ -543,22 +543,16 @@ EOF
 then ok "install schema, sample registration and fixture agree with real output"; else bad "install schema or fixture"; fi
 
 # No personal defaults.  Split the needles so this check does not match its
-# own source.  Documentation and manual hits are deliberately printed but
-# skipped for this round; the next round removes this exact skip list.
+# own source.  README.md, docs/ and man/ are covered too.
 hpat=/$(printf 'home')/
 dollar=$
 hwork=${dollar}HOME/work
 bwork=${dollar}{HOME}/work
 twwork='~'"/work"
 user=mla$(printf 'pointe')
-skip="docs/ man/ README.md"
-printf 'TEMPORARY SKIP (next round removes it): %s\n' "$skip"
-for p in docs man README.md; do
-	[ ! -e "$repo/$p" ] || grep -R -n -F -e "$hpat" -e "$hwork" -e "$bwork" -e "$twwork" -e "$user" "$repo/$p" 2>/dev/null || true
-done
 scan=$S/no-user-paths
 : > "$scan"
-for p in Makefile scripts lib/libnvrm/Makefile; do
+for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
 	grep -R -n -F -e "$hpat" -e "$hwork" -e "$bwork" -e "$twwork" -e "$user" "$repo/$p" >> "$scan" 2>/dev/null || true
 done
 for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
@@ -566,9 +560,9 @@ for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
 done
 if [ -s "$scan" ]; then
 	sed "s|$repo|<repo>|g" "$scan"
-	bad "personal paths or the personal account name remain outside the marked skip"
+	bad "personal paths or the personal account name remain"
 else
-	ok "no personal paths outside the explicitly skipped documentation locations"
+	ok "no personal paths in code, tests, README.md, docs or man"
 fi
 
 if [ "$fail" = 0 ]; then

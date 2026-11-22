@@ -5,7 +5,7 @@ Design note for Track #2228, 2026-11-20. It was written together with the NULL-h
 items below land.
 
 In this document `ogkm/` means NVIDIA's open-gpu-kernel-modules 580.178.04 (MIT), checked out
-at `~/work/gb10/sources/open-gpu-kernel-modules-580.178.04`. Line numbers refer to the pristine
+at `<repo>/work/sources/open-gpu-kernel-modules-580.178.04`. Line numbers refer to the pristine
 files; the functions named next to them are the stable anchors.
 
 ## 0. The short version
@@ -453,7 +453,7 @@ overflow cases are checked before any allocation or wiring (`tests/pageimport_te
 
 `tests/prime-import-testboot/` is the kit for a one-shot test boot environment named
 `nvidia-prime-import-test-<date>-<n>`: `make-be.sh` assembles it, `prime_import_testboot` is the
-self-recording rc one-shot (results under `~/work/gb10/logs/prime-import-*`), and
+self-recording rc one-shot (results under `<repo>/work/logs/prime-import-*`), and
 `prime_import_probe` (`prime_import_probe(8)`, JSON schema `prime-import-probe/1`) does the
 create, export, import and `ADDFB2` of section 5.2. It never sets a mode and never loads or
 unloads anything on a running system; the regressions of section 5.3 run from the rc script
@@ -623,6 +623,6 @@ unset; a second-stage Wayfire step after login is a follow-up.
 What to expect on the day: the machine boots into the test boot environment and the kit runs while
 the boot is held, for about 30 minutes (a hang ends in the dead-man restart after 60). After the done
 row it stays in the test boot environment until the next reboot. A missing run directory under
-`~/work/gb10/logs/prime-import-<stamp>` means the boot died before the rc script. Read a run with
+`<repo>/work/logs/prime-import-<stamp>` means the boot died before the rc script. Read a run with
 `tests/prime-import-testboot/summarize.sh <run directory>`: 0 passed, 1 failed, 3 finished but the
 import or the wire measurement was skipped.

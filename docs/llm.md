@@ -140,13 +140,13 @@ Both servers need the same model, the same context size, one slot, and `--slot-s
 same directory, since one writes the slot file and the other reads it:
 
 ```sh
-mkdir -p ~/llm-slots
+mkdir -p "$(pwd)/work/llm-slots"
 # prefill: the RX 7600
 llama-server -m $M -ngl 99 -fa on -t 8 -c 8192 -np 1 \
-    --slot-save-path ~/llm-slots --port 18080 &
+    --slot-save-path "$(pwd)/work/llm-slots" --port 18080 &
 # decode: the CPU only
 llama-server -m $M --device none -t 32 -c 8192 -np 1 \
-    --slot-save-path ~/llm-slots --port 18081 &
+    --slot-save-path "$(pwd)/work/llm-slots" --port 18081 &
 
 python3 scripts/pd_split.py http://127.0.0.1:18080 http://127.0.0.1:18081 128
 ```
@@ -269,7 +269,7 @@ Ubuntu arm64 builds (`ubuntu-vulkan-arm64`, `ubuntu-cuda-13.5-arm64`) on NVIDIA'
 libraries under the Linuxulator (see the
 [README](../README.md#vulkan-linux-icd-under-the-linuxulator)). A FreeBSD llama.cpp cannot load
 NVIDIA's Linux ICD or `libcuda`, so the whole process has to be Linux. The NVIDIA numbers (the
-README's [Numbers](../README.md#what-works-status-2026-11-20) and the bench history) are
+README's [Numbers](../README.md#what-works) and the bench history) are
 recorded with `"path": "linuxulator"` and `"path_status": "last-resort"`, and are replaced as
 soon as a native path exists.
 The Linux CUDA path is described in the next section.
@@ -288,7 +288,7 @@ export VK_DRIVER_FILES=$GB10_WORK/linuxroot/nv/nvidia_icd.json
 export __EGL_VENDOR_LIBRARY_FILENAMES=$GB10_WORK/linuxroot/nv/10_nvidia.json
 ```
 
-The work root is `GB10_WORK`, which defaults to `$HOME/work/gb10`. It holds:
+The default work root is the `work/` directory of the checkout; `GB10_WORK` overrides it. It holds:
 
 | Directory | Contents |
 |---|---|
@@ -409,4 +409,5 @@ sh tests/linux_cuda_test.sh                    # no GPU: build and the shim test
 
 `run-linux-cuda.sh` starts the program through the Rocky `ld-linux-aarch64.so.1` with
 `--preload shim.so` and `--library-path` over `nv`, `rl9/usr/lib64` and `rl9/usr/lib`, and
-sets `SHIM_MMAP_MIN_ADDR`, `SHIM_COMM` and `SHIM_ABSTRACT_DIR` (default `~/.cache/sa`).
+sets `SHIM_MMAP_MIN_ADDR`, `SHIM_COMM` and `SHIM_ABSTRACT_DIR`. The abstract-socket directory
+has a per-user cache default; set `SHIM_ABSTRACT_DIR` to override it.
