@@ -101,15 +101,25 @@ that user must be trusted with root:
 T=/home/YOUR_USER/work/gb10
 kenv hw.nvidia.registry.EnableGpuFirmware=1
 kldload $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
-kldload $T/build/tree/nvidia/nvidia.ko            # also loads linux64 and linux_common, for now
+kldload $T/build/tree/nvidia/nvidia.ko            # the Linux providers below are optional
 kldload $T/build/tree/nvidia-modeset/nvidia-modeset.ko
-kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last
+kldload $T/build/tree/nvidia-drm/nvidia-drm.ko    # last of the native modules; the providers come after
+```
+
+`nvidia-smi` and Linux CUDA and Vulkan need the two Linux provider modules as well (see
+[Linux bridges](#linux-bridges-nvidia_linuxko)). Loading them also loads the Linuxulator
+(`linux64`, `linux_common`). Skip this on a host that runs no Linux binaries:
+
+```sh
+kldload $T/build/tree/nvidia-linux/nvidia_linux.ko
+kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
 ```
 
 ### 5. Check it worked
 
 ```sh
-kldstat                  # the four modules, plus linux64, linux_common, drm and its linuxkpi modules
+kldstat                  # the four modules, drm and its linuxkpi modules; with the providers also
+                         # nvidia_linux, nvidia_modeset_linux, linux64 and linux_common
 dmesg | tail             # nvidia0: <NVIDIA ...> on vgapci0
 ls /dev/nvidia*          # /dev/nvidia0 /dev/nvidiactl
 sleep 30 < /dev/nvidia0 &   # hold the device open: the GPU and GSP start on the first open
@@ -129,9 +139,14 @@ install -o root -g wheel -m 555 \
     $T/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko \
     $T/build/tree/nvidia/nvidia.ko \
     $T/build/tree/nvidia-modeset/nvidia-modeset.ko \
-    $T/build/tree/nvidia-drm/nvidia-drm.ko /boot/modules/
+    $T/build/tree/nvidia-drm/nvidia-drm.ko \
+    $T/build/tree/nvidia-linux/nvidia_linux.ko \
+    $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko /boot/modules/
+install -o root -g wheel -m 555 $T/rc.d/nvidia_linux /usr/local/etc/rc.d/nvidia_linux
 kldxref /boot/modules
 sysrc kld_list+="nvidia_gsp_ga10x_fw nvidia nvidia-modeset nvidia-drm"   # once: += appends
+sysrc linux_enable=YES         # only for nvidia-smi, Linux CUDA and Vulkan: starts the Linuxulator
+sysrc nvidia_linux_mode=AUTO   # the default; YES or NO overrides it
 grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
     echo 'hw.nvidia.registry.EnableGpuFirmware="1"' >> /boot/loader.conf
 ```
@@ -139,14 +154,22 @@ grep -q '^hw.nvidia.registry.EnableGpuFirmware=' /boot/loader.conf ||
 `kld_list` loads in the order given. `nvidia.ko` reads `hw.nvidia.registry.*` from the kernel
 environment when it loads, so the `loader.conf` line takes effect for a `kld_list` load.
 
+The providers are not in `kld_list`: `rc.d/nvidia_linux` loads them after the Linuxulator is up.
+`nvidia_linux_mode` needs setting only to override its default. `AUTO` loads `nvidia_linux.ko`
+when `linux_enable` is on and `nvidia.ko` is loaded, and `nvidia_modeset_linux.ko` when
+`linux_enable` is on and `nvidia-modeset.ko` is loaded; `YES` loads them whenever the script runs;
+`NO` never. Without `linux_enable=YES` (set above) `AUTO` loads nothing. See `nvidia_linux(4)`.
+
 ### What works and what does not
 
 In short (details in the [status table](#what-works-status-2026-11-20) below):
 
 - KMS and Xorg modesetting work, with software rendering only.
 - `nvidia-smi` runs through the Linuxulator: `sh scripts/fetch-nvidia-smi.sh`, plus
-  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi).
-- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator. CUDA also
+  `linux_base-rl9`, and the provider modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
+  (step 6); see [nvidia-smi](#nvidia-smi).
+- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator, with the
+  same provider modules. CUDA also
   needs `nvidia-uvm.ko` from [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd)
   (private; ask for access when you report), built per its README, and Linuxulator additions
   that are in the cloudbsd-src kernel, not in a stock one. Native versions are in progress.

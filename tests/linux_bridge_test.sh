@@ -504,6 +504,44 @@ grep -q 'Track #2363' "$TMPD/doc_bad.md" && pass "plant (j): the Track-reference
 if ! sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep -q 'kld_list='; then fail "(j) the nvidia_linux(4) synopsis has no kld_list line to check"
 elif sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$REPO/man/nvidia_linux.4" | grep 'kld_list=' | grep -q '_linux'; then fail "(j) the nvidia_linux(4) synopsis puts a provider in kld_list"; else pass "(j) the nvidia_linux(4) synopsis kld_list holds no provider"; fi
 printf 'kld_list="nvidia nvidia_linux"\n' | grep 'kld_list=' | grep -q '_linux' && pass "plant (j): the synopsis pattern fires" || fail "plant (j): the synopsis pattern cannot fire"
+# the Installation section agrees with the optional Linux providers: nvidia.ko does not load the Linuxulator,
+# and the steps install and name the providers and the rc script
+readme_install_ok() {	# readme_install_ok <README>: 0 ok, 1 the old claim is back, 2 a command is missing ($README_MISSING names it)
+	README_MISSING=
+	grep -q -e 'also loads linux64' -e 'plus linux64, linux_common' "$1" && return 1
+	# the commands of the Installation section's fenced blocks, continuation lines joined
+	_cmds=$(sed -n '/^## Installation/,/^## /p' "$1" | awk '/^```/ { f = !f; next } f { if (sub(/\\$/, "")) { buf = buf $0; next } print buf $0; buf = "" }')
+	for _w in 'kldload .*nvidia_linux\.ko' 'kldload .*nvidia_modeset_linux\.ko' 'install .*nvidia_linux\.ko' 'install .*nvidia_modeset_linux\.ko' \
+	    'install .*rc\.d/nvidia_linux ' 'sysrc linux_enable=YES' 'sysrc nvidia_linux_mode='; do
+		printf '%s\n' "$_cmds" | grep -q -e "$_w" || { README_MISSING=$_w; return 2; }
+	done
+	return 0
+}
+_rc=0
+readme_install_ok "$REPO/README.md" || _rc=$?
+case $_rc in
+0) pass "(j) the README Installation section names the providers, the rc script and nvidia_linux_mode, and no longer says nvidia.ko loads linux64" ;;
+1) fail "(j) the README still says nvidia.ko loads linux64 (also loads linux64, or plus linux64, linux_common)" ;;
+*) fail "(j) the README Installation section has no command matching [$README_MISSING] in its fenced blocks (prose does not count)" ;;
+esac
+printf '## Installation\nkldload nvidia.ko   # also loads linux64 and linux_common, for now\n## Next\n' > "$TMPD/readme_old.md"
+_rc=0
+readme_install_ok "$TMPD/readme_old.md" || _rc=$?
+[ "$_rc" = 1 ] && pass "plant (j): the old Installation text is refused" || fail "plant (j): the old Installation text was accepted (rc $_rc)"
+printf '## Installation\nkldload nvidia.ko\n## Next\n' > "$TMPD/readme_nop.md"
+_rc=0
+readme_install_ok "$TMPD/readme_nop.md" || _rc=$?
+[ "$_rc" = 2 ] && pass "plant (j): an Installation section without the provider commands is refused" || fail "plant (j): an Installation section without the provider commands was accepted (rc $_rc)"
+# prose alone does not count: the names are in a paragraph, the code block has none of the commands
+printf '## Installation\nInstall nvidia_linux.ko, nvidia_modeset_linux.ko and rc.d/nvidia_linux; set nvidia_linux_mode.\n```sh\nkldload nvidia.ko\n```\n## Next\n' > "$TMPD/readme_prose.md"
+_rc=0
+readme_install_ok "$TMPD/readme_prose.md" || _rc=$?
+[ "$_rc" = 2 ] && pass "plant (j): provider names in prose only are refused" || fail "plant (j): prose naming the providers was accepted (rc $_rc)"
+# the sysrc lines only in prose: refused, and the message names the missing command
+sed 's/^sysrc linux_enable=YES.*$//' "$REPO/README.md" > "$TMPD/readme_nosysrc.md"
+_rc=0
+readme_install_ok "$TMPD/readme_nosysrc.md" || _rc=$?
+[ "$_rc" = 2 ] && [ "$README_MISSING" = 'sysrc linux_enable=YES' ] && pass "plant (j): a README without the linux_enable command is refused and names it" || fail "plant (j): linux_enable command removed: rc $_rc missing [$README_MISSING]"
 # every build-shim.sh command in the README names its module with --module=
 readme_shim_ok() { grep -E 'build-shim\.sh +(nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux)( |$)' "$1" | grep -q . && return 1; return 0; }
 if readme_shim_ok "$REPO/README.md"; then pass "(j) no README build-shim.sh command names its module as a bare word"; else fail "(j) a README build-shim.sh command names the module as a bare word, not --module="; fi
