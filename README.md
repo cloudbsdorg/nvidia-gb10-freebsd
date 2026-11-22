@@ -139,10 +139,22 @@ kldload $T/build/tree/nvidia-modeset-linux/nvidia_modeset_linux.ko
 ```sh
 kldstat                  # the four modules, drm and its linuxkpi modules; with the providers also
                          # nvidia_linux, nvidia_modeset_linux, linux64 and linux_common
-dmesg | tail             # nvidia0: <NVIDIA ...> on vgapci0
-ls /dev/nvidia*          # /dev/nvidia0 /dev/nvidiactl
-sleep 30 < /dev/nvidia0 &   # hold the device open: the GPU and GSP start on the first open
-sysctl hw.nvidia.gpus.0  # firmware and VBIOS versions, while the device is held open
+dmesg | tail             # nvidiaN: <NVIDIA ...> on vgapciM
+ls /dev/nvidia*          # one /dev/nvidiaN per GPU, plus /dev/nvidiactl
+# Which node is which card: never assume the first number; a second NVIDIA GPU or the
+# attach order moves it (a BMC moves the vgapci and dri/card numbers).
+# Each nvidiaN's newbus parent is its vgapci device; pciconf names the vendor and bus.
+unset NV
+units=$(sysctl -N dev.nvidia 2>/dev/null | sed -n 's/^dev\.nvidia\.\([0-9]*\)\.%parent$/\1/p')
+for u in $units; do echo "/dev/nvidia$u $(pciconf -l "$(sysctl -n dev.nvidia.$u.%parent)")"; done
+set -- $units
+case $# in
+0) echo "no nvidiaN attached: see dmesg | grep -i nvidia" >&2 ;;
+1) NV=/dev/nvidia$1 ;;
+*) echo "several NVIDIA GPUs: set NV to the node on the bus you want, from the list" >&2 ;;
+esac
+sleep 30 < "${NV:?no NVIDIA node chosen}" &   # GPU and GSP start on the first open
+sysctl hw.nvidia.gpus    # firmware and VBIOS versions, while the device is held open
 ```
 
 ### 6. Load at boot
@@ -184,14 +196,19 @@ when `linux_enable` is on and `nvidia.ko` is loaded, and `nvidia_modeset_linux.k
 In short (details in the [status table](#what-works-status-2026-11-20) below):
 
 - KMS and Xorg modesetting work, with software rendering only.
-- `nvidia-smi` runs through the Linuxulator: `sh scripts/fetch-nvidia-smi.sh`, plus
-  `linux_base-rl9`, and the provider modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
-  (step 6); see [nvidia-smi](#nvidia-smi).
-- CUDA and Vulkan work only through NVIDIA's Linux libraries under the Linuxulator, with the
-  same provider modules. CUDA also
-  needs `nvidia-uvm.ko` from [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd)
-  (private; ask for access when you report), built per its README, and Linuxulator additions
-  that are in the cloudbsd-src kernel, not in a stock one. Native versions are in progress.
+- Native NVIDIA user space on FreeBSD arm64 today: only `nvrm-info` (device enumeration, from
+  [libnvrm](#libnvrm-and-nvrm-info); not yet run on hardware: it passes against libnvrm's
+  simulated device, and the first run on a real GPU is pending). NVIDIA ships no FreeBSD arm64 Vulkan or CUDA, and the native NVK and CUDA work
+  (Track [#2379](https://track.cloudbsd.org/work_packages/2379), [#2362](https://track.cloudbsd.org/work_packages/2362)) has not reached a workload.
+- Linux-only, last resort: CUDA, Vulkan and `nvidia-smi` monitoring run only through NVIDIA's
+  Linux libraries under the Linuxulator. They are kept only because no native path exists
+  ([Linux dependencies](docs/LINUX-DEPENDENCY-AUDIT.md)); a native path replaces each of them as
+  soon as it exists. They need the provider modules `nvidia_linux.ko` and
+  `nvidia_modeset_linux.ko` (step 6). `nvidia-smi`: `sh scripts/fetch-nvidia-smi.sh`, plus
+  `linux_base-rl9`; see [nvidia-smi](#nvidia-smi). CUDA also needs `nvidia-uvm.ko` from
+  [cloudbsdorg/uvm-bsd](https://github.com/cloudbsdorg/uvm-bsd) (private; ask for access when
+  you report), built per its README, and Linuxulator additions that are in the cloudbsd-src
+  kernel, not in a stock one.
 - There are no published packages yet.
 - To report a problem, open an issue at
   <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the failing step's output,
@@ -203,14 +220,16 @@ In short (details in the [status table](#what-works-status-2026-11-20) below):
 |---|---|
 | `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
-| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on `/dev/dri/card1`; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
+| Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node (`card1` on the test host, found by PCI bus); Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
-| `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works |
-| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below) |
-| CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below |
+| Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
+| `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
+| Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | works (numbers below); Linux-only, last resort |
+| CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
+| CUDA, native | not started: Track #2362 |
 | Wayfire on the NVIDIA output | not yet: Wayfire runs on the other GPU and the NVIDIA output stays blank. It needs cross-GPU import. The kernel no longer panics: a framebuffer without NVIDIA memory is refused with `EINVAL` |
 | Cross-GPU buffer import (PRIME: render on another GPU, show on the NVIDIA card) | not merged yet; see Track #2228 |
-| Accelerated native rendering (Mesa NVK over a render interface in `nvidia-drm`) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
+| Accelerated native rendering and native Vulkan (Mesa NVK; on libnvrm for compute, Track #2379) | not started: only the interface contract exists ([`nvidia-drm-render.h`](src/nvidia-drm-render/nvidia-drm-render.h), [nvidia_drm_render(4)](man/nvidia_drm_render.4)) |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | fix committed (3414fd7), waits for test boot 6 |
 | Cross-GPU buffer import (PRIME) of system-memory buffers | implemented (#2228), waits for a test boot; see [Cross-GPU buffers](#cross-gpu-buffers-prime-import) |
 | CUDA | does not work yet: needs `nvidia-uvm` (clean-room module in progress) |
@@ -224,8 +243,9 @@ FreeBSD. It comes from the clean-room module
 Linuxulator additions in the kernel: the `/proc` files `libcuda` reads, and Linux abstract
 UNIX sockets. Those are in the cloudbsd-src tree, not here (Track #2101).
 
-**Numbers.** Measured with llama.cpp b12531 (`llama-bench`, defaults otherwise), in tokens per
-second. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
+**Numbers.** Linux-only, last resort: the official Ubuntu arm64 llama.cpp b12531 builds on
+NVIDIA's Linux libraries, under the Linuxulator (`llama-bench`, defaults otherwise), in tokens per
+second. They are not native numbers; there is no native NVIDIA path to measure yet. pp512 is the prompt-processing speed over a 512-token prompt, and tg128 the generation
 speed over 128 tokens.
 
 | Backend | Model | pp512 | tg128 |
@@ -369,8 +389,8 @@ kldload $GB10_WORK/build/tree/firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko
 kldload $GB10_WORK/build/tree/nvidia/nvidia.ko    # no Linux layer is loaded
 kldload $GB10_WORK/build/tree/nvidia-modeset/nvidia-modeset.ko
 kldload $GB10_WORK/build/tree/nvidia-drm/nvidia-drm.ko
-dmesg | tail                                      # nvidia0: <NVIDIA ...> on vgapci0
-ls /dev/nvidia*                                   # /dev/nvidia0 /dev/nvidiactl
+dmesg | tail                                      # nvidiaN: <NVIDIA ...> on vgapciM
+ls /dev/nvidia*                                   # /dev/nvidiaN per GPU, /dev/nvidiactl
 ```
 
 `nvidia.ko` depends on the GSP firmware module for its architecture: `nvidia_gsp_ga10x_fw`
@@ -384,11 +404,12 @@ path, as above, works because a dependency that is already loaded is accepted; k
 `kldload` line first. If `kldload` says `depends on nvidia_gsp_ga10x_fw_fw - not available`, the
 module is not installed or `kldxref` was not run. See `man/nvidia.4`.
 
-The GPU is initialised, and GSP booted, on the first open of `/dev/nvidia0`; it is shut down
-again when the last open closes. `sysctl hw.nvidia.gpus.0` shows the firmware and VBIOS
+The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN` (find N by
+PCI bus as in [Check it worked](#5-check-it-worked), never by assuming 0); it is shut down
+again when the last open closes. `sysctl hw.nvidia.gpus` shows the firmware and VBIOS
 versions while something holds the device open.
 
-If that first open fails (`nvidia0: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
+If that first open fails (`nvidiaN: NVRM: rm_init_adapter() failed!` in `dmesg`, and the
 program gets `EIO`), the driver frees what the open took and the open can be tried again. See
 `man/nvidia.4`.
 

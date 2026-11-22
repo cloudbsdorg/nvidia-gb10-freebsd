@@ -1,0 +1,11 @@
+{
+ "records": [
+  {
+   "date": "2026-11-22T05:37:27Z",
+   "card": "nvidia-rtx5060ti",
+   "backend": "cuda",
+   "path": "native",
+   "path_status": "native"
+  }
+ ]
+}

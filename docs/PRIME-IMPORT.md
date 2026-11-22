@@ -266,11 +266,15 @@ copies, or gives up on that output).
 
 ### 5.2 Direction 1: render on the amdgpu, scan out on the NVIDIA card
 
-1. Boot with both `amdgpu.ko` and `nvidia-drm.ko` loaded; the NVIDIA card owns the output
-   (`/dev/dri/card1`), the AMD card is the renderer.
-2. Run the session with the renderer on card0 and the output on card1. With wlroots, force
-   the renderer (`WLR_RENDERER=gles2` with `WLR_RENDERER_DRM_DEVICE=card0`, or the Vulkan
-   renderer with the AMD device selected) and keep the output on card1.
+1. Boot with both `amdgpu.ko` and `nvidia-drm.ko` loaded; the NVIDIA card owns the output,
+   the AMD card is the renderer. Find each card's DRM node by PCI bus, never by number:
+   `sysctl hw.dri` gives `hw.dri.<minor>.busid` per card (`cardN` is minor N), and
+   `pciconf -l` gives the vendor on that bus (0x10de NVIDIA, 0x1002 AMD). The busid numbers
+   are hex (`pci:000d:01:00.0`), the pciconf ones decimal (`pci13:1:0:0`).
+2. Run the session with the renderer on the AMD node and the output on the NVIDIA node. With
+   wlroots, force the renderer (`WLR_RENDERER=gles2` with `WLR_RENDER_DRM_DEVICE=/dev/dri/cardN`,
+   N being the AMD card's minor from step 1, or the Vulkan renderer with the AMD device
+   selected) and keep the output on the NVIDIA node.
 3. Observe:
    * no kernel panic, no `IsVidmem` fault;
    * the monitor shows the correct image (during the copy phase);
