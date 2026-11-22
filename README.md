@@ -873,6 +873,6 @@ toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg ins
 `sh lib/cuda-native/mksdk.sh obj/cuda-native` builds the tree. Then
 `/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
 emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
-Not there yet: the libdevice math library, `ptxas`/`fatbinary`, `libcudart` and `libcuda`.
+The stub `ptxas`/`fatbinary` tools and `libcudart` let clang fully compile and link, but every launch returns `cudaErrorNotSupported` (801); the libdevice math library, real compiler and runtime, device execution and `libcuda` are not there yet.
 Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips
 without LLVM 23).

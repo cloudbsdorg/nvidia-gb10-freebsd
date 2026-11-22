@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # mksdk.sh - assemble the cuda-native SDK tree (Track #2380), the directory
-# clang takes as --cuda-path: include/, bin/, nvvm/libdevice/libdevice.10.bc,
-# and version.json (our identity, generated from include/cuda.h; clang
-# ignores it).  See cuda-native-toolchain(7).
+# clang takes as --cuda-path: include/, bin/ptxas and fatbinary, lib64's stub
+# libcudart, tool/runtime schemas, nvvm/libdevice/libdevice.10.bc, and version.json
+# (our identity, generated from include/cuda.h; clang ignores it).
+# See cuda-native-toolchain(7).
 #
 #   sh lib/cuda-native/mksdk.sh OUTDIR
 #
@@ -97,8 +98,9 @@ if [ -e "$OUT" ]; then
 fi
 check_llvm || exit 2
 
-# Time: O(1).  Space: O(1).
-for src in sdk/include/cuda.h libdevice/libdevice.ll; do
+# Time: O(number of required source files).  Space: O(1).
+for src in sdk/include/cuda.h libdevice/libdevice.ll tools/nvptxas.sh \
+    tools/nvfatbin.sh tools/cuda-native-tool-lib.sh libcudart-stub/cudart_stub.c; do
 	[ -f "$HERE/$src" ] || {
 		echo "mksdk: $HERE/$src is missing; the source tree is incomplete (check out lib/cuda-native again)" >&2
 		exit 1
@@ -115,6 +117,10 @@ rel=$(macro CUDA_NATIVE_VERSION)
 	echo "mksdk: CUDA_VERSION or CUDA_NATIVE_VERSION missing in sdk/include/cuda.h" >&2
 	exit 1
 }
+rel_major=$((rel / 10000))
+rel_minor=$((rel % 10000 / 100))
+rel_patch=$((rel % 100))
+rel_version=$rel_major.$rel_minor.$rel_patch
 
 # The data layout clang uses for nvptx64; empty output means clang failed.
 # This runs before anything is created, so a refused clang leaves nothing.
@@ -134,14 +140,42 @@ trap 'rm -rf -- "$NEW"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-mkdir "$NEW/bin" "$NEW/nvvm" "$NEW/nvvm/libdevice" || exit 1
+mkdir "$NEW/bin" "$NEW/lib64" "$NEW/nvvm" "$NEW/nvvm/libdevice" || exit 1
+mkdir -p "$NEW/share/cuda-native/schema" || exit 1
 cp -R "$HERE/sdk/include" "$NEW/include" || exit 1
-printf '{"cuda":{"name":"cuda-native","version":"%d.%d.%d"},"cuda_native":{"version":"%d.%d.%d","track":"2380"}}\n' \
-    $((api / 1000)) $((api % 1000 / 10)) 0 \
-    $((rel / 10000)) $((rel % 10000 / 100)) $((rel % 100)) \
+# Time: O(number of tools and schemas).  Space: O(1).
+for tool in nvptxas nvfatbin; do
+	sed -e "s/@CUDA_NATIVE_VERSION@/$rel_version/g" \
+	    -e "s/@CUDA_NATIVE_VERSION_MAJOR@/$rel_major/g" \
+	    -e "s/@CUDA_NATIVE_VERSION_MINOR@/$rel_minor/g" \
+	    -e "s/@CUDA_NATIVE_VERSION_PATCH@/$rel_patch/g" \
+	    "$HERE/tools/$tool.sh" >"$NEW/bin/$tool" || exit 1
+	chmod 755 "$NEW/bin/$tool" || exit 1
+done
+sed -e "s/@CUDA_NATIVE_VERSION@/$rel_version/g" \
+    -e "s/@CUDA_NATIVE_VERSION_MAJOR@/$rel_major/g" \
+    -e "s/@CUDA_NATIVE_VERSION_MINOR@/$rel_minor/g" \
+    -e "s/@CUDA_NATIVE_VERSION_PATCH@/$rel_patch/g" \
+    "$HERE/tools/cuda-native-tool-lib.sh" >"$NEW/share/cuda-native/cuda-native-tool-lib.sh" || exit 1
+cp "$NEW/bin/nvptxas" "$NEW/bin/ptxas" || exit 1
+cp "$NEW/bin/nvfatbin" "$NEW/bin/fatbinary" || exit 1
+# Time: O(number of schemas).  Space: O(1).
+for schema in "$HERE"/schema/*; do
+	[ -f "$schema" ] || {
+		echo "mksdk: $schema is not a regular schema file" >&2
+		exit 1
+	}
+	cp "$schema" "$NEW/share/cuda-native/schema/" || exit 1
+done
+printf '{"cuda":{"name":"cuda-native","version":"%d.%d.%d"},"cuda_native":{"version":"%s","track":"2380"}}\n' \
+    $((api / 1000)) $((api % 1000 / 10)) 0 "$rel_version" \
     >"$NEW/version.json" || exit 1
 { printf '%s\n' "$layout"; cat "$HERE/libdevice/libdevice.ll"; } |
     "$LLVM/bin/llvm-as" -o "$NEW/nvvm/libdevice/libdevice.10.bc" || exit 1
+"$LLVM/bin/clang" -std=c11 -O2 -fPIC -Wall -Wextra -Werror -shared \
+    -fuse-ld=lld -Wl,-soname,libcudart.so.13 -o "$NEW/lib64/libcudart.so.13" \
+    "$HERE/libcudart-stub/cudart_stub.c" || exit 1
+ln -s libcudart.so.13 "$NEW/lib64/libcudart.so" || exit 1
 
 # mktemp made NEW mode 0700; give the tree the usual directory mode.
 chmod 755 "$NEW" || exit 1

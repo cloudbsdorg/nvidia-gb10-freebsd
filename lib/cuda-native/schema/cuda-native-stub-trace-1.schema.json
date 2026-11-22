@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:cuda-native:schema:cuda-native-stub-trace/1",
+  "title": "cuda-native libcudart stub trace, schema 1",
+  "description": "One JSON object per registration or launch call when CUDA_NATIVE_STUB_TRACE is 1 (standard error) or names a trace file.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "members"],
+      "properties": {
+        "event": { "const": "register_fatbin" },
+        "members": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "refused", "reason"],
+      "properties": {
+        "event": { "const": "register_fatbin" },
+        "refused": { "const": true },
+        "reason": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "name"],
+      "properties": {
+        "event": { "const": "register_function" },
+        "handle": { "const": null },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event"],
+      "properties": {
+        "event": { "const": "register_fatbin_end" },
+        "handle": { "const": null }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event"],
+      "properties": {
+        "event": { "const": "unregister_fatbin" },
+        "handle": { "const": null }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "status"],
+      "properties": {
+        "event": { "const": "launch" },
+        "status": { "const": 801 }
+      }
+    }
+  ]
+}
