@@ -63,8 +63,26 @@ grep -q 'rc=3' "$T/o4/run.log" && ok "failure recorded in run.log" || bad "failu
 R="sh $here/scripts/run-cuda-llama.sh"
 $R >/dev/null 2>&1; check "run-cuda-llama: no arguments" 2 $?
 $R --help >/dev/null 2>&1; check "run-cuda-llama: --help" 0 $?
-env -u HOME -u GB10_WORK $R llama-bench >/dev/null 2>&1; check "run-cuda-llama: no HOME" 2 $?
+env -u HOME -u GB10_WORK $R llama-bench >/dev/null 2>&1; check "run-cuda-llama: no HOME, no files (needs no HOME, so a missing file)" 1 $?
 $R llama-bench >/dev/null 2>&1; check "run-cuda-llama: missing files" 1 $?
+
+# The contract: run-cuda-llama.sh needs no HOME.  Its cache directory is
+# ${HOME:-$W}/.cache/sa (scripts/run-cuda-llama.sh, the CACHE= line), so with
+# HOME unset it falls back to the work root.  A fake work root holds every file
+# the script checks, with a stub loader that records its arguments.
+F=$T/fakework
+mkdir -p "$F/linuxroot/noble/lib" "$F/linuxroot/nv" "$F/build/linux-cuda" "$F/llm/cuda/llama-b12531-cuda/llama-b12531"
+LLD=$F/llm/cuda/llama-b12531-cuda/llama-b12531
+printf '#!/bin/sh\necho "$*" > "%s/loader.args"\n' "$T" > "$F/linuxroot/noble/lib/ld-linux-aarch64.so.1"
+chmod +x "$F/linuxroot/noble/lib/ld-linux-aarch64.so.1"
+: > "$F/build/linux-cuda/shim.so"; : > "$LLD/llama-bench"; : > "$LLD/libggml-cuda.so"; : > "$LLD/libcudart.so.13"; : > "$F/linuxroot/nv/libcuda.so.1"
+env -u HOME GB10_WORK="$F" sh "$here/scripts/run-cuda-llama.sh" llama-bench -h >/dev/null 2>&1
+check "run-cuda-llama: HOME unset, files present, runs" 0 $?
+grep -q -- "$LLD/llama-bench -h" "$T/loader.args" && ok "run-cuda-llama: HOME unset, the loader got the program and its arguments" || bad "run-cuda-llama: HOME unset, the loader was not run"
+[ -s "$F/.cache/sa/comm.txt" ] && ok "run-cuda-llama: HOME unset, the cache falls back to the work root" || bad "run-cuda-llama: HOME unset, no cache under the work root"
+rm "$LLD/libcudart.so.13"
+env -u HOME GB10_WORK="$F" sh "$here/scripts/run-cuda-llama.sh" llama-bench >/dev/null 2>&1
+check "run-cuda-llama: HOME unset, a file missing" 1 $?
 
 [ $fail = 0 ] && echo "all passed" || echo "FAILED"
 exit $fail
