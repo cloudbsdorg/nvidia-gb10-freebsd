@@ -48,8 +48,11 @@ runs, one by one.
   (`DRMKMODDIR=`, an absolute path), and the FreeBSD source headers (`BSDSRCTOP=`, the parent
   of `SYSDIR` by default).
 - A host with an Ampere Altra CPU (not to be confused with the GPU generation) needs PCIe
-  workarounds in the kernel. They are in a separate kernel tree, not in this repository; ask
-  for it when you report (see the end of this section). Other arm64 machines do not need them.
+  workarounds in the kernel, and `nvidia-drm` (like every drm-kmod driver) needs a LinuxKPI fix
+  on any arm64 machine. Both are FreeBSD kernel patches in
+  [`kernel-patches/`](kernel-patches/README.md), with a step-by-step guide to apply them, build
+  the kernel and boot it next to the stock one. `nvidia.ko` alone on an arm64 machine that is
+  not an Altra needs none of them.
 
 ### 2. Get the code and sources
 
@@ -265,8 +268,13 @@ NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: N
 It needs no Linux layer: `linux64.ko` and `linux_common.ko` are not dependencies; the
 Linux ioctl bridges are the optional modules `nvidia_linux.ko` and `nvidia_modeset_linux.ko`
 (see [Linux bridges](#linux-bridges-nvidia_linuxko) below). An **Ampere Altra** does need kernel workarounds for its PCIe
-(32-bit configuration reads, emulation of misaligned device accesses); those are kernel
-changes kept in a separate kernel tree, not here. Other arm64 machines should not need them.
+(32-bit configuration reads, emulation of misaligned device accesses), and `nvidia-drm`, like
+every drm-kmod driver, needs LinuxKPI to map write-combining memory non-cacheable on arm64.
+Those are FreeBSD kernel patches, kept in [`kernel-patches/`](kernel-patches/README.md) with a
+step-by-step guide (check whether you need them, fetch the matching source, apply, build,
+install as `kernel.patched`, test once with `nextboot`, make it the default, go back, redo after
+updates), a helper `kernel-patches/apply.sh` and the manual page `kernel-patches(7)`. Other
+arm64 machines need only the LinuxKPI patch, and only for `nvidia-drm`.
 
 On the Altra the driver also maps write-combining BARs as Device memory. It decides this itself
 from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_active`; see
@@ -436,8 +444,9 @@ a cacheable load from a register page is a synchronous external abort, which the
 
 On the Altra, Normal memory accesses to PCIe BARs are not safe (the root complex mishandles
 some of them), so write-combining requests fall back to Device-nGnRE there as well. The
-FreeBSD kernel tree applies the same rule to its own write-combining mappings, Device for the
-kernel and Normal non-cacheable for user processes. `nvidia.ko` applies its table to the
+FreeBSD kernel patches in [`kernel-patches/`](kernel-patches/README.md) apply the same rule to
+LinuxKPI's write-combining mappings, Device for the kernel and Normal non-cacheable for user
+processes (`compat.linuxkpi.altra_82288`). `nvidia.ko` applies its table to the
 mappings it makes itself, the kernel ones and the user ones alike.
 
 ## Video memory and fictitious pages (nvidia-drm)
@@ -654,6 +663,7 @@ splitting prefill and decode between two servers): [`docs/llm.md`](docs/llm.md).
 | `scripts/` | fetch, prepare and build steps; `lib.sh` holds the shared helpers; `pd_split.py`, the prefill/decode split client of [`docs/llm.md`](docs/llm.md) |
 | `patches/` | one unified diff per changed file of NVIDIA's FreeBSD OS layer |
 | `patches/ogkm/` | patches to the open-gpu-kernel-modules build for FreeBSD aarch64 |
+| `kernel-patches/` | patches to the FreeBSD kernel itself (LinuxKPI write-combining on arm64; Ampere Altra PCIe workarounds), `apply.sh`, `kernel-patches(7)` and a [step-by-step README](kernel-patches/README.md) |
 | `src/gb10-stubs/` | fail-closed stubs for RM core functions the arm64 build lacks |
 | `src/gb10-memattr/` | the memory-type policy for kernel mappings on arm64 |
 | `src/gb10-linux-bridge/` | the compat provider interface of `nvidia.ko` (`nvidia_bridge.h`, `nvidia_bridge.c`) and the two Linux provider modules, `nvidia_linux.ko` and `nvidia_modeset_linux.ko` |

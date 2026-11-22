@@ -1,0 +1,231 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt KERNEL-PATCHES 7
+.Os
+.Sh NAME
+.Nm kernel-patches
+.Nd FreeBSD kernel patches for GPU drivers on arm64 and on Ampere Altra
+.Sh SYNOPSIS
+.Nm sh
+.Pa kernel-patches/apply.sh
+.Op Fl n
+.Op Fl R
+.Ar srcdir
+.Op Ar patch ...
+.Nm sh
+.Pa kernel-patches/apply.sh
+.Fl h
+.Sh DESCRIPTION
+The
+.Pa kernel-patches
+directory of nvidia-gb10-freebsd holds four patches to the
+.Fx
+kernel source, applied with
+.Xr patch 1
+in the order of the
+.Pa series
+file:
+.Bl -tag -width "0004"
+.It Pa 0001-linuxkpi-arm64-write-combining.diff
+On arm64, LinuxKPI maps
+.Fn ioremap_wc ,
+.Fn pgprot_writecombine
+and
+.Vt io_mapping
+as Normal non-cacheable instead of the cacheable write-through
+.Dv VM_MEMATTR_WRITE_COMBINING ,
+and makes
+.Fn memcpy_toio ,
+.Fn memcpy_fromio
+and
+.Fn memset_io
+use only naturally aligned accesses.
+Needed on every arm64 machine with a drm-kmod driver.
+It changes headers only: the GPU modules must be rebuilt against the
+patched tree.
+.It Pa 0002-linuxkpi-altra-erratum-82288.diff
+LinuxKPI maps write-combining and uncached PCIe memory as Device-nGnRE on
+an Ampere Altra (erratum 82288).
+.It Pa 0003-arm64-kernel-alignment-fixup.diff
+Emulates kernel-mode alignment faults of general-purpose loads and stores
+and
+.Li DC ZVA
+on Device memory instead of panicking with
+.Dq Misaligned access from kernel space! .
+On by default only on an Ampere Altra.
+It handles kernel-mode faults only: a program that makes an unaligned
+access or a
+.Li DC ZVA
+on a Device mapping gets
+.Dv SIGBUS
+.Pq Dv BUS_ADRALN .
+.It Pa 0004-pci-host-generic-altra-ecam.diff
+.Xr pci 4
+configuration reads on Ampere Altra host bridges are made as aligned 32-bit
+reads.
+Adds the test
+.Pa tests/sys/pci/pci_host_generic_quirks_test .
+.El
+.Pp
+An Ampere Altra is recognized by its ACPI MCFG table: OEM ID
+.Dq Ampere
+and an OEM table ID starting with
+.Dq Altra
+for 0002 and 0003; OEM table ID
+.Dq Altra
+with OEM revision 1 for 0004.
+On other machines 0002, 0003 and 0004 do nothing.
+.Pp
+.Nm apply.sh
+dry-runs every selected patch against
+.Ar srcdir
+first and stops, changing nothing, if any patch would be rejected, would
+only apply with fuzz, or would create a file that is already there with
+other contents.
+A patch that is already applied is skipped.
+It writes only the files the patches name, inside
+.Ar srcdir ,
+and no backup or reject files.
+The options are:
+.Bl -tag -width "-R"
+.It Fl n
+Dry run only.
+.It Fl R
+Take the patches out again, last one first.
+.It Fl h
+Print the usage.
+.El
+.Pp
+With
+.Ar patch
+arguments, only those patches of the series are used, still in series
+order.
+.Sh LOADER TUNABLES
+These are also read-write
+.Xr sysctl 8
+variables.
+.Bl -tag -width "compat.linuxkpi.altra_82288"
+.It Va compat.linuxkpi.altra_82288
+From 0002.
+.Li -1
+(default) automatic: mode
+.Li 1
+on an Altra;
+.Li 0
+off;
+.Li 1
+kernel mappings use Device-nGnRE;
+.Li 2
+kernel and user
+.Pq Xr mmap 2
+mappings use Device-nGnRE.
+Mode
+.Li 2
+is for testing only: a program that makes an unaligned access or a large
+memset into GPU memory it mapped can get
+.Dv SIGBUS ,
+and a
+.Xr read 2
+or
+.Xr write 2
+from such a buffer at an unaligned address can fail with
+.Dv EFAULT .
+Whether the machine is an Altra is decided once, when LinuxKPI
+initialises; on other machines the setting is ignored and no mapping is
+changed.
+The variable exists from boot when LinuxKPI is built into the kernel (arm64 GENERIC), otherwise once
+.Pa linuxkpi.ko
+is loaded.
+.It Va machdep.kern_align_fixup
+From 0003.
+.Li -1
+(default) automatic: on when the ACPI MCFG names an Altra, off elsewhere;
+.Li 0
+off;
+.Li 1
+on.
+The ACPI MCFG is read once at boot, before any driver attaches.
+Writing
+.Li -1
+at run time goes back to the automatic choice.
+.El
+.Sh SYSCTL VARIABLES
+These are read-only.
+.Bl -tag -width "compat.linuxkpi.altra_82288_active"
+.It Va compat.linuxkpi.altra_82288_active
+From 0002.
+The mode in effect:
+.Li 0
+(off, or not an Altra),
+.Li 1
+or
+.Li 2 .
+.It Va machdep.kern_align_fixup_active
+From 0003.
+.Li 1
+when the fixup is in effect,
+.Li 0
+when it is not.
+.It Va machdep.kern_align_fixups
+From 0003.
+The number of kernel accesses emulated since boot.
+.El
+.Sh FILES
+.Bl -tag -width "kernel-patches/README.md" -compact
+.It Pa kernel-patches/series
+the patch order and the
+.Fx
+commits each patch was checked against
+.It Pa kernel-patches/README.md
+the step-by-step guide: matching source, apply, build, install as
+.Pa /boot/kernel.patched ,
+a
+.Xr nextboot 8
+test, making it the default, going back, updates
+.It Pa /boot/kernel.patched
+where the README installs the patched kernel
+.El
+.Sh EXIT STATUS
+.Nm apply.sh
+exits 0 when every patch was applied, reverted or skipped, or the dry run
+passed; 1 when a patch does not apply or
+.Ar srcdir
+is not a
+.Fx
+source tree; 2 on a usage error.
+.Sh EXAMPLES
+Check, apply and build:
+.Bd -literal -offset indent
+sh kernel-patches/apply.sh -n ~/src/freebsd
+sh kernel-patches/apply.sh ~/src/freebsd
+cd ~/src/freebsd
+env PATH=/sbin:/bin:/usr/sbin:/usr/bin MAKEOBJDIRPREFIX=~/obj \e
+    make -j"$(sysctl -n hw.ncpu)" buildkernel KERNCONF=GENERIC
+.Ed
+.Pp
+Check the result after booting the patched kernel on an Altra:
+.Bd -literal -offset indent
+sysctl machdep.kern_align_fixup_active machdep.kern_align_fixups
+dmesg | grep -e 'alignment-fault fixup' -e '32-bit config space'
+.Ed
+.Sh SEE ALSO
+.Xr patch 1 ,
+.Xr pci 4 ,
+.Xr loader.conf 5 ,
+.Xr build 7 ,
+.Xr acpidump 8 ,
+.Xr freebsd-update 8 ,
+.Xr nextboot 8
+.Sh CAVEATS
+The patched kernel matches one
+.Fx
+version.
+After every update of the base system rebuild it from the matching source,
+or boot the stock kernel; see the README.
+.Pp
+The patches are not part of
+.Fx .
+.Sh BUGS
+Report problems at
+.Lk https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues
