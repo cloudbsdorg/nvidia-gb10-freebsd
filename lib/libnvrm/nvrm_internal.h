@@ -49,6 +49,8 @@ enum nvrm_prop {
 
 enum nvrm_sprop {
 	NVRM_SP_UUID,
+	NVRM_SP_VBIOS,
+	NVRM_SP_GSP_FIRMWARE,
 	NVRM_SP_COUNT
 };
 
@@ -71,8 +73,10 @@ typedef struct nvrm_backend_ops {
 	/* Open, check the version, attach.  Returns enum nvrm_error. */
 	int	(*open)(nvrm_backend **be, char *err, size_t errlen);
 	void	(*close)(nvrm_backend *be);
-	/* The running kernel module's version, as it reports it. */
+	/* The running kernel module's legacy short version and parsed versions. */
 	void	(*running_version)(nvrm_backend *be, nvrm_str *out);
+	void	(*driver_version)(nvrm_backend *be, nvrm_version *out);
+	void	(*rm_api_version)(nvrm_backend *be, nvrm_version *out);
 	/* Probed GPU ids, attached.  Returns enum nvrm_error. */
 	int	(*list_gpus)(nvrm_backend *be, uint32_t *ids, unsigned max,
 		    unsigned *n, char *err, size_t errlen);
@@ -105,6 +109,8 @@ uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
+/* Translate a stored reason id; -1 means the id is not in the reason table. */
+int	nvrm_reason_from_id(const char *id);
 /* The process and fork generation that own backend objects. */
 typedef struct nvrm_owner {
 	pid_t		pid;
@@ -127,6 +133,8 @@ typedef struct nvrm_family {
 } nvrm_family;
 extern const nvrm_family nvrm_family_table[];
 extern const unsigned nvrm_family_count;
+int	nvrm_compute_capability_for(uint64_t architecture,
+	    uint64_t implementation, uint32_t *major, uint32_t *minor);
 
 /* Board decorators: add or override options, never decide support. */
 typedef struct nvrm_decorator {
@@ -159,6 +167,7 @@ struct nvrm_ctx {
 	nvrm_backend	*be;
 	unsigned	ndev;
 	nvrm_str	running;
+	nvrm_version	driver, rm_api;
 	nvrm_device	dev[NVRM_MAX_GPUS];
 };
 
@@ -336,6 +345,8 @@ int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);
 int	nvrm_cap_limit_desc(int fd, int kind);
 
 /* Field and capability descriptors (nvrm_fields.c); one definition. */
+#define NVRM_STRINGIFY_(x)	#x
+#define NVRM_STRINGIFY(x)	NVRM_STRINGIFY_(x)
 /* Most GPCs an enabled-unit mask can describe (the masks are 32 bits). */
 #define NVRM_MAX_GPCS	32
 

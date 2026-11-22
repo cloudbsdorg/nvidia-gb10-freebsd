@@ -47,6 +47,7 @@ struct nvrm_backend {
 	uint32_t		next_handle;
 	nv_ioctl_card_info_t	cards[NV_MAX_DEVICES];
 	nvrm_str		running;
+	nvrm_version		driver, rm_api;
 	int			wc, wc_reason;
 };
 

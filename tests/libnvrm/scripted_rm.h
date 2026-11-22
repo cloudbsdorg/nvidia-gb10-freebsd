@@ -15,12 +15,25 @@
 
 static struct {
 	/* configuration */
-	const char	*version;	/* what the kernel module is */
+	const char	*version;	/* strict-check module version */
+	const char	*banner;	/* hw.nvidia.version */
+	const char	*version_string; /* hw.nvidia.version_string */
+	const char	*version_suffix; /* hw.nvidia.version_suffix */
+	const char	*rm_api_version; /* query reply versionString */
+	const char	*gsp_firmware;	/* GSP GET_FEATURES firmwareVersion */
+	uint32_t	vbios_revision, vbios_oem_revision;
+	int		gsp_valid;	/* GSP GET_FEATURES bValid */
+	int		fail_vbios_oem;	/* fail only the OEM-revision control */
+	int		version_major, version_minor, version_patch;
+	int		version_available;
+	int		version_parts;	/* 1 = the version_* sysctls exist */
 	int		ngpus;
 	uint32_t	gpu_id[2];
 	int		have_card[2];
 	int		fn_wc;		/* sysctl wc value; -1 = sysctl fails */
 	int		fn_ver;		/* 1 = hw.nvidia.version works */
+	int		fail_banner_read; /* probe succeeds, data read fails */
+	int		banner_probe_zero; /* probe reports a zero length */
 	int		fn_wc_short;	/* answer with the wrong length */
 	int		numa;
 	int		soc;
@@ -33,7 +46,10 @@ static struct {
 	int		fail_probed;
 	/* record */
 	int		order_ok;
-	int		saw_version, saw_card, saw_attach_fd, saw_client;
+	int		saw_version, saw_version_query;
+	int		saw_version_probe, banner_reads;
+	int		saw_vbios_revision, saw_vbios_oem_revision, saw_gsp;
+	int		saw_card, saw_attach_fd, saw_client;
 	int		nalloc, nfree, nctl;
 	NvHandle	live[MAXOBJ];
 	int		nlive;
@@ -47,7 +63,9 @@ static struct {
 	int		real_errno;	/* errno of a refused real ioctl */
 	int		last_fd;	/* the control descriptor handed out */
 	int		nfd;		/* descriptors opened and not closed */
-	int		reply_unrecognized;	/* version check answers 0, not recognized */
+	int		reply_unrecognized;	/* strict check is not recognized */
+	int		query_unrecognized;	/* RM version query is not recognized */
+	int		fail_version_query;	/* only the query ioctl fails */
 	int		bad_pci_vendor;	/* pciDeviceId vendor half differs from the card */
 	int		bad_pci_device;	/* pciDeviceId device half differs from the card */
 	int		swap_pci;	/* pciDeviceId with vendor and device swapped */
@@ -65,6 +83,20 @@ reset_kernel(void)
 {
 	memset(&K, 0, sizeof(K));
 	K.version = NVRM_RM_VERSION;
+	K.banner = "NVIDIA UNIX Open Kernel Module for aarch64  "
+	    "580.178.04  Release Build  (cloudbsd@build)  "
+	    "Sun Nov 22 06:36:44 UTC 2026";
+	K.version_string = NVRM_RM_VERSION;
+	K.version_suffix = "";
+	K.rm_api_version = NVRM_RM_VERSION;
+	K.gsp_firmware = NVRM_RM_VERSION;
+	K.vbios_revision = 0x96061e00;
+	K.vbios_oem_revision = 0x4a;
+	K.gsp_valid = 1;
+	K.version_major = 580;
+	K.version_minor = 178;
+	K.version_patch = 4;
+	K.version_available = 1;
 	K.ngpus = 1;
 	K.gpu_id[0] = 0x0d00;
 	K.gpu_id[1] = 0x0e00;
@@ -126,25 +158,95 @@ k_access(const char *path)
 }
 
 static int
-k_sysctl(const char *name, void *old, size_t *len)
+k_sysctl_string(void *old, size_t *len, const char *value)
 {
-	int v;
+	size_t need = strlen(value) + 1;
 
-	if (strcmp(name, "hw.nvidia.version") == 0) {
-		if (!K.fn_ver)
-			return (-1);
-		snprintf(old, *len, "NVIDIA UNIX Open Kernel Module for "
-		    "aarch64  %s", K.version);
-		*len = strlen(old) + 1;
+	if (old == NULL) {
+		*len = need;
 		return (0);
 	}
-	if (strcmp(name, "hw.nvidia.altra_device_wc_active") == 0) {
-		if (K.fn_wc < 0)
-			return (-1);
-		v = K.fn_wc;
-		memcpy(old, &v, sizeof(v));
-		*len = K.fn_wc_short ? 2 : sizeof(v);
+	if (*len < need) {
+		*len = need;
+		errno = ENOMEM;
+		return (-1);
+	}
+	memcpy(old, value, need);
+	*len = need;
+	return (0);
+}
+
+static int
+k_sysctl_int(void *old, size_t *len, int value)
+{
+	if (old == NULL) {
+		*len = sizeof(value);
 		return (0);
+	}
+	if (*len < sizeof(value)) {
+		*len = sizeof(value);
+		errno = ENOMEM;
+		return (-1);
+	}
+	memcpy(old, &value, sizeof(value));
+	*len = sizeof(value);
+	return (0);
+}
+
+static int
+k_sysctl(const char *name, void *old, size_t *len)
+{
+	if (strcmp(name, "hw.nvidia.version") == 0) {
+		if (!K.fn_ver) {
+			errno = ENOENT;
+			return (-1);
+		}
+		if (old == NULL) {
+			K.saw_version_probe++;
+			if (K.banner_probe_zero) {
+				*len = 0;
+				return (0);
+			}
+		} else {
+			K.banner_reads++;
+			if (K.fail_banner_read) {
+				errno = EIO;
+				return (-1);
+			}
+		}
+		return (k_sysctl_string(old, len, K.banner));
+	}
+	if (strncmp(name, "hw.nvidia.version_", 18) == 0) {
+		if (!K.version_parts) {
+			errno = ENOENT;
+			return (-1);
+		}
+		if (strcmp(name, "hw.nvidia.version_string") == 0)
+			return (k_sysctl_string(old, len, K.version_string));
+		if (strcmp(name, "hw.nvidia.version_major") == 0)
+			return (k_sysctl_int(old, len, K.version_major));
+		if (strcmp(name, "hw.nvidia.version_minor") == 0)
+			return (k_sysctl_int(old, len, K.version_minor));
+		if (strcmp(name, "hw.nvidia.version_patch") == 0)
+			return (k_sysctl_int(old, len, K.version_patch));
+		if (strcmp(name, "hw.nvidia.version_suffix") == 0)
+			return (k_sysctl_string(old, len, K.version_suffix));
+		if (strcmp(name, "hw.nvidia.version_available") == 0)
+			return (k_sysctl_int(old, len, K.version_available));
+	}
+	if (strcmp(name, "hw.nvidia.altra_device_wc_active") == 0) {
+		if (K.fn_wc < 0) {
+			errno = ENOENT;
+			return (-1);
+		}
+		if (K.fn_wc_short) {
+			int v = K.fn_wc;
+
+			memcpy(old, &v, *len < sizeof(v) ? *len : sizeof(v));
+			*len = 2;
+			return (0);
+		}
+		return (k_sysctl_int(old, len, K.fn_wc));
 	}
 	bad("unexpected sysctl");
 	return (-1);
@@ -256,6 +358,41 @@ handle_control(NVOS54_PARAMETERS *p)
 		return;
 	}
 	switch (cmd) {
+	case NV2080_CTRL_CMD_BIOS_GET_INFO_V2: {
+		NV2080_CTRL_BIOS_GET_INFO_V2_PARAMS *a = NvP64_VALUE(p->params);
+
+		NEED(0, NV2080_CTRL_BIOS_GET_INFO_V2_PARAMS);
+		if (a->biosInfoListSize != 1)
+			bad("BIOS info asked for more than one index");
+		switch (a->biosInfoList[0].index) {
+		case NV2080_CTRL_BIOS_INFO_INDEX_REVISION:
+			K.saw_vbios_revision++;
+			a->biosInfoList[0].data = K.vbios_revision;
+			break;
+		case NV2080_CTRL_BIOS_INFO_INDEX_OEM_REVISION:
+			K.saw_vbios_oem_revision++;
+			if (K.fail_vbios_oem) {
+				p->status = NV_ERR_GENERIC;
+				return;
+			}
+			a->biosInfoList[0].data = K.vbios_oem_revision;
+			break;
+		default:
+			p->status = NV_ERR_INVALID_ARGUMENT;
+		}
+		return;
+	}
+	case NV2080_CTRL_CMD_GSP_GET_FEATURES: {
+		NV2080_CTRL_GSP_GET_FEATURES_PARAMS *a = NvP64_VALUE(p->params);
+
+		NEED(0, NV2080_CTRL_GSP_GET_FEATURES_PARAMS);
+		K.saw_gsp++;
+		a->bValid = K.gsp_valid ? NV_TRUE : NV_FALSE;
+		if (a->bValid)
+			snprintf((char *)a->firmwareVersion,
+			    sizeof(a->firmwareVersion), "%s", K.gsp_firmware);
+		return;
+	}
 	case NV2080_CTRL_CMD_BUS_GET_PCI_INFO: {
 		NV2080_CTRL_BUS_GET_PCI_INFO_PARAMS *a = NvP64_VALUE(p->params);
 
@@ -465,8 +602,23 @@ k_ioctl(int fd, unsigned long cmd, void *arg)
 
 		if (size != sizeof(*v))
 			bad("version ioctl size");
+		if (v->cmd == NV_RM_API_VERSION_CMD_QUERY) {
+			if (!K.saw_version || K.nalloc != 0 || K.saw_card)
+				bad("version query was not after the strict check");
+			K.saw_version_query++;
+			if (K.fail_version_query) {
+				errno = EIO;
+				return (-1);
+			}
+			v->reply = K.query_unrecognized ?
+			    NV_RM_API_VERSION_REPLY_UNRECOGNIZED :
+			    NV_RM_API_VERSION_REPLY_RECOGNIZED;
+			snprintf(v->versionString, sizeof(v->versionString), "%s",
+			    K.rm_api_version);
+			return (0);
+		}
 		if (v->cmd != NV_RM_API_VERSION_CMD_STRICT)
-			bad("version check is not strict");
+			bad("version check is not strict or a query");
 		if (K.nalloc != 0 || K.saw_card)
 			bad("version check was not the first call");
 		K.saw_version = 1;
