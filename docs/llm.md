@@ -194,6 +194,28 @@ recorded with `"path": "linuxulator"` and `"path_status": "last-resort"`, and ar
 soon as a native path exists.
 The Linux CUDA path is described in the next section.
 
+## Native NVIDIA benchmark
+
+When NVK on libnvrm can create a device, `scripts/native-llm-bench`
+([native-llm-bench(1)](../man/native-llm-bench.1)) selects the card by PCI bus, proves the Vulkan and
+benchmark paths are native, checks memory before each model, and records history rows with
+published-median comparisons. For NVIDIA it pins only `nvk_nvrm_icd.<arch>.json` with library
+`libvulkan_nvk_nvrm.so`; any `libvulkan_nouveau.so` ICD or inherited override to another ICD is
+refused. It refuses Linux ICDs, Linux binaries and loaded Linux compatibility modules; until that
+native path exists, it exits with the Track #2379 refusal instead of running the Linux path.
+
+Check the working Radeon path without starting a benchmark:
+
+```sh
+scripts/native-llm-bench --gpu radeon --dry-run
+```
+
+The NVIDIA command below refuses with exit 3 until NVK on libnvrm is installed:
+
+```sh
+scripts/native-llm-bench --gpu nvidia
+```
+
 ## CUDA (Linux libcuda through the Linuxulator; Linux-only, last resort)
 
 NVIDIA's Linux `libcuda.so.1` (580.178.04) runs under the Linuxulator against `nvidia.ko`

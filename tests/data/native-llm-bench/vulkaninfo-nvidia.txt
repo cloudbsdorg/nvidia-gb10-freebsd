@@ -1,0 +1,23 @@
+==========
+VULKANINFO
+==========
+
+Devices:
+========
+GPU0:
+	apiVersion         = 1.4.354
+	driverVersion      = 26.2.2
+	vendorID           = 0x10de
+	deviceID           = 0x2d04
+	deviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+	deviceName         = NVIDIA GeForce RTX 5060 Ti
+VkPhysicalDevicePCIBusInfoPropertiesEXT:
+----------------------------------------
+	pciDomain   = 13
+	pciBus      = 1
+	pciDevice   = 0
+	pciFunction = 0
+VkPhysicalDeviceVulkan12Properties:
+-----------------------------------
+	driverName                                           = NVK (CloudBSD, libnvrm)
+	driverInfo                                           = Mesa 26.2.2 (libnvrm)

@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+"""One fake for every command used by native-llm-bench tests."""
+import json
+import os
+import sys
+
+DATA = os.path.dirname(os.path.realpath(__file__))
+NAME = os.path.basename(sys.argv[0])
+ARGS = sys.argv[1:]
+LOG = os.environ.get("FAKE_LOG", os.path.join(DATA, "unused-log"))
+LOADER_VARIABLES = (
+    "VK_ADD_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_DRIVER_FILES",
+    "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE",
+    "VK_LOADER_LAYERS_ENABLE", "VK_INSTANCE_LAYERS", "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+)
+
+
+def read(name):
+    with open(os.path.join(DATA, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def append(name, value):
+    os.makedirs(LOG, exist_ok=True)
+    with open(os.path.join(LOG, name), "a", encoding="utf-8") as f:
+        f.write(json.dumps(value) + "\n")
+
+
+def value_after(flag, default=None):
+    return ARGS[ARGS.index(flag) + 1] if flag in ARGS else default
+
+
+def preflight():
+    vendor = value_after("--vendor")
+    device = value_after("--device")
+    scenario = os.environ.get("FAKE_SCENARIO", "radeon")
+    if scenario == "none":
+        print(json.dumps({"version": 1, "status": "none", "devices": [], "verify": [],
+                          "override": bool(device), "error": None}))
+        return 0
+    if scenario in ("error", "verify-failed"):
+        message = "probe failed" if scenario == "error" else "verification failed"
+        print(json.dumps({"version": 1, "status": scenario, "devices": [], "verify": [],
+                          "override": bool(device), "error": message}))
+        return 0
+    if vendor == "0x1002":
+        devices = [{"bus": "pci12:3:0:0", "vendor": "0x1002", "role": "display",
+                    "node": "dri/renderD128", "selected": True}]
+    else:
+        devices = [{"bus": "pci13:1:0:0", "vendor": "0x10de", "role": "display",
+                    "node": "nvidia0", "selected": True}]
+    if scenario == "multi":
+        devices.append(dict(devices[0], bus="pci14:1:0:0", selected=False))
+    chosen = devices[-1:] if device == devices[-1]["bus"] else devices[:1]
+    verify = [{"bus": d["bus"], "node": d["node"], "node_present": True,
+               "found_bus": d["bus"], "answers": True} for d in chosen]
+    print(json.dumps({"version": 1, "status": "ok", "devices": devices, "verify": verify,
+                      "override": bool(device), "error": None, "node_map": value_after("--node-map")}))
+    return 0
+
+
+def sysctl():
+    if ARGS == ["hw.dri"]:
+        sys.stdout.write(read("hw-dri-busid.txt"))
+    elif ARGS == ["-N", "dev.nvidia"]:
+        if os.environ.get("FAKE_NVIDIA_SYSCTL", "present") == "missing":
+            print("sysctl: unknown oid 'dev.nvidia'", file=sys.stderr)
+            return 1
+        print("dev.nvidia.0.%parent")
+    elif ARGS and ARGS[-1].startswith("dev.nvidia.") and ARGS[-1].endswith(".%parent"):
+        print("vgapci1")
+    elif ARGS and ARGS[-1] == "vm.stats.vm.v_free_count":
+        print(os.environ.get("FAKE_HOST_FREE_PAGES", "8388608"))
+    elif ARGS and ARGS[-1] == "vm.stats.vm.v_inactive_count":
+        print(os.environ.get("FAKE_HOST_INACTIVE_PAGES", "8388608"))
+    elif ARGS and ARGS[-1] == "hw.pagesize":
+        print("4096")
+    else:
+        print("fake sysctl: unsupported arguments: %r" % (ARGS,), file=sys.stderr)
+        return 1
+    return 0
+
+
+def llama_bench():
+    append("llama-bench.jsonl", ARGS)
+    if ARGS == ["--version"]:
+        if os.environ.get("FAKE_VERSION") == "none":
+            return 0
+        print("version: 1.0.0-dev (build 1, commit 225a534)", file=sys.stderr)
+        print("built with Clang 21.1.8 for FreeBSD aarch64", file=sys.stderr)
+        return 0
+    if ARGS == ["--list-devices"]:
+        free = os.environ.get("FAKE_GPU_FREE_MIB", "8147")
+        list_mode = os.environ.get("FAKE_LIST_MODE", "ordinary")
+        if list_mode in ("duplicate-match", "duplicate-mismatch"):
+            names = (["Same GPU", "Other GPU", "Same GPU"] if list_mode == "duplicate-match"
+                     else ["Same GPU", "Same GPU", "Other GPU"])
+            print("Available devices:")
+            for index, name in enumerate(names):
+                print("  Vulkan%d: %s (16384 MiB, %s MiB free)" % (index, name, free))
+        elif os.environ.get("FAKE_SCENARIO", "radeon") == "nvidia":
+            print("Available devices:")
+            print("  Vulkan0: NVIDIA GeForce RTX 5060 Ti (16384 MiB, %s MiB free)" % free)
+        else:
+            sys.stdout.write(read("list-devices-radeon.txt").replace("8147 MiB free", free + " MiB free"))
+        return 0
+    model = value_after("-m", "")
+    append("benchmarks.jsonl", ARGS)
+    fail_model = os.environ.get("FAKE_BENCH_FAIL_MODEL", "")
+    if fail_model and fail_model in model:
+        print("fake llama-bench: requested benchmark failure", file=sys.stderr)
+        return 7
+    fixture = "bench-3b.json" if "3B-Instruct" in model else "bench-7b.json"
+    sys.stdout.write(read(fixture))
+    return 0
+
+
+def main():
+    append("commands.jsonl", {"command": NAME, "args": ARGS,
+                              "VK_DRIVER_FILES": os.environ.get("VK_DRIVER_FILES"),
+                              "loader_env": {name: os.environ.get(name)
+                                             for name in LOADER_VARIABLES}})
+    if NAME == "hw-preflight":
+        return preflight()
+    if NAME == "sysctl":
+        return sysctl()
+    if NAME == "pciconf":
+        sys.stdout.write(read("pciconf-l.txt"))
+        return 0
+    if NAME == "uname":
+        if ARGS != ["-p"]:
+            print("fake uname: unsupported arguments: %r" % (ARGS,), file=sys.stderr)
+            return 1
+        print(os.environ.get("FAKE_ARCH", "aarch64"))
+        return 0
+    if NAME == "kldstat":
+        if ARGS == ["-v"]:
+            print("Id Refs Address Size Name")
+            print("  1  100 0xffff000000000000 1594e28 kernel")
+            module = os.environ.get("FAKE_KLD_VERBOSE", "none")
+            if module != "none":
+                print("702    0 -                    -      " + module)
+            return 0
+        fixture = "kldstat-no-linux.txt" if os.environ.get("FAKE_KLD") == "none" else "kldstat.txt"
+        sys.stdout.write(read(fixture))
+        return 0
+    if NAME == "vulkaninfo":
+        if not os.environ.get("VK_DRIVER_FILES"):
+            print("fake vulkaninfo: VK_DRIVER_FILES is not set", file=sys.stderr)
+            return 1
+        mode = os.environ.get("FAKE_VULKAN", "radeon")
+        if mode == "radeon":
+            sys.stdout.write(read("vulkaninfo-radeon.txt"))
+        elif mode == "duplicate":
+            for index, (name, domain, bus) in enumerate((
+                    ("Same GPU", 12, 3), ("Other GPU", 14, 1), ("Same GPU", 15, 2))):
+                print("GPU%d:" % index)
+                print("\tdeviceType = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU")
+                print("\tdeviceName = " + name)
+                print("\tdriverName = radv")
+                print("\tdriverInfo = Mesa fixture")
+                print("\tpciDomain = %d" % domain)
+                print("\tpciBus = %d" % bus)
+                print("\tpciDevice = 0")
+                print("\tpciFunction = 0")
+        else:
+            text = read("vulkaninfo-nvidia.txt")
+            if mode == "proprietary":
+                text = text.replace("NVK (CloudBSD, libnvrm)", "NVIDIA")
+            elif mode == "wrong-bus":
+                text = text.replace("pciBus      = 1", "pciBus      = 2")
+            sys.stdout.write(text)
+        return 0
+    if NAME == "llama-bench":
+        return llama_bench()
+    if NAME == "file":
+        brief = ARGS and ARGS[0] == "-b"
+        target = ARGS[-1] if ARGS else ""
+        if "llama-bench" in target:
+            os_name = os.environ.get("FAKE_BINARY_OS", "FreeBSD")
+        else:
+            os_name = os.environ.get("FAKE_LIBRARY_OS", "FreeBSD")
+        description = ("ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux), "
+                       "for GNU/Linux 3.7.0" if os_name == "Linux" else
+                       "ELF 64-bit LSB executable, ARM aarch64, version 1 (FreeBSD), "
+                       "for FreeBSD 15.0")
+        print(description if brief else "%s: %s" % (target, description))
+        return 0
+    if NAME == "fstat":
+        print("USER CMD PID FD MOUNT INUM MODE SZ|DV R/W NAME")
+        return 0
+    if NAME == "bectl":
+        print("BE Active Mountpoint Space Created")
+        print("cloudbsd-test NR / 1.0G 2026-11-22")
+        return 0
+    print("unknown fake command: " + NAME, file=sys.stderr)
+    return 99
+
+
+if __name__ == "__main__":
+    sys.exit(main())
