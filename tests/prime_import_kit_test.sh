@@ -36,16 +36,88 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/prime-import-testboot
+# the one shared bare-shutdown detector (also used by check-be.sh in kits that have one)
+. "$KIT/bare-shutdown-check.sh"
 WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/prime-kit-test.XXXXXXXX") || exit 1
-trap 'rm -rf -- "${TMPD:?}"' EXIT INT TERM
-export TMPDIR=$TMPD
+TEST_PIDS=$TMPD/test-pids
+: > "$TEST_PIDS"
+cleanup() {
+	if [ -f "$TEST_PIDS" ]; then
+		while IFS= read -r _pid; do
+			case $_pid in
+			''|*[!0-9]*) ;;
+			*)	# only a pid that is still one of our own shutdown copies
+				[ "$(ps -o uid= -o comm= -p "$_pid" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ] && kill "$_pid" 2> /dev/null
+				: ;;
+			esac
+		done < "$TEST_PIDS"
+	fi
+	rm -rf -- "${TMPD:?}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export TMPDIR=$TMPD TEST_PIDS
 
 passed=0
 failed=0
 ok() { echo "PASS: $1"; passed=$((passed + 1)); }
 bad() { echo "FAIL: $1"; failed=$((failed + 1)); }
+
+# (guard G1) sentinels precede every kit run.  The PATH sentinel can only log
+# and exit; the override stub starts a copied sleep named shutdown so the rc's
+# exact-pid confirmation exercises the real ps check without shutdown(8).
+SENT=$TMPD/sent
+SENT2=$TMPD/sent2
+TEST_CHILD=$TMPD/child
+mkdir -p "$SENT" "$SENT2" "$TEST_CHILD"
+cat > "$SENT/shutdown" <<'EOF'
+#!/bin/sh
+printf 'REACHED %s %s\n' "$0" "$*" >> "$SENT/hits"
+exit 99
+EOF
+cat > "$SENT2/real-shutdown" <<'EOF'
+#!/bin/sh
+printf 'REAL REACHED %s %s\n' "$0" "$*" >> "$SENT2/hits"
+exit 99
+EOF
+cp /bin/sleep "$TEST_CHILD/shutdown"
+cat > "$TMPD/prime-shutdown-stub" <<'EOF'
+#!/bin/sh
+printf 'shutdown %s\n' "$*" >> "$PRIME_STUB_LOG"
+if [ -n "${PRIME_STUB_REFUSE:-}" ] && [ -e "$PRIME_STUB_REFUSE" ]; then
+	echo 'shutdown: cannot' >&2
+	exit 1
+fi
+"$TEST_CHILD/shutdown" 300 > /dev/null 2>&1 < /dev/null &
+_child=$!
+printf '%s\n' "$_child" >> "$TEST_PIDS"
+# the pid is announced only once ps says it is a shutdown (bounded, no timer)
+_i=0
+while [ "$(ps -o comm= -p "$_child" 2> /dev/null | tr -d ' ')" != shutdown ]; do
+	_i=$((_i + 1))
+	if [ "$_i" -gt 2000 ]; then
+		echo 'stub: the child never became a shutdown' >&2
+		exit 1
+	fi
+done
+printf 'shutdown: [pid %s]\n' "$_child"
+exit 0
+EOF
+chmod 755 "$SENT/shutdown" "$SENT2/real-shutdown" "$TEST_CHILD/shutdown" "$TMPD/prime-shutdown-stub"
+PATH=$SENT:$PATH
+prime_import_testboot_shutdown=$TMPD/prime-shutdown-stub
+export PATH SENT SENT2 TEST_CHILD prime_import_testboot_shutdown
+if [ -n "$prime_import_testboot_shutdown" ] && [ "$prime_import_testboot_shutdown" != /sbin/shutdown ] &&
+    [ -x "$prime_import_testboot_shutdown" ] && [ ! -u "$prime_import_testboot_shutdown" ] &&
+    [ "${PATH%%:*}" = "$SENT" ]; then
+	ok "(guard G1) PATH and absolute non-setuid shutdown stub sentinels are armed before kit code runs"
+else
+	echo "guard: the harness left prime_import_testboot_shutdown at /sbin/shutdown" >&2
+	exit 1
+fi
 
 DRMINC="-I/usr/local/include -I/usr/local/include/libdrm"
 DRMLIB="-L/usr/local/lib -ldrm"
@@ -575,10 +647,12 @@ else
 	bad "(d) the armed message names another directory: $(tail -1 "$TMPD/act.out")"
 fi
 
-# (e) forbidden commands anywhere in the kit
-common='kldunload|kldload|devctl|acpiconf|zzz|[^a-z_]reboot|shutdown|halt -|bectl[[:space:]]+destroy'
+# (e) forbidden commands anywhere in the kit.  Shutdown has its own exact
+# static checks below: the real path is data, and the only call is quoted via
+# prime_import_testboot_shutdown.
+common='kldunload|kldload|devctl|acpiconf|zzz|[^a-z_]reboot|halt -|bectl[[:space:]]+destroy'
 scan() {	# scan <file>: forbidden commands, comments excluded
-	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vE '^[0-9]+:[[:space:]]+shutdown -r "\+\$prime_import_testboot_deadman" "prime_import_testboot dead-man: [^"]*" > /dev/null 2>&1 &$' | grep -vE '^[0-9]+::[[:space:]]"\$\{prime_import_testboot_lockfile:=/var/run/noshutdown\}"$' | grep -vE '^[0-9]+:[[:space:]]+if pkill -f "prime_import_testboot dead-man" > /dev/null 2>&1; then$'
+	grep -nE "$common|bectl[[:space:]]+activate" "$1" | grep -v '^[0-9]*:[[:space:]]*#'
 }
 _hits=
 for f in prime_import_testboot make-be.sh prime_import_probe.c; do
@@ -641,17 +715,12 @@ else
 fi
 
 # (f2) the rc script's decisions, run for real against fakes: a fake probe, sysctl,
-# kldstat, dmesg, bectl, su and pgrep first in PATH.  The paths are rc.conf
-# variables, so nothing outside TMPD is touched.
+# kldstat, dmesg, bectl and su first in PATH.  The paths are rc.conf variables,
+# so nothing outside TMPD is touched.  Shutdown always uses G1's override stub.
 FAKE=$TMPD/fake; mkdir -p "$FAKE/bin"
 for t in kldstat dmesg bectl sync; do
 	printf '#!/bin/sh\ncase "$0" in *kldstat) if [ "$1" = -v ]; then cat "%s/kldv" 2>/dev/null; else echo "nvidia-drm.ko amdgpu.ko"; fi;; *sync) echo s >> "%s/sync.log";; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/$t"
 done
-# a fake process table: pgrep -f and pkill -f match their pattern against the command lines in it (the rc script's
-# own command line is always there, as on the box), and a restart request that is not refused adds its own line
-printf '#!/bin/sh\n[ "$1" = -f ] || exit 2\ngrep -Eq -- "$2" "%s/ptable"\n' "$FAKE" > "$FAKE/bin/pgrep"
-printf '#!/bin/sh\necho "$0 $*" >> "%s/dead-man.log"\n[ "$1" = -f ] || exit 2\ngrep -Eq -- "$2" "%s/ptable" || exit 1\ngrep -Ev -- "$2" "%s/ptable" > "%s/ptable.new"\nmv "%s/ptable.new" "%s/ptable"\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/pkill"
-printf '#!/bin/sh\necho "$0 $*" >> "%s/dead-man.log"\n[ -e "%s/shutdown-refuse" ] && exit 0\necho "shutdown $*" >> "%s/ptable"\nexit 0\n' "$FAKE" "$FAKE" "$FAKE" > "$FAKE/bin/shutdown"
 printf '#!/bin/sh\n[ "$1" = -n ] && case "$2" in kern.bootfile) echo /boot/kernel/kernel;; vm.stats.vm.v_wire_count) cat "%s/wired";; hw.nvidia_unlock_dirty_refused) cat "%s/refused" 2>/dev/null;; esac\nexit 0\n' "$FAKE" "$FAKE" > "$FAKE/bin/sysctl"
 printf '#!/bin/sh\nexit 0\n' > "$FAKE/bin/su"
 chmod +x "$FAKE"/bin/*
@@ -663,17 +732,31 @@ printf 'Id Refs Address Size Name\n 7 1 0xffff 1 nvidia-drm.ko (/boot/modules/nv
 printf 'Id Refs Address Size Name\n 1 4 0xffff 1 kernel\n' > "$FAKE/kldv-none"
 cp "$FAKE/kldv-good" "$FAKE/kldv"
 echo 0 > "$FAKE/refused"
-# rc_run <name> <rc script> <probe>: run the one-shot, print its run directory
+# rc_run <name> <rc script> <probe>: run the one-shot, print its run directory.
+# RC_UNSET_SHUTDOWN=1 omits the override for the safely substituted G3 copy.
 rc_run() {
 	_n=$1; _rc=$2; _pr=$3
 	rm -rf "$FAKE/logs-$_n"; mkdir -p "$FAKE/logs-$_n"
-	printf '/usr/sbin/sshd\nsh %s onestart\n' "$_rc" > "$FAKE/ptable"
-	env PATH="$FAKE/bin:$PATH" prime_import_testboot_logroot="$FAKE/logs-$_n" \
+	: > "$FAKE/dead-man.log"
+	set --
+	if [ "${RC_UNSET_SHUTDOWN:-0}" != 1 ]; then
+		set -- prime_import_testboot_shutdown="${RC_STUB:-$prime_import_testboot_shutdown}"
+	fi
+	if [ -n "${RC_AUTOBOOT:-}" ]; then
+		set -- "$@" autoboot="$RC_AUTOBOOT"
+	fi
+	env -u prime_import_testboot_shutdown PATH="$SENT:$FAKE/bin:$PATH" PRIME_STUB_LOG="$FAKE/dead-man.log" \
+	    PRIME_STUB_REFUSE="$FAKE/shutdown-refuse" TEST_CHILD="$TEST_CHILD" TEST_PIDS="$TEST_PIDS" \
+	    prime_import_testboot_logroot="$FAKE/logs-$_n" \
 	    prime_import_testboot_probe="$_pr" prime_import_testboot_log="$FAKE/rc-$_n.log" \
 	    prime_import_testboot_src=/dev/null prime_import_testboot_dst=/dev/null \
 	    prime_import_testboot_loops=4 prime_import_testboot_probe_timeout=${RC_PROBE_TIMEOUT:-60} prime_import_testboot_loop_timeout=${RC_LOOP_TIMEOUT:-20} prime_import_testboot_deadman=${RC_DEADMAN:-60} prime_import_testboot_lockfile="$FAKE/noshutdown" prime_import_testboot_version="$FAKE/version" prime_import_testboot_linuxroot="$FAKE/none" \
-	    prime_import_testboot_cudarun="$FAKE/none" timeout 90 sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
+	    prime_import_testboot_cudarun="$FAKE/none" prime_import_testboot_marker="$FAKE/marker" prime_import_testboot_bectl="$FAKE/bin/bectl" \
+	    "$@" timeout 90 sh "$_rc" onestart > "$FAKE/rc-$_n.out" 2>&1
 	ls -d "$FAKE/logs-$_n"/prime-import-* 2>/dev/null | head -1
+}
+pid_is_shutdown() {
+	[ "$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ]
 }
 rowres() {	# rowres <results.jsonl> <row>: the results of the row, in order
 	grep "\"row\":\"$2\"" "$1" | sed 's/.*"result":"\([a-z]*\)".*/\1/' | tr '\n' ' '
@@ -754,17 +837,35 @@ sh "$KIT/summarize.sh" "$TMPD/empty.jsonl" > /dev/null 2>&1; [ $? -eq 1 ] && ok 
 sh "$KIT/summarize.sh" > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: no argument is a usage error" || bad "(f2) summarize.sh usage"
 sh "$KIT/summarize.sh" /nonexistent > /dev/null 2>&1; [ $? -eq 2 ] && ok "(f2) summarize.sh: an unreadable file is a usage error" || bad "(f2) summarize.sh unreadable"
 
-# the dead-man reboot: armed before the first probe, cancelled at the done row, off at 0
-d=$(rc_run good "$KIT/prime_import_testboot" "$FAKE/probe-good")
-if grep -q 'shutdown -r +60' "$FAKE/dead-man.log" 2>/dev/null; then
-	ok "(f2) the dead-man timer is armed for 60 minutes"
+# the dead-man reboot: foreground arm, exact-pid cancel, decoy untouched, off at 0
+"$TEST_CHILD/shutdown" 300 &
+_decoy=$!
+printf '%s\n' "$_decoy" >> "$TEST_PIDS"
+d=$(rc_run exact "$KIT/prime_import_testboot" "$FAKE/probe-good")
+_armed_pid=$(sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$d/deadman.txt" 2> /dev/null | head -1)
+case $_armed_pid in
+''|*[!0-9]*) bad "(f2) the foreground stub printed no exact dead-man pid" ;;
+*)
+	# the pid was started by the stub (so it was a real child, not a vacuous pass), the row says it was confirmed as a shutdown when armed
+	if grep -qx "$_armed_pid" "$TEST_PIDS" && grep '"row":"deadman"' "$d/results.jsonl" | head -1 | grep -q "pending as pid $_armed_pid" &&
+	    ! pid_is_shutdown "$_armed_pid" && pid_is_shutdown "$_decoy"; then
+		ok "(f2) cancel kills the recorded pid $_armed_pid and leaves same-name decoy $_decoy alive"
+	else
+		bad "(f2) exact-pid cancel: armed pid '$_armed_pid', decoy '$_decoy'"
+	fi
+	;;
+esac
+kill "$_decoy" 2> /dev/null || :
+wait "$_decoy" 2> /dev/null || :
+if grep -q 'shutdown -r +60' "$FAKE/dead-man.log" 2>/dev/null &&
+    grep '"row":"deadman"' "$d/results.jsonl" | head -1 | grep -q "pending as pid $_armed_pid"; then
+	ok "(f2) the dead-man timer is armed for 60 minutes in the foreground and confirmed by pid"
 else
-	bad "(f2) no dead-man reboot was armed: $(cat "$FAKE/dead-man.log" 2>/dev/null)"
+	bad "(f2) no confirmed dead-man reboot was armed: $(cat "$FAKE/dead-man.log" 2>/dev/null)"
 fi
-grep -q 'pkill -f prime_import_testboot dead-man' "$FAKE/dead-man.log" 2>/dev/null && ok "(f2) only this script's dead-man timer is cancelled (by its own message), at the end of a finished run" || bad "(f2) the dead-man reboot is not cancelled"
 case $(rowres "$d/results.jsonl" deadman) in "info info ") ok "(f2) the arm and the cancel are both recorded" ;; *) bad "(f2) deadman rows: '$(rowres "$d/results.jsonl" deadman)'" ;; esac
-[ "$(grep -c 'dead-man' "$KIT/prime_import_testboot")" -ge 2 ] && [ "$(grep -c '^[[:space:]]*shutdown ' "$KIT/prime_import_testboot")" -eq 1 ] && ok "(f2) the rc script has exactly one shutdown, the dead-man" || bad "(f2) the rc script has another shutdown"
-rm -f "$FAKE/dead-man.log"
+grep '"row":"deadman"' "$d/results.jsonl" | head -1 | grep -q 'a stubbed shutdown is used' &&
+    ok "(f2) the arm row says that a stubbed shutdown is used" || bad "(f2) the arm row does not identify the stub"
 d=$(RC_DEADMAN=0 rc_run nodead "$KIT/prime_import_testboot" "$FAKE/probe-good")
 [ ! -s "$FAKE/dead-man.log" ] && ok "(f2) with the dead-man set to 0 nothing is armed" || bad "(f2) a dead-man was armed with the variable at 0"
 # the unload order: the guard listed before nvidia_drm passes; after, absent or no driver does not
@@ -792,36 +893,15 @@ fi
 touch "$FAKE/shutdown-refuse"
 d=$(rc_run nopend "$KIT/prime_import_testboot" "$FAKE/probe-good")
 rm -f "$FAKE/shutdown-refuse"
-[ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that is not pending is a fail row" || bad "(f2) not-pending dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
+[ "$(rowres "$d/results.jsonl" deadman)" = "fail info " ] && ok "(f2) a dead-man timer that is not pending is one fail row, then the no-pid cancel row" || bad "(f2) not-pending dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
 touch "$FAKE/noshutdown"
 d=$(rc_run noshut "$KIT/prime_import_testboot" "$FAKE/probe-good")
 rm -f "$FAKE/noshutdown"
-[ "$(rowres "$d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && ok "(f2) a dead-man timer that shutdown refuses (noshutdown) is a fail row" || bad "(f2) noshutdown dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
+[ "$(rowres "$d/results.jsonl" deadman)" = "fail info " ] && ok "(f2) a dead-man timer with the noshutdown lock is a fail row" || bad "(f2) noshutdown dead-man rows: '$(rowres "$d/results.jsonl" deadman)'"
 touch "$FAKE/shutdown-refuse"
 d=$(rc_run nocancel "$KIT/prime_import_testboot" "$FAKE/probe-good")
 rm -f "$FAKE/shutdown-refuse"
 grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | grep -q 'no dead-man timer was found to cancel' && ok "(f2) a cancel that finds no timer says so, it does not claim success" || bad "(f2) cancel without a timer: '$(grep '"row":"deadman"' "$d/results.jsonl" | tail -1 | cut -c1-120)'"
-# a finished run leaves the rc script alone and the dead-man gone (the cancel pattern is this script's, not a substring of every line)
-d=$(rc_run ptfinal "$KIT/prime_import_testboot" "$FAKE/probe-good")
-if grep -q 'prime_import_testboot onestart' "$FAKE/ptable" && ! grep -q 'dead-man' "$FAKE/ptable" && grep -q sshd "$FAKE/ptable"; then
-	ok "(f2) the cancel removed the dead-man timer and nothing else (not the rc script itself, not other processes)"
-else
-	bad "(f2) the process table after the cancel: $(tr '\n' '|' < "$FAKE/ptable")"
-fi
-	mkdir -p "$TMPD/ctl-pg"; _f="$TMPD/ctl-pg/prime_import_testboot"
-	sed 's/pgrep -f "prime_import_testboot dead-man"/pgrep -f "prime_import_testboot"/' "$KIT/prime_import_testboot" > "$_f"
-	if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control pgrep-pattern: the mutation changed nothing (stale test)"; else
-		touch "$FAKE/shutdown-refuse"
-		_d=$(rc_run mpgrep "$_f" "$FAKE/probe-good")
-		rm -f "$FAKE/shutdown-refuse"
-		[ "$(rowres "$_d/results.jsonl" deadman | cut -d' ' -f2)" = "fail" ] && bad "(f2) control pgrep-pattern: a pending check that matches the rc script itself was not seen" || ok "(f2) control: a pending check whose pattern matches the rc script itself never fails, and the test above sees it"
-	fi
-mkdir -p "$TMPD/ctl-pk"; _f="$TMPD/ctl-pk/prime_import_testboot"
-sed 's/pkill -f "prime_import_testboot dead-man"/pkill -f "prime_import_testboot"/' "$KIT/prime_import_testboot" > "$_f"
-if cmp -s "$KIT/prime_import_testboot" "$_f"; then bad "(f2) control pkill-pattern: the mutation changed nothing (stale test)"; else
-	_d=$(rc_run mpkill "$_f" "$FAKE/probe-good")
-	grep -q 'prime_import_testboot onestart' "$FAKE/ptable" && bad "(f2) control pkill-pattern: a cancel that kills the rc script itself was not seen" || ok "(f2) control: a cancel pattern that matches the rc script itself is seen (it removes the script from the table)"
-fi
 # the sync after a running row is real: the sync count at the first probe falls by one without it
 rm -f "$FAKE/sync.log" "$FAKE/sync-at-probe"; : > "$FAKE/sync.log"
 d=$(rc_run syncgood "$KIT/prime_import_testboot" "$FAKE/probe-good")
@@ -940,6 +1020,338 @@ else
 fi
 mut_rc no-running-row 's/^	running import .*$/	:/' "$FAKE/probe-good" 'pass '
 
+# (guard) no path reaches /sbin/shutdown during host tests.  G1 is at the top,
+# G2 is the final assertion, and every mutant below is confined to a sentinel
+# (the PATH sentinel, the G3 sentinel copy, or never run at all).
+
+# guard_bare <rc script>: the shared detector (tests/prime-import-testboot/bare-shutdown-check.sh)
+# prints every line that calls shutdown by name; empty is clean.
+guard_bare() {
+	bare_shutdown_lines "$1"
+}
+# guard_static <rc script>: prints the name of the first rule it breaks and
+# returns 1, or prints nothing and returns 0.
+guard_static() {
+	_gs=$1
+	_gs_guard=$(sed -n '/^deadman_allowed()/,/^}/p' "$_gs")
+	[ -n "$_gs_guard" ] || { echo guard-function; return 1; }
+	[ -n "$(sed -n '/^dm_decide()/,/^}/p' "$_gs")" ] || { echo decide-function; return 1; }
+	for _needle in 'id -u' 'autoboot' 'rc_fast' 'rc_arg' 'prime_import_testboot_marker' 'prime_import_testboot_bectl' 'list -H' '$_dm_be' '$_dm_marker' 'dm_decide'; do
+		printf '%s\n' "$_gs_guard" | grep -qF "$_needle" || { echo "needle:$_needle"; return 1; }
+	done
+	[ "$(grep -cF '/sbin/shutdown' "$_gs")" -eq 1 ] || { echo literal-count; return 1; }
+	grep -qF 'prime_import_testboot_real_shutdown=/sbin/shutdown' "$_gs" || { echo real-assignment; return 1; }
+	grep -qF ': "${prime_import_testboot_shutdown:=$prime_import_testboot_real_shutdown}"' "$_gs" || { echo override-default; return 1; }
+	if [ -n "$(guard_bare "$_gs")" ]; then echo bare; return 1; fi
+	[ "$(grep -cF '"$prime_import_testboot_shutdown" -r' "$_gs")" -eq 1 ] || { echo call-count; return 1; }
+	if grep -F '"$prime_import_testboot_shutdown" -r' "$_gs" | grep -qE '&[[:space:]]*$'; then echo background; return 1; fi
+	_gs_deadman=$(sed -n '/^deadman_arm()/,/^prime_import_testboot_start()/p' "$_gs")
+	[ -n "$_gs_deadman" ] || { echo deadman-section; return 1; }
+	if printf '%s\n' "$_gs_deadman" | grep -qE 'pgrep|pkill'; then echo pkill; return 1; fi
+	grep -qF 'dm_confirm "$_dm_pid" "$(id -u)"' "$_gs" || { echo confirm-arm; return 1; }
+	grep -qF 'dm_confirm "$DM_CHILD" "$(id -u)"' "$_gs" || { echo confirm-cancel; return 1; }
+	grep -qF 'kill "$DM_CHILD"' "$_gs" || { echo kill-exact; return 1; }
+	return 0
+}
+_gs_out=$(guard_static "$KIT/prime_import_testboot")
+if [ -z "$_gs_out" ]; then
+	ok "(guard G4) fail-closed uid/boot(autoboot, rc_fast, rc_arg)/BE/marker checks, one quoted foreground call, no bare shutdown and exact-pid cancel are present"
+else
+	bad "(guard G4) the real rc script fails the static shutdown guard rule '$_gs_out'"
+fi
+
+# F3: dm_decide is pure; run it over a table of every single failure plus the all-true row.
+# Fields: expected status | uid | autoboot | rc_fast | rc_arg | marker | current BE | refusal text must contain
+dm_table_wrong() {	# dm_table_wrong <rc script>: the numbers of the table rows that give a wrong answer
+	sed -n '/^dm_decide()/,/^}/p' "$1" > "$TMPD/dm-decide.sh"
+	_w=
+	_n=0
+	while IFS='|' read -r _exp _u _ab _rf _ra _mk _be _want; do
+		_n=$((_n + 1))
+		_out=$( . "$TMPD/dm-decide.sh"; dm_decide "$_u" "$_ab" "$_rf" "$_ra" "$_mk" "$_be" )
+		_rc=$?
+		if [ "$_rc" != "$_exp" ]; then
+			_w="$_w $_n"
+		elif [ "$_exp" = 0 ] && [ -n "$_out" ]; then
+			_w="$_w $_n"
+		else
+			case $_out in *"$_want"*) ;; *) _w="$_w $_n" ;; esac
+		fi
+	done <<'EOF'
+0|0|yes|yes|start|BE1|BE1|
+1|1001|yes|yes|start|BE1|BE1|uid 1001
+1|0||yes|start|BE1|BE1|autoboot
+1|0|no|yes|start|BE1|BE1|autoboot
+1|0|yes||start|BE1|BE1|rc_fast
+1|0|yes|no|start|BE1|BE1|rc_fast
+1|0|yes|yes|stop|BE1|BE1|rc_arg
+1|0|yes|yes||BE1|BE1|rc_arg
+1|0|yes|yes|start||BE1|marker
+1|0|yes|yes|start|BE1|BE2|does not match
+1|0|yes|yes|start|BE1||no current
+EOF
+	printf '%s' "$_w"
+}
+_dtw=$(dm_table_wrong "$KIT/prime_import_testboot")
+if [ -z "$_dtw" ]; then
+	ok "(guard F3) dm_decide: the all-true row returns 0 and each of 10 single-condition failures is refused with its reason"
+else
+	bad "(guard F3) dm_decide table rows wrong:$_dtw"
+fi
+for _mv in uid:'s/^	if \[ "\$1" != 0 \]; then$/	if false; then/' \
+    autoboot:'s/^	if \[ "\$2" != yes \]; then$/	if [ "$2" = yes ]; then/' \
+    rc_fast:'s/^	if \[ "\$3" != yes \]; then$/	if false; then/' \
+    be:'s/^	if \[ "\$6" != "\$5" \]; then$/	if false; then/'; do
+	_mvn=${_mv%%:*}
+	_mve=${_mv#*:}
+	sed "$_mve" "$KIT/prime_import_testboot" > "$TMPD/mdm-$_mvn"
+	if cmp -s "$KIT/prime_import_testboot" "$TMPD/mdm-$_mvn"; then
+		bad "(guard F3) mutant $_mvn changed nothing (stale test)"
+	elif [ -n "$(dm_table_wrong "$TMPD/mdm-$_mvn")" ]; then
+		ok "(guard F3) control: mutant '$_mvn test removed' is seen as a wrong table row ($(dm_table_wrong "$TMPD/mdm-$_mvn" | tr -d ' ' | cut -c1-1) first)"
+	else
+		bad "(guard F3) mutant $_mvn gave the right table: not seen"
+	fi
+done
+
+# G3: replace the one real-path literal with a second sentinel, then omit the
+# override.  A non-root onestart must name uid refusal and make no sentinel hit.
+G3_SAFE=0
+_g3=$TMPD/g3-sentinel-rc
+_real_count=$(grep -cF '/sbin/shutdown' "$KIT/prime_import_testboot")
+sed "s|/sbin/shutdown|$SENT2/real-shutdown|" "$KIT/prime_import_testboot" > "$_g3"
+_copy_count=$(grep -cF '/sbin/shutdown' "$_g3")
+if [ "$_real_count" -eq 1 ] && [ "$_copy_count" -eq 0 ] && [ -x "$SENT2/real-shutdown" ] && [ ! -u "$SENT2/real-shutdown" ]; then
+	G3_SAFE=1
+	ok "(guard G3) the original has one real-path literal and the run copy has only the second sentinel"
+else
+	bad "(guard G3) unsafe sentinel substitution: original count $_real_count, copy count $_copy_count"
+fi
+if [ "$(id -u)" = 0 ]; then
+	bad "(guard G3) refusal runtime requires the current user to be non-root"
+elif [ "$G3_SAFE" = 1 ]; then
+	rm -f "$SENT2/hits"
+	d=$(RC_UNSET_SHUTDOWN=1 rc_run g3real "$_g3" "$FAKE/probe-good")
+	if [ ! -e "$SENT2/hits" ] && [ -n "$d" ] && [ -f "$d/results.jsonl" ] &&
+	    grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid .*this boot is NOT protected against a hang' "$d/results.jsonl"; then
+		ok "(guard G3) the unset override is refused as non-root, names uid, says the boot is not protected, and never reaches the real-path sentinel"
+	else
+		bad "(guard G3) real-default refusal failed: hits=$(cat "$SENT2/hits" 2> /dev/null) rows=$(grep '"row":"deadman"' "$d/results.jsonl" 2> /dev/null)"
+	fi
+fi
+
+# F1: at an rc boot (autoboot=yes) a stub override is ignored: the real conditions
+# apply and the override program is never called.  Run on the G3 sentinel copy.
+if [ "$(id -u)" = 0 ] || [ "$G3_SAFE" != 1 ]; then
+	bad "(guard F1) needs a non-root user and a proven sentinel copy"
+else
+	rm -f "$SENT2/hits"
+	d=$(RC_AUTOBOOT=yes rc_run f1boot "$_g3" "$FAKE/probe-good")
+	if [ ! -s "$FAKE/dead-man.log" ] && [ ! -e "$SENT2/hits" ] && [ ! -s "$SENT/hits" ] &&
+	    grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid ' "$d/results.jsonl"; then
+		ok "(guard F1) with autoboot=yes the stub override is ignored: refused (uid), the stub and the real-path sentinel are not called"
+	else
+		bad "(guard F1) a stub override was honoured at an rc boot: stub log '$(cat "$FAKE/dead-man.log" 2> /dev/null)' rows $(grep '"row":"deadman"' "$d/results.jsonl" 2> /dev/null | head -1)"
+	fi
+	rm -f "$SENT2/hits"
+	_mf1=$TMPD/mf1-honour-override
+	sed 's/^	if \[ "\${autoboot:-}" != yes \] &&$/	if true \&\&/' "$_g3" > "$_mf1"
+	if cmp -s "$_g3" "$_mf1"; then
+		bad "(guard F1) mutant honouring the override at boot changed nothing (stale test)"
+	else
+		RC_AUTOBOOT=yes rc_run mf1 "$_mf1" "$FAKE/probe-good" > /dev/null
+		if grep -q 'shutdown -r' "$FAKE/dead-man.log" 2> /dev/null; then
+			ok "(guard F1) control: a mutant that honours the override at an rc boot is seen (the stub is called)"
+		else
+			bad "(guard F1) the override-at-boot mutant was not seen"
+		fi
+	fi
+	rm -f "$SENT2/hits"
+fi
+
+# F4: with the lock file present, shutdown is not called at all (the stub log stays empty)
+touch "$FAKE/noshutdown"
+d=$(rc_run f4lock "$KIT/prime_import_testboot" "$FAKE/probe-good")
+rm -f "$FAKE/noshutdown"
+if [ ! -s "$FAKE/dead-man.log" ] && grep -q '"row":"deadman","result":"fail","detail":"the dead-man timer was requested but is not pending (the lock file .*shutdown was not called' "$d/results.jsonl"; then
+	ok "(guard F4) with the lock file present shutdown is not called and the deadman row is fail"
+else
+	bad "(guard F4) the lock file case called shutdown or has the wrong row: log '$(cat "$FAKE/dead-man.log" 2> /dev/null)'"
+fi
+
+# G5/M1: a bare command must find only the PATH sentinel, and static checks fail.
+# F11: the mutant is never run unless the sentinel dir is first in PATH with an executable shutdown.
+_m1=$TMPD/m1-bare-shutdown
+sed 's|^	"\$prime_import_testboot_shutdown" -r |	shutdown -r |' "$KIT/prime_import_testboot" > "$_m1"
+if cmp -s "$KIT/prime_import_testboot" "$_m1"; then
+	bad "(guard G5) M1 mutation changed nothing"
+elif [ "${PATH%%:*}" != "$SENT" ] || [ ! -x "$SENT/shutdown" ] || [ -u "$SENT/shutdown" ]; then
+	bad "(guard F11) M1 not run: the PATH sentinel dir is not first in PATH with an executable shutdown"
+else
+	_m1_static=$(guard_static "$_m1")
+	rm -f "$SENT/hits"
+	rc_run m1 "$_m1" "$FAKE/probe-good" > /dev/null
+	if [ "$_m1_static" = bare ] && [ -s "$SENT/hits" ] && grep -q '^REACHED ' "$SENT/hits" && grep -qF -- '-r +60' "$SENT/hits"; then
+		ok "(guard G5) control: mutant M1 is seen (bare call hits only the PATH sentinel; static rule '$_m1_static')"
+	else
+		bad "(guard G5) M1 was not seen: static='$_m1_static' hits=$(cat "$SENT/hits" 2> /dev/null)"
+	fi
+fi
+rm -f "$SENT/hits"
+
+# G5/M2: with the refusal call removed, the already-substituted G3 copy must
+# hit its second sentinel.  It can never name the host's real shutdown.
+_m2=$TMPD/m2-no-refusal
+sed 's/^	if ! deadman_allowed; then$/	if false; then/' "$_g3" > "$_m2"
+if cmp -s "$_g3" "$_m2" || cmp -s "$KIT/prime_import_testboot" "$_m2"; then
+	bad "(guard G5) M2 mutation changed nothing"
+elif [ "$G3_SAFE" != 1 ]; then
+	bad "(guard G5) M2 was not run because G3's sentinel substitution was not proven safe"
+else
+	rm -f "$SENT2/hits"
+	RC_UNSET_SHUTDOWN=1 rc_run m2 "$_m2" "$FAKE/probe-good" > /dev/null
+	if [ -s "$SENT2/hits" ] && grep -q '^REAL REACHED ' "$SENT2/hits"; then
+		ok "(guard G5) control: mutant M2 is seen (guard removal hits only the second sentinel)"
+	else
+		bad "(guard G5) M2 was not seen"
+	fi
+fi
+rm -f "$SENT2/hits"
+
+# G5/M3: pattern cancellation is rejected by the same G4 static guard, and only by its pkill rule
+# (the mutant is built from the original, so no other rule can fire).
+_m3=$TMPD/m3-pattern-cancel
+sed '/^deadman_cancel()$/{n;s/^{$/{\
+	pkill -f "prime_import_testboot dead-man"/;}' "$KIT/prime_import_testboot" > "$_m3"
+if cmp -s "$KIT/prime_import_testboot" "$_m3"; then
+	bad "(guard G5) M3 mutation changed nothing"
+else
+	_m3_static=$(guard_static "$_m3")
+	if [ "$_m3_static" = pkill ]; then
+		ok "(guard G5) control: mutant M3 is seen (pattern cancellation fails only the pkill rule of G4)"
+	else
+		bad "(guard G5) M3 was not seen by the pkill rule alone: rule '$_m3_static'"
+	fi
+fi
+
+# G5/M4 (F5): the call rewritten behind an if ! is a bare call.  Never run: only the detector looks at it.
+_m4=$TMPD/m4-if-bare
+sed 's|^	"\$prime_import_testboot_shutdown" -r .*$|	if ! shutdown -r "+$prime_import_testboot_deadman" "m"; then :; fi|' "$KIT/prime_import_testboot" > "$_m4"
+if cmp -s "$KIT/prime_import_testboot" "$_m4"; then
+	bad "(guard G5) M4 mutation changed nothing"
+elif [ "$(guard_static "$_m4")" = bare ]; then
+	ok "(guard G5) control: mutant M4 (if ! shutdown -r ...) is seen by the bare-call detector"
+else
+	bad "(guard G5) M4 was not seen as a bare call: rule '$(guard_static "$_m4")'"
+fi
+
+# G3 (FIX3): stub overrides that are not an absolute, executable, non-setuid file are
+# not honoured.  Each runs through the sentinel copy of the rc as non-root with onestart:
+# the REFUSED row, an empty stub log and no sentinel hit are expected.
+_g3_setuid=$TMPD/prime-shutdown-setuid-stub
+cp "$TMPD/prime-shutdown-stub" "$_g3_setuid"
+chmod 4755 "$_g3_setuid"
+if [ "$(id -u)" = 0 ] || [ "$G3_SAFE" != 1 ]; then
+	bad "(guard G3) override cases need a non-root user and a proven sentinel copy"
+elif [ ! -u "$_g3_setuid" ]; then
+	bad "(guard G3) the setuid stub copy is not setuid (stale test)"
+else
+	for _ov in true:true relative:prime-shutdown-stub setuid:"$_g3_setuid"; do
+		_ovn=${_ov%%:*}
+		_ovv=${_ov#*:}
+		rm -f "$SENT/hits" "$SENT2/hits"
+		d=$(cd "$TMPD" && RC_STUB="$_ovv" rc_run "g3ov$_ovn" "$_g3" "$FAKE/probe-good")
+		if [ -n "$d" ] && [ ! -s "$FAKE/dead-man.log" ] && [ ! -e "$SENT2/hits" ] && [ ! -e "$SENT/hits" ] &&
+		    grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid ' "$d/results.jsonl"; then
+			ok "(guard G3) the $_ovn override is refused: REFUSED row, empty stub log, no sentinel hit"
+		else
+			bad "(guard G3) the $_ovn override was not refused: log '$(cat "$FAKE/dead-man.log" 2> /dev/null)' rows $(grep '"row":"deadman"' "$d/results.jsonl" 2> /dev/null | head -1)"
+		fi
+	done
+fi
+rm -f "$SENT/hits" "$SENT2/hits"
+
+# G1 (FIX3) control: the shared detector must not flag the clean rc script, comments,
+# the allowlisted lines or row/echo messages that carry the word shutdown.
+_bc=$TMPD/bare-clean
+cp "$KIT/prime_import_testboot" "$_bc"
+printf '%s\n' '# shutdown -r now is only a comment' 'row t pass "shutdown -r now in a message"' 'echo "shutdown now"' >> "$_bc"
+if [ -z "$(bare_shutdown_lines "$_bc")" ] && [ -z "$(bare_shutdown_lines "$KIT/prime_import_testboot")" ]; then
+	ok "(guard G1) control: the clean rc, comments, the allowlisted lines and row/echo messages are not flagged"
+else
+	bad "(guard G1) the bare detector flags clean text: $(bare_shutdown_lines "$_bc" | head -3)"
+fi
+
+# G5/M6 and M7: quoted shells are bare calls too.  Never run: only the detector looks at them.
+for _mq in m6:'sh -c "shutdown -r now"' m7:"eval 'shutdown -r now'"; do
+	_mqn=${_mq%%:*}
+	_mqt=$TMPD/$_mqn-quoted-bare
+	cp "$KIT/prime_import_testboot" "$_mqt"
+	printf '%s\n' "${_mq#*:}" >> "$_mqt"
+	if cmp -s "$KIT/prime_import_testboot" "$_mqt"; then
+		bad "(guard G5) $_mqn mutation changed nothing"
+	elif [ "$(guard_static "$_mqt")" = bare ] && [ -n "$(bare_shutdown_lines "$_mqt")" ]; then
+		ok "(guard G5) control: mutant $_mqn (${_mq#*:}) is seen by the bare-call detector"
+	else
+		bad "(guard G5) $_mqn was not seen as a bare call: rule '$(guard_static "$_mqt")'"
+	fi
+done
+
+# G5/M8: a mutant of the shared detector file itself (it reports nothing) must make
+# the M6 line pass unseen, which the test then reports as the control being seen.
+_m8=$TMPD/m8-detector
+sed "s/grep -nE '.*\$/grep -nE 'ZZZNEVERZZZ'/" "$KIT/bare-shutdown-check.sh" > "$_m8"
+if cmp -s "$KIT/bare-shutdown-check.sh" "$_m8"; then
+	bad "(guard G5) M8 mutation changed nothing"
+else
+	_m8out=$( . "$_m8"; bare_shutdown_lines "$TMPD/m6-quoted-bare" )
+	if [ -z "$_m8out" ]; then
+		ok "(guard G5) control: mutant M8 (broken shared detector) misses M6, so the M6 check above would fail"
+	else
+		bad "(guard G5) M8 detector still sees M6: $_m8out"
+	fi
+fi
+
+# G6: a fake make-be run writes the clone's own BE name into a 0444 marker.
+make_be_no_shutdown() {
+	if grep -nE '^[[:space:]]*(/sbin/)?shutdown([[:space:]]|$)' "$1" > /dev/null; then return 1; fi
+	return 0
+}
+out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 12 -m "$TMPD/mods"); rc=$?
+_g6be=nvidia-prime-import-test-20261120-12
+_g6marker=$TMPD/mnt/usr/local/etc/prime_import_testboot.marker
+if [ "$rc" -eq 0 ] && [ "$(cat "$_g6marker" 2> /dev/null)" = "$_g6be" ] &&
+    [ "$(stat -f %Lp "$_g6marker" 2> /dev/null)" = 444 ] && make_be_no_shutdown "$KIT/make-be.sh"; then
+	ok "(guard G6) make-be writes the BE marker as 0444 and contains no shutdown command"
+else
+	bad "(guard G6) marker content/mode or make-be command check failed (rc=$rc)"
+fi
+_g6cmd=$TMPD/g6-make-command-mutant
+cp "$KIT/make-be.sh" "$_g6cmd"
+printf 'shutdown -r now\n' >> "$_g6cmd"
+if cmp -s "$KIT/make-be.sh" "$_g6cmd"; then
+	bad "(guard G6) command mutant changed nothing"
+elif make_be_no_shutdown "$_g6cmd"; then
+	bad "(guard G6) a planted shutdown command was not seen"
+else
+	ok "(guard G6) control: a planted shutdown command is seen without running the mutant"
+fi
+_g6kit=$TMPD/g6kit
+mkdir -p "$_g6kit"
+cp "$KIT"/* "$_g6kit/"
+_g6mark=$_g6kit/make-be.sh
+sed 's/"\$BE" > "\$MNT\/usr\/local\/etc\/prime_import_testboot.marker"/"\$BASE" > "\$MNT\/usr\/local\/etc\/prime_import_testboot.marker"/' "$KIT/make-be.sh" > "$_g6mark"
+if cmp -s "$KIT/make-be.sh" "$_g6mark"; then
+	bad "(guard G6) marker mutant changed nothing"
+else
+	run_be "$_g6mark" -b base -D 20261120 -n 12 -m "$TMPD/mods" > /dev/null 2>&1
+	if [ "$(cat "$_g6marker" 2> /dev/null)" = base ] && [ "$(cat "$_g6marker" 2> /dev/null)" != "$_g6be" ]; then
+		ok "(guard G6) control: a marker containing the wrong BE is seen"
+	else
+		bad "(guard G6) wrong-BE marker mutant was not seen"
+	fi
+fi
+
 # (g) controls
 mkdir -p "$TMPD/ctl"
 cp "$KIT"/* "$TMPD/ctl/"
@@ -956,6 +1368,12 @@ else
 	else
 		bad "(g) control: the always-arm mutant did not arm"
 	fi
+fi
+
+if [ ! -s "$SENT/hits" ]; then
+	ok "(guard G2) no rc run or mutant reached the PATH shutdown sentinel after its M1 control was cleared"
+else
+	bad "(guard G2) the PATH shutdown sentinel was reached: $(cat "$SENT/hits")"
 fi
 
 echo "passed: $passed failed: $failed"

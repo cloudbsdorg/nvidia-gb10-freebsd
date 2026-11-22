@@ -324,6 +324,8 @@ else
 	mkdir -p "$MNT/etc/rc.conf.d"
 	printf 'prime_import_testboot_enable="YES"\n' > "$MNT/etc/rc.conf.d/prime_import_testboot"
 	printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/prime_import_testboot.version"
+	printf '%s\n' "$BE" > "$MNT/usr/local/etc/prime_import_testboot.marker"
+	chmod 0444 "$MNT/usr/local/etc/prime_import_testboot.marker"
 fi
 
 run "$BECTL" umount "$BE"
