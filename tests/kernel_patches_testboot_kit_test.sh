@@ -2,7 +2,7 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# kernel_patches_testboot_kit_test.sh - static checks of the test-boot kit in
+# kernel_patches_testboot_kit_test.sh - static and unprivileged runtime checks in
 # tests/kernel-patches-testboot/ (Track #2442); no root, no boot environment:
 #   (a) every kit script parses (sh -n);
 #   (b) testboot-return matches the sha256 pin in VENDOR;
@@ -16,7 +16,9 @@
 #   (f) make-be.sh never activates a boot environment (no "bectl activate");
 #   (g) the recorder has no /home/ path and runs both GPU jobs through su -m;
 #   (h) make-be.sh writes devmatch_blocklist and removes testboot-return.hold;
-#   (i) check-be.sh rejects a malformed -N before checking for root.
+#   (i) check-be.sh rejects a malformed -N before checking for root;
+#   (j) dead-man runtime fakes use GB10_WORK (default $HOME/work/gb10) for
+#       their mktemp directory under its tmp subdirectory, never /tmp.
 
 set -u
 LC_ALL=C
@@ -38,7 +40,7 @@ want=$(sed -n 's/^sha256 *= *\([0-9a-f]\{64\}\)$/\1/p' "$kit/VENDOR")
 got=$(sha256 -q "$kit/testboot-return" 2> /dev/null || sha256sum "$kit/testboot-return" | cut -d' ' -f1)
 [ -n "$want" ] && [ "$got" = "$want" ] && ok "testboot-return matches VENDOR" || bad "testboot-return is $got, VENDOR pins $want"
 
-dm=$(grep -n 'shutdown -r "+$kernel_patches_testboot_deadman"' "$rc" | head -1 | cut -d: -f1)
+dm=$(grep -nF 'shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1' "$rc" | head -1 | cut -d: -f1)
 ld=$(grep -n 'kldload amdgpu >' "$rc" | head -1 | cut -d: -f1)
 gate=$(grep -n 'if \[ "$DM_OK" != 1 \]; then' "$rc" | head -1 | cut -d: -f1)
 [ -n "$dm" ] && [ -n "$ld" ] && [ "$dm" -lt "$ld" ] && ok "dead-man (line $dm) before kldload amdgpu (line $ld)" ||
@@ -46,15 +48,150 @@ gate=$(grep -n 'if \[ "$DM_OK" != 1 \]; then' "$rc" | head -1 | cut -d: -f1)
 [ -n "$gate" ] && [ -n "$ld" ] && [ "$gate" -lt "$ld" ] && ok "no dead-man, no load (line $gate)" || bad "no DM_OK gate before the load"
 def=$(sed -n 's/^: "${kernel_patches_testboot_deadman:=\([0-9]*\)}"$/\1/p' "$rc")
 [ -n "$def" ] && [ "$def" -gt 0 ] && ok "dead-man default $def minutes" || bad "dead-man default '${def}'"
-if grep -qF 'pgrep -f' "$rc" || grep -qF 'pkill -f' "$rc"; then
-	bad "dead-man uses a full-command process match"
+if grep -qF 'pgrep' "$rc" || grep -qF 'pkill' "$rc"; then
+	bad "the recorder still uses pgrep or pkill"
 else
-	ok "dead-man never uses pgrep -f or pkill -f"
+	ok "the recorder has no pgrep or pkill"
 fi
-grep -qF 'pgrep -u 0 -x shutdown' "$rc" && ok "dead-man confirmation falls back to root's shutdown process" ||
-    bad "dead-man confirmation does not use pgrep -u 0 -x shutdown"
-grep -qF 'pkill -u 0 -x shutdown' "$rc" && ok "dead-man cancellation targets root's shutdown process" ||
-    bad "dead-man cancellation does not use pkill -u 0 -x shutdown"
+grep -qF 'dm_confirm "$_dm_pid" 0' "$rc" && grep -qF 'DM_CHILD=$_dm_pid' "$rc" &&
+    ok "dead-man confirmation and DM_CHILD use shutdown's exact pid" ||
+    bad "dead-man confirmation does not use the exact pid"
+grep -qF 'kill "$DM_CHILD"' "$rc" && ok "dead-man cancellation targets only DM_CHILD" ||
+    bad "dead-man cancellation does not kill the exact confirmed pid"
+if grep -qF 'ps -o uid=,comm=' "$rc"; then
+	bad "the recorder still uses the comma-form ps output selector"
+else
+	ok "the recorder has no comma-form ps output selector"
+fi
+
+# Exercise the extracted functions without invoking shutdown(8).  All fakes
+# live under GB10_WORK (default $HOME/work/gb10), never /tmp, and cleanup only
+# kills exact pids started by this test.
+_dm_test_root=${GB10_WORK:-$HOME/work/gb10}/tmp
+if [ "$(id -u)" = 0 ]; then
+	printf 'skip  dead-man runtime cases: refuse to run as root\n'
+elif ! mkdir -p "$_dm_test_root"; then
+	bad "cannot create dead-man test parent $_dm_test_root"
+elif _dm_test_dir=$(mktemp -d "$_dm_test_root/dm-exact.XXXXXX"); then
+	_dm_test_pid=
+	_dm_test_gone=
+	cleanup() {
+		case $_dm_test_pid in
+		''|*[!0-9]*) ;;
+		*) kill "$_dm_test_pid" 2> /dev/null || : ;;
+		esac
+		case $_dm_test_gone in
+		''|*[!0-9]*) ;;
+		*) kill "$_dm_test_gone" 2> /dev/null || : ;;
+		esac
+		_dm_test_pid=
+		_dm_test_gone=
+		rm -rf -- "$_dm_test_dir"
+	}
+	trap cleanup 0
+	trap 'cleanup; exit 130' 1 2 15
+	mkdir -p "$_dm_test_dir/bin" "$_dm_test_dir/child"
+	cp /bin/sleep "$_dm_test_dir/child/shutdown"
+	cat > "$_dm_test_dir/bin/shutdown-ok" <<'EOF'
+#!/bin/sh
+dir=${0%/*}/..
+"$dir/child/shutdown" 30 &
+printf 'shutdown: [pid %s]\n' "$!" >&2
+exit 0
+EOF
+	cat > "$_dm_test_dir/bin/shutdown-fail" <<'EOF'
+#!/bin/sh
+printf 'shutdown: cannot\n' >&2
+exit 1
+EOF
+	chmod 755 "$_dm_test_dir/bin/shutdown-ok" "$_dm_test_dir/bin/shutdown-fail"
+	_dm_test_pid_def=$(sed -n '/^dm_child_pid()/,/^}$/p' "$rc")
+	_dm_test_confirm_def=$(sed -n '/^dm_confirm()/,/^}$/p' "$rc")
+	if [ -z "$_dm_test_pid_def" ] || [ -z "$_dm_test_confirm_def" ] ||
+	    ! eval "$_dm_test_pid_def
+$_dm_test_confirm_def"; then
+		bad "could not extract and evaluate dm_child_pid and dm_confirm"
+	else
+		_dm_test_uid=$(id -u)
+
+		# Case 1: the fake shutdown prints the exact child pid and exits 0.
+		"$_dm_test_dir/bin/shutdown-ok" > "$_dm_test_dir/ok.txt" 2>&1
+		_dm_test_ok_status=$?
+		[ "$_dm_test_ok_status" = 0 ] && ok "dead-man case 1: shutdown-ok exits 0" ||
+		    bad "dead-man case 1: expected status 0, got $_dm_test_ok_status"
+		_dm_test_pid=$(dm_child_pid "$_dm_test_dir/ok.txt")
+		case $_dm_test_pid in
+		''|*[!0-9]*)
+			bad "dead-man case 1 did not print a numeric child pid"
+			_dm_test_pid=
+			;;
+		esac
+		if [ -n "$_dm_test_pid" ]; then
+			_dm_test_i=0
+			while [ "$(ps -o comm= -p "$_dm_test_pid" 2> /dev/null | tr -d ' ')" != shutdown ] &&
+			    [ "$_dm_test_i" -lt 50 ]; do
+				sleep 0.1
+				_dm_test_i=$((_dm_test_i + 1))
+			done
+			if [ "$(ps -o comm= -p "$_dm_test_pid" 2> /dev/null | tr -d ' ')" != shutdown ]; then
+				printf 'skip  dead-man case 1: child did not exec after 50 tries\n'
+			elif dm_confirm "$_dm_test_pid" "$_dm_test_uid"; then
+				ok "dead-man case 1: the exact live child is confirmed"
+			else
+				bad "dead-man case 1: the exact live child was not confirmed"
+			fi
+		fi
+
+		if [ -n "$_dm_test_pid" ] &&
+		    [ "$(ps -o comm= -p "$_dm_test_pid" 2> /dev/null | tr -d ' ')" = shutdown ]; then
+			# Case 2: case 1's live child is a decoy; this arming must still fail.
+			"$_dm_test_dir/bin/shutdown-fail" > "$_dm_test_dir/fail.txt" 2>&1
+			_dm_test_fail_status=$?
+			_dm_test_fail_pid=$(dm_child_pid "$_dm_test_dir/fail.txt")
+			_dm_test_armed=0
+			if [ "$_dm_test_fail_status" -eq 0 ] && [ -n "$_dm_test_fail_pid" ] &&
+			    dm_confirm "$_dm_test_fail_pid" 0; then
+				_dm_test_armed=1
+			fi
+			if [ "$_dm_test_fail_status" = 1 ] && [ -z "$_dm_test_fail_pid" ] &&
+			    [ "$_dm_test_armed" = 0 ]; then
+				ok "dead-man case 2: failed arming is rejected with a live decoy"
+			else
+				bad "dead-man case 2: status $_dm_test_fail_status, pid '${_dm_test_fail_pid}', armed $_dm_test_armed"
+			fi
+
+			/bin/sleep 0 &
+			_dm_test_gone=$!
+			wait "$_dm_test_gone" 2> /dev/null || :
+			if dm_confirm "$_dm_test_gone" "$_dm_test_uid"; then
+				bad "dead-man case 2: a gone pid passed while the decoy was running"
+			else
+				ok "dead-man case 2: a gone pid returns 1 despite the live decoy"
+			fi
+			if [ "$(uname -s)" = FreeBSD ]; then
+				# FreeBSD ps prints the ",comm=" header for a gone pid with this
+				# comma form; two -o options avoid that non-empty false positive.
+				_dm_test_comma=$(ps -o uid=,comm= -p "$_dm_test_gone" 2> /dev/null)
+				if [ -n "$_dm_test_comma" ]; then
+					ok "FreeBSD comma-form ps prints a header for a gone pid"
+				else
+					bad "FreeBSD comma-form ps did not reproduce its header quirk"
+				fi
+			fi
+
+			# Case 3: the same exact child must not confirm as root's process.
+			if dm_confirm "$_dm_test_pid" 0; then
+				bad "dead-man case 3: the test user's child passed as uid 0"
+			else
+				ok "dead-man case 3: the test user's child is rejected for uid 0"
+			fi
+		fi
+	fi
+	cleanup
+	trap - 0 1 2 15
+else
+	bad "mktemp -d failed under $_dm_test_root"
+fi
 
 names=$(sed -n 's/^+SYSCTL_[A-Z]*(_\([a-z0-9_]*\), *OID_AUTO, *\([a-z0-9_]*\),.*/\1 \2/p' "$repo"/kernel-patches/000*.diff |
     while read -r p l; do printf '%s.%s\n' "$(printf '%s' "$p" | tr _ .)" "$l"; done)

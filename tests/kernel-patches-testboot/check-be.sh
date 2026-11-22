@@ -141,9 +141,11 @@ _others=$(cat "$MNT/etc/rc.conf" "$MNT/etc/rc.conf.local" "$MNT"/etc/rc.conf.d/*
     grep -E '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable=.?[Yy]' | grep -v '^kernel_patches_testboot_enable=' || true)
 chk "no other test-boot kit is enabled" [ -z "$_others" ]
 
-_dm=$(grep -nF 'shutdown -r "+$kernel_patches_testboot_deadman"' "$RC" | head -1 | cut -d: -f1)
+_dm=$(grep -nF 'shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1' "$RC" | head -1 | cut -d: -f1)
+_cancel=$(grep -nF 'kill "$DM_CHILD"' "$RC" | head -1 | cut -d: -f1)
 _ld=$(grep -n 'kldload amdgpu >' "$RC" | head -1 | cut -d: -f1)
 chk "dead-man: the timer (line ${_dm:-none}) is armed before the kldload of amdgpu (line ${_ld:-none})" [ -n "$_dm" -a -n "$_ld" -a "${_dm:-0}" -lt "${_ld:-0}" ]
+chk "dead-man: cancellation uses the confirmed child pid (line ${_cancel:-none})" [ -n "$_cancel" -a -n "$_dm" -a "${_cancel:-0}" -gt "${_dm:-0}" ]
 chk "dead-man: no timer, no amdgpu load (the DM_OK gate)" grep -q 'if \[ "$DM_OK" != 1 \]; then' "$RC"
 _def=$(sed -n 's/^: "${kernel_patches_testboot_deadman:=\([0-9]*\)}"$/\1/p' "$RC")
 chk "dead-man: the default is ${_def:-unset} minutes" [ -n "$_def" -a "${_def:-0}" -gt 0 ]

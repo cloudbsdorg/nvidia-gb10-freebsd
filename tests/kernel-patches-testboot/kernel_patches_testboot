@@ -83,6 +83,7 @@ stop_cmd=:
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=$kernel_patches_testboot_work/$STAMP
 DM_OK=0
+DM_CHILD=
 STOP_TESTS=0
 
 row()	# row <name> <pass|fail|info|skip|running> <detail>
@@ -114,26 +115,42 @@ expect()
 
 as_owner() { su -m "$kernel_patches_testboot_owner" -c '/bin/sh -c '\''exec "$0" "$@"'\'' "$0" "$@"' "$@"; }
 
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+{
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
 deadman_arm()
 {
 	case $kernel_patches_testboot_deadman in
 	''|*[!0-9]*|0) row deadman fail "kernel_patches_testboot_deadman is '$kernel_patches_testboot_deadman', not a positive number of minutes"; return 0 ;;
 	esac
-	shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > /dev/null 2>&1 &
-	DM_PID=$!
-	sleep 1
-	_dm_ps=$(ps -o uid=,comm= -p "$DM_PID" 2> /dev/null | tr -d ' ')
-	if [ "$_dm_ps" = 0shutdown ]; then
-		_dm_ok=1
-	elif [ -z "$_dm_ps" ] && pgrep -u 0 -x shutdown > /dev/null 2>&1; then
-		_dm_ok=1
-	else
-		_dm_ok=0
+	DM_CHILD=
+	shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ -e /var/run/noshutdown ]; then
+		_dm_fail="/var/run/noshutdown exists"
+	elif [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" 0; then
+		_dm_fail="pid $_dm_pid is not a root shutdown"
 	fi
-	if [ -e /var/run/noshutdown ] || [ "$_dm_ok" != 1 ]; then
-		row deadman fail "the dead-man timer is not pending (/var/run/noshutdown, or shutdown failed)"
+	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
+	if [ -n "$_dm_fail" ]; then
+		row deadman fail "$_dm_fail; first line of deadman.txt: ${_dm_first:-<empty>}"
 	else
-		row deadman pass "shutdown -r +$kernel_patches_testboot_deadman is pending"
+		DM_CHILD=$_dm_pid
+		row deadman pass "shutdown -r +$kernel_patches_testboot_deadman is pending as pid $DM_CHILD"
 		DM_OK=1
 	fi
 	sync
@@ -302,7 +319,12 @@ kernel_patches_testboot_start()
 	"$kernel_patches_testboot_return" "$kernel_patches_testboot_normal_be" > "$OUT/testboot-return.txt" 2>&1
 	_trc=$?
 	echo "== testboot-return exit $_trc"
-	[ "$_trc" != 3 ] || pkill -u 0 -x shutdown > /dev/null 2>&1
+	if [ "$_trc" = 3 ]; then
+		case $DM_CHILD in
+		''|*[!0-9]*) ;;
+		*) kill "$DM_CHILD" > /dev/null 2>&1 ;;
+		esac
+	fi
 	) > "$OUT/rc.log" 2>&1 &
 	return 0
 }
