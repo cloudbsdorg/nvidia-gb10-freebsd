@@ -1,0 +1,223 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.Dd November 19, 2026
+.Dt RUN-NV-VULKAN.SH 1
+.Os
+.Sh NAME
+.Nm run-nv-vulkan.sh
+.Nd run the Linux aarch64 Vulkan stack against the NVIDIA card
+.Sh SYNOPSIS
+.Nm
+.Cm vulkaninfo
+.Op Ar options
+.Nm
+.Cm list
+.Op Ar options
+.Nm
+.Cm bench
+.Op Ar model.gguf
+.Op Ar options
+.Nm
+.Cm server
+.Ar model
+.Op Ar options
+.Nm
+.Cm llama-bench
+.Op Ar options
+.Nm
+.Cm rpc
+.Op Ar options
+.Sh DESCRIPTION
+.Nm
+runs the Linux aarch64 Vulkan userspace against the NVIDIA card through the
+Linuxulator.
+The programs are started from private Linux roots of their own; nothing in
+.Pa /compat/linux
+is touched.
+.Pp
+The modes are:
+.Bl -tag -width Ds
+.It Cm vulkaninfo
+The Rocky Vulkan loader and
+.Xr vulkaninfo 1
+against the ICD.
+It runs
+.Cm vulkaninfo --summary
+when it is given no options of its own; the options it is given are passed
+on instead of
+.Fl -summary .
+.It Cm list
+.Xr llama-bench 1
+.Fl -list-devices ,
+with the options after it.
+.It Cm bench
+.Xr llama-bench 1
+with one model, prompt 512 and 128 tokens, every layer on the GPU and flash
+attention off and on.
+The options that follow the model are passed on to
+.Xr llama-bench 1 .
+.It Cm server
+.Xr llama-server 1
+with one model and the given options.
+.It Cm llama-bench
+.Xr llama-bench 1
+with the given options; no model is added, the model is yours to pass, as an
+absolute path.
+.It Cm rpc
+.Xr ggml-rpc-server 1
+with the given options.
+.El
+.Pp
+Only
+.Cm bench
+and
+.Cm server
+take a model.
+In the other modes the second argument is one of the program's own options and
+is passed on unchanged.
+An empty model argument is a missing argument, not the default model:
+.Cm bench \(dq\(dq
+and
+.Cm server \(dq\(dq
+stop with exit 2.
+.Pp
+.Xr llama-bench 1
+appends the flags
+.Cm -m
+.Cm -p
+.Cm -n
+.Cm -ngl
+and
+.Cm -fa
+to a list: a flag given twice does not override the first one, it adds a
+second run.
+The defaults of
+.Cm bench
+.Cm -p 512
+.Cm -n 128
+.Cm -ngl 99
+and
+.Cm -fa 0,1
+are therefore added only for the flags your options do not give themselves,
+and a
+.Cm -m
+in the options of
+.Cm bench
+or
+.Cm server
+is refused (exit 2), by its short or long name:
+the model is that mode's own argument.
+llama-bench would run both models, and llama-server would silently use the last one.
+The defaults of
+.Cm bench
+are likewise added only when neither the short nor the long name of the flag is given.
+.Pp
+The
+.Cm -fa 0,1
+default is what makes the rows comparable: the default flash attention of
+.Xr llama-bench 1
+is AUTO, it writes that as
+.Cm -1 ,
+and a
+.Cm -1
+row matches no published
+.Cm fa
+0 or
+.Cm fa
+1 row.
+.Pp
+Every mode runs from the llama directory, because ggml finds its backends next
+to the executable and in the current directory, and the executable here is
+.Pa ld-linux-aarch64.so.1
+from the Ubuntu root, so only the current-directory search finds them.
+A relative path in the options is therefore relative to that directory: pass
+absolute ones.
+The model path itself is made absolute against the directory the script was
+started from.
+.Pp
+The NVIDIA Vulkan ICD starts through libEGL (glvnd).
+Without the EGL vendor file libEGL finds no NVIDIA vendor and the loader
+says "Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr' for
+ICD libGLX_nvidia.so.0" and "Found no drivers!".
+The function
+.Fn vk_icdGetInstanceProcAddr
+returns NULL in that case.
+Any launcher that does not use this script has to set both variables itself.
+.Sh ENVIRONMENT
+.Bl -tag -width "GB10_WORK"
+.It Ev GB10_WORK
+The work root.
+It defaults to
+.Pa $HOME/work/gb10
+and holds:
+.Bl -tag -width "linuxroot/nv/" -compact
+.It Pa linuxroot/nv/
+NVIDIA's user libraries, the Vulkan ICD file
+.Pa nvidia_icd.json
+and the EGL vendor file
+.Pa 10_nvidia.json .
+.It Pa linuxroot/rl9/
+Rocky 9: Vulkan loader,
+.Xr vulkaninfo 1 ,
+libglvnd, the X11, xcb and Wayland client libraries, libffi.
+.It Pa linuxroot/noble/
+Ubuntu 24.04: glibc, libstdc++, libgomp, Vulkan loader,
+.Xr vulkaninfo 1 ,
+the X11/glvnd libraries: what the official llama.cpp
+.Pa ubuntu-vulkan-arm64
+build needs.
+.It Pa llm/llama-vulkan-arm64/llama-b12531/
+The llama.cpp build.
+.El
+.It Ev HOME
+The default work root and the default model path.
+It is not needed when
+.Ev GB10_WORK
+is set.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+The command ran.
+.It 1
+A path is missing.
+.It 2
+An unknown mode, a missing argument, an option the mode does not take, or
+.Ev HOME
+is not set.
+.El
+.Sh EXAMPLES
+Run
+.Xr llama-bench 1
+to list the devices:
+.Bd -literal -offset indent
+$ run-nv-vulkan.sh list
+.Ed
+.Pp
+Benchmark one model with the defaults (prompt 512, 128 tokens, every layer on
+the GPU, flash attention off and on):
+.Bd -literal -offset indent
+$ run-nv-vulkan.sh bench ~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+.Ed
+.Pp
+Benchmark one model with a longer prompt and a longer generation; the
+.Cm -p
+and
+.Cm -n
+defaults are not added, because they were given:
+.Bd -literal -offset indent
+$ run-nv-vulkan.sh bench model.gguf -p 1024 -n 256
+.Ed
+.Pp
+Serve one model:
+.Bd -literal -offset indent
+$ run-nv-vulkan.sh server ~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --port 18080
+.Ed
+.Sh SEE ALSO
+.Xr ggml-rpc-server 1 ,
+.Xr llama-bench 1 ,
+.Xr llama-server 1 ,
+.Xr vulkaninfo 1
+.Sh CAVEATS
+The Vulkan loader and the ICD are the Linux ones, run through the
+Linuxulator; the driver on the FreeBSD side is what has to be right.
