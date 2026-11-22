@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "tool": "install",
+  "outcome": "installed",
+  "blockers": [],
+  "installed": [
+    {"path": "/boot/modules/nvidia.ko", "mode": "555"},
+    {"path": "/usr/local/lib/libnvrm.so", "mode": "link"},
+    {"path": "/usr/local/sbin/nvrm-info", "mode": "555"}
+  ],
+  "next": ["doas kldload nvidia-drm", "kldstat", "nvrm-info --json"]
+}

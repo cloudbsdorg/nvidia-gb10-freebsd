@@ -5,7 +5,7 @@
 # build-shim_test.sh - offline tests for scripts/build-shim.sh.
 #
 # Runs the real script against a fake prepared tree under an unpredictable
-# mktemp(1) directory in ${GB10_WORK:-$HOME/work/gb10}/tmp: TREE/nvidia
+# mktemp(1) directory in ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp: TREE/nvidia
 # holds a tiny BSD-make Makefile whose "all" target writes a fake.o that
 # EMBEDS THE SYSDIR IT WAS BUILT AGAINST and concatenates it into a fake
 # nvidia.ko, so a reused stale object is visible in the module's bytes.
@@ -84,7 +84,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT="$TESTSDIR/../scripts/build-shim.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TESTROOT=$(mktemp -d "$WORK/tmp/shim-test.XXXXXXXX") || exit 1
 

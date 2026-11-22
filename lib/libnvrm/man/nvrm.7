@@ -5,7 +5,7 @@
 .Os
 .Sh NAME
 .Nm nvrm
-.Nd model of the libnvrm device description
+.Nd model of the libnvrm device description and memory rules
 .Sh DESCRIPTION
 .Xr nvrm 3
 describes a GPU in layers.
@@ -141,10 +141,16 @@ sets
 .Dv NVRM_ENUM_ALLOW_ALLOC
 in the enumeration option flags; the descriptors then also keep the allocate
 escape.
-There is no mapping right in either case, and this version of the library
-has no call that maps device memory, inside or outside capability mode.
+The enumeration descriptors never carry a mapping right, in either case.
 It must say so before the limit is applied, because Capsicum rights can only be
 narrowed, never widened.
+Memory is mapped through a client of its own
+.Pq Xr nvrm_mem 3 :
+only a client opened with
+.Dv NVRM_OPEN_ALLOW_MAP
+holds descriptors with the right to be mapped, opened and limited before
+.Xr cap_enter 2 ,
+one for each CPU mapping it can make there.
 .Xr nvrm-info 8
 uses the default.
 After enumeration the process may call
@@ -152,10 +158,41 @@ After enumeration the process may call
 and keep calling
 .Fn nvrm_device_refresh .
 OS-layer values (sysctl, card list) are read before and kept.
+.Ss Memory attributes
+The attribute a CPU mapping of GPU memory gets, as
+.Xr nvrm_mem 3
+reports it in
+.Va cpu_attr :
+.Bl -tag -width "video memory, arm64"
+.It system memory
+Write-back
+.Pq Dv NVRM_ATTR_CACHED ,
+unless its owner made it otherwise: an imported object the RM keeps
+write-combined is
+.Dv NVRM_ATTR_WC ,
+and one it keeps uncached, write-through or write-protected follows the
+Device rule on every host.
+.It video memory, not arm64
+A PCIe BAR, write-combined
+.Pq Dv NVRM_ATTR_WC .
+.It video memory, arm64
+.Dv NVRM_ATTR_WC
+(Normal non-cacheable) when the capability
+.Li os_device_wc_active
+is 0;
+.Dv NVRM_ATTR_DEVICE
+(Device-nGnRE) when it is 1, because the OS layer then falls back to
+Device memory for write-combining, or when it is not reported.
+.El
+.Pp
+Through Device memory only aligned accesses of 1, 2, 4 or 8 bytes are safe;
+an unaligned access, or a copy routine that makes one, can fault.
+A GPU with no video memory of its own (VRAM size 0) places video memory
+allocations in system memory.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 1;
+minor 2;
 documents name it in the
 .Li schema
 member.
@@ -172,9 +209,17 @@ index and name pairs) are frozen in
 .Pa lib/libnvrm/schema/nvrm-info-1.ids ;
 the test suite compares the schema with that baseline and refuses one that
 removes, renames or renumbers an identifier.
+Minor 1 added the error codes of the memory calls.
+Minor 2 added the versions object, the version fields of a device and the
+reasons
+.Dq version_unparsed
+and
+.Dq version_inconsistent .
 Until the first package release the interface is provisional (see
 .Xr nvrm 3 ) ,
-and this schema is minor 1 of it.
+and this schema is minor 2 of it.
 .Sh SEE ALSO
+.Xr cap_enter 2 ,
 .Xr nvrm 3 ,
+.Xr nvrm_mem 3 ,
 .Xr nvrm-info 8

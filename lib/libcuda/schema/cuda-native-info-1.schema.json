@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudbsd.org/schema/cuda-native-info-1.schema.json",
+  "title": "cuda-native-info JSON output, version 1",
+  "oneOf": [
+    { "$ref": "#/$defs/document" },
+    { "$ref": "#/$defs/header" },
+    { "$ref": "#/$defs/device" },
+    { "$ref": "#/$defs/end" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "version": {
+      "type": "object",
+      "required": ["string", "major", "minor", "patch"],
+      "additionalProperties": false,
+      "properties": {
+        "string": { "type": "string" },
+        "major": { "type": "integer", "minimum": 0 },
+        "minor": { "type": "integer", "minimum": 0 },
+        "patch": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nullableAttribute": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": null }
+      ]
+    },
+    "nullableFlag": {
+      "oneOf": [
+        { "type": "integer", "enum": [0, 1] },
+        { "const": null }
+      ]
+    },
+    "attributes": {
+      "type": "object",
+      "required": [
+        "max_threads_per_block",
+        "max_shared_memory_per_block",
+        "warp_size",
+        "multiprocessor_count",
+        "integrated",
+        "pci_bus_id",
+        "pci_device_id",
+        "pci_domain_id",
+        "compute_capability_major",
+        "compute_capability_minor",
+        "cooperative_launch",
+        "max_shared_memory_per_block_optin",
+        "virtual_memory_management_supported"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_threads_per_block": { "$ref": "#/$defs/nullableAttribute" },
+        "max_shared_memory_per_block": { "$ref": "#/$defs/nullableAttribute" },
+        "warp_size": { "$ref": "#/$defs/nullableAttribute" },
+        "multiprocessor_count": { "$ref": "#/$defs/nullableAttribute" },
+        "integrated": { "$ref": "#/$defs/nullableFlag" },
+        "pci_bus_id": { "$ref": "#/$defs/nullableAttribute" },
+        "pci_device_id": { "$ref": "#/$defs/nullableAttribute" },
+        "pci_domain_id": { "$ref": "#/$defs/nullableAttribute" },
+        "compute_capability_major": { "$ref": "#/$defs/nullableAttribute" },
+        "compute_capability_minor": { "$ref": "#/$defs/nullableAttribute" },
+        "cooperative_launch": { "$ref": "#/$defs/nullableFlag" },
+        "max_shared_memory_per_block_optin": { "$ref": "#/$defs/nullableAttribute" },
+        "virtual_memory_management_supported": { "$ref": "#/$defs/nullableFlag" }
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["schema", "kind", "ordinal", "name", "uuid", "total_memory_bytes", "attributes"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "cuda-native-info/1" },
+        "kind": { "const": "device" },
+        "ordinal": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "uuid": { "type": "string" },
+        "total_memory_bytes": { "type": "integer", "minimum": 0 },
+        "attributes": { "$ref": "#/$defs/attributes" }
+      }
+    },
+    "document": {
+      "type": "object",
+      "required": ["schema", "kind", "backend", "cuda_version", "cuda_native_version", "device_count", "devices"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "cuda-native-info/1" },
+        "kind": { "const": "document" },
+        "backend": { "enum": ["fake", "nvrm"] },
+        "cuda_version": { "$ref": "#/$defs/version" },
+        "cuda_native_version": { "$ref": "#/$defs/version" },
+        "device_count": { "type": "integer", "minimum": 0 },
+        "devices": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/device" }
+        }
+      }
+    },
+    "header": {
+      "type": "object",
+      "required": ["schema", "kind", "backend", "cuda_version", "cuda_native_version", "device_count"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "cuda-native-info/1" },
+        "kind": { "const": "header" },
+        "backend": { "enum": ["fake", "nvrm"] },
+        "cuda_version": { "$ref": "#/$defs/version" },
+        "cuda_native_version": { "$ref": "#/$defs/version" },
+        "device_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "end": {
+      "type": "object",
+      "required": ["schema", "kind", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "cuda-native-info/1" },
+        "kind": { "const": "end" },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["schema", "kind", "backend", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "cuda-native-info/1" },
+        "kind": { "const": "error" },
+        "backend": { "type": "string" },
+        "error": {
+          "type": "object",
+          "required": ["code", "name", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "type": "integer" },
+            "name": { "type": "string" },
+            "message": { "type": "string" },
+            "hint": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

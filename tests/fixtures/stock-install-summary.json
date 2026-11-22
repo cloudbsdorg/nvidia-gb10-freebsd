@@ -1,0 +1,1 @@
+{"schema":"stock-install-summary/1","pass":false,"os":"16.0-CURRENT","arch":"aarch64","backend":"vmm","repo_url":"git@github.com:cloudbsdorg/nvidia-gb10-freebsd.git","ref":"","blocked":"no aarch64 vmm worker","results":"tests/install-e2e/results/16.0-CURRENT-aarch64-20261122T070000Z"}

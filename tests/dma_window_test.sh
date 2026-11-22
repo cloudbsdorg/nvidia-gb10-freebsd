@@ -36,7 +36,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TREE=${1:-$WORK/build/tree}
 TOPDIR=NVIDIA-FreeBSD-x86_64-580.178.04
 TARBALL=$WORK/sources/$TOPDIR.tar.xz

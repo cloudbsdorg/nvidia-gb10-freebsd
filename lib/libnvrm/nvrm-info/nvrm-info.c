@@ -242,7 +242,7 @@ report_failure(enum mode mode, const char *code, const char *msg)
 int
 main(int argc, char **argv)
 {
-	nvrm_enum_opts opts = { NULL, 0 };	/* no flags: least privilege */
+	nvrm_enum_opts opts = { .backend = NULL };	/* no flags: least privilege */
 	nvrm_ctx *ctx;
 	enum mode mode = M_TEXT;
 	char msg[512];

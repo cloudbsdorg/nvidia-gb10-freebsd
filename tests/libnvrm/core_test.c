@@ -1023,6 +1023,24 @@ test_names_and_fields(void)
 	CHECK_STR(nvrm_error_id(NVRM_E_NODEV), "no_gpu");
 	CHECK_STR(nvrm_error_id(-1), "unknown");
 	CHECK_STR(nvrm_error_id(NVRM_E__COUNT), "unknown");
+	/* every code has a text and an id, none the fallback, no two alike */
+	{
+		int i, j;
+
+		for (i = 0; i < NVRM_E__COUNT; i++) {
+			CHECK(nvrm_strerror(i) != NULL && nvrm_error_id(i) != NULL);
+			if (nvrm_strerror(i) == NULL || nvrm_error_id(i) == NULL)
+				continue;
+			CHECK(strcmp(nvrm_strerror(i), "unknown error") != 0);
+			CHECK(strcmp(nvrm_error_id(i), "unknown") != 0);
+			for (j = 0; j < i; j++) {
+				CHECK(strcmp(nvrm_strerror(i), nvrm_strerror(j)) != 0);
+				CHECK(strcmp(nvrm_error_id(i), nvrm_error_id(j)) != 0);
+			}
+		}
+		CHECK_STR(nvrm_error_id(NVRM_E_DENIED), "denied");
+		CHECK_STR(nvrm_error_id(NVRM_E_BUSY), "busy");
+	}
 	CHECK_STR(nvrm_reason_id(NVRM_R_NO_NUMA), "no_numa_node");
 	CHECK_STR(nvrm_reason_id(-1), "unknown");
 	CHECK_STR(nvrm_reason_id(NVRM_R__COUNT), "unknown");
@@ -1055,6 +1073,13 @@ test_names_and_fields(void)
 	for (i = 0; i < NVRM_R__COUNT; i++)
 		CHECK(strlen(nvrm_reason_id(i)) > 0 &&
 		    strlen(nvrm_reason_text(i)) > 0);
+}
+
+static void
+test_field_table(void)
+{
+	unsigned i;
+
 	/* the field table covers each kind and group exactly as declared */
 	CHECK(nvrm_nfields >= 30);
 	CHECK_EQ(nvrm_ngroups, 4);
@@ -1262,6 +1287,22 @@ test_field_reason_and_masks(void)
 	CHECK(ctx == NULL && strstr(err, "unknown enumeration flags") != NULL);
 	o.flags = NVRM_ENUM_ALLOW_ALLOC | 0x100;
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
+	/* each reserved word must be zero */
+	{
+		unsigned i;
+
+		o.flags = 0;
+		for (i = 0; i < 4; i++) {
+			memset(o.reserved, 0, sizeof(o.reserved));
+			o.reserved[i] = 1u << i;
+			ctx = (nvrm_ctx *)1;
+			CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_INVAL);
+			CHECK(ctx == NULL && strstr(err, "reserved must be zero") != NULL);
+		}
+		memset(o.reserved, 0, sizeof(o.reserved));
+		CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+		nvrm_close(ctx);
+	}
 }
 
 /* ---- Capsicum helper ----------------------------------------------------- */
@@ -1383,21 +1424,21 @@ static void
 test_public_versions(void)
 {
 	static const uint32_t built_for[] = { 580, 178, 4 };
-	static const uint32_t library[] = { 1, 1, 0 };
-	static const uint32_t symbols[] = { 1, 1 };
-	static const uint32_t schema[] = { 1, 1 };
+	static const uint32_t library[] = { 1, 2, 0 };
+	static const uint32_t symbols[] = { 1, 2 };
+	static const uint32_t schema[] = { 1, 2 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
 	CHECK_EQ(NVRM_API_MAJOR, 1);
-	CHECK_EQ(NVRM_API_MINOR, 1);
+	CHECK_EQ(NVRM_API_MINOR, 2);
 	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
 	    "");
-	t_check_version(nvrm_library_version(), "1.1.0", library, 3, "");
+	t_check_version(nvrm_library_version(), "1.2.0", library, 3, "");
 	v = nvrm_symbol_version();
-	t_check_version(v, "NVRM_1.1", symbols, 2, "");
+	t_check_version(v, "NVRM_1.2", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.1", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "1.2", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1437,7 +1478,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":1") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":2") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1449,13 +1490,13 @@ test_json(void)
 	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
 	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library\":{\"available\":true,"
-	    "\"string\":\"1.1.0\",\"major\":1,\"minor\":1,\"patch\":0,"
-	    "\"parts\":[1,1,0],\"source\":\"derived\"}") != NULL);
+	    "\"string\":\"1.2.0\",\"major\":1,\"minor\":2,\"patch\":0,"
+	    "\"parts\":[1,2,0],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
-	    "\"string\":\"NVRM_1.1\",\"major\":1,\"minor\":1,\"patch\":0,"
-	    "\"parts\":[1,1],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.1\","
-	    "\"major\":1,\"minor\":1,\"patch\":0,\"parts\":[1,1],"
+	    "\"string\":\"NVRM_1.2\",\"major\":1,\"minor\":2,\"patch\":0,"
+	    "\"parts\":[1,2],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.2\","
+	    "\"major\":1,\"minor\":2,\"patch\":0,\"parts\":[1,2],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1561,7 +1602,7 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 1") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 2") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "
@@ -1662,6 +1703,7 @@ main(int argc, char **argv)
 		test_decorators();
 	test_abi_1_0_layout();
 	test_names_and_fields();
+	test_field_table();
 	test_accessors_refresh_json_table();
 	test_field_reason_and_masks();
 	test_cap_helper();

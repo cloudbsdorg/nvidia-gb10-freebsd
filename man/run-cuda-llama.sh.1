@@ -30,8 +30,12 @@ Pass absolute model paths.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev GB10_WORK"
 .It Ev GB10_WORK
-Work root, default
-.Pa $HOME/work/gb10 .
+Work root.
+The default is the
+.Pa work/
+directory of the checkout.
+.Ev GB10_WORK
+overrides it.
 .It Ev LL
 The release directory, default
 .Pa $GB10_WORK/llm/cuda/llama-b12531-cuda/llama-b12531 .
@@ -52,7 +56,7 @@ The exit status of
 1 when a required file is missing.
 .Sh EXAMPLES
 .Dl run-cuda-llama.sh llama-bench --list-devices
-.Dl run-cuda-llama.sh llama-bench -m /home/me/work/models/m.gguf -ngl 99 -fa 1
+.Dl run-cuda-llama.sh llama-bench -m /path/to/models/m.gguf -ngl 99 -fa 1
 .Sh SEE ALSO
 .Xr bench-report.sh 1 ,
 .Xr run-nv-vulkan.sh 1

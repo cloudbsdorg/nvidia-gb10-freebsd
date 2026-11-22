@@ -11,7 +11,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 export PATH
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SRC=$HERE/../src/gb10-linux-bridge
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/nvbridge_ioctl_unit_test.XXXXXXXX") || exit 1
 trap 'rm -rf "$TMPD"' EXIT

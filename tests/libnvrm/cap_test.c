@@ -12,7 +12,12 @@
  *   rm      the RM backend over the scripted kernel with a real descriptor:
  *           the RM escapes get through the allow list in capability mode, an
  *           ioctl outside the list is refused (ENOTCAPABLE), and a new
- *           enumeration is impossible (open fails with ECAPMODE).
+ *           enumeration is impossible (open fails with ECAPMODE);
+ *   memory  a memory client of the fake backend after cap_enter(): with
+ *           NVRM_OPEN_ALLOW_MAP the pre-opened spares carry each CPU mapping
+ *           and export until they run out (NVRM_E_NOSLOT, nothing can be
+ *           opened), and a client without the flag is refused the mapping
+ *           (NVRM_E_DENIED) and holds no descriptor that could be mapped.
  * The child's exit status carries the verdict.
  */
 #include <sys/param.h>
@@ -294,6 +299,62 @@ run_child(const char *name, void (*fn)(void))
 	return (WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : 1);
 }
 
+/* Memory after cap_enter(): the descriptors were opened and limited before. */
+static void
+mem_case(void)
+{
+	nvrm_enum_opts o = { .backend = "fake" };
+	nvrm_open_opts mo = { 0, NVRM_OPEN_ALLOW_MAP, 1, 1 };
+	nvrm_mem_params mp = { 0, NVRM_MEM_SYSMEM, 0, 0, 65536, 0, 0 };
+	nvrm_client_stats st = { 0 };
+	nvrm_client *cl, *plain;
+	nvrm_mem *m, *m2;
+	nvrm_ctx *ctx;
+	char err[200];
+	uint32_t v = 0xa5a5a5a5u, back = 0;
+	void *p;
+	int fd, fd2;
+
+	setenv("NVRM_FAKE_PROFILE", "discrete", 1);
+	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &mo, &cl, err,
+	    sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), NULL, &plain, err,
+	    sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_client_stats_get(plain, &st), NVRM_OK);
+	CHECK_EQ(st.spare_descriptors, NVRM_EXPORT_SLOTS_DEFAULT);
+	CHECK_EQ(cap_enter(), 0);
+	CHECK_EQ(nvrm_mem_alloc(cl, &mp, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_alloc(cl, &mp, &m2), NVRM_OK);
+	/* the one mapping spare carries a mapping that works */
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p), NVRM_OK);
+	CHECK_EQ(nvrm_mem_write(m, 64, &v, sizeof(v)), NVRM_OK);
+	CHECK_EQ(nvrm_mem_read(m, 64, &back, sizeof(back)), NVRM_OK);
+	CHECK_EQ(back, v);
+	CHECK_EQ(*(volatile uint32_t *)((char *)p + 64), v);
+	/* the next has none left, and none can be opened now */
+	CHECK_EQ(nvrm_mem_map_cpu(m2, NVRM_CPU_READ, &p), NVRM_E_NOSLOT);
+	CHECK(strstr(nvrm_client_errmsg(cl), "capability mode") != NULL);
+	/* exports the same, one spare */
+	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_OK);
+	CHECK_EQ(nvrm_mem_export_fd(m2, &fd2), NVRM_E_NOSLOT);
+	close(fd);
+	/* without the flag: refused, whatever the slots */
+	{
+		nvrm_mem *pm;
+
+		CHECK_EQ(nvrm_mem_alloc(plain, &mp, &pm), NVRM_OK);
+		CHECK_EQ(nvrm_mem_map_cpu(pm, NVRM_CPU_READ, &p), NVRM_E_DENIED);
+		CHECK(strstr(nvrm_client_errmsg(plain), "NVRM_OPEN_ALLOW_MAP") != NULL);
+		nvrm_mem_free(pm);
+	}
+	nvrm_mem_free(m);
+	nvrm_mem_free(m2);
+	nvrm_client_close(cl);
+	nvrm_client_close(plain);
+	nvrm_close(ctx);
+}
+
 int
 main(void)
 {
@@ -305,6 +366,7 @@ main(void)
 	bad += run_child("cap_test rm default (least privilege)", default_cases);
 	bad += run_child("cap_test fake default (least privilege)", fake_default);
 	bad += run_child("cap_test rm, NULL options (least privilege)", null_opts_case);
+	bad += run_child("cap_test memory (fake)", mem_case);
 	printf("cap_test: %s\n", bad == 0 ? "all passed" : "FAILED");
 	return (bad == 0 ? 0 : 1);
 }

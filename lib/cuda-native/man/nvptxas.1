@@ -1,0 +1,147 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt NVPTXAS 1
+.Os
+.Sh NAME
+.Nm nvptxas ,
+.Nm ptxas
+.Nd preserve PTX in the cuda-native assembler stub
+.Sh SYNOPSIS
+.Nm
+.Op Fl m64
+.Op Fl O Ns Ar level
+.Fl -gpu-name
+.Ar arch
+.Fl -output-file
+.Ar file
+.Op Fl -
+.Ar input.ptx
+.Pp
+.Nm
+.Fl -version
+.Op Fl -json
+.Sh DESCRIPTION
+.Nm
+and its installed alias
+.Nm ptxas
+are the same POSIX shell program.
+They accept the option subset that clang 23 emits for a CUDA device compile.
+The input must contain exactly one
+.Li .target
+line, and its architecture must equal
+.Fl -gpu-name ;
+a mismatch is refused with a diagnostic naming both.
+.Pp
+The output is a placeholder container whose first four lines are
+.Bd -literal -offset indent
+CUDA-NATIVE-STUB-CUBIN 1
+arch=ARCH
+ptx-sha256=HEX
+---
+.Ed
+The complete PTX input follows the separator byte for byte.
+The SHA-256 is taken over that unchanged PTX.
+The container is written through a temporary file in the output directory and
+renamed into place.
+.Pp
+The accepted compile options are
+.Fl m64 ,
+.Fl O0 ,
+.Fl O1 ,
+.Fl O2 ,
+.Fl O3 ,
+.Fl g ,
+.Fl lineinfo ,
+.Fl -dont-merge-basicblocks ,
+.Fl -return-at-end ,
+.Fl -gpu-name
+and
+.Fl -output-file .
+The last two options also accept an equals sign between the option and its
+value.
+The architecture, output and one input are required.
+The optional
+.Fl -
+argument ends option processing; every later argument is positional, and the
+single input may therefore have a dash-prefixed name such as
+.Pa -g .
+A path such as
+.Pa ./-g
+also avoids option parsing without the delimiter.
+.Fl h
+and
+.Fl -help
+print usage.
+Every argument that starts with a dash before
+.Fl -
+is parsed as an option, regardless of whether a same-named file exists.
+Every unsupported option is refused instead of being ignored.
+.Pp
+.Fl -version
+prints
+.Ql nvptxas (cuda-native) VERSION stub .
+With
+.Fl -json
+it prints one JSON object containing
+.Dv tool ,
+.Dv version ,
+.Dv version_major ,
+.Dv version_minor ,
+.Dv version_patch ,
+.Dv stub
+and
+.Dv track .
+The version string and its three integer parts come from
+.Dv CUDA_NATIVE_VERSION
+in
+.Pa sdk/include/cuda.h
+when
+.Pa mksdk.sh
+installs the tool.
+The object validates against
+.Pa share/cuda-native/schema/cuda-native-tool-1.schema.json .
+.Sh ENVIRONMENT
+.Bl -tag -width CUDA_NATIVE_TRACE
+.It Ev CUDA_NATIVE_TRACE
+When nonempty, append one JSON record after a successful placeholder write.
+The record has
+.Dv tool ,
+.Dv schema ,
+.Dv arch ,
+.Dv input ,
+.Dv output
+and
+.Dv stub
+fields, and is validated by
+.Pa share/cuda-native/schema/nvptxas-trace-1.schema.json
+in the SDK tree.
+Arguments containing control bytes or malformed UTF-8 are refused before
+writing output or a trace.
+Valid UTF-8 paths are accepted, and JSON metacharacters are escaped, keeping
+every emitted string parseable as UTF-8 JSON.
+.El
+.Sh EXIT STATUS
+.Ex -std
+In detail, exit status 0 means that the placeholder was written, 2 reports
+usage or an unsupported option, and 1 reports an input, architecture mismatch,
+output or trace error.
+.Sh EXAMPLES
+Preserve a PTX file under the name clang would use for an object:
+.Bd -literal -offset indent
+ptxas -m64 -O0 --gpu-name sm_121 --output-file kernel.o kernel.ptx
+.Ed
+.Sh SEE ALSO
+.Xr nvfatbin 1 ,
+.Xr libcudart-stub 3 ,
+.Xr cuda-native-toolchain 7
+.Sh CAVEATS
+This is not an assembler.
+The real assembler is Track #2427.
+Its output is a cuda-native placeholder containing PTX text, not a real cubin
+or other GPU machine code.
+The explicit header prevents the payload from being mistaken for a bare PTX
+file or an assembled cubin.
+It permits clang's compile pipeline to finish without claiming that device code
+can execute.
+No NVIDIA CUDA toolkit file is used.

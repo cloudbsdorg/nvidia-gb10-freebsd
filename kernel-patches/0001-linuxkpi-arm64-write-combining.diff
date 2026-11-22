@@ -1,0 +1,173 @@
+Subject: LinuxKPI arm64: write-combining is Normal non-cacheable; aligned MMIO copies
+SPDX-License-Identifier: BSD-2-Clause
+Applies to: sys/compat/linuxkpi (FreeBSD main and stable/15, see series)
+Needed on: every arm64 machine that runs a drm-kmod driver (amdgpu, i915/xe,
+nvidia-drm, ...).  No effect on other architectures (all changes are under
+#if defined(__aarch64__)).
+
+FreeBSD arm64 defines VM_MEMATTR_WRITE_COMBINING as Normal write-through,
+which is cacheable.  LinuxKPI used it for ioremap_wc(), pgprot_writecombine()
+and io_mapping, so GPU apertures and framebuffers were mapped cacheable.
+This patch maps them Normal non-cacheable (VM_MEMATTR_UNCACHEABLE, the arm64
+write-combining type), leaves pgprot_noncached() Normal non-cacheable as upstream, and replaces
+memcpy_toio(), memcpy_fromio() and memset_io(), which were plain memcpy() and
+memset() (unaligned LDP/STP and DC ZVA, which fault on Device memory), with
+loops that make only naturally aligned accesses.
+See kernel-patches/README.md.
+
+diff --git a/sys/compat/linuxkpi/common/include/linux/io-mapping.h b/sys/compat/linuxkpi/common/include/linux/io-mapping.h
+index f5f2fbc5c..e427a8a16 100644
+--- a/sys/compat/linuxkpi/common/include/linux/io-mapping.h
++++ b/sys/compat/linuxkpi/common/include/linux/io-mapping.h
+@@ -54,7 +54,10 @@ io_mapping_init_wc(struct io_mapping *mapping, resource_size_t base,
+ 
+ 	mapping->base = base;
+ 	mapping->size = size;
+-#ifdef VM_MEMATTR_WRITE_COMBINING
++#if defined(__aarch64__)
++	mapping->mem = ioremap_wc(base, size);
++	mapping->attr = VM_MEMATTR_UNCACHEABLE;
++#elif defined(VM_MEMATTR_WRITE_COMBINING)
+ 	mapping->mem = ioremap_wc(base, size);
+ 	mapping->attr = VM_MEMATTR_WRITE_COMBINING;
+ #else
+diff --git a/sys/compat/linuxkpi/common/include/linux/io.h b/sys/compat/linuxkpi/common/include/linux/io.h
+index c5d944cb1..a64f6dcbd 100644
+--- a/sys/compat/linuxkpi/common/include/linux/io.h
++++ b/sys/compat/linuxkpi/common/include/linux/io.h
+@@ -432,7 +432,17 @@ devm_ioremap(struct device *dev, resource_size_t offset, resource_size_t size)
+ #define	ioremap(addr, size)						\
+     _ioremap_attr((addr), (size), VM_MEMATTR_UNCACHEABLE)
+ #endif
+-#ifdef VM_MEMATTR_WRITE_COMBINING
++#if defined(__aarch64__)
++/*
++ * arm64 VM_MEMATTR_WRITE_COMBINING is Normal write-through *cacheable*,
++ * which is wrong for a PCIe BAR.  Linux maps ioremap_wc() as Normal
++ * non-cacheable; do the same.  On Ampere Altra, the erratum 82288
++ * workaround in _ioremap_attr(), when applied, maps PCIe windows as
++ * Device-nGnRE instead.
++ */
++#define	ioremap_wc(addr, size)						\
++    _ioremap_attr((addr), (size), VM_MEMATTR_UNCACHEABLE)
++#elif defined(VM_MEMATTR_WRITE_COMBINING)
+ #define	ioremap_wc(addr, size)						\
+     _ioremap_attr((addr), (size), VM_MEMATTR_WRITE_COMBINING)
+ #else
+@@ -442,9 +452,87 @@ devm_ioremap(struct device *dev, resource_size_t offset, resource_size_t size)
+     _ioremap_attr((addr), (size), VM_MEMATTR_WRITE_BACK)
+ void iounmap(void *addr);
+ 
++#if defined(__aarch64__)
++/*
++ * The arm64 memcpy()/memset() use unaligned LDP/STP and DC ZVA, which take
++ * an alignment fault on Device memory (and DC ZVA must never target MMIO).
++ * Use naturally aligned accesses only, like Linux arch/arm64/kernel/io.c:
++ * byte head until the I/O side is 8-byte aligned, 8-byte body, byte tail.
++ */
++static inline void
++memcpy_fromio(void *to, const volatile void *from, size_t count)
++{
++	const volatile uint8_t *f = from;
++	uint8_t *t = to;
++
++	while (count > 0 && ((uintptr_t)f & 7) != 0) {
++		*t++ = *(const volatile uint8_t *)f++;
++		count--;
++	}
++	while (count >= 8) {
++		uint64_t v = *(const volatile uint64_t *)f;
++		__builtin_memcpy(t, &v, 8);
++		t += 8; f += 8; count -= 8;
++	}
++	while (count > 0) {
++		*t++ = *(const volatile uint8_t *)f++;
++		count--;
++	}
++	__io_ar();
++}
++
++static inline void
++memcpy_toio(volatile void *to, const void *from, size_t count)
++{
++	volatile uint8_t *t = to;
++	const uint8_t *f = from;
++
++	__io_bw();
++	while (count > 0 && ((uintptr_t)t & 7) != 0) {
++		*(volatile uint8_t *)t++ = *f++;
++		count--;
++	}
++	while (count >= 8) {
++		uint64_t v;
++
++		__builtin_memcpy(&v, f, 8);
++		*(volatile uint64_t *)t = v;
++		t += 8; f += 8; count -= 8;
++	}
++	while (count > 0) {
++		*(volatile uint8_t *)t++ = *f++;
++		count--;
++	}
++}
++
++static inline void
++memset_io(volatile void *to, int c, size_t count)
++{
++	volatile uint8_t *t = to;
++	uint64_t v = (uint8_t)c;
++
++	v |= v << 8;
++	v |= v << 16;
++	v |= v << 32;
++	__io_bw();
++	while (count > 0 && ((uintptr_t)t & 7) != 0) {
++		*(volatile uint8_t *)t++ = (uint8_t)c;
++		count--;
++	}
++	while (count >= 8) {
++		*(volatile uint64_t *)t = v;
++		t += 8; count -= 8;
++	}
++	while (count > 0) {
++		*(volatile uint8_t *)t++ = (uint8_t)c;
++		count--;
++	}
++}
++#else
+ #define	memset_io(a, b, c)	memset((a), (b), (c))
+ #define	memcpy_fromio(a, b, c)	memcpy((a), (b), (c))
+ #define	memcpy_toio(a, b, c)	memcpy((a), (b), (c))
++#endif
+ 
+ static inline void
+ __iowrite32_copy(void *to, const void *from, size_t count)
+diff --git a/sys/compat/linuxkpi/common/include/linux/page.h b/sys/compat/linuxkpi/common/include/linux/page.h
+index 8271d2d63..2b7d5c67f 100644
+--- a/sys/compat/linuxkpi/common/include/linux/page.h
++++ b/sys/compat/linuxkpi/common/include/linux/page.h
+@@ -82,12 +82,24 @@ pgprot2cachemode(pgprot_t prot)
+ 
+ #define	pgprot_noncached(prot)		\
+ 	(((prot) & VM_PROT_ALL) | cachemode2protval(VM_MEMATTR_UNCACHEABLE))
++#if defined(__aarch64__)
++/*
++ * arm64: VM_MEMATTR_WRITE_COMBINING is cacheable write-through,
++ * which must not be used for PCIe BARs; write-combining is Normal
++ * non-cacheable.  pgprot_noncached stays Normal non-cacheable too:
++ * the fault handler also applies it to RAM pages, and Device on a RAM page
++ * would change its direct-map alias as well.
++ */
++#define	pgprot_writecombine(prot)	\
++	(((prot) & VM_PROT_ALL) | cachemode2protval(VM_MEMATTR_UNCACHEABLE))
++#else
+ #ifdef VM_MEMATTR_WRITE_COMBINING
+ #define	pgprot_writecombine(prot)	\
+ 	(((prot) & VM_PROT_ALL) | cachemode2protval(VM_MEMATTR_WRITE_COMBINING))
+ #else
+ #define	pgprot_writecombine(prot)	pgprot_noncached(prot)
+ #endif
++#endif
+ 
+ #undef	PAGE_MASK
+ #define	PAGE_MASK	(~(PAGE_SIZE-1))

@@ -41,7 +41,7 @@
 #
 # Usage: tests/firmware_test.sh [TREE]
 #   TREE  prepared working tree; defaults to
-#         ${GB10_WORK:-$HOME/work/gb10}/build/tree
+#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree
 #
 # Prerequisites: scripts/prepare-tree.sh has run on TREE (so
 # TREE/firmware/gsp_ga10x/gsp_ga10x.bin exists) and scripts/build-shim.sh
@@ -56,7 +56,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 TREE=${1:-$WORK/build/tree}
 FWDIR=$TREE/firmware/gsp_ga10x
 KO=$FWDIR/nvidia_gsp_ga10x_fw.ko
@@ -80,7 +80,7 @@ fail() {
 	printf 'FAIL %s\n' "$1"
 }
 
-# Unpredictable scratch directories ($WORK/tmp is $HOME/work/gb10/tmp unless
+# Unpredictable scratch directories ($WORK/tmp is <repo>/work/tmp unless
 # GB10_WORK says otherwise). All four names are initialised EMPTY and the
 # trap is installed BEFORE the first mktemp, so no signal can orphan a
 # scratch dir, a scratch log or the symlinked LOG of case (e) and the

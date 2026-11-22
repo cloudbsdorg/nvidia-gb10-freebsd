@@ -59,7 +59,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$TESTSDIR/../scripts/lib.sh"
-TESTROOT=$(mktemp -d "$HOME/work/gb10/tmp/lib-test.XXXXXXXX") || exit 1
+TESTROOT=$(mktemp -d "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work/tmp/lib-test.XXXXXXXX") || exit 1
 
 PASSED=0
 FAILED=0

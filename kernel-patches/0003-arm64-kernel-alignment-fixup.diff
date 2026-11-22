@@ -1,0 +1,459 @@
+Subject: arm64: emulate kernel alignment faults on Device memory
+SPDX-License-Identifier: BSD-2-Clause
+Applies to: sys/arm64/arm64 (new align_fixup.c, a hook in trap.c),
+sys/arm64/include/md_var.h (its prototype) and
+sys/conf/files.arm64.
+Needed on: Ampere Altra and Altra Max hosts with a GPU driver (amdgpu,
+nvidia.ko, nvidia-drm).  The emulator is generic.  Tunable and sysctl
+machdep.kern_align_fixup (-1 auto, default: on when the ACPI MCFG says
+Ampere/Altra; 0 off; 1 on); read-only machdep.kern_align_fixup_active (in
+effect, 0 or 1) and machdep.kern_align_fixups (accesses emulated).  The
+Altra check runs at SI_SUB_DRIVERS, before configure() attaches drivers,
+so drivers preloaded by the loader are covered; writing -1 at run time goes
+back to the detected value.
+
+On Device memory every unaligned access and every DC ZVA takes an
+alignment fault, and a fault in kernel mode panics with "Misaligned access
+from kernel space!".  With the Altra mapping write-combining BARs as
+Device, ordinary driver code (memcpy, structure copies) hits this.  The
+fixup decodes the faulting general-purpose load or store (LDR/STR all
+forms and sizes, LDP/STP/LDNP/STNP/LDPSW, PRFM, DC ZVA), performs it as
+naturally aligned pieces and resumes.  Anything else still panics.
+See kernel-patches/README.md.
+
+diff --git a/sys/arm64/arm64/align_fixup.c b/sys/arm64/arm64/align_fixup.c
+new file mode 100644
+index 000000000..4e306b4e4
+--- /dev/null
++++ b/sys/arm64/arm64/align_fixup.c
+@@ -0,0 +1,393 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 CloudBSD
++ *
++ * Kernel alignment-fault fixup for arm64.
++ *
++ * On Ampere Altra (erratum 82288 / PCIE_65) PCIe BARs that drivers map
++ * write-combining must be mapped Device-nGnRE instead, and on Device memory
++ * every unaligned access, and every DC ZVA, takes an alignment fault.  Linux
++ * carries an out-of-tree emulator for this; this is the FreeBSD equivalent
++ * for kernel-mode general-purpose register loads and stores:
++ *
++ *   LDR/STR (immediate, unscaled, pre/post-index, register offset),
++ *   all sizes, sign-extending loads, PRFM (skipped),
++ *   LDP/STP/LDNP/STNP/LDPSW (offset, pre/post-index), and DC ZVA.
++ *
++ * Each emulated access is split into naturally aligned pieces, so the
++ * PCIe side sees contiguous byte enables.  The decoded address range must
++ * contain the faulting address, or the fault panics as before.  Anything
++ * else still panics.
++ *
++ * machdep.kern_align_fixup is the setting: -1 auto (default: on when the
++ * ACPI MCFG says OEM "Ampere" / table "Altra", off elsewhere), 0 off, 1 on.
++ * The detection result is kept apart from the setting, so writing -1 at run
++ * time goes back to the detected value; machdep.kern_align_fixup_active
++ * reports what is in effect.
++ */
++
++#include "opt_acpi.h"
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/kernel.h>
++#include <sys/sysctl.h>
++
++#include <vm/vm.h>
++#include <vm/pmap.h>
++
++#include <machine/frame.h>
++#include <machine/vmparam.h>
++#include <machine/md_var.h>
++
++#ifdef DEV_ACPI
++#include <contrib/dev/acpica/include/acpi.h>
++#endif
++
++extern int64_t dczva_line_size;
++
++static int kern_align_fixup = -1;
++SYSCTL_INT(_machdep, OID_AUTO, kern_align_fixup, CTLFLAG_RWTUN,
++    &kern_align_fixup, 0,
++    "Emulate misaligned kernel loads/stores (-1 auto: on for Ampere Altra, 0 off, 1 on)");
++/* The ACPI MCFG names an Ampere Altra; set once, before any driver attaches. */
++static int kern_align_fixup_altra;
++static u_long kern_align_fixups;
++SYSCTL_ULONG(_machdep, OID_AUTO, kern_align_fixups, CTLFLAG_RD,
++    &kern_align_fixups, 0, "Misaligned kernel accesses emulated");
++
++static bool
++kern_align_fixup_on(void)
++{
++	int v;
++
++	v = atomic_load_int(&kern_align_fixup);
++	if (v < 0)
++		return (atomic_load_int(&kern_align_fixup_altra) != 0);
++	return (v != 0);
++}
++
++static int
++sysctl_kern_align_fixup_active(SYSCTL_HANDLER_ARGS)
++{
++	int v;
++
++	v = kern_align_fixup_on() ? 1 : 0;
++	return (sysctl_handle_int(oidp, &v, 0, req));
++}
++SYSCTL_PROC(_machdep, OID_AUTO, kern_align_fixup_active,
++    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
++    sysctl_kern_align_fixup_active, "I",
++    "Kernel alignment-fault fixup in effect (0 off, 1 on)");
++
++/*
++ * The ACPI MCFG header names an Ampere Altra.  This uses the early table
++ * helpers of acpi_machdep.c (pmap_mapbios), not ACPICA, so it works before
++ * the acpi driver attaches.
++ */
++static bool
++kern_align_mcfg_is_altra(void)
++{
++#ifdef DEV_ACPI
++	ACPI_TABLE_HEADER *hdr;
++	vm_paddr_t pa;
++	bool altra;
++
++	pa = acpi_find_table(ACPI_SIG_MCFG);
++	if (pa == 0)
++		return (false);
++	hdr = acpi_map_table(pa, ACPI_SIG_MCFG);
++	if (hdr == NULL)
++		return (false);
++	altra = strncmp(hdr->OemId, "Ampere", 6) == 0 &&
++	    strncmp(hdr->OemTableId, "Altra", 5) == 0;
++	acpi_unmap_table(hdr);
++	return (altra);
++#else
++	printf("arm64: built without DEV_ACPI: Ampere Altra detection "
++	    "unavailable; set machdep.kern_align_fixup=1 to force the "
++	    "fixup on\n");
++	return (false);
++#endif
++}
++
++static void
++kern_align_fixup_init(void *arg __unused)
++{
++
++	atomic_store_int(&kern_align_fixup_altra,
++	    kern_align_mcfg_is_altra() ? 1 : 0);
++	if (kern_align_fixup_on())
++		printf("arm64: kernel alignment-fault fixup enabled (%s)\n",
++		    kern_align_fixup >= 0 ? "machdep.kern_align_fixup" :
++		    "Ampere Altra");
++	else if (kern_align_fixup_altra != 0)
++		printf("arm64: kernel alignment-fault fixup off on Ampere Altra "
++		    "(machdep.kern_align_fixup=0)\n");
++}
++/*
++ * SI_SUB_DRIVERS comes before SI_SUB_CONFIGURE, where configure() attaches
++ * every driver, so drivers preloaded by the loader are covered too.
++ */
++SYSINIT(kern_align_fixup, SI_SUB_DRIVERS, SI_ORDER_FIRST,
++    kern_align_fixup_init, NULL);
++
++static uint64_t
++getreg(struct trapframe *tf, u_int r, bool sp)
++{
++	if (r < 30)
++		return (tf->tf_x[r]);
++	if (r == 30)
++		return (tf->tf_lr);
++	return (sp ? tf->tf_sp : 0);
++}
++
++static void
++setreg(struct trapframe *tf, u_int r, bool sp, uint64_t v)
++{
++	if (r < 30)
++		tf->tf_x[r] = v;
++	else if (r == 30)
++		tf->tf_lr = v;
++	else if (sp)
++		tf->tf_sp = v;
++}
++
++/* Naturally aligned pieces, little-endian. */
++static uint64_t
++mem_read(uintptr_t a, u_int n)
++{
++	uint64_t v = 0;
++	u_int off = 0, c;
++
++	while (off < n) {
++		uintptr_t p = a + off;
++
++		if ((p & 7) == 0 && n - off >= 8) {
++			v = *(volatile uint64_t *)p;	/* n == 8 */
++			c = 8;
++		} else if ((p & 3) == 0 && n - off >= 4) {
++			v |= (uint64_t)*(volatile uint32_t *)p << (off * 8);
++			c = 4;
++		} else if ((p & 1) == 0 && n - off >= 2) {
++			v |= (uint64_t)*(volatile uint16_t *)p << (off * 8);
++			c = 2;
++		} else {
++			v |= (uint64_t)*(volatile uint8_t *)p << (off * 8);
++			c = 1;
++		}
++		off += c;
++	}
++	return (v);
++}
++
++static void
++mem_write(uintptr_t a, u_int n, uint64_t v)
++{
++	u_int off = 0, c;
++
++	while (off < n) {
++		uintptr_t p = a + off;
++		uint64_t s = (off < 8) ? v >> (off * 8) : 0;
++
++		if ((p & 7) == 0 && n - off >= 8) {
++			*(volatile uint64_t *)p = s;
++			c = 8;
++		} else if ((p & 3) == 0 && n - off >= 4) {
++			*(volatile uint32_t *)p = (uint32_t)s;
++			c = 4;
++		} else if ((p & 1) == 0 && n - off >= 2) {
++			*(volatile uint16_t *)p = (uint16_t)s;
++			c = 2;
++		} else {
++			*(volatile uint8_t *)p = (uint8_t)s;
++			c = 1;
++		}
++		off += c;
++	}
++}
++
++static uint64_t
++sext(uint64_t v, u_int bits)
++{
++	uint64_t m = 1ULL << (bits - 1);
++
++	v &= (bits == 64) ? ~0ULL : ((1ULL << bits) - 1);
++	return ((v ^ m) - m);
++}
++
++static uint64_t
++extend_reg(uint64_t v, u_int option, u_int shift)
++{
++	switch (option) {
++	case 2:	/* UXTW */
++		v = (uint32_t)v;
++		break;
++	case 3:	/* LSL / UXTX */
++		break;
++	case 6:	/* SXTW */
++		v = (uint64_t)(int64_t)(int32_t)v;
++		break;
++	case 7:	/* SXTX */
++		break;
++	default:
++		return (0);
++	}
++	return (v << shift);
++}
++
++/*
++ * Single register load/store.  Returns false when the opcode is not one we
++ * emulate (vector forms, unprivileged forms).
++ */
++static bool
++far_in(uint64_t far, uint64_t addr, uint64_t len)
++{
++	return (far - addr < len);
++}
++
++static bool
++emulate_ldst(struct trapframe *tf, uint32_t insn, uintptr_t addr, uint64_t far)
++{
++	u_int size = insn >> 30, opc = (insn >> 22) & 3, rt = insn & 31;
++	u_int n = 1U << size;
++	uint64_t v;
++
++	if (size == 3 && opc == 2)
++		return (true);		/* PRFM */
++	if (!far_in(far, addr, n))
++		return (false);
++	if (opc == 0) {
++		mem_write(addr, n, getreg(tf, rt, false));
++		return (true);
++	}
++	if (size == 3 && opc == 3)
++		return (false);
++	if (size == 2 && opc == 3)
++		return (false);
++	v = mem_read(addr, n);
++	if (opc == 2)
++		v = sext(v, n * 8);				/* to 64 bits */
++	else if (opc == 3)
++		v = (uint32_t)sext(v, n * 8);			/* to 32 bits */
++	setreg(tf, rt, false, v);
++	return (true);
++}
++
++int
++arm64_kern_align_fixup(struct trapframe *frame, uint64_t far)
++{
++	uint32_t insn;
++	u_int rn, rt, rt2, size;
++	uint64_t base, addr;
++	int64_t imm;
++
++	if (!kern_align_fixup_on())
++		return (0);
++	if (frame->tf_elr < VM_MIN_KERNEL_ADDRESS || (frame->tf_elr & 3) != 0)
++		return (0);
++	insn = *(uint32_t *)frame->tf_elr;
++	rn = (insn >> 5) & 31;
++	rt = insn & 31;
++
++	/* DC ZVA, Xt */
++	if ((insn & 0xffffffe0) == 0xd50b7420) {
++		uint64_t len = dczva_line_size, a;
++
++		if (len == 0)
++			return (0);
++		a = getreg(frame, rt, false) & ~(len - 1);
++		if (!far_in(far, a, len))
++			return (0);
++		for (uint64_t o = 0; o < len; o += 8)
++			*(volatile uint64_t *)(a + o) = 0;
++		goto done;
++	}
++
++	/* Load/store register, unsigned immediate (GPR). */
++	if ((insn & 0x3f000000) == 0x39000000) {
++		size = insn >> 30;
++		imm = (int64_t)(((insn >> 10) & 0xfff) << size);
++		addr = getreg(frame, rn, true) + imm;
++		if (!emulate_ldst(frame, insn, addr, far))
++			return (0);
++		goto done;
++	}
++
++	/* Load/store register, imm9: unscaled (00), post (01), pre (11). */
++	if ((insn & 0x3f200000) == 0x38000000) {
++		u_int op2 = (insn >> 10) & 3;
++
++		if (op2 == 2)
++			return (0);	/* unprivileged LDTR/STTR */
++		if (op2 != 0 && (insn >> 30) == 3 &&
++		    ((insn >> 22) & 3) == 2)
++			return (0);	/* unallocated pre/post-index PRFM form */
++		imm = (int64_t)sext((insn >> 12) & 0x1ff, 9);
++		base = getreg(frame, rn, true);
++		addr = (op2 == 1) ? base : base + imm;
++		if (!emulate_ldst(frame, insn, addr, far))
++			return (0);
++		if (op2 != 0)
++			setreg(frame, rn, true, base + imm);
++		goto done;
++	}
++
++	/* Load/store register, register offset. */
++	if ((insn & 0x3f200c00) == 0x38200800) {
++		u_int rm = (insn >> 16) & 31, option = (insn >> 13) & 7;
++		u_int s = (insn >> 12) & 1;
++		uint64_t off;
++
++		size = insn >> 30;
++		if ((option & 2) == 0)
++			return (0);
++		off = extend_reg(getreg(frame, rm, false), option,
++		    s ? size : 0);
++		addr = getreg(frame, rn, true) + off;
++		if (!emulate_ldst(frame, insn, addr, far))
++			return (0);
++		goto done;
++	}
++
++	/* Load/store pair (GPR): no-allocate, post, offset, pre. */
++	if ((insn & 0x3e000000) == 0x28000000) {
++		u_int opc = insn >> 30, type = (insn >> 23) & 3;
++		u_int load = (insn >> 22) & 1, n;
++		uint64_t v1, v2;
++
++		if (opc == 3 || (opc == 1 && !load) ||
++		    (opc == 1 && type == 0))
++			return (0);
++		n = (opc == 2) ? 8 : 4;
++		rt2 = (insn >> 10) & 31;
++		imm = (int64_t)sext((insn >> 15) & 0x7f, 7) * n;
++		base = getreg(frame, rn, true);
++		addr = (type == 1) ? base : base + imm;
++		if (!far_in(far, addr, 2 * n))
++			return (0);
++		if (load) {
++			v1 = mem_read(addr, n);
++			v2 = mem_read(addr + n, n);
++			if (opc == 1) {		/* LDPSW */
++				v1 = sext(v1, 32);
++				v2 = sext(v2, 32);
++			}
++			setreg(frame, rt, false, v1);
++			setreg(frame, rt2, false, v2);
++		} else {
++			mem_write(addr, n, getreg(frame, rt, false));
++			mem_write(addr + n, n, getreg(frame, rt2, false));
++		}
++		if (type == 1 || type == 3)
++			setreg(frame, rn, true, base + imm);
++		goto done;
++	}
++	return (0);
++
++done:
++	atomic_add_long(&kern_align_fixups, 1);
++	frame->tf_elr += 4;
++	return (1);
++}
+diff --git a/sys/arm64/arm64/trap.c b/sys/arm64/arm64/trap.c
+index e688b9cb7..66b114b82 100644
+--- a/sys/arm64/arm64/trap.c
++++ b/sys/arm64/arm64/trap.c
+@@ -228,6 +228,10 @@ align_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
+ 			return;
+ 		}
+ 
++		/* Ampere Altra: Device-mapped PCIe (erratum 82288). */
++		if (arm64_kern_align_fixup(frame, far))
++			return;
++
+ 		print_registers(frame);
+ 		print_gp_register("far", far);
+ 		printf(" esr: 0x%.16lx\n", esr);
+diff --git a/sys/arm64/include/md_var.h b/sys/arm64/include/md_var.h
+index da136ff09..c2104e506 100644
+--- a/sys/arm64/include/md_var.h
++++ b/sys/arm64/include/md_var.h
+@@ -50,7 +50,9 @@ extern u_long elf32_hwcap2;
+ 
+ struct dumperinfo;
+ struct minidumpstate;
++struct trapframe;
+ 
++int arm64_kern_align_fixup(struct trapframe *frame, uint64_t far);
+ int cpu_minidumpsys(struct dumperinfo *, const struct minidumpstate *);
+ void generic_bs_fault(void) __asm(__STRING(generic_bs_fault));
+ void generic_bs_peek_1(void) __asm(__STRING(generic_bs_peek_1));
+diff --git a/sys/conf/files.arm64 b/sys/conf/files.arm64
+index 0329c8d57..0cd280efd 100644
+--- a/sys/conf/files.arm64
++++ b/sys/conf/files.arm64
+@@ -28,2 +28,3 @@ arm64/acpica/acpi_wakeup.c			optional acpi
+ arm64/acpica/pci_cfgreg.c			optional acpi pci
++arm64/arm64/align_fixup.c			standard
+ arm64/arm64/autoconf.c				standard

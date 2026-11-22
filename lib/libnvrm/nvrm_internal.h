@@ -92,6 +92,8 @@ typedef struct nvrm_backend_ops {
 		    unsigned *n);
 	/* Limit the descriptors for Capsicum.  Returns enum nvrm_error. */
 	int	(*limit)(nvrm_backend *be, int allow_alloc);
+	/* Memory and VA (S2); NULL when the backend has none. */
+	const struct nvrm_mem_ops *mem;
 } nvrm_backend_ops;
 
 /* Registry. */
@@ -100,6 +102,9 @@ const nvrm_backend_ops *nvrm_backend_select(const char *name);
 void	nvrm_registry_reset(void);	/* tests: drop every provider */
 void	nvrm_registry_builtin(void);	/* the two built-in providers */
 unsigned nvrm_registry_count(void);	/* tests: providers registered */
+/* Fake backend: what its memory model needs from a GPU of its own. */
+uint64_t nvrm_fake_gpu_vram_kb(const nvrm_gpu *g);
+uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 /* Test seam: runs between the two built-in registrations. */
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
@@ -158,8 +163,176 @@ struct nvrm_ctx {
 	nvrm_device	dev[NVRM_MAX_GPUS];
 };
 
+
+/* ---- memory and VA (nvrm_mem.c, nvrm_va.c) ------------------------------ */
+
+typedef struct nvrm_bclient nvrm_bclient;	/* backend: one client on one GPU */
+typedef struct nvrm_bmem nvrm_bmem;		/* backend: one memory object */
+typedef struct nvrm_bres nvrm_bres;		/* backend: one VA reservation */
+
+/* The kinds of spare descriptor a client pre-opens. */
+enum { NVRM_DESC_MAP = 1, NVRM_DESC_EXPORT, NVRM_DESC__COUNT };
+
+typedef struct nvrm_open_cfg {
+	int		allow_map;
+	unsigned	map_slots, export_slots;
+} nvrm_open_cfg;
+
+typedef struct nvrm_vainfo {
+	uint64_t	base, end;
+} nvrm_vainfo;
+
+/* What the core asks for; the core has chosen the place already. */
+typedef struct nvrm_balloc {
+	int		kind;		/* NVRM_MEM_VRAM or NVRM_MEM_SYSMEM */
+	int		place;		/* enum nvrm_place */
+	uint64_t	bytes, alignment, page_size;
+} nvrm_balloc;
+
+/* How the CPU side of system memory is mapped, as the backend learned it
+ * (the allocation asked for it, or the RM reports it for an import). */
+enum { NVRM_COH_CACHED = 0, NVRM_COH_WC, NVRM_COH_UNCACHED };
+
+/* What the backend reports back about an object. */
+typedef struct nvrm_bmem_info {
+	uint64_t	bytes, page_size;
+	int		place;
+	int		coherency;	/* NVRM_COH_*; system memory only */
+} nvrm_bmem_info;
+
+/*
+ * Every call that can fail returns an enum nvrm_error and, with a message of
+ * its own, says why in err.  The core owns the bookkeeping (VA allocator,
+ * lists, argument rules); a backend only talks to the GPU.  A release (unmap,
+ * free) that the GPU side refuses returns an error too, so the core can keep
+ * what is still held out of reuse; a release a backend skips on purpose (a
+ * fork child, which does not own the RM client) is a success.
+ */
+typedef struct nvrm_mem_ops {
+	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
+		    const nvrm_open_cfg *cfg, nvrm_bclient **bc,
+		    nvrm_vainfo *va, char *err, size_t errlen);
+	void	(*client_close)(nvrm_bclient *bc);
+	int	(*desc_open)(nvrm_bclient *bc, int kind, int *fd, char *err,
+		    size_t errlen);
+	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
+		    int sparse, nvrm_bres **r, char *err, size_t errlen);
+	int	(*va_release)(nvrm_bres *r, char *err, size_t errlen);
+	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
+		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
+		    size_t errlen);
+	int	(*mem_register)(nvrm_bclient *bc, void *addr, uint64_t bytes,
+		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
+		    size_t errlen);
+	int	(*mem_free)(nvrm_bmem *m, char *err, size_t errlen);
+	int	(*map_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
+		    uint64_t offset, uint64_t length, int read_only, char *err,
+		    size_t errlen);
+	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
+		    uint64_t length, char *err, size_t errlen);
+	/* The descriptor is consumed, mapped or not (the OS layer lets one
+	 * descriptor carry one mapping); the core closes it on unmap. */
+	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
+		    char *err, size_t errlen);
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, char *err,
+		    size_t errlen);
+	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
+	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
+		    nvrm_bmem_info *out, char *err, size_t errlen);
+	/* 1 when the host is arm64 (the memory attribute rule differs). */
+	int	(*host_arm64)(void);
+	/* NULL, or a check of each primitive CPU access (the fake traps). */
+	int	(*cpu_access)(int attr, const volatile void *p, unsigned width,
+		    int write);
+} nvrm_mem_ops;
+
+extern const nvrm_mem_ops nvrm_fake_mem_ops;
+extern const nvrm_mem_ops nvrm_rm_mem_ops;
+
+/* The VA range allocator (nvrm_va.c). */
+typedef struct nvrm_va nvrm_va;
+nvrm_va	*nvrm_va_new(uint64_t base, uint64_t end);
+void	nvrm_va_destroy(nvrm_va *va);
+int	nvrm_va_alloc(nvrm_va *va, uint64_t size, uint64_t align,
+	    int have_fixed, uint64_t fixed, uint64_t *out);
+int	nvrm_va_free(nvrm_va *va, uint64_t addr, uint64_t size);
+uint64_t nvrm_va_free_bytes(const nvrm_va *va);
+unsigned nvrm_va_extents(const nvrm_va *va);
+
+/* The CPU memory attribute rule (nvrm_mem.c).  wc is the capability flag
+ * os_device_wc_active as the device reports it; coherency is NVRM_COH_*. */
+int	nvrm_cpu_attr_rule(int place, int coherency, int host_arm64,
+	    const nvrm_u64 *wc);
+
+typedef struct nvrm_reserve {
+	struct nvrm_reserve *next;
+	uint64_t	va, bytes;
+	int		sparse;
+	nvrm_bres	*b;
+	unsigned	nmaps;
+} nvrm_reserve;
+
+typedef struct nvrm_gmap {
+	struct nvrm_gmap *next;
+	uint64_t	va, length;
+	nvrm_reserve	*res;
+	nvrm_mem	*mem;
+} nvrm_gmap;
+
+struct nvrm_mem {
+	nvrm_client	*cl;
+	struct nvrm_mem	*next;
+	nvrm_bmem	*b;
+	int		kind, place, cpu_attr;
+	uint64_t	bytes, page_size;
+	unsigned	ngmaps;
+	void		*cpu_addr;
+	int		cpu_fd;		/* the descriptor carrying the mapping */
+	unsigned	cpu_prot;
+};
+
+typedef struct nvrm_pool {
+	int		*fd;
+	unsigned	n, cap;
+} nvrm_pool;
+
+struct nvrm_client {
+	const nvrm_backend_ops *ops;
+	const nvrm_mem_ops *mops;
+	nvrm_bclient	*bc;
+	nvrm_va		*va;
+	uint64_t	va_base, va_end;
+	nvrm_reserve	*reserves;
+	nvrm_gmap	*gmaps;
+	nvrm_mem	*mems;
+	nvrm_u64	vram_size;	/* from the device, as enumerated */
+	nvrm_u64	wc_cap;
+	nvrm_list	page_sizes;
+	nvrm_u64	max_page_size;
+	int		host_arm64;
+	int		allow_map;
+	nvrm_pool	pool[NVRM_DESC__COUNT];	/* indexed by NVRM_DESC_* */
+	nvrm_client_stats st;
+	char		errmsg[160];
+};
+
+/* Index of the os_device_wc_active flag in nvrm_device_info.caps[]. */
+#define NVRM_CAPIDX_OS_DEVICE_WC (NVRM_P_CAP_OS_DEVICE_WC - NVRM_P_CAP_DMABUF)
+
+/* Test seam: nonzero stands for "this process is in capability mode". */
+extern int (*nvrm_capmode_hook)(void);
+
+/* The fake backend's software GPU: read or write through a GPU address, as
+ * the GPU would (tests).  Returns 0, or NVRM_FAKE_FAULT_*. */
+#define NVRM_FAKE_FAULT_UNMAPPED	1
+#define NVRM_FAKE_FAULT_READONLY	2
+int	nvrm_fake_gpu_access(nvrm_client *cl, uint64_t va, void *buf,
+	    size_t len, int write);
+
 /* Capsicum helper shared by the backends (nvrm_cap.c). */
 int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);
+/* Limit a spare descriptor (mapping or export) to what it is for. */
+int	nvrm_cap_limit_desc(int fd, int kind);
 
 /* Field and capability descriptors (nvrm_fields.c); one definition. */
 #define NVRM_STRINGIFY_(x)	#x

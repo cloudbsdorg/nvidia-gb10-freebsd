@@ -75,3 +75,37 @@ The files of the open-gpu-kernel-modules and nvidia-drm that the patches touch a
 checked). Sources read for this round: FreeBSD's `sys/compat/linuxkpi/common/src/linux_page.c` and
 `sys/vm` (BSD) for the fault path. No Linux kernel source was read, and no GPL header text: the
 `get_dma_buf()` and `dma_buf_put()` calls are the public API names.
+
+# Provenance: cuda-native SDK tree (Track #2380, stage C1.1 #2425)
+
+## Consulted (read)
+
+- The CUDA headers of clang 23 in `/usr/local/llvm23/lib/clang/23/include/` (`__clang_cuda_runtime_wrapper.h`,
+  `__clang_cuda_intrinsics.h`, `__clang_cuda_device_functions.h`, `__clang_cuda_texture_intrinsics.h`,
+  `__clang_cuda_math.h`; Apache-2.0 with LLVM exception), for the header names the wrapper includes and
+  the types and helper functions it expects from them.
+- The behaviour of the clang 23 driver, by experiment: which files make a `--cuda-path` tree an
+  installation, and where it takes the SDK version from.
+- The public CUDA documentation, for API names, signatures and documented values:
+  - the Runtime API reference: the `cudaError_t` values, `cudaLaunchKernel`, the texture read modes
+    and the surface boundary modes;
+  - the Driver API reference: `cuuint32_t` and `cuuint64_t`;
+  - the Math API reference: the host math functions;
+  - the CUDA C++ Programming Guide: the execution and memory space keywords, the vector types and
+    their alignment, the `make_<type>` constructors, and the `__cvta_generic_to_*` conversions.
+
+## Not consulted
+
+No file of NVIDIA's CUDA toolkit was opened, copied or diffed: no header, no `libdevice.bc`, no
+binary. The Linux CUDA tree used for the Linuxulator comparison path was not read. No GPL source.
+
+## Licence of the files
+
+Everything under `lib/cuda-native/` is ours, and so are `tests/cuda-native/` and
+`tests/cuda_native_toolchain_test.sh`. All of it is BSD-2-Clause, like `lib/libnvrm`, and every
+file carries the licence header. The `version.json` of a built tree carries none, because JSON has
+no comments; `mksdk.sh` generates it from `cuda.h`.
+
+The test checks this. It fails if any file under `lib/cuda-native` or `tests/cuda-native` lacks
+the header, names NVIDIA Corporation, or carries another copyright line in any spelling. Two
+planted mutants prove that the check works.

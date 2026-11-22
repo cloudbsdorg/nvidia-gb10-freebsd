@@ -155,9 +155,14 @@ sets
 .Dv NVRM_ENUM_ALLOW_ALLOC
 before the limit is applied: Capsicum rights can only be narrowed, never
 widened, so they cannot be asked for later.
-The descriptor never has a mapping right, with or without the flag, and this
-version of the library has no call that maps device memory, inside or outside
-capability mode; a later version may add one.
+The enumeration descriptors never carry a mapping right, with or without the
+flag.
+GPU memory, its virtual addresses and CPU mappings are made through a client
+of their own:
+.Xr nvrm_mem 3 ,
+with
+.Dv NVRM_OPEN_ALLOW_MAP
+for CPU mappings.
 A flag bit the library does not know makes
 .Fn nvrm_enumerate
 fail with
@@ -274,15 +279,15 @@ returns the version answer to the RM query with source
 returns the RM version against which the library was built.
 .Fn nvrm_library_version
 returns the library API version, currently
-.Li 1.1.0 .
+.Li 1.2.0 .
 .Fn nvrm_symbol_version
 returns the library symbol version, currently the string
-.Li NVRM_1.1
-with integer parts 1 and 1.
+.Li NVRM_1.2
+with integer parts 1 and 2.
 .Fn nvrm_schema_version
 returns the JSON schema version, currently
-.Li 1.1
-with integer parts 1 and 1.
+.Li 1.2
+with integer parts 1 and 2.
 The built-for, library, symbol and schema versions have source
 .Li derived .
 The schema version is also the
@@ -433,6 +438,17 @@ The code stays defined so that existing programs still build.
 and
 .Fn nvrm_error_id
 turn the code into text and a stable machine identifier.
+The memory calls of
+.Xr nvrm_mem 3
+also return
+.Dv NVRM_E_RM ,
+.Dv NVRM_E_DENIED ,
+.Dv NVRM_E_NOSLOT ,
+.Dv NVRM_E_RANGE ,
+.Dv NVRM_E_NOTSUP
+and
+.Dv NVRM_E_BUSY ;
+its ERRORS section says when.
 .Sh THREADS AND FORK
 A context and its devices are not safe for concurrent use.
 .Fn nvrm_device_refresh
@@ -476,10 +492,18 @@ first, which closes the descriptor.
 This interface is provisional.
 The symbol versions
 .Li NVRM_1.0
-and its additive successor
-.Li NVRM_1.1 ,
+and its additive successors
+.Li NVRM_1.1
+and
+.Li NVRM_1.2 ,
 and the structures behind them, are frozen at the first package release and not
 before; a future version may still reshape them.
+The memory calls are
+.Li NVRM_1.1 ,
+API minor 1.
+The version calls are
+.Li NVRM_1.2 ,
+API minor 2.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
 .It Ev NVRM_BACKEND
@@ -510,6 +534,7 @@ RM control device.
 JSON Schema of the JSON output.
 .El
 .Sh SEE ALSO
+.Xr nvrm_mem 3 ,
 .Xr capsicum 4 ,
 .Xr nvrm 7 ,
 .Xr nvrm-info 8
