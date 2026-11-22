@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:stock-install-step:1.0",
+  "version": "1.0",
+  "title": "One step of the stock-install test (tests/install-e2e guest.sh and run.sh), one JSON object per line",
+  "type": "object",
+  "required": ["schema", "index", "step", "pass", "rc", "seconds", "detail", "log"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "stock-install-step/1"},
+    "index": {"type": "integer", "minimum": 0},
+    "step": {"type": "string", "minLength": 1},
+    "pass": {"type": "boolean"},
+    "rc": {"type": "integer"},
+    "seconds": {"type": "integer", "minimum": 0},
+    "detail": {"type": "string"},
+    "log": {"type": "string"}
+  }
+}

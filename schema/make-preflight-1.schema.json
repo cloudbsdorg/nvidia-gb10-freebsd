@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:make-preflight:1.0",
+  "version": "1.0",
+  "title": "make preflight JSON=1 (sh scripts/make.sh preflight --json) of nvidia-gb10-freebsd",
+  "type": "object",
+  "required": ["schema_version", "tool", "purpose", "metadata", "status", "items", "device", "missing"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "tool": {"const": "preflight"},
+    "purpose": {"enum": ["application", "library", "tool", "service", "docs", "config", "data", "skills", "infra", "fork"]},
+    "metadata": {
+      "type": "object",
+      "required": ["os", "arch", "release", "osreldate", "work"],
+      "additionalProperties": false,
+      "properties": {
+        "os": {"type": "string"}, "arch": {"type": "string"}, "release": {"type": "string"},
+        "osreldate": {"type": "string"}, "work": {"type": "string"}
+      }
+    },
+    "status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "name", "state", "available", "reason", "fix"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "name": {"type": "string", "minLength": 1},
+          "state": {"enum": ["ok", "missing", "warn"]},
+          "available": {"type": "boolean"},
+          "reason": {"type": "string"},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "selector", "vendor", "device", "class"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "selector": {"type": "string"},
+          "vendor": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+          "device": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+          "class": {"type": "string", "pattern": "^0x[0-9a-f]{6}$"}
+        }
+      }
+    },
+    "device": {"enum": ["no NVIDIA device", "NVIDIA device present", "device check unavailable"]},
+    "missing": {"type": "integer", "minimum": 0}
+  }
+}

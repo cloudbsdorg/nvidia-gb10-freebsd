@@ -20,13 +20,29 @@
 #   (e) a second install over the first one is allowed (it wrote the files)
 #   (f) a file the install did not write is never replaced
 #   (g) a file changed since install is not replaced by a reinstall
-#   (h) deinstall keeps a file changed since install, and never follows a
-#       manifest path with a .. component
+#   (h) deinstall keeps a file changed since install (listed, exit 1), and
+#       never follows a manifest path with a .. component
 #   (i) an interrupted install (a read-only directory) can be rerun, and
 #       deinstall then restores the DESTDIR
 #   (j) a reinstall with a smaller stage removes the files it no longer has
 #   (k) deinstall YES=1 leaves the DESTDIR exactly as it was before
 #   (l) mutant: a manifest with a wrong sha256 is caught by check_manifest
+#       (it runs right after (d))
+#   (m) configure: refused without YES; applied with YES (backup, the
+#       proposed lines shown); nothing to configure the second time;
+#       deinstall restores both files exactly and removes the backup
+#   (n) a path planted in the stage is refused before anything is copied
+#   (o) preflight creates no WORK
+#   (p) a WORK writable by group or other is refused and keeps its mode
+#   (q) tests/install-e2e/expected.manifest equals what install writes
+#   (s) someone else's drm.ko is kept, and ours is not installed
+#   (t) a manifest at the place commit 23c18da used is moved; deinstall
+#       then removes everything
+#   (u) every module of the module table is among the installed files
+#   (r) the NVIDIA licence: YES=1 alone and no terminal both stop with the
+#       explanation; ACCEPT_NVIDIA_LICENSE=1 and ACCEPT_ALL_LICENSES=1
+#       accept and record it; a changed licence asks again; preflight and
+#       help say so
 # The MK_* switches of a calling make (make test YES=1) are cleared first.
 # Scratch files live under WORK/tmp (never /tmp) and are removed at the end.
 
@@ -34,7 +50,7 @@ set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 export PATH
 unset MK_WORK MK_PREFIX MK_DESTDIR MK_SYSDIR MK_BSDSRCTOP MK_DRMKMODDIR \
-    MK_YES MK_ASSUME_YES MK_JSON MK_PURPOSE
+    MK_YES MK_ASSUME_YES MK_JSON MK_PURPOSE MK_ACCEPT_NVIDIA_LICENSE MK_ACCEPT_ALL_LICENSES
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 base=${GB10_WORK:-$repo/work}
 mkdir -p -- "$base/tmp"
@@ -79,7 +95,7 @@ assert isinstance(d["status"], list) and isinstance(d["items"], list)
 names = [s["name"] for s in d["status"]]
 assert "sources" in names and "sysdir" in names and "drmkmoddir" in names and "root" in names
 for i, s in enumerate(d["status"]):
-    assert s["index"] == i and s["state"] in ("ok", "missing")
+    assert s["index"] == i and s["state"] in ("ok", "missing", "warn")
     assert s["available"] == (s["state"] == "ok")
 src = [s for s in d["status"] if s["name"] == "sources"][0]
 assert src["state"] == "missing" and src["fix"] == "make install-prereqs"
@@ -105,9 +121,13 @@ mkdir -p "$L/lib" "$L/info"
 printf 'so\n' > "$L/lib/libnvrm.so.1"
 printf 'a\n' > "$L/lib/libnvrm.a"
 printf 'prog\n' > "$L/info/nvrm-info"
+printf 'drm\n' > "$W/build/drm.ko"
+printf 'dmabuf\n' > "$W/build/dmabuf.ko"
+mkdir -p "$W/sources"
+printf 'NVIDIA licence (planted)\n' > "$W/sources/nvidia-license.txt"
 MK_WORK=$W mk _build-stamp > "$W/build/stamp"
 D=$S/dest
-mkdir -p "$D/boot/modules" "$D/usr/local/etc"
+mkdir -p "$D/boot/modules" "$D/usr/local/etc" "$D/etc"
 snap() { (cd "$1" && find . | sort); }
 snap "$D" > "$S/before.list"
 
@@ -138,7 +158,8 @@ check_manifest() {
 # (d) YES=1 install into DESTDIR
 inst "$D" "$S/d.out"
 rc=$?
-M=$D/usr/local/share/nvidia-gb10-freebsd/installed.manifest
+M=$D/var/db/nvidia-gb10-freebsd/installed.manifest
+cp "$M" "$S/q.manifest" 2>/dev/null
 if [ "$rc" = 0 ] && [ -f "$M" ]; then
 	errs=$(check_manifest "$M" "$D")
 	[ -z "$errs" ] && ok "install: manifest modes, owners and sha256 match" || bad "install manifest: $errs"
@@ -146,12 +167,14 @@ if [ "$rc" = 0 ] && [ -f "$M" ]; then
 	    "/usr/local/share/man/man4/nvidia.4 444 $me" "/usr/local/lib/libnvrm.so.1 444 $me" \
 	    "/usr/local/sbin/nvrm-info 555 $me" "/usr/local/share/man/man8/nvrm-info.8 444 $me" \
 	    "/usr/local/lib/libnvrm.so link -> libnvrm.so.1" "/usr/local/share/man/man3/nvrm_enumerate.3 link -> nvrm.3" \
-	    "/usr/local/share/nvidia-gb10-freebsd dir" "/usr/local/include/nvrm dir" "/usr/local/etc/rc.d dir"; do
+	    "/usr/local/etc/devd/nvidia_gb10.conf 444 $me" "/boot/modules/drm.ko 555 $me" "/boot/modules/dmabuf.ko 555 $me" \
+	    "/usr/local/share/licenses/nvidia-gb10-freebsd/NVIDIA-LICENSE 444 $me" \
+	    "/var/db/nvidia-gb10-freebsd dir" "/usr/local/include/nvrm dir" "/usr/local/etc/rc.d dir"; do
 		grep -q "^$want" "$M" || bad "manifest lacks: $want"
 	done
 	grep -q '^/boot/modules dir' "$M" && bad "manifest claims /boot/modules, which existed before"
 	got=$(awk '$1 ~ /^\/boot\/modules\// { sub(/.*\//, "", $1); print $1 }' "$M" | sort)
-	want=$(printf '%s\n' "$mods" | sed 's|.*/||' | sort)
+	want=$(printf '%s\n' $mods drm.ko dmabuf.ko | sed 's|.*/||' | sort)
 	[ "$got" = "$want" ] && ok "install: the modules are the module list" || bad "modules: $got"
 	n=$(awk '$2 ~ /^[0-7]+$/' "$M" | wc -l | tr -d ' ')
 	ns=$(find "$W/stage" -type f | wc -l | tr -d ' ')
@@ -197,15 +220,17 @@ chmod u+w "$M"
 printf '%s 444 %s %s\n' "/../../outside" "$me" "$(sha256 -q "$S/outside")" >> "$M"
 deinst "$D" "$S/h.out"
 rc=$?
-if [ "$rc" = 0 ] && [ "$(cat "$D/usr/local/share/man/man4/nvidia.4")" = changed ] && [ -f "$S/outside" ] \
-    && grep -q 'kept .*nvidia.4' "$S/h.out" && grep -q 'refusing manifest path' "$S/h.out"; then
-	ok "deinstall keeps a changed file and refuses a .. path"
+# exit 1: a file was kept; it stays listed in the manifest
+if [ "$rc" = 1 ] && [ "$(cat "$D/usr/local/share/man/man4/nvidia.4")" = changed ] && [ -f "$S/outside" ] \
+    && grep -q 'kept .*nvidia.4' "$S/h.out" && grep -q 'refusing manifest path' "$S/h.out" \
+    && grep -q '^/usr/local/share/man/man4/nvidia.4 ' "$M"; then
+	ok "deinstall keeps a changed file, lists it, exits 1, and refuses a .. path"
 else
 	bad "deinstall changed/.. (rc $rc): $(tail -n 3 "$S/h.out")"
 fi
-# put the original back by hand so the tree is clean for the next cases
+# the user removes the changed file; a second deinstall finishes the job
 rm -f "$D/usr/local/share/man/man4/nvidia.4"
-rmdir "$D/usr/local/share/man/man4" "$D/usr/local/share/man" "$D/usr/local/share" 2>/dev/null
+deinst "$D" "$S/h2.out" || bad "second deinstall: $(tail -n 2 "$S/h2.out")"
 snap "$D" > "$S/h.list"
 cmp -s "$S/before.list" "$S/h.list" || bad "after (h): $(diff "$S/before.list" "$S/h.list" | head -5)"
 
@@ -253,6 +278,156 @@ if [ "$rc" = 0 ] && cmp -s "$S/before.list" "$S/k.list"; then
 else
 	bad "deinstall (rc $rc): $(diff "$S/before.list" "$S/k.list" | head -5)"
 fi
+
+# (m) configure into a DESTDIR: refused without YES, applied with it (an
+# existing rc.conf is backed up), "nothing to configure" the second time,
+# and deinstall puts both files back exactly and removes the backup
+D3=$S/dest3
+mkdir -p "$D3/boot" "$D3/etc" "$D3/var/db"
+printf 'hostname="h"\n' > "$D3/etc/rc.conf"
+cp "$D3/etc/rc.conf" "$S/rc.conf.orig"
+snap "$D3" > "$S/m.before"
+(MK_WORK=$W MK_DESTDIR=$D3 mk configure < /dev/null) > "$S/m0.out" 2>&1
+[ $? != 0 ] && cmp -s "$D3/etc/rc.conf" "$S/rc.conf.orig" && [ ! -e "$D3/boot/loader.conf" ] \
+    && ok "configure without YES and without a terminal is refused" || bad "configure without YES"
+MK_WORK=$W MK_DESTDIR=$D3 MK_YES=1 mk configure > "$S/m1.out" 2>&1 < /dev/null
+if [ $? = 0 ] && grep -q '^nvidia_gb10_autoload="YES"' "$D3/etc/rc.conf" && grep -q '^hostname="h"' "$D3/etc/rc.conf" \
+    && grep -q '^hw.nvidia.registry.EnableGpuFirmware="1"' "$D3/boot/loader.conf" \
+    && ls "$D3"/etc/rc.conf.bak-* > /dev/null 2>&1 && grep -q '^proposed: ' "$S/m1.out"; then
+	ok "configure YES=1 shows, backs up and applies"
+else
+	bad "configure YES=1: $(tail -n 3 "$S/m1.out")"
+fi
+MK_WORK=$W MK_DESTDIR=$D3 MK_YES=1 mk configure > "$S/m2.out" 2>&1 < /dev/null
+grep -q 'nothing to configure' "$S/m2.out" && ok "configure twice: nothing to configure" || bad "configure twice: $(tail -n 2 "$S/m2.out")"
+MK_WORK=$W MK_DESTDIR=$D3 MK_YES=1 mk deinstall > "$S/m3.out" 2>&1 < /dev/null
+rc=$?
+snap "$D3" > "$S/m.after"
+if [ "$rc" = 0 ] && cmp -s "$S/m.before" "$S/m.after" && cmp -s "$D3/etc/rc.conf" "$S/rc.conf.orig"; then
+	ok "deinstall takes out what configure set, restores rc.conf, removes the backup"
+else
+	bad "unconfigure: $(diff "$S/m.before" "$S/m.after" | head -4) $(tail -n 2 "$S/m3.out")"
+fi
+
+# (n) a path planted in the stage is refused, and nothing is written
+D4=$S/dest4
+mkdir -p "$D4"
+cp -Rp "$W/stage" "$S/stage-evil"
+mkdir -p "$S/stage-evil/etc/rc.d"
+printf '#!/bin/sh\n' > "$S/stage-evil/etc/rc.d/evil"
+snap "$D4" > "$S/n.before"
+mk _install-stage "$S/stage-evil" "$D4" /usr/local > "$S/n.out" 2>&1
+rc=$?
+rm -rf "$D4/var/db/nvidia-gb10-freebsd/.install."* 2>/dev/null
+if [ "$rc" != 0 ] && [ ! -e "$D4/etc/rc.d/evil" ] && grep -q 'refusing staged path /etc/rc.d/evil' "$S/n.out" \
+    && [ ! -e "$D4/boot/modules/nvidia.ko" ]; then
+	ok "a path planted in the stage is refused before anything is copied"
+else
+	bad "planted stage path (rc $rc): $(tail -n 2 "$S/n.out")"
+fi
+
+# (o) preflight and configure resolve paths only: no WORK is created
+MK_WORK=$S/nowork mk preflight > /dev/null 2>&1
+[ ! -e "$S/nowork" ] && ok "preflight creates no WORK" || bad "preflight created $S/nowork"
+
+# (p) a WORK writable by group or other is refused and left alone
+mkdir -m 775 "$S/gw"
+MK_WORK=$S/gw MK_DESTDIR=$D4 MK_YES=1 mk install > "$S/p.out" 2>&1 < /dev/null
+rc=$?
+[ "$rc" != 0 ] && [ "$(stat -f '%Lp' "$S/gw")" = 775 ] && grep -q 'writable by group or other' "$S/p.out" \
+    && ok "a group-writable WORK is refused and keeps its mode" || bad "group-writable WORK (rc $rc): $(tail -n 1 "$S/p.out")"
+
+# (r) the NVIDIA licence: YES=1 alone stops with the explanation and the
+# setting to add; no setting and no terminal stops too; either setting
+# accepts and records it; a changed licence asks again; preflight says so
+WL=$S/wl
+top=NVIDIA-FreeBSD-x86_64-580.178.04
+mkdir -p "$S/lt/$top/doc" "$WL/sources"
+printf 'NVIDIA Driver License Agreement (test copy)\n' > "$S/lt/$top/doc/license.txt"
+tar -cJf "$WL/sources/$top.tar.xz" -C "$S/lt" "$top"
+lic() { env MK_WORK="$WL" "$@" sh "$repo/scripts/make.sh" _licence < /dev/null; }
+lic MK_YES=1 > "$S/r1.out" 2>&1
+rc=$?
+[ "$rc" = 1 ] && grep -q 'ACCEPT_NVIDIA_LICENSE=1' "$S/r1.out" && grep -q 'YES=1 alone' "$S/r1.out" \
+    && [ ! -e "$WL/sources/nvidia-licence.accepted" ] \
+    && ok "licence: YES=1 alone stops with the explanation and the setting" || bad "licence YES=1 alone (rc $rc)"
+lic > "$S/r2.out" 2>&1
+rc=$?
+[ "$rc" = 1 ] && grep -q 'ACCEPT_ALL_LICENSES=1' "$S/r2.out" && [ ! -e "$WL/sources/nvidia-licence.accepted" ] \
+    && ok "licence: no setting and no terminal stops" || bad "licence no setting (rc $rc)"
+MK_WORK=$WL mk preflight --json > "$S/r.json" 2>/dev/null
+grep -q '"name": "licence", "state": "missing".*ACCEPT_NVIDIA_LICENSE=1' "$S/r.json" \
+    && ok "preflight: licence missing, with the setting to add" || bad "preflight licence missing"
+lic MK_YES=1 MK_ACCEPT_NVIDIA_LICENSE=1 > "$S/r3.out" 2>&1
+rc=$?
+[ "$rc" = 0 ] && grep -q 'accepted by ACCEPT_NVIDIA_LICENSE=1' "$WL/sources/nvidia-licence.accepted" \
+    && ok "licence: ACCEPT_NVIDIA_LICENSE=1 accepts and records it" || bad "ACCEPT_NVIDIA_LICENSE=1 (rc $rc)"
+MK_WORK=$WL mk preflight --json > "$S/r.json" 2>/dev/null
+grep -q '"name": "licence", "state": "ok"' "$S/r.json" && ok "preflight: licence ok once accepted" || bad "preflight licence ok"
+printf 'a changed term\n' >> "$S/lt/$top/doc/license.txt"
+tar -cJf "$WL/sources/$top.tar.xz" -C "$S/lt" "$top"
+lic MK_YES=1 > "$S/r4.out" 2>&1
+rc=$?
+[ "$rc" = 1 ] && ok "licence: a changed licence asks again" || bad "changed licence (rc $rc)"
+MK_WORK=$WL mk preflight --json > "$S/r.json" 2>/dev/null
+grep -q '"name": "licence", "state": "missing", "available": false, "reason": "the NVIDIA driver licence in the tarball changed' "$S/r.json" \
+    && ok "preflight: a changed licence is missing again" || bad "preflight after a licence change"
+lic MK_ACCEPT_ALL_LICENSES=1 > "$S/r5.out" 2>&1
+rc=$?
+[ "$rc" = 0 ] && grep -q 'accepted by ACCEPT_ALL_LICENSES=1' "$WL/sources/nvidia-licence.accepted" \
+    && ok "licence: ACCEPT_ALL_LICENSES=1 accepts it" || bad "ACCEPT_ALL_LICENSES=1 (rc $rc)"
+(cd "$repo" && make -s help) | grep -q 'ACCEPT_NVIDIA_LICENSE=1' && ok "help lists the licence settings" || bad "help: licence settings"
+
+# (s) someone else's drm.ko in /boot/modules: install leaves drm.ko and
+# dmabuf.ko out and does not touch the foreign one
+D5=$S/dest5
+mkdir -p "$D5/boot/modules"
+printf 'foreign drm\n' > "$D5/boot/modules/drm.ko"
+inst "$D5" "$S/s.out"
+rc=$?
+M5=$D5/var/db/nvidia-gb10-freebsd/installed.manifest
+if [ "$rc" = 0 ] && [ "$(cat "$D5/boot/modules/drm.ko")" = "foreign drm" ] && ! grep -q '^/boot/modules/drm.ko ' "$M5" \
+    && ! grep -q '^/boot/modules/dmabuf.ko ' "$M5" && grep -q '^/boot/modules/nvidia-drm.ko ' "$M5"; then
+	ok "a foreign drm.ko is kept and ours is not installed"
+else
+	bad "foreign drm.ko (rc $rc): $(tail -n 2 "$S/s.out")"
+fi
+deinst "$D5" "$S/s2.out"
+[ "$(cat "$D5/boot/modules/drm.ko")" = "foreign drm" ] && ok "deinstall keeps the foreign drm.ko" || bad "deinstall removed the foreign drm.ko"
+
+# (t) a manifest at the old place (commit 23c18da: PREFIX/share) is moved,
+# and deinstall still removes everything
+D6=$S/dest6
+mkdir -p "$D6/boot/modules" "$D6/usr/local/etc" "$D6/etc"
+snap "$D6" > "$S/t.before"
+inst "$D6" "$S/t1.out" || bad "(t) install: $(tail -n 2 "$S/t1.out")"
+mkdir -p "$D6/usr/local/share/nvidia-gb10-freebsd"
+awk '$1 == "/var/db/nvidia-gb10-freebsd/installed.manifest" { $1 = "/usr/local/share/nvidia-gb10-freebsd/installed.manifest" }
+    $1 != "/var/db/nvidia-gb10-freebsd" && $1 != "/var/db" && $1 != "/var" { print }' \
+    "$D6/var/db/nvidia-gb10-freebsd/installed.manifest" > "$D6/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+printf '/usr/local/share/nvidia-gb10-freebsd dir\n/var dir\n/var/db dir\n' >> "$D6/usr/local/share/nvidia-gb10-freebsd/installed.manifest"
+chmod u+w "$D6/var/db/nvidia-gb10-freebsd/installed.manifest"
+rm -f "$D6/var/db/nvidia-gb10-freebsd/installed.manifest"
+deinst "$D6" "$S/t2.out"
+rc=$?
+snap "$D6" > "$S/t.after"
+[ "$rc" = 0 ] && cmp -s "$S/t.before" "$S/t.after" && grep -q 'moved the manifest of an earlier install' "$S/t2.out" \
+    && ok "a manifest at the old place is moved and deinstall removes everything" \
+    || bad "(t) rc $rc: $(diff "$S/t.before" "$S/t.after" | head -4 | tr '\n' ' ')"
+
+# (u) every module of the module table is a path install may write
+bad_paths=$(printf '%s\n' $mods | sed 's|.*/|/boot/modules/|' | while read -r pth; do
+	grep -q "^$pth " "$S/q.manifest" || echo "$pth"
+done)
+[ -z "$bad_paths" ] && ok "every module of the module table is installed" || bad "not installed: $bad_paths"
+
+# (q) the expected manifest in the repository is what install writes
+# (owners as a root install sets them)
+awk '$2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, "root:wheel" }' \
+    "$S/q.manifest" 2>/dev/null | sort > "$S/q.got"
+grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF' | sort > "$S/q.want"
+[ -s "$S/q.got" ] && cmp -s "$S/q.got" "$S/q.want" && ok "tests/install-e2e/expected.manifest matches what install writes" \
+    || bad "expected.manifest differs: $(diff "$S/q.want" "$S/q.got" | head -4 | tr '\n' ' ')"
 
 if [ "$fail" = 0 ]; then
 	echo "make_contract_test: PASS"
