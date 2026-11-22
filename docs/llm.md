@@ -274,6 +274,10 @@ recorded with `"path": "linuxulator"` and `"path_status": "last-resort"`, and ar
 soon as a native path exists.
 The Linux CUDA path is described in the next section.
 
+## NVIDIA Vulkan through the Linuxulator (Linux-only, last resort)
+
+This is the last-resort Linux path: it is used only while no native NVIDIA Vulkan driver exists, and its results are recorded with path linuxulator, path_status last-resort.
+
 [`scripts/run-nv-vulkan.sh`](../scripts/run-nv-vulkan.sh) runs the Linux aarch64 Vulkan stack
 against the NVIDIA card through the Linuxulator. It starts the programs from private Linux roots
 of their own (nothing in `/compat/linux` is touched) and sets the two environment variables the
@@ -337,6 +341,28 @@ Two traps, in plain words:
 The script is tested without a GPU and without a Linux root:
 `sh tests/run-nv-vulkan_test.sh` builds a fake work root whose dynamic linker is a shell script
 that prints its arguments, and checks the modes, the model path and the two refusals.
+
+## Native NVIDIA benchmark
+
+When NVK on libnvrm can create a device, `scripts/native-llm-bench`
+([native-llm-bench(1)](../man/native-llm-bench.1)) selects the card by PCI bus, proves the Vulkan and
+benchmark paths are native, checks memory before each model, and records history rows with
+published-median comparisons. For NVIDIA it pins only `nvk_nvrm_icd.<arch>.json` with library
+`libvulkan_nvk_nvrm.so`; any `libvulkan_nouveau.so` ICD or inherited override to another ICD is
+refused. It refuses Linux ICDs, Linux binaries and loaded Linux compatibility modules; until that
+native path exists, it exits with the Track #2379 refusal instead of running the Linux path.
+
+Check the working Radeon path without starting a benchmark:
+
+```sh
+scripts/native-llm-bench --gpu radeon --dry-run
+```
+
+The NVIDIA command below refuses with exit 3 until NVK on libnvrm is installed:
+
+```sh
+scripts/native-llm-bench --gpu nvidia
+```
 
 ## CUDA (Linux libcuda through the Linuxulator; Linux-only, last resort)
 
