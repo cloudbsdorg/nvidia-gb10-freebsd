@@ -300,3 +300,109 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
 
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
+
+## 2026-11-22 (native-tools test-boot kit, agent/native-tools-testboot, #2362): PAUSED after the survey, no kit code written; resume at Next 1
+Brief (Mark): "we have native tooling, we need native test results, not going through linux". A one-shot test-boot kit
+that measures the NVIDIA card with native FreeBSD tools only: linux_enable=NO in the BE, no linux64 kldload, results as
+JSON/JSONL (a summary verdict plus per-tool JSON). Modelled on the uvm-bsd kit tests/ioctl/testboot (e3b07d9 on
+agent/2373-uvm-client-ownership): dead-man timer, self-recording rc one-shot, testboot-return to cloudbsd-rx7600, GSP
+firmware loaded as root first, root open before the probes, gpu-detect.sh (never /dev/nvidia0). Dry-run build and
+check-be.sh only; the orchestrator arms it. Every commit passes the review gate twice (two review-and-record rounds);
+author Mark LaPointe; push; a Track comment; a STATUS.md line.
+
+This is the one spec for the kit. It folds in the findings of review-and-record receipts aa2815b6, d1ea2742 and 03953fbd
+(five reviewing voices each) on earlier drafts of this entry; nothing here is decided by Mark yet.
+
+Layout and names:
+- BE nvidia-native-tools-test-YYYYMMDD-N, N from -n (default 1). A clashing name is refused with a message that names the
+  existing BE and the next free N.
+- the rc one-shot (root) writes to /var/db/nvidia-native-tools-test/<stamp>/ in the BE and copies the run to the copy-out
+  directory, a make-be.sh option whose default is /home/mlapointe/work/gb10/logs/native-tools-testboot (the home dataset
+  survives the return). check-be.sh fails when that directory is on the BE dataset (zfs list -H -o name for the path
+  equals the BE dataset or lies below it).
+- shared pieces of the model kit (dead-man, rc skeleton, gpu-detect.sh, testboot-return) are vendored with a sha256 pin
+  in VENDOR; check-be.sh compares them (testboot-return pin 3a88d17547c013ce93631d5aa4a414bcae6ccadb6e6653f641553f6df77f4d9d).
+
+Statuses and verdict:
+- every row has one status: pass, fail, error, needs-linux, needs-linuxkpi or not-available, each with a reason.
+- summary.json holds every planned row (its key set equals the planned list, a host test checks it), counts per status,
+  and the verdict: fail when any row is fail or error or the environment check failed; incomplete when no row failed
+  but some planned row is not pass; pass only when every planned row passed. A run that tested little never reads pass.
+- libnvrm S2 rows stay in the plan: not-available with the reason (no agent/2378-libnvrm-s2 on origin at assembly)
+  unless S2 is pushed by then.
+
+The no-Linux guard:
+- environment, once, before any row: error when kldstat -v exits non-zero, or its output lacks kernel, or lacks
+  nvidia.ko (either missing is an error; positive control). fail when any file or module name contains "linux" (linux,
+  linux64, linux_common, linuxkpi, nvidia_linux, nvidia_modeset_linux, any future bridge), or when sysctl -N compat.linux
+  answers; only its unknown-oid answer counts as absent, any other failure is error. An environment failure or error
+  makes every row not-available ("environment tainted") and the verdict fail. The message names the modules found and
+  the fix (rebuild the BE from a base without them).
+- make-be.sh sets linux_enable=NO, strips linuxkpi consumers (amdgpu, drm, i915kms) from the clone kld_list and
+  loader.conf; check-be.sh fails when any entry still loads one.
+- per row: the row runs under ktrace -i -t cn; every execve path comes from its NAMI records (the tool, a #! interpreter,
+  every ELF it runs), and each must be a FreeBSD-branded ELF (brandelf, readelf -n). An execve without a resolved path,
+  or a trace with no execve of the tool itself, is error. Any kldload call in the trace, or a kldunload of a module whose
+  name contains linux, is fail. After the row, kldstat -v must show no new module (a delta).
+- host tests: a /bin/sh script passes; an undeclared copy of /bin/echo branded Linux, run by absolute path, fails; a row
+  that loads and unloads a module named linux_test fails; canned kldstat with only kernel is error; canned kldstat with
+  nvidia_linux.ko and no linux64 fails; a stub sysctl with a non-oid error is error.
+
+Classification of rows that may need Linux (evidence recorded in the row):
+- from the .ko: the MODULE_DEPEND list (readelf, kldxref) and undefined symbols matching linux, lkpi or linuxkpi; from
+  the row binaries: their brands. A dependency on linux, linux64 or linux_common gives needs-linux, on linuxkpi gives
+  needs-linuxkpi; none gives a native row. An inspection that fails (missing file, nm error) gives not-available.
+- nvidia-uvm.ko is SUSPECTED to need the Linuxulator (the #2363 kit loads it only after linux64), UNVERIFIED. The uvm-bsd
+  79-check ioctl suite and the #2373 probe and race tests follow this rule.
+- render uAPI and PRIME rows are native when their ioctls are served by nvidia.ko or nvidia-modeset.ko of the #2363 build
+  and the guard passes; otherwise classified by the same rule.
+
+Survey done:
+- model kit read: make-be.sh, check-be.sh, nvidia_client_owner_testboot, gpu-detect.sh, summarize.sh, testboot-return.
+- origin/main is 7e28d7b. agent/2363-linux-bridges-optional (dc38ba9) is NOT merged into main yet, so nvidia.ko on main
+  still carries the Linux ioctl bridge; the kit uses the #2363 build and installs only its native modules (nvidia.ko,
+  nvidia-modeset.ko, the GSP firmware), never nvidia_linux.ko or nvidia_modeset_linux.ko. Not yet checked on the files.
+- libnvrm S2 is NOT pushed; wt-libnvrm-s2 holds uncommitted S2 work of another agent: do not touch it.
+
+Next:
+1. Check with readelf and nm, recording the output here: the main nvidia.ko of the v6 boot build (nvidia-v6-phase0.ko in
+   $GB10_WORK/logs/uvm-2373), the #2363 build in the tree its make-be.sh -t reads (default $GB10_WORK/build/tree, from
+   dc38ba9: nvidia/nvidia.ko, nvidia-modeset/nvidia-modeset.ko), and nvidia-uvm.ko (nvidia-uvm-v5.ko, same directory).
+2. Write tests/native-tools-testboot/ (make-be.sh, check-be.sh, the rc one-shot, summarize.sh writing summary.json, the
+   guard and statuses above) and the kit host test.
+3. Rows: nvrm-info on the booted card (tests/libnvrm/boot_nvrm_info.sh), gpu-detect and the root open, then the uvm,
+   render and PRIME rows by the classification rule, the S2 rows as above.
+4. Gate twice per commit, push, the dry-run BE, check-be.sh, a Track comment under #2362, STATUS.md, hand back.
+
+## 2026-11-22 (native-tools test-boot kit, #2362): RESUMED after the test boot; kit written, host test green
+- main is a682522 (#2363 merged); the branch is fast-forwarded to it, the earlier entry re-added on top.
+- nvidia-uvm.ko NEEDS the Linuxulator, verified: uvm-bsd sys/uvm_main.c declares MODULE_DEPEND(nvidia_uvm,
+  linux64elf or linux, 1, 1, 1) and MODULE_DEPEND(nvidia_uvm, linux_common, 1, 1, 1) and calls
+  linux_ioctl_register_handler; kldxref -d -v on nvidia-uvm-v5.ko (the v7 boot module) prints linux64elf.1 and
+  linux_common.1, nm -u shows linux_ioctl_register_handler and linux_ioctl_unregister_handler. The uvm rows are
+  needs-linux until uvm-bsd makes that bridge optional the way #2363 did for nvidia.ko.
+- nvidia.ko of main NEEDS NO Linux, verified on a fresh archive build of a682522 (work-native-a682522, SYSDIR
+  kc502, base LLD 21.1.8): depends on kernel, mem, nvidia_gsp_ga10x_fw_fw only, no undefined linux_ or lkpi_ symbol;
+  nvidia-modeset.ko depends on kernel and nvidia.2 only. The v6 and older builds all depended on linux64elf and
+  linux_common. Staged in logs/native-tools/stage-a682522 with SHA256-native-a682522.txt and nvrm-info built from
+  the same commit.
+- the normal BE loads amdgpu (kld_list, so linuxkpi and drm) and linux64 (linux_enable); the kit strips both in the
+  clone and blocks them in devmatch (rc.conf and loader kenv).
+- libnvrm S2 still not on origin: nvrm-s2-memory is not-available. Render uAPI: header and documents only. PRIME:
+  needs-linuxkpi (nvidia-drm.ko, amdgpu).
+- kit: tests/native-tools-testboot/ (make-be.sh, check-be.sh, the rc one-shot, guard.sh, summarize.py, the summary
+  schema, ROWS.md, vendored gpu-detect.sh and testboot-return pinned in VENDOR), tests/native_tools_kit_test.sh
+  91 passed 0 failed, README section.
+Next: gate 2 rounds, commit once the root Makefile is on main (merge it first), push, dry-run BE, check-be, Track,
+STATUS, hand back.
+- Gate round 1 (receipt 1c084a59, 5 Opus voices plus scanners; lizard CCN 37 in summarize.py fixed by splitting
+  it). Fixed: guard_trace parses kdump by event name (a process name with spaces), keeps only the paths of a
+  successful execve, and a relative or vanished path is an error; any kldload or kldunload fails (kldunload names a
+  file id, so the rule is "any"; comments say so); lindebugfs matched; nm failure or an empty nm list is an error
+  (guard_undef); the rc script reads rc.conf.d before its defaults (normal_be was ignored); the copy-out refuses a
+  symbolic link in its path, writes into a new 0700 directory from inside it, and copies testboot-return.txt and
+  rc.log again after the return; not-run for every unreached row, not-available only for a missing tool; a missing
+  row after any failed row (planned or not) is not-run; bectl list failure no longer masked; copy-out default under
+  GB10_WORK; check-be finds the steps by check-be markers, derives the BE root from bootfs (any name), prints no ok
+  after a failed override check, says what to do on failure; make-be -h prints the whole header. Kit test 121/0.
+  Branch fast-forwarded to main d015038 (root Makefile, #2440).
