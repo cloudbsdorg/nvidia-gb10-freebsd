@@ -5,7 +5,7 @@
 # stubs_test.sh - tests for the fail-closed RM core stubs
 # (src/gb10-stubs/nv-gb10-stubs.c) and scripts/build-stubs.sh.
 #
-# Runs against the real prepared trees under ${GB10_WORK:-$HOME/work/gb10}
+# Runs against the real prepared trees under ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 # (the ogkm build copy, nv-kernel-aarch64.o and the OS-layer objects), so
 # the stubs are compiled with the core's own flags and linked exactly as
 # build-stubs.sh does it. Prerequisite: scripts/prepare-tree.sh and
@@ -37,13 +37,13 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 export TMPDIR="$WORK/tmp"
 SYMS=$REPO/tests/data/rmcore-missing-symbols.txt
 BUILD=$REPO/scripts/build-stubs.sh
 STUBS_SRC=$REPO/src/gb10-stubs/nv-gb10-stubs.c
 STUBS_OBJ=$WORK/build/nv-gb10-stubs.o
-# Unpredictable scratch directory ($WORK/tmp is $HOME/work/gb10/tmp unless
+# Unpredictable scratch directory ($WORK/tmp is <repo>/work/tmp unless
 # GB10_WORK says otherwise), removed by the trap on every exit path.
 mkdir -p "$WORK/tmp"
 TESTROOT=$(mktemp -d "$WORK/tmp/stubs-test.XXXXXXXX") || exit 1

@@ -10,12 +10,12 @@
 #
 # Set: Llama 3.2 3B Q4_K_M (fa 1), Llama 2 7B Q4_0 (fa 0,1), Ornith 1.5 9B
 # Q4_K_M (fa 1) and Qwen2.5 14B Q4_K_M (fa 1); every run is
-# -ngl 99 -t 8 -r 3 -p 512 -n 128 -o json, from ~/work/models (MODELS).
+# -ngl 99 -t 8 -r 3 -p 512 -n 128 -o json, from <repo>/work/models (MODELS).
 # One benchmark at a time: refuses to start while uvm_stress.sh runs.
 #
 # Environment:
-#   GB10_WORK  work root (default $HOME/work/gb10)
-#   MODELS     model directory (default $HOME/work/models)
+#   GB10_WORK  work root (default <repo>/work)
+#   MODELS     model directory (default <repo>/work/models)
 #   ONLY       space-separated model tags to run (3b 7b ornith qwen)
 #
 # Exit status: 0 all runs ok; 1 a run failed; 2 usage or a stress run active.
@@ -33,11 +33,10 @@ cuda | vulkan) ;;
 	;;
 esac
 [ $# -eq 2 ] || { echo "usage: $0 cuda|vulkan OUTDIR" >&2; exit 2; }
-: "${HOME:?HOME must be set}"
 backend=$1
 out=$2
-W=${GB10_WORK:-$HOME/work/gb10}
-M=${MODELS:-$HOME/work/models}
+W=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
+M=${MODELS:-$W/models}
 here=$(cd "$(dirname "$0")" && pwd)
 if pgrep -f '^(timeout [0-9]+ )?sh [^ ]*uvm_stress\.sh' >/dev/null 2>&1; then
 	echo "bench-report: uvm_stress.sh is running; not benchmarking" >&2

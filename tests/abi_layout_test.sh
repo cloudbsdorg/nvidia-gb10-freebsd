@@ -29,7 +29,7 @@
 #
 # Environment:
 #   GB10_WORK  work root holding build/tree and build/ogkm; defaults to
-#              $HOME/work/gb10, the same root every other script and test
+#              <repo>/work, the same root every other script and test
 #              in this repo uses. TMPDIR is always $GB10_WORK/tmp - an
 #              inherited TMPDIR is ignored.
 #
@@ -45,9 +45,9 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 export PATH
 # The work root comes from GB10_WORK like every other script and test in
 # this repo, so the trees checked here are the trees the scripts built
-# (r14e-c pass-2 u11 #2: $HOME/work/gb10 was hard-coded and GB10_WORK was
+# (r14e-c pass-2 u11 #2: <repo>/work was hard-coded and GB10_WORK was
 # silently ignored).
-ROOT=${GB10_WORK:-$HOME/work/gb10}
+ROOT=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 # TMPDIR is FORCED, never inherited: this test compiles probe binaries in
 # it and EXECUTES them, and the project rule is that scratch never lives
 # outside $ROOT/tmp - an inherited TMPDIR=/tmp would put executed code in

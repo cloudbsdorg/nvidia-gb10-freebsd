@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:cuda-native:schema:nvptxas-trace/1",
+  "title": "cuda-native nvptxas stub trace, schema 1",
+  "description": "One JSON object per successful nvptxas stub invocation, including invocation through the ptxas alias. Paths are the arguments clang supplied; stub is always true because no machine code was assembled. The schema field is the record format; the release version is reported separately by --version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "schema", "arch", "input", "output", "stub"],
+  "properties": {
+    "tool": { "const": "nvptxas" },
+    "schema": { "const": 1 },
+    "arch": { "type": "string" },
+    "input": { "type": "string" },
+    "output": { "type": "string" },
+    "stub": { "const": true }
+  }
+}

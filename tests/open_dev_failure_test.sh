@@ -39,7 +39,7 @@
 # Usage: sh tests/open_dev_failure_test.sh
 #   The tree under test is prepared here from the repository's own patches
 #   (scripts/prepare-tree.sh) into a scratch tree under
-#   ${GB10_WORK:-$HOME/work/gb10}/build and removed on exit; it needs the
+#   ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build and removed on exit; it needs the
 #   pristine sources (scripts/fetch-sources.sh) and a C compiler.
 # Exit: 0 every case passes, 1 otherwise.
 
@@ -50,7 +50,7 @@ export PATH LC_ALL
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo/scripts/lib.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 ver=$(sources_get "$repo/SOURCES" ogkm_tag) || { echo "FAIL: no ogkm_tag in SOURCES"; exit 1; }
 PRISTINE=$WORK/sources/NVIDIA-FreeBSD-x86_64-$ver/src
 OGKM=$WORK/sources/open-gpu-kernel-modules-$ver
@@ -281,10 +281,23 @@ if [ ! -s "$TMPD/lint.out" ] && { [ "$_lrc" -eq 0 ] || [ -s "$TMPD/lint.raw" ]; 
 else
 	bad "man/nvidia.4 does not lint clean"; sed 's/^/    /' "$TMPD/lint.out"
 fi
-MSG='nvidia0: NVRM: rm_init_adapter() failed!'
+# The documents name the unit as nvidiaN because the unit number is never assumed (the card is not always unit 0).
+DIAG='NVRM: rm_init_adapter() failed!'
+MSG="nvidiaN: $DIAG"
 grep -qF "$MSG" "$repo/man/nvidia.4" && grep -qF "$MSG" "$repo/README.md" \
-    && ok "man page and README name the exact diagnostic the driver prints" || bad "the diagnostic text is missing from the man page or the README"
-grep -qF 'rm_init_adapter() failed!' "$TREE/nvidia/nvidia_subr.c" && ok "the driver prints that diagnostic" || bad "the driver does not print the documented diagnostic"
+    && ok "man page and README name the driver's diagnostic with the unit placeholder nvidiaN" || bad "the man page or the README does not name the diagnostic as nvidiaN: ..."
+for _doc in man/nvidia.4 README.md; do
+	grep -qE 'nvidia[0-9]+: NVRM: rm_init_adapter\(\) failed!' "$repo/$_doc"
+	_grc=$?
+	if [ "$_grc" -eq 0 ]; then
+		bad "$_doc names the diagnostic with a concrete unit number"
+	elif [ "$_grc" -eq 1 ]; then
+		ok "$_doc does not name the diagnostic with a concrete unit number"
+	else
+		bad "could not read $_doc"
+	fi
+done
+grep -qF "$DIAG" "$TREE/nvidia/nvidia_subr.c" && ok "the driver prints that diagnostic (device_printf adds the unit prefix)" || bad "the driver does not print the documented diagnostic"
 grep -q 'nvidia_gsp_ga10x_fw' "$repo/man/nvidia.4" && grep -q 'EnableGpuFirmware' "$repo/man/nvidia.4" \
     && ok "man page gives the remedy (firmware module) and explains EnableGpuFirmware" || bad "man page lacks the firmware remedy"
 if grep -n '0x19f8\|Track #' "$repo/man/nvidia.4" > "$TMPD/hist.out"; then bad "man page carries a fault address or a tracker number"; cat "$TMPD/hist.out"; else ok "man page has neither a fault address nor a tracker number"; fi

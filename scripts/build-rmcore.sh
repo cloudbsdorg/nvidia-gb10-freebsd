@@ -14,10 +14,10 @@
 #            named by its bare word as the first argument
 #            (nvidia-modeset), the form the README's build recipe uses.
 #   OUT   where to copy the built object; defaults to
-#         ${GB10_WORK:-$HOME/work/gb10}/build/nv-kernel-aarch64.o (nvidia)
+#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/nv-kernel-aarch64.o (nvidia)
 #         or .../build/nv-modeset-kernel-aarch64.o (nvidia-modeset)
 #   LOG   gmake output log; defaults to
-#         ${GB10_WORK:-$HOME/work/gb10}/logs/build-rmcore-<core>-<UTC>.log
+#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/logs/build-rmcore-<core>-<UTC>.log
 #
 # Environment:
 #   GB10_WORK work root holding sources/, build/, logs/ and tmp/; it must
@@ -85,7 +85,7 @@ LC_ALL=C
 export PATH LC_ALL
 
 OGKMDIR=open-gpu-kernel-modules-580.178.04
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 # GB10_WORK must be an ABSOLUTE path: the build below cd's into the copied
 # tree and writes $BUILDDIR/$MARKER.new and $OUT relative to the new
 # directory, so a relative work root turns a good build into a failure at

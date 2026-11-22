@@ -1,0 +1,208 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt LIBCUDA 3
+.Os
+.Sh NAME
+.Nm libcuda
+.Nd native CUDA Driver API device and context subset
+.Sh LIBRARY
+libcuda
+.Sh SYNOPSIS
+.In cuda.h
+.Ft CUresult
+.Fn cuInit "unsigned int flags"
+.Ft CUresult
+.Fn cuDriverGetVersion "int *driverVersion"
+.Ft CUresult
+.Fn cuDeviceGetCount "int *count"
+.Ft CUresult
+.Fn cuDeviceGet "CUdevice *device" "int ordinal"
+.Ft CUresult
+.Fn cuDeviceGetName "char *name" "int len" "CUdevice dev"
+.Ft CUresult
+.Fn cuDeviceGetUuid "CUuuid *uuid" "CUdevice dev"
+.Ft CUresult
+.Fn cuDeviceTotalMem "size_t *bytes" "CUdevice dev"
+.Ft CUresult
+.Fn cuDeviceGetAttribute "int *pi" "CUdevice_attribute attrib" "CUdevice dev"
+.Ft CUresult
+.Fn cuDevicePrimaryCtxRetain "CUcontext *pctx" "CUdevice dev"
+.Ft CUresult
+.Fn cuDevicePrimaryCtxRelease "CUdevice dev"
+.Ft CUresult
+.Fn cuCtxGetCurrent "CUcontext *pctx"
+.Ft CUresult
+.Fn cuCtxSetCurrent "CUcontext ctx"
+.Ft CUresult
+.Fn cuCtxGetDevice "CUdevice *device"
+.Ft CUresult
+.Fn cuGetErrorName "CUresult error" "const char **pStr"
+.Ft CUresult
+.Fn cuGetErrorString "CUresult error" "const char **pStr"
+.Ft CUresult
+.Fn cuGetProcAddress "const char *symbol" "void **pfn" "int cudaVersion" "cuuint64_t flags"
+.Ft CUresult
+.Fn cuGetProcAddress_v2 "const char *symbol" "void **pfn" "int cudaVersion" "cuuint64_t flags" "CUdriverProcAddressQueryResult *symbolStatus"
+.Sh DESCRIPTION
+The
+.Nm
+library provides a small, native FreeBSD subset of the CUDA Driver API.
+It uses neither the Linux compatibility layer nor NVIDIA's CUDA libraries.
+The public header is
+.In cuda.h .
+.Dv CUDA_VERSION
+is 13000 and
+.Dv CUDA_NATIVE_VERSION
+is 100, encoding version 0.1.0 as major * 10000 + minor * 100 + patch.
+The C declarations are also enclosed in C++ linkage guards.
+All exported functions have the provisional symbol version
+.Dv CUDA_1.0 .
+.Pp
+.Fn cuInit
+accepts only zero flags and initializes the provider registry once per process.
+Device and context calls other than argument validation require successful
+initialization; before it they return
+.Dv CUDA_ERROR_NOT_INITIALIZED .
+.Fn cuDriverGetVersion ,
+the error queries, and
+.Fn cuGetProcAddress
+do not require initialization.
+.Ss Providers
+.Ev CUDA_NATIVE_BACKEND
+selects
+.Dq fake
+or
+.Dq nvrm .
+The default is
+.Dq nvrm .
+An unknown name makes
+.Fn cuInit
+fail with
+.Dv CUDA_ERROR_INVALID_VALUE .
+The nvrm provider is a stub in this release: enumeration returns
+.Dv CUDA_ERROR_NOT_SUPPORTED
+and no device is opened.
+.Pp
+The fake provider defaults to one synthetic GB206 device.
+.Ev CUDA_NATIVE_FAKE_PROFILE
+accepts a comma-separated list of
+.Dq gb206
+and
+.Dq gb10 .
+The list
+.Dq gb206,gb10
+provides GB206 followed by GB10.
+An unknown or empty profile is an invalid value.
+Fake names, UUIDs, memory sizes, and attributes are test data, not hardware
+measurements.
+.Ss Devices
+Device ordinals are contiguous in their visible enumeration order.
+Invalid ordinals return
+.Dv CUDA_ERROR_INVALID_DEVICE .
+.Fn cuDeviceGetName
+always terminates the destination and truncates a name to fit.
+.Fn cuDeviceTotalMem
+returns bytes.
+.Fn cuDeviceGetAttribute
+returns
+.Dv CUDA_ERROR_NOT_SUPPORTED
+for an attribute outside the subset and leaves the destination unchanged.
+.Ss Visibility
+.Ev CUDA_VISIBLE_DEVICES
+is read during the first initialization attempt.
+The outcome of that attempt, including failure, is permanent for the process
+lifetime; later environment changes do not retry initialization.
+When unset, every provider device is visible in physical order.
+When set to an empty string, no device is visible.
+Otherwise it is a comma-separated sequence of zero-based physical indices or
+UUID selectors of the form
+.Dq GPU-<uuid> .
+Entries filter and reorder the visible list.
+An invalid index ends parsing, so only entries before it are visible, matching
+the public CUDA environment-variable contract.
+UUID selectors may be unambiguous prefixes of the canonical UUID text.
+An invalid or ambiguous UUID selector also ends parsing in this implementation.
+Repeated entries are retained.
+MIG selectors are not implemented.
+.Ss Context state
+.Fn cuDevicePrimaryCtxRetain
+retains one reference-counted primary context per physical device.
+Retaining an already active primary context returns the same handle.
+It does not make that context current.
+.Fn cuDevicePrimaryCtxRelease
+releases one reference; releasing an inactive primary context returns
+.Dv CUDA_ERROR_INVALID_CONTEXT .
+The final release invalidates the handle, which may be reused by a later retain.
+.Pp
+The current context is per thread and initially null.
+.Fn cuCtxSetCurrent
+accepts null or an active primary context owned by this library.
+.Fn cuCtxGetCurrent
+returns the calling thread's current handle.
+.Fn cuCtxGetDevice
+returns the visible ordinal associated with that handle, or
+.Dv CUDA_ERROR_INVALID_CONTEXT
+when no active context is current.
+These calls manage user-space state only; they do not submit GPU work.
+.Ss Errors and entry points
+.Fn cuGetErrorName
+and
+.Fn cuGetErrorString
+return static text for each
+.Vt CUresult
+value defined by this subset.
+An unknown result or null output pointer returns
+.Dv CUDA_ERROR_INVALID_VALUE .
+An unknown result also sets
+.Va *pStr
+to null.
+.Pp
+.Fn cuGetProcAddress_v2
+looks up the library's public entry points in one table.
+The header maps the source-level name
+.Fn cuGetProcAddress
+to this five-argument function.
+The dynamic symbol
+.Fn cuGetProcAddress
+retains the documented four-argument CUDA 11.3 interface for legacy callers.
+Both forms accept default, legacy-stream, and per-thread-default-stream flags.
+.Pp
+A request for a CUDA version newer than
+.Dv CUDA_VERSION
+returns
+.Dv CUDA_ERROR_INVALID_VALUE
+and sets a supplied query status to
+.Dv CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT .
+When the requested version predates an entry point, the current form returns
+.Dv CUDA_SUCCESS ,
+sets the function pointer to null, and sets the query status to
+.Dv CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT ;
+the legacy form returns
+.Dv CUDA_ERROR_NOT_FOUND .
+An unknown name returns
+.Dv CUDA_ERROR_NOT_FOUND ,
+sets the function pointer to null, and sets a supplied status to
+.Dv CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND .
+The unknown-name result is intentionally stricter than the success-with-null-pointer
+behavior in the current public reference.
+Every failed entry-point query sets
+.Va *pfn
+to null when that pointer is supplied; the current form also updates a supplied
+.Va symbolStatus .
+These writes are exceptions to the general unchanged-output rule below.
+.Sh RETURN VALUES
+Functions return
+.Dv CUDA_SUCCESS
+on success or a
+.Vt CUresult
+error value.
+Unless documented otherwise, output pointers must not be null and are not
+changed on failure.
+.Sh SEE ALSO
+.Xr cuda-native-info 1 ,
+.Xr pthread 3
+.Sh HISTORY
+This clean-room subset first appeared in cuda-native 0.1.0.
+Its provider ABI and symbol version remain provisional until the first package
+release.

@@ -5,7 +5,7 @@
 # prepare-tree_test.sh - offline test for scripts/prepare-tree.sh.
 #
 # Builds a tiny fake tarball under an unpredictable mktemp(1) directory in
-# ${GB10_WORK:-$HOME/work/gb10}/tmp (created if missing) with the
+# ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/tmp (created if missing) with the
 # NVIDIA top-directory layout (one file, src/nvidia/a.c), points GB10_WORK at
 # the test dir, PATCHES at test patch dirs and SOURCES at a test SOURCES file
 # holding the fake tarball's real sha256 (both are test hooks, so
@@ -52,7 +52,7 @@ SCRIPT="$TESTSDIR/../scripts/prepare-tree.sh"
 # The scratch root honours GB10_WORK like the scripts do and is created if
 # missing: mktemp -d fails when the parent directory does not exist, which
 # would abort the suite before the first case on a fresh work root.
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TESTROOT=$(mktemp -d "$WORK/tmp/prep-test.XXXXXXXX") || exit 1
 

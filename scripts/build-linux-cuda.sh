@@ -8,7 +8,7 @@
 # Usage: scripts/build-linux-cuda.sh [-h|--help]
 #
 # Environment:
-#   GB10_WORK  work root (default $HOME/work/gb10); not needed when LINUXROOT
+#   GB10_WORK  work root (default <repo>/work); not needed when LINUXROOT
 #              and BUILDDIR are both set
 #   LINUXROOT  Linux roots (default $GB10_WORK/linuxroot); the Rocky 9 tree
 #              LINUXROOT/rl9 is the sysroot
@@ -40,13 +40,7 @@ case "${1:-}" in
 	;;
 esac
 
-if [ -z "${GB10_WORK:-}" ] && { [ -z "${LINUXROOT:-}" ] || [ -z "${BUILDDIR:-}" ]; }; then
-	if [ -z "${HOME:-}" ]; then
-		echo "build-linux-cuda: HOME is not set and GB10_WORK is not set" >&2
-		exit 2
-	fi
-fi
-WORK=${GB10_WORK:-${HOME:-/nonexistent}/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 LINUXROOT=${LINUXROOT:-$WORK/linuxroot}
 BUILDDIR=${BUILDDIR:-$WORK/build/linux-cuda}
 CLANG=${CLANG:-clang}

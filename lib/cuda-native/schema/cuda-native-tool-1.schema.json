@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:cuda-native:schema:cuda-native-tool/1",
+  "title": "cuda-native tool version, schema 1",
+  "description": "The single object emitted by nvptxas or nvfatbin for --version --json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "version", "version_major", "version_minor", "version_patch", "stub", "track"],
+  "properties": {
+    "tool": { "enum": ["nvptxas", "nvfatbin"] },
+    "version": { "type": "string" },
+    "version_major": { "type": "integer", "minimum": 0 },
+    "version_minor": { "type": "integer", "minimum": 0 },
+    "version_patch": { "type": "integer", "minimum": 0 },
+    "stub": { "const": true },
+    "track": { "const": "2427" }
+  }
+}

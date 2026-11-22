@@ -123,7 +123,7 @@
 #            produces - and the check must refuse that copy.
 #
 # Usage: tests/kmod_symbols_test.sh [TREE] [--modeset] [--drm]
-#   TREE  prepared working tree; defaults to ${GB10_WORK:-$HOME/work/gb10}/build/tree
+#   TREE  prepared working tree; defaults to ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/tree
 #   --modeset
 #         check nvidia-modeset.ko even when it has not been built; the
 #         run then fails if the module is missing
@@ -141,7 +141,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 WANT_MODESET=0
 WANT_DRM=0
 # The TREE is the only positional argument; --modeset and --drm ask for
@@ -174,7 +174,7 @@ fail() {
 
 [ -f "$KO" ] || fail "no $KO: run scripts/build-shim.sh first"
 
-# Unpredictable scratch directory ($WORK/tmp is $HOME/work/gb10/tmp unless
+# Unpredictable scratch directory ($WORK/tmp is <repo>/work/tmp unless
 # GB10_WORK says otherwise), removed by the trap on every exit path.
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/kmod_symbols_test.XXXXXXXX") || exit 1

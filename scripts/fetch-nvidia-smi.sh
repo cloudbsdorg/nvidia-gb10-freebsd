@@ -8,7 +8,7 @@
 # through the Linuxulator against the FreeBSD nvidia.ko of the same version.
 #
 # Usage: scripts/fetch-nvidia-smi.sh [DESTDIR]
-#   DESTDIR defaults to ${GB10_WORK:-$HOME/work/gb10}/nvidia-smi. It must not
+#   DESTDIR defaults to ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/nvidia-smi. It must not
 #   be a symlink, must be owned by this user and must not be writable by
 #   group or other. Afterwards:
 #     DESTDIR/nvidia-smi     wrapper to run (sets LD_LIBRARY_PATH itself)
@@ -78,7 +78,7 @@ case $ver in
 esac
 lib=libnvidia-ml.so.$ver
 
-destdir=${1:-${GB10_WORK:-$HOME/work/gb10}/nvidia-smi}
+destdir=${1:-${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/nvidia-smi}
 # A symlink would pass the owner/mode check from the link itself while every
 # write went through it, so it is refused before the stat.
 [ ! -L "$destdir" ] || die "refusing DESTDIR $destdir: symlink"

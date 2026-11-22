@@ -120,6 +120,64 @@ A firmware module cannot be unloaded while
 is loaded.
 When the driver is loaded from a build directory by path, load the firmware
 module by path first: a dependency that is already loaded is satisfied.
+.Sh INSTALLATION
+On a stock
+.Fx
+arm64 install, from a checkout of the repository, as a normal user who can
+become root with
+.Xr doas 1
+or
+.Xr sudo 8 :
+.Bd -literal -offset indent
+make install-prereqs YES=1 ACCEPT_NVIDIA_LICENSE=1
+make install YES=1
+make configure YES=1
+.Ed
+.Pp
+.Cm install-prereqs
+installs the packages the build needs, fetches NVIDIA's driver tarball and
+open-gpu-kernel-modules, the
+.Fx
+source of the running kernel and drm-kmod.
+The GSP firmware comes from NVIDIA's tarball; it is fetched on the machine,
+not shipped.
+NVIDIA's terms ask everyone who installs the driver to read and accept its
+licence first, so the install never accepts it on its own:
+.Va YES=1
+alone does not, and stops with that explanation.
+.Va ACCEPT_NVIDIA_LICENSE=1
+accepts NVIDIA's driver licence;
+.Va ACCEPT_ALL_LICENSES=1
+accepts every licence the install meets.
+Without either, on a terminal, the licence is shown and the user is asked.
+.Pp
+.Cm install
+installs the modules in
+.Pa /boot/modules
+and runs
+.Xr kldxref 8 .
+.Cm configure
+sets
+.Va hw.nvidia.registry.EnableGpuFirmware
+in
+.Xr loader.conf 5
+and
+.Va nvidia_gb10_autoload
+in
+.Xr rc.conf 5 ,
+which the installed
+.Xr devd 8
+rule reads before it loads
+.Nm nvidia-drm
+when
+.Xr vgapci 4
+attaches to an NVIDIA display device.
+.Cm deinstall
+removes everything
+.Cm install
+and
+.Cm configure
+wrote.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia.registry.EnableGpuFirmware
@@ -143,6 +201,14 @@ of the driver.
 .It Pa /boot/modules/nvidia_gsp_ga10x_fw.ko
 .It Pa /boot/modules/nvidia_gsp_tu10x_fw.ko
 (amd64 only)
+.It Pa /usr/local/etc/devd/nvidia_gb10.conf
+the
+.Xr devd 8
+rule that loads the driver
+.It Pa /var/db/nvidia-gb10-freebsd/installed.manifest
+every file
+.Cm make install
+wrote, with its mode, owner and sha256
 .El
 .Sh DIAGNOSTICS
 .Bl -tag -width indent

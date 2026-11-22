@@ -140,13 +140,13 @@ Both servers need the same model, the same context size, one slot, and `--slot-s
 same directory, since one writes the slot file and the other reads it:
 
 ```sh
-mkdir -p ~/llm-slots
+mkdir -p "$(pwd)/work/llm-slots"
 # prefill: the RX 7600
 llama-server -m $M -ngl 99 -fa on -t 8 -c 8192 -np 1 \
-    --slot-save-path ~/llm-slots --port 18080 &
+    --slot-save-path "$(pwd)/work/llm-slots" --port 18080 &
 # decode: the CPU only
 llama-server -m $M --device none -t 32 -c 8192 -np 1 \
-    --slot-save-path ~/llm-slots --port 18081 &
+    --slot-save-path "$(pwd)/work/llm-slots" --port 18081 &
 
 python3 scripts/pd_split.py http://127.0.0.1:18080 http://127.0.0.1:18081 128
 ```
@@ -269,10 +269,14 @@ Ubuntu arm64 builds (`ubuntu-vulkan-arm64`, `ubuntu-cuda-13.5-arm64`) on NVIDIA'
 libraries under the Linuxulator (see the
 [README](../README.md#vulkan-linux-icd-under-the-linuxulator)). A FreeBSD llama.cpp cannot load
 NVIDIA's Linux ICD or `libcuda`, so the whole process has to be Linux. The NVIDIA numbers (the
-README's [Numbers](../README.md#what-works-status-2026-11-20) and the bench history) are
+README's [Numbers](../README.md#what-works) and the bench history) are
 recorded with `"path": "linuxulator"` and `"path_status": "last-resort"`, and are replaced as
 soon as a native path exists.
 The Linux CUDA path is described in the next section.
+
+## NVIDIA Vulkan through the Linuxulator (Linux-only, last resort)
+
+This is the last-resort Linux path: it is used only while no native NVIDIA Vulkan driver exists, and its results are recorded with path linuxulator, path_status last-resort.
 
 [`scripts/run-nv-vulkan.sh`](../scripts/run-nv-vulkan.sh) runs the Linux aarch64 Vulkan stack
 against the NVIDIA card through the Linuxulator. It starts the programs from private Linux roots
@@ -284,7 +288,7 @@ export VK_DRIVER_FILES=$GB10_WORK/linuxroot/nv/nvidia_icd.json
 export __EGL_VENDOR_LIBRARY_FILENAMES=$GB10_WORK/linuxroot/nv/10_nvidia.json
 ```
 
-The work root is `GB10_WORK`, which defaults to `$HOME/work/gb10`. It holds:
+The default work root is the `work/` directory of the checkout; `GB10_WORK` overrides it. It holds:
 
 | Directory | Contents |
 |---|---|
@@ -338,6 +342,28 @@ The script is tested without a GPU and without a Linux root:
 `sh tests/run-nv-vulkan_test.sh` builds a fake work root whose dynamic linker is a shell script
 that prints its arguments, and checks the modes, the model path and the two refusals.
 
+## Native NVIDIA benchmark
+
+When NVK on libnvrm can create a device, `scripts/native-llm-bench`
+([native-llm-bench(1)](../man/native-llm-bench.1)) selects the card by PCI bus, proves the Vulkan and
+benchmark paths are native, checks memory before each model, and records history rows with
+published-median comparisons. For NVIDIA it pins only `nvk_nvrm_icd.<arch>.json` with library
+`libvulkan_nvk_nvrm.so`; any `libvulkan_nouveau.so` ICD or inherited override to another ICD is
+refused. It refuses Linux ICDs, Linux binaries and loaded Linux compatibility modules; until that
+native path exists, it exits with the Track #2379 refusal instead of running the Linux path.
+
+Check the working Radeon path without starting a benchmark:
+
+```sh
+scripts/native-llm-bench --gpu radeon --dry-run
+```
+
+The NVIDIA command below refuses with exit 3 until NVK on libnvrm is installed:
+
+```sh
+scripts/native-llm-bench --gpu nvidia
+```
+
 ## CUDA (Linux libcuda through the Linuxulator; Linux-only, last resort)
 
 NVIDIA's Linux `libcuda.so.1` (580.178.04) runs under the Linuxulator against `nvidia.ko`
@@ -383,4 +409,5 @@ sh tests/linux_cuda_test.sh                    # no GPU: build and the shim test
 
 `run-linux-cuda.sh` starts the program through the Rocky `ld-linux-aarch64.so.1` with
 `--preload shim.so` and `--library-path` over `nv`, `rl9/usr/lib64` and `rl9/usr/lib`, and
-sets `SHIM_MMAP_MIN_ADDR`, `SHIM_COMM` and `SHIM_ABSTRACT_DIR` (default `~/.cache/sa`).
+sets `SHIM_MMAP_MIN_ADDR`, `SHIM_COMM` and `SHIM_ABSTRACT_DIR`. The abstract-socket directory
+has a per-user cache default; set `SHIM_ABSTRACT_DIR` to override it.

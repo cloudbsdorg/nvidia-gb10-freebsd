@@ -6,10 +6,10 @@
 # the ogkm_tag line of SOURCES.  The default header path is built from it, and
 # the build refuses when NVRM_RM_VERSION in nvrm.h names another version.
 #   make OGKM=/path/to/open-gpu-kernel-modules-<tag>
-# The default is ${GB10_WORK:-$HOME/work/gb10}/sources/open-gpu-kernel-modules-<tag>.
+# The default is <repo>/work/sources/open-gpu-kernel-modules-<tag>.
 
 OGKM_TAG!=	awk '$$1 == "ogkm_tag" { print $$2 }' ${.CURDIR}/../../SOURCES
-OGKM?=	${GB10_WORK:U${HOME}/work/gb10}/sources/open-gpu-kernel-modules-${OGKM_TAG}
+OGKM?=	${GB10_WORK:U${.CURDIR}/../../work}/sources/open-gpu-kernel-modules-${OGKM_TAG}
 
 .if empty(OGKM_TAG)
 .error libnvrm: ${.CURDIR}/../../SOURCES has no ogkm_tag line (copy SOURCES with lib/)

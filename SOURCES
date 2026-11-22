@@ -6,3 +6,8 @@ ogkm_commit c8e699821c23e4335bf23330a54a23d15cfb95e9
 nvidia_linux_aarch64_url https://download.nvidia.com/XFree86/Linux-aarch64/580.178.04/NVIDIA-Linux-aarch64-580.178.04.run
 nvidia_linux_aarch64_sha256 ef59ec5d24850e12d6f7550ec1f7cf84db53a84ce9c63eb3ba55ef5ed0c4f049
 nvidia_linux_aarch64_skip 1186
+drm_kmod_repo https://github.com/freebsd/drm-kmod.git
+drm_kmod_612_tag drm_v6.12.110_1
+drm_kmod_612_commit 1d054ae55685c45c23aa86541427dfc72afa9ca1
+drm_kmod_66_tag drm_v6.6.25_14
+drm_kmod_66_commit 699fa27c36d85bd9c98ef9ae44dc264a460ad163

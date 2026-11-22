@@ -12,7 +12,7 @@
 #        run-nv-vulkan.sh rpc [ggml-rpc-server options...]
 #
 # Environment:
-#   GB10_WORK  work root (default $HOME/work/gb10). It holds:
+#   GB10_WORK  work root (default <repo>/work). It holds:
 #                linuxroot/nv/     NVIDIA user libraries (580.178.04), the
 #                                  Vulkan ICD file nvidia_icd.json and the
 #                                  EGL vendor file 10_nvidia.json
@@ -25,8 +25,7 @@
 #                                  llama.cpp ubuntu-vulkan-arm64 build needs
 #                                  (GLIBC_2.38)
 #                llm/llama-vulkan-arm64/llama-b12531/  the llama.cpp build
-#   HOME       the default work root and the default model path; not needed
-#              when GB10_WORK is set.
+#                models/             the default model for bench
 #
 # The modes:
 #   vulkaninfo  the Rocky Vulkan loader and vulkaninfo against the ICD
@@ -101,8 +100,7 @@ give themselves.
 the options it is given instead.
 
 Environment:
-  GB10_WORK  work root (default $HOME/work/gb10)
-  HOME       default work root and default model path
+  GB10_WORK  work root and default model parent (default <repo>/work)
 EOF
 }
 
@@ -128,23 +126,8 @@ case ${1:-} in
 	;;
 esac
 
-if [ -n "${GB10_WORK:-}" ]; then
-	WORK=$GB10_WORK
-else
-	# An explicit test, not "${HOME:?}": the exit status of a parameter
-	# expansion error depends on the shell (2 under /bin/sh, 1 under bash),
-	# and the status of this script must not.
-	if [ -z "${HOME:-}" ]; then
-		echo "HOME must be set (or set GB10_WORK)" >&2
-		exit 2
-	fi
-	WORK=$HOME/work/gb10
-fi
-if [ -n "${HOME:-}" ]; then
-	DEFAULT_MODEL=$HOME/work/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
-else
-	DEFAULT_MODEL=
-fi
+WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
+DEFAULT_MODEL=$WORK/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 R=$WORK/linuxroot
 LL=$WORK/llm/llama-vulkan-arm64/llama-b12531

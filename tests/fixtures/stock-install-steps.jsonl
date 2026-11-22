@@ -1,0 +1,3 @@
+{"schema":"stock-install-step/1","index":0,"step":"host:image","pass":true,"rc":0,"seconds":0,"detail":"https://download.freebsd.org/snapshots/VM-IMAGES/16.0-CURRENT/aarch64/Latest/FreeBSD-16.0-CURRENT-arm64-aarch64-BASIC-CLOUDINIT-20261117-611046b15dbb-291235-ufs.raw.xz sha256 ea9385ebd1248285a8645c5d883dad809c7259027a1247535fb0f48c1698b485 (checked live)","log":""}
+{"schema":"stock-install-step/1","index":1,"step":"clone","pass":true,"rc":0,"seconds":3,"detail":"0123456789abcdef0123456789abcdef01234567","log":"logs/clone.log"}
+{"schema":"stock-install-step/1","index":2,"step":"install","pass":false,"rc":1,"seconds":812,"detail":"make.sh: build step nvidia failed (rc 1)","log":"logs/install.log"}

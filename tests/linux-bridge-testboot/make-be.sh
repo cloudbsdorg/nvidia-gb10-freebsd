@@ -365,6 +365,7 @@ if [ "$DRY" -eq 1 ]; then
 	echo "+ write $MNT/etc/rc.conf.d/linux: linux_enable=NO"
 	echo "+ write $MNT/etc/rc.conf.d/nvidia_linux: nvidia_linux_mode=NO (the kit loads the providers itself)"
 	echo "+ write $MNT/etc/rc.conf.d/linux_bridge_testboot: linux_bridge_testboot_enable=YES, _logroot=$LOGROOT${CUDAUSER:+, _user=$CUDAUSER, _cudarun=$CUDARUN}"
+	echo "+ write $MNT/usr/local/etc/linux_bridge_testboot.marker: $BE (mode 0444)"
 else
 	printf 'kld_list="%s"\n' "$KLD" > "$MNT/etc/rc.conf.d/kld"
 	printf 'linux_enable="NO"\n' > "$MNT/etc/rc.conf.d/linux"
@@ -383,6 +384,8 @@ else
 	else
 		printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/linux_bridge_testboot.version"
 	fi
+	printf '%s\n' "$BE" > "$MNT/usr/local/etc/linux_bridge_testboot.marker"
+	chmod 0444 "$MNT/usr/local/etc/linux_bridge_testboot.marker"
 	cp "$HASHLIST" "$MNT/usr/local/etc/linux_bridge_testboot.sha256"
 fi
 

@@ -8,7 +8,7 @@
 #   - NVIDIA open-gpu-kernel-modules at a pinned tag and commit
 #
 # Usage: scripts/fetch-sources.sh [DESTDIR]
-#   DESTDIR defaults to ${GB10_WORK:-$HOME/work/gb10}/sources.
+#   DESTDIR defaults to ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/sources.
 #   Nothing is written outside DESTDIR; /tmp is never used.
 #   DESTDIR must not be a symlink, must be owned by this user and must not
 #   be writable by group or other, and neither the tarball nor its .part may
@@ -42,7 +42,7 @@ sources=$script_dir/../SOURCES
 # is sourced from the same directory this script lives in.
 . "$script_dir/lib.sh"
 
-destdir=${1:-${GB10_WORK:-$HOME/work/gb10}/sources}
+destdir=${1:-${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/sources}
 
 die() {
     echo "fetch-sources: $*" >&2

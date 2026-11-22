@@ -147,9 +147,12 @@ Any launcher that does not use this script has to set both variables itself.
 .Bl -tag -width "GB10_WORK"
 .It Ev GB10_WORK
 The work root.
-It defaults to
-.Pa $HOME/work/gb10
-and holds:
+The default is the
+.Pa work/
+directory of the checkout;
+.Ev GB10_WORK
+overrides it.
+It holds:
 .Bl -tag -width "linuxroot/nv/" -compact
 .It Pa linuxroot/nv/
 NVIDIA's user libraries, the Vulkan ICD file
@@ -169,11 +172,6 @@ build needs.
 .It Pa llm/llama-vulkan-arm64/llama-b12531/
 The llama.cpp build.
 .El
-.It Ev HOME
-The default work root and the default model path.
-It is not needed when
-.Ev GB10_WORK
-is set.
 .El
 .Sh EXIT STATUS
 .Bl -tag -width Ds -compact
@@ -182,9 +180,7 @@ The command ran.
 .It 1
 A path is missing.
 .It 2
-An unknown mode, a missing argument, an option the mode does not take, or
-.Ev HOME
-is not set.
+An unknown mode, a missing argument, or an option the mode does not take.
 .El
 .Sh EXAMPLES
 Run
@@ -197,7 +193,7 @@ $ run-nv-vulkan.sh list
 Benchmark one model with the defaults (prompt 512, 128 tokens, every layer on
 the GPU, flash attention off and on):
 .Bd -literal -offset indent
-$ run-nv-vulkan.sh bench ~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+$ run-nv-vulkan.sh bench /path/to/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 .Ed
 .Pp
 Benchmark one model with a longer prompt and a longer generation; the
@@ -211,7 +207,7 @@ $ run-nv-vulkan.sh bench model.gguf -p 1024 -n 256
 .Pp
 Serve one model:
 .Bd -literal -offset indent
-$ run-nv-vulkan.sh server ~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --port 18080
+$ run-nv-vulkan.sh server /path/to/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --port 18080
 .Ed
 .Sh SEE ALSO
 .Xr ggml-rpc-server 1 ,

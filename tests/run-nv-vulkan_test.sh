@@ -21,8 +21,8 @@
 #   (d) llama-bench -p 512:              no model path is inserted; "-p" is
 #                                        passed on as llama-bench's own option
 #   (e) a missing nvidia_icd.json:       exits non-zero with "missing"
-#   (f) HOME unset, no GB10_WORK:        exits 2 under sh and under
-#                                        bash --posix alike, and says "HOME"
+#   (f) HOME unset, no GB10_WORK:        uses <repo>/work under sh and under
+#                                        bash --posix alike
 #   (g) HOME unset, GB10_WORK set:       works (GB10_WORK replaces the default
 #                                        work root, so HOME is not needed)
 #   (h) sh -n:                           the script parses
@@ -38,8 +38,8 @@
 #   (n) bench with an empty model:       exits 2 with "bench needs a model"
 #   (o) server with an empty model:      exits 2 with "server needs a model"
 #   (p) the script is executable:        scripts/run-nv-vulkan.sh is mode 755
-#   (q) the header of the script:        it does not promise exit 1 for the
-#                                        HOME case (/bin/sh exits 2)
+#   (q) the script's help:               it does not describe HOME as the work
+#                                        or model default
 #   (r) bench with no model at all:      the default model is used and only
 #                                        the default arguments reach
 #                                        llama-bench
@@ -233,10 +233,11 @@ else
 	fail "(e) missing nvidia_icd.json: rc=$rc stderr=$(cat "$TESTROOT/e.err")"
 fi
 
-# (f) HOME unset and no GB10_WORK: the script has no work root and says so.
-# The status is 2, and it is 2 under every shell: the exit code must not
-# depend on the shell (a ${HOME:?} expansion error exits 2 under /bin/sh but
-# 1 under bash).
+# (f) HOME unset and no GB10_WORK: resolve the work root from the script, not
+# from HOME.  A copy at TESTROOT/scripts makes the existing fake tree its
+# repository-local work directory without touching the real repository's work.
+mkdir -p "$TESTROOT/scripts"
+cp "$SCRIPT" "$TESTROOT/scripts/run-nv-vulkan.sh"
 f_ok=1
 f_shell=
 f_rc=
@@ -245,9 +246,9 @@ for f_cmd in "sh" "bash --posix"; do
 	rc=0
 	# The shell word is split on purpose: "bash --posix" is two words.
 	# shellcheck disable=SC2086
-	env -u HOME -u GB10_WORK $f_cmd "$SCRIPT" list \
+	env -u HOME -u GB10_WORK $f_cmd "$TESTROOT/scripts/run-nv-vulkan.sh" list \
 	    > "$TESTROOT/f.out" 2> "$TESTROOT/f.err" || rc=$?
-	if [ "$rc" -ne 2 ] || ! grep -q 'HOME' "$TESTROOT/f.err"; then
+	if [ "$rc" -ne 0 ] || ! grep -qx "PWD: $LL" "$TESTROOT/f.out"; then
 		f_ok=0
 		f_shell=$f_cmd
 		f_rc=$rc
@@ -255,7 +256,7 @@ for f_cmd in "sh" "bash --posix"; do
 	fi
 done
 if [ "$f_ok" -eq 1 ]; then
-	ok "(f) HOME unset, no GB10_WORK: exit 2 under sh and bash --posix"
+	ok "(f) HOME unset, no GB10_WORK: repository-local work under sh and bash --posix"
 else
 	fail "(f) HOME unset, no GB10_WORK ($f_shell): rc=$f_rc stderr=$f_err"
 fi
@@ -397,25 +398,23 @@ else
 	fail "(p) scripts/run-nv-vulkan.sh is not executable"
 fi
 
-# (q) The header of the script must not promise exit 1 for the HOME case:
-# the ${HOME:?} parameter expansion error of /bin/sh exits with 2.
-if grep -q 'HOME is not set' "$SCRIPT" &&
-    grep -q '1 a path is missing or HOME is not set' "$SCRIPT"; then
-	fail "(q) the header still promises exit 1 for the HOME case"
+# (q) The help must not retain the old HOME-based defaults.
+if grep -q 'HOME.*default.*\(work\|model\)' "$SCRIPT"; then
+	fail "(q) the help still describes HOME-based defaults"
 else
-	ok "(q) the header does not promise exit 1 for the HOME case"
+	ok "(q) the help does not describe HOME-based defaults"
 fi
 
 # (r) bench with no model at all: the default model is used and nothing else
 # reaches llama-bench (the name of the mode is not one of its arguments).
-mkdir -p "$TESTROOT/home/work/models"
-: > "$TESTROOT/home/work/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+mkdir -p "$FAKE/models"
+: > "$FAKE/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 rc=0
-HOME="$TESTROOT/home" GB10_WORK="$FAKE" sh "$SCRIPT" bench \
+GB10_WORK="$FAKE" sh "$SCRIPT" bench \
     > "$TESTROOT/r.out" 2> "$TESTROOT/r.err" || rc=$?
 bench_args=$(bench_args "$TESTROOT/r.out" | tr '\n' ' ')
 if [ "$rc" -eq 0 ] &&
-    [ "$bench_args" = "-m $TESTROOT/home/work/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -ngl 99 -fa 0,1 " ]; then
+    [ "$bench_args" = "-m $FAKE/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -ngl 99 -fa 0,1 " ]; then
 	ok "(r) bench with no model: the default model, and nothing else"
 else
 	fail "(r) bench with no model: rc=$rc args=[$bench_args] err=$(cat "$TESTROOT/r.err")"
