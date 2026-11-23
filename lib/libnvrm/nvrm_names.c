@@ -121,6 +121,8 @@ nvrm_reason_from_id(const char *id)
 {
 	int i;
 
+	if (id == NULL)
+		return (-1);
 	for (i = 1; i < NVRM_R__COUNT; i++)
 		if (strcmp(id, reasons[i].id) == 0)
 			return (i);

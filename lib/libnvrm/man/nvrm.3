@@ -22,6 +22,7 @@
 .Nm nvrm_error_id ,
 .Nm nvrm_reason_id ,
 .Nm nvrm_reason_text ,
+.Nm nvrm_reason_from_id ,
 .Nm nvrm_source_name ,
 .Nm nvrm_cap_name ,
 .Nm nvrm_info_nfields ,
@@ -82,6 +83,8 @@ libnvrm
 .Fn nvrm_reason_id "int reason"
 .Ft const char *
 .Fn nvrm_reason_text "int reason"
+.Ft int
+.Fn nvrm_reason_from_id "const char *id"
 .Ft const char *
 .Fn nvrm_source_name "int source"
 .Ft const char *
@@ -305,6 +308,14 @@ give text and a stable identifier for an error code;
 and
 .Fn nvrm_reason_text
 for a reason a value is unavailable;
+.Fn nvrm_reason_from_id
+is the inverse of
+.Fn nvrm_reason_id
+for every reason except
+.Dv NVRM_R_NONE :
+it returns the reason code of an identifier, or \-1 for the identifier of
+.Dv NVRM_R_NONE ,
+an unknown identifier or a null pointer;
 .Fn nvrm_source_name
 names the layer that supplied a value and
 .Fn nvrm_cap_name
@@ -501,9 +512,31 @@ before; a future version may still reshape them.
 The memory calls are
 .Li NVRM_1.1 ,
 API minor 1.
-The version calls are
+The version calls and
+.Fn nvrm_reason_from_id
+are
 .Li NVRM_1.2 ,
-API minor 2.
+API minor 2; a program that uses them does not load against a library that has
+only
+.Li NVRM_1.0
+or
+.Li NVRM_1.1 .
+.Pp
+The field table grew after
+.Li NVRM_1.0 ,
+so
+.Fn nvrm_info_nfields
+and
+.Fn nvrm_info_field
+have two versions.
+A program linked against
+.Li NVRM_1.0
+sees exactly the rows of that version, at the same indexes and in the same
+order, and never a row of a kind it does not know (the version rows).
+New links bind to the
+.Li NVRM_1.2
+versions, which return the whole table; every row added after 1.0 comes last,
+so a later addition never moves an index.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
 .It Ev NVRM_BACKEND
@@ -514,7 +547,7 @@ or
 Comma list of fake GPUs:
 .Dq discrete ,
 .Dq unified ,
-.Dq alias ,
+.Dq untabled ,
 .Dq unknown ,
 .Dq sparse .
 .It Ev NVRM_FAKE_FAIL

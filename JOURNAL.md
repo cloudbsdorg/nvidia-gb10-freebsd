@@ -713,3 +713,19 @@ RESUME:
 - Stray pre-fix working-tree edits found before the merge were saved to tmp/stray-worktree-changes.patch and dropped.
 RESUME: after PR 22 is merged, rebase wt-2378-sysctl on main (drop its nvrm_version.h copy), gate 2 rounds, PR;
 then kit round C; then the staged build, make-be dry run and check-be.
+
+## 2026-11-22 (UTC) libnvrm review follow-up (#2378, agent/2378-libnvrm-review-followup)
+- The alias/raw fallback plan of the PAUSED entry (nvrm-info boot fixes and version sysctls) was dropped: with
+  architecture and implementation available but no table row, compute capability is family_unknown, whatever
+  the raw SM code is (nvrm(3), nvrm(7), nvrm-info(8) say the same).
+- This follow-up fixes the Review-open items of c0102d7:
+  - security.3: an NVRM_1.0 caller of nvrm_info_nfields()/nvrm_info_field() gets only the 30 rows of 8702134,
+    in 1.0 order (nvrm_compat.c, .symver); the rows added later (rm_sm_version, compute capability, the versions
+    group) are last in the table, and the NVRM_1.2 versions return all of it. dlvsym test and a mutant.
+  - reason ids: nvrm_reason_from_id (now public, NVRM_1.2) is the one mapping, used by the running version and by
+    the nvrm-info text; rm_test plants os_call_failed.
+  - compute capability reason is family_unknown independent of raw_sm; text output prints
+    "unavailable: <reason text>" for a per-GPU version; fake profile "alias" is now "untabled"; fake_gpu_str
+    switches with a default; core_test counts the appended rows instead of "rows + 5"; nvrm-info(8) says the
+    vbios_* and firmware_* sysctls come with the kernel module of PR 33.
+- Left for the owner: security.2 (host names and home paths in this journal).

@@ -164,16 +164,13 @@
     "group_gpu": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["architecture", "implementation", "chip_id", "sm_version_major", "sm_version_minor", "rm_sm_version", "compute_capability_major", "compute_capability_minor", "gpc_count", "tpc_count", "sm_count", "cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "classes", "family"],
+      "required": ["architecture", "implementation", "chip_id", "sm_version_major", "sm_version_minor", "gpc_count", "tpc_count", "sm_count", "cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "classes", "family", "rm_sm_version", "compute_capability_major", "compute_capability_minor"],
       "properties": {
         "architecture": { "$ref": "#/$defs/u64", "description": "RM architecture id" },
         "implementation": { "$ref": "#/$defs/u64", "description": "RM implementation id" },
         "chip_id": { "$ref": "#/$defs/u64", "description": "architecture plus implementation" },
         "sm_version_major": { "$ref": "#/$defs/u64", "description": "RM SM version, major" },
         "sm_version_minor": { "$ref": "#/$defs/u64", "description": "RM SM version, minor" },
-        "rm_sm_version": { "$ref": "#/$defs/u64", "description": "raw RM SM version code" },
-        "compute_capability_major": { "$ref": "#/$defs/u64", "description": "CUDA compute capability, major" },
-        "compute_capability_minor": { "$ref": "#/$defs/u64", "description": "CUDA compute capability, minor" },
         "gpc_count": { "$ref": "#/$defs/u64", "description": "enabled GPCs" },
         "tpc_count": { "$ref": "#/$defs/u64", "description": "enabled TPCs" },
         "sm_count": { "$ref": "#/$defs/u64", "description": "enabled SMs" },
@@ -182,7 +179,10 @@
         "cls_eng3d": { "$ref": "#/$defs/u64", "description": "3D class" },
         "cls_copy": { "$ref": "#/$defs/u64", "description": "copy engine class" },
         "classes": { "$ref": "#/$defs/list", "description": "every class the GPU supports" },
-        "family": { "$ref": "#/$defs/text", "description": "generation table row" }
+        "family": { "$ref": "#/$defs/text", "description": "generation table row" },
+        "rm_sm_version": { "$ref": "#/$defs/u64", "description": "raw RM SM version code" },
+        "compute_capability_major": { "$ref": "#/$defs/u64", "description": "CUDA compute capability, major" },
+        "compute_capability_minor": { "$ref": "#/$defs/u64", "description": "CUDA compute capability, minor" }
       }
     },
     "group_memory": {

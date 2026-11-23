@@ -27,7 +27,7 @@ OGKM?=	${GB10_WORK:U${.CURDIR}/../../work}/sources/open-gpu-kernel-modules-${OGK
 LIB=		nvrm
 SHLIB_MAJOR=	1
 VERSION_MAP=	${.CURDIR}/Version.map
-SRCS=		nvrm.c nvrm_cap.c nvrm_fake.c nvrm_fake_mem.c nvrm_fields.c \
+SRCS=		nvrm.c nvrm_cap.c nvrm_compat.c nvrm_fake.c nvrm_fake_mem.c nvrm_fields.c \
 		nvrm_json.c nvrm_mem.c nvrm_names.c nvrm_owner.c nvrm_rm.c \
 		nvrm_rm_mem.c nvrm_table.c nvrm_va.c
 INCSDIR=	${INCLUDEDIR}/nvrm
@@ -36,7 +36,7 @@ MAN=		man/nvrm.3 man/nvrm_mem.3 man/nvrm.7
 # The man links come from Version.map, the one list of the exported calls:
 # NVRM_1.0 (discovery) and NVRM_1.2 (version numbers) link to nvrm.3,
 # NVRM_1.1 (memory and VA) to nvrm_mem.3.
-NVRM_FUNCS!=	awk '/^NVRM_1\.[02] /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
+NVRM_FUNCS!=	awk '/^NVRM_1\.[02] /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");if (!s[$$1]++) print $$1}' ${.CURDIR}/Version.map
 NVRM_MEM_FUNCS!=	awk '/^NVRM_1\.1 /{v=1;next} /^}/{v=0} v && /^\t\tnvrm_/{sub(";","");print $$1}' ${.CURDIR}/Version.map
 .for f in ${NVRM_FUNCS}
 MLINKS+=	nvrm.3 ${f}.3
@@ -54,6 +54,9 @@ WARNS?=		3
 # pthread_once for the backend registry.  LDADD, not LIBADD: LIBADD is only
 # processed by a build inside the FreeBSD source tree (measured: out of tree it
 # adds nothing, and libc's own pthread_once is a stub that never calls back).
+# Only the PIC objects (the shared library) carry symbol versions; the static
+# archive keeps the plain names.
+SHARED_CFLAGS+=	-DNVRM_SHLIB
 LDADD=		-lthr
 
 .include <bsd.lib.mk>

@@ -57,7 +57,11 @@ are derived only from the architecture/implementation table.
 When that table has no row, both are unavailable with reason
 .Li family_unknown :
 neither an RM alias nor the raw high and low bytes is a compute capability.
-Zero or unavailable raw input without a table row leaves compute capability
+The reason does not depend on the raw code: zero or an unavailable raw code
+without a table row is
+.Li family_unknown
+too.
+Only a missing architecture or implementation leaves compute capability
 unavailable with reason
 .Li input_unavailable .
 The raw code remains available separately as

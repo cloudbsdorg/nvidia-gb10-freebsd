@@ -109,8 +109,6 @@ uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
-/* Translate a stored reason id; -1 means the id is not in the reason table. */
-int	nvrm_reason_from_id(const char *id);
 /* The process and fork generation that own backend objects. */
 typedef struct nvrm_owner {
 	pid_t		pid;
@@ -355,6 +353,20 @@ int	*nvrm_field_reason(nvrm_device_info *info, const nvrm_field *f);
 
 extern const nvrm_field nvrm_fields[];
 extern const unsigned nvrm_nfields;
+/* The rows nvrm_info_field() returned at NVRM_1.0 (the table's first rows, in
+ * their 1.0 order; every later row is after them).  nvrm_compat.c serves
+ * exactly these to a caller bound to the NVRM_1.0 symbols. */
+#define NVRM_NFIELDS_1_0	30
+/* The one definition of "added after NVRM_1.0": a row whose member sits at or
+ * after rm_sm_version in nvrm_device_info.  nvrm_compat.c and core_test both
+ * use it; core_test ties NVRM_NFIELDS_1_0 to it (the first NVRM_NFIELDS_1_0
+ * rows are not added after 1.0, every later row is). */
+#define NVRM_ADDED_AFTER_1_0(off)					\
+	((off) >= offsetof(nvrm_device_info, rm_sm_version))
+/* The NVRM_1.0 versions of the field-table calls (nvrm_compat.c, shared
+ * library only). */
+unsigned nvrm_info_nfields_1_0(void);
+const nvrm_field *nvrm_info_field_1_0(unsigned index);
 extern const char *const nvrm_group_names[];
 extern const unsigned nvrm_ngroups;
 
