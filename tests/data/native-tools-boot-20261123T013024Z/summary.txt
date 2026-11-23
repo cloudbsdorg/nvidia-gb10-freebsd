@@ -1,0 +1,40 @@
+pass            deadman                      a dead-man timer is pending for 30 minutes as pid 66490
+pass            panic-settings               kern.panic_reboot_wait_time 5, debug.debugger_on_panic 0
+pass            linux-enable                 linux_enable is NO
+fail            env-before                   loaded Linux-layer files: amdgpu.ko drm.ko linuxkpi_video.ko dmabuf.ko lindebugfs.ko ttm.ko amdgpu_psp_13_0_7_sos_bin.ko amdgpu_psp_13_0_7_ta_bin.ko amdgpu_smu_13_0_7_bin.ko amdgpu_dcn_3_2_1_dmcub_bin ... (full text in summary.json)
+pass            hash-nvidia_gsp_ga10x_fw.ko  b8b00bdd36a6a5c5fde12e347a44e50e058f15681bc4083bb1cc2eb1195cd52c
+pass            hash-nvidia.ko               e9288e31e86c8bf9bdab0bc25404a8ce0b327cff7bee5d14f7b7e15e0b5f44c0
+pass            hash-nvidia-modeset.ko       a2e95fc61034097d22806d69a2d616f1dc61e27aba4ecec44e1a1d0e693317a4
+pass            hash-nvrm-info               0aa9f50c1b0ca09c11df7dab122c6d8b0f8e67a83ee58d12b25b887b66c1ff5d
+pass            hash-libnvrm.so.1            e7178689ba5f6fd17202fb4651e43abeb3607fe6426d8e11873df0aed6d61594
+pass            ko-native-nvidia             nvidia.ko depends only on kernel mem nvidia_gsp_ga10x_fw_fw , has no undefined Linux or LinuxKPI symbol, and imports nothing LinuxKPI defines
+pass            ko-native-nvidia-modeset     nvidia-modeset.ko depends only on kernel nvidia , has no undefined Linux or LinuxKPI symbol, and imports nothing LinuxKPI defines
+not-run         load-nvidia_gsp_ga10x_fw     not reached: an earlier row failed
+not-run         load-nvidia                  not reached: an earlier row failed
+not-run         load-nvidia-modeset          not reached: an earlier row failed
+not-run         load                         not reached: an earlier row failed
+not-run         env-loaded                   not reached: an earlier row failed
+not-run         gpu-node                     not reached: an earlier row failed
+not-run         gpu-detect-native            not reached: a step before it failed (see the rows above)
+not-run         root-open                    not reached: an earlier row failed
+not-run         gpu-verify                   not reached: an earlier row failed
+not-run         nvidiactl-open               not reached: a step before it failed (see the rows above)
+not-run         modeset-open                 not reached: a step before it failed (see the rows above)
+not-run         nvrm-info                    not reached: a step before it failed (see the rows above)
+not-run         nvrm-info-native             not reached: a step before it failed (see the rows above)
+not-run         nvrm-info-no-new-module      not reached: a step before it failed (see the rows above)
+needs-linux     uvm-ioctl-suite              the uvm-bsd tests open /dev/nvidia-uvm, which only nvidia-uvm.ko provides. nvidia-uvm-v5.ko (uvm-bsd nvidia-uvm.ko, sha256 e18786ff0e39037673500d3f02b1d2e1e8696cfaca6965f457ceeaf1c966b60f) depends on  ... (full text in summary.json)
+needs-linux     uvm-owner-probe              the uvm-bsd tests open /dev/nvidia-uvm, which only nvidia-uvm.ko provides. nvidia-uvm-v5.ko (uvm-bsd nvidia-uvm.ko, sha256 e18786ff0e39037673500d3f02b1d2e1e8696cfaca6965f457ceeaf1c966b60f) depends on  ... (full text in summary.json)
+needs-linux     uvm-owner-race               the uvm-bsd tests open /dev/nvidia-uvm, which only nvidia-uvm.ko provides. nvidia-uvm-v5.ko (uvm-bsd nvidia-uvm.ko, sha256 e18786ff0e39037673500d3f02b1d2e1e8696cfaca6965f457ceeaf1c966b60f) depends on  ... (full text in summary.json)
+needs-linuxkpi  prime-import                 PRIME import needs nvidia-drm.ko and the AMD amdgpu driver (drm-kmod, LinuxKPI) on the other side. nvidia-drm-v5.ko (nvidia-drm.ko, the NVIDIA side of PRIME import, sha256 f2d246b7f5ba6f3a15a312776ab8 ... (full text in summary.json)
+not-available   render-uapi                  the render uAPI is a header and documents only (src/nvidia-drm-render/nvidia-drm-render.h, docs/RENDER-UAPI.md) at commit 937f89f0f27d3d000b6048bf371c8c3d9ac191dd: no kernel module serves it yet 
+not-available   nvrm-s2-memory               libnvrm S2 (memory) is in the commit, but this kit has no S2 rows yet: add the allocation and copy timing rows 
+fail            env-after                    loaded Linux-layer files: amdgpu.ko drm.ko linuxkpi_video.ko dmabuf.ko lindebugfs.ko ttm.ko amdgpu_psp_13_0_7_sos_bin.ko amdgpu_psp_13_0_7_ta_bin.ko amdgpu_smu_13_0_7_bin.ko amdgpu_dcn_3_2_1_dmcub_bin ... (full text in summary.json)
+not-available   env-after-delta              no env-loaded listing to compare with: nothing was loaded
+info            done                         the run is over; summarize.py gives the reading
+info            kit-version                  kit commit 937f89f0f27d3d000b6048bf371c8c3d9ac191dd, BE nvidia-native-tools-test-20261123-1, kernel /boot/kernel.rx7600/kernel
+info            env-before-kernel-records    Linux-layer module records compiled into the kernel file, not loaded files: pci/lkpi_mlx5_core_pci_table uhub/usb_linux lkpi_iicbb/iicbb drm/lkpi_iicbb drmn/lkpi_iicbb lkpi_iic/iicbus drm/lkpi_iic drm ... (full text in summary.json)
+info            env-after-kernel-records     Linux-layer module records compiled into the kernel file, not loaded files: pci/lkpi_mlx5_core_pci_table uhub/usb_linux lkpi_iicbb/iicbb drm/lkpi_iicbb drmn/lkpi_iicbb lkpi_iic/iicbus drm/lkpi_iic drm ... (full text in summary.json)
+native rows: 12 ran, 2 failed (env-before, env-after)
+not run natively: load-nvidia_gsp_ga10x_fw (not-run), load-nvidia (not-run), load-nvidia-modeset (not-run), load (not-run), env-loaded (not-run), gpu-node (not-run), gpu-detect-native (not-run), root-open (not-run), gpu-verify (not-run), nvidiactl-open (not-run), modeset-open (not-run), nvrm-info (not-run), nvrm-info-native (not-run), nvrm-info-no-new-module (not-run), uvm-ioctl-suite (needs-linux), uvm-owner-probe (needs-linux), uvm-owner-race (needs-linux), prime-import (needs-linuxkpi), render-uapi (not-available), nvrm-s2-memory (not-available), env-after-delta (not-available)
+FAIL
