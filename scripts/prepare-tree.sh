@@ -56,7 +56,10 @@
 # nvidia.ko and nvidia-drm.ko both find through -I../common/inc.
 # src/gb10-client-owner/nv_client_owner.h and nvco_glue.h (the RM client
 # ownership table and its kernel glue for nvidia-uvm.ko, Track #2373) to
-# TREE/nvidia/. The version sysctl source/header and the shared freestanding
+# TREE/nvidia/. The architecture floor (src/gb10-archfloor/nv_arch_floor.c and
+# .h, Track #2457: nvidia.ko attaches to Ampere and later only) goes to
+# TREE/nvidia/ as well, built through the patched nvidia/Makefile. The
+# version sysctl source/header and the shared freestanding
 # nvrm_version.h parser go to both TREE/nvidia/ and TREE/nvidia-modeset/; each
 # of those copies has its own manifest line with a third column, the
 # destination relative to TREE, so a stale copy is named by the freshness check.
@@ -172,7 +175,8 @@ copy_repo_src() {
 	mkdir -p "$TREE/nvidia"
 	for _f in src/gb10-memattr/gb10_memattr.h \
 	    src/gb10-uvm/nv-uvm-interface.h src/gb10-uvm/nv-uvm-interface.c \
-	    src/gb10-client-owner/nv_client_owner.h src/gb10-client-owner/nvco_glue.h; do
+	    src/gb10-client-owner/nv_client_owner.h src/gb10-client-owner/nvco_glue.h \
+	    src/gb10-archfloor/nv_arch_floor.h src/gb10-archfloor/nv_arch_floor.c; do
 		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
 		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
 		    >> "$TREE/.prepared.patches"

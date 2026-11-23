@@ -13,7 +13,10 @@
 #   preflight [--json] [--purpose NAME]
 #                    report what is missing (--json or MK_JSON=1: the JSON
 #                    contract, schema/make-preflight-1.schema.json); exit 1
-#                    when something is missing
+#                    when something is missing.  Each NVIDIA display device
+#                    also gets a support verdict (nvidia.ko attaches to Ampere
+#                    and later only); a card below that is reported, never
+#                    counted as missing
 #   install-prereqs  install the missing packages (pkg), fetch the NVIDIA
 #                    sources (showing the NVIDIA licence first), the FreeBSD
 #                    source tree of the running kernel and drm-kmod
@@ -73,6 +76,11 @@
 #                           /bin/ln
 #   GB10_TEST_MKTEMP        the program that names a temporary neighbour,
 #                           instead of /usr/bin/mktemp
+#   GB10_TEST_PCICONF       the program preflight runs instead of pciconf
+#   GB10_TEST_SYSCTL        the program preflight runs instead of sysctl to ask
+#                           a loaded nvidia.ko about its GPUs
+#   GB10_TEST_MACHINE_ARCH  the machine architecture (amd64, aarch64) preflight
+#                           uses for the GSP image check, instead of uname -p
 #
 # Exit status: 0 done, 1 failed or something is missing, 2 usage.
 
@@ -447,7 +455,7 @@ json_str() {
 # device pciconf(8) reports (vendor 0x10de, class 0x03); never a guessed
 # device node.  Fails when pciconf itself fails.
 nvidia_devices() {
-	_pci=$(pciconf -l 2>/dev/null) || return 1
+	_pci=$("$_pciconf" -l 2>/dev/null) || return 1
 	printf '%s\n' "$_pci" | awk '
 		{
 			sel = $1; sub(/:$/, "", sel); v = ""; d = ""; c = ""
@@ -458,6 +466,274 @@ nvidia_devices() {
 			}
 			if (v == "0x10de" && c ~ /^0x03/) print sel, v, d, c
 		}'
+}
+
+# --- GPU support verdicts (Track #2457) ----------------------------------
+#
+# nvidia.ko attaches to Ampere (RTX 30) and later only.  preflight says, for
+# each NVIDIA display device, whether the driver will take it.  When nvidia.ko
+# is loaded the kernel decides (what it attached, what it refused:
+# hw.nvidia.refused); otherwise the chip name pciconf -lv gives is looked up
+# in the table of src/gb10-archfloor/nv_arch_floor.h, which this reads with awk:
+# the values live in that one file and nowhere else.  Missing the GPU is never
+# a missing item: the build needs none.
+
+arch_floor_header() {
+	printf '%s\n' "$repo/src/gb10-archfloor/nv_arch_floor.h"
+}
+
+# arch_floor_table CHIP MACHINE: with no chip, the architecture table of the
+# header, one record per line:
+#   floor <value> <name> <label>
+#   arch  <value> <name> <chip prefix>
+#   fw    <architecture> <implementation> <chip> <image> <machines>
+# and with a chip the verdict for it: "state|architecture|reason".
+# This is the one program that reads the header: a value is 0x and one or two
+# hexadecimal digits, the numbers are compared as numbers, and anything
+# malformed prints nothing and fails.  Every caller then fails closed: no
+# verdict at all, and no floor.
+arch_floor_table() {
+	[ -r "$(arch_floor_header)" ] || return 1
+	awk -v chip="${1:-}" -v machine="${2:-}" '
+	function hexnum(s,   i, c, v, d) {
+		if (s !~ /^0x[0-9a-fA-F]{1,2}$/) return -1
+		d = 0
+		for (i = 3; i <= length(s); i++) {
+			c = tolower(substr(s, i, 1))
+			if (c >= "0" && c <= "9")
+				v = c - "0"
+			else if (c >= "a" && c <= "f")
+				v = c - "a" + 10
+			else
+				return -1
+			d = d * 16 + v
+		}
+		return d
+	}
+	function quoted(s) {
+		if (match(s, /"[^"]*"/) == 0) return ""
+		return substr(s, RSTART + 1, RLENGTH - 2)
+	}
+	function unquoted(s) {
+		if (s !~ /^"[^"]*"$/) return ""
+		return substr(s, 2, length(s) - 2)
+	}
+	function bad(what) {
+		printf "the architecture table is malformed: %s\n", what > "/dev/stderr"
+		malformed = 1
+	}
+	function machine_in(list, m,   n, f, i) {
+		n = split(list, f, "[ \t]+")
+		for (i = 1; i <= n; i++)
+			if (f[i] == m) return 1
+		return 0
+	}
+	function chip_matches(c, row,   rest) {
+		if (substr(c, 1, length(row)) != row) return 0
+		rest = substr(c, length(row) + 1, 1)
+		return (rest !~ /^[0-9]$/)
+	}
+	$1 == "#define" && $2 == "NV_ARCH_FLOOR_MIN_ARCHITECTURE" {
+		fv = hexnum($3)
+		if (fv < 0) {
+			bad("the floor value")
+		} else {
+			floor = fv
+		}
+		havefloor = 1
+	}
+	$1 == "#define" && $2 == "NV_ARCH_FLOOR_MIN_ARCHITECTURE_NAME" {
+		fname = quoted($0)
+		if (fname == "") bad("the floor name")
+	}
+	$1 == "#define" && $2 == "NV_ARCH_FLOOR_MIN_ARCHITECTURE_LABEL" {
+		flabel = quoted($0)
+		if (flabel == "") bad("the floor label")
+	}
+	/^[ \t]+ROW\(/ {
+		line = $0
+		sub(/^[ \t]+ROW\(/, "", line)
+		if (match(line, /\)/) == 0) {
+			bad("a row without a closing parenthesis")
+			next
+		}
+		line = substr(line, 1, RSTART - 1)
+		n = split(line, a, ",[ \t]*")
+		if (n == 3) {
+			v = hexnum(a[1]); nm = unquoted(a[2]); pre = unquoted(a[3])
+			if (v < 0 || nm == "" || pre == "") {
+				bad("an architecture row")
+				next
+			}
+			narch++
+			archval[narch] = v; archname[narch] = nm; archpre[narch] = pre
+		} else if (n == 5) {
+			av = hexnum(a[1]); iv = hexnum(a[2])
+			ch = unquoted(a[3]); im = unquoted(a[4]); mac = unquoted(a[5])
+			if (av < 0 || iv < 0 || ch == "" || im == "" || mac == "") {
+				bad("a firmware row")
+				next
+			}
+			nfw++
+			fwarch[nfw] = av; fwimpl[nfw] = iv; fwchip[nfw] = ch
+			fwimage[nfw] = im; fwmach[nfw] = mac
+		} else {
+			bad("a row with the wrong number of fields")
+		}
+	}
+	END {
+		if (malformed) exit 1
+		if (!havefloor || floor < 0 || fname == "" || flabel == "") {
+			bad("the floor, its name or its label")
+			exit 1
+		}
+		if (narch == 0) {
+			bad("no architecture row")
+			exit 1
+		}
+		if (chip == "") {
+			printf "floor %d %s %s\n", floor, fname, flabel
+			for (i = 1; i <= narch; i++)
+				printf "arch %d %s %s\n", archval[i], archname[i], archpre[i]
+			for (i = 1; i <= nfw; i++)
+				printf "fw %d %d %s %s %s\n", fwarch[i], fwimpl[i], fwchip[i], \
+			    fwimage[i], fwmach[i]
+			exit 0
+		}
+		if (chip !~ /^[A-Z][A-Z][0-9]/) {
+			print "unknown||no chip name in the PCI device name; nvidia.ko decides when it probes"
+			exit 0
+		}
+		p = substr(chip, 1, 2); best = -1; an = ""
+		for (i = 1; i <= narch; i++)
+			if (archpre[i] == p && archval[i] > best) {
+				best = archval[i]; an = archname[i]
+			}
+		if (best < 0) {
+			print "unknown||unknown chip " chip "; nvidia.ko decides when it probes"
+			exit 0
+		}
+		if (best < floor) {
+			print "below-floor|" an "|" chip " is " an \
+			    "; this driver supports " flabel " and later"
+			exit 0
+		}
+		for (j = 1; j <= nfw; j++)
+			if (chip_matches(chip, fwchip[j]) && !machine_in(fwmach[j], machine)) {
+				print "no-firmware|" an "|" chip " is " an \
+				    ", which needs the " fwimage[j] \
+				    " firmware; only the " fwmach[j] " build carries it"
+				exit 0
+			}
+		print "supported|" an "|" chip " is " an
+		exit 0
+	}
+	' "$(arch_floor_header)"
+}
+
+# floor_from_header: "value|name" of the floor the header declares; fails when
+# the header cannot be read or does not declare one.
+floor_from_header() {
+	_t=$(arch_floor_table) || return 1
+	_f=$(printf '%s\n' "$_t" | awk '$1 == "floor" { print $2 "|" $3; exit }')
+	[ -n "$_f" ] || return 1
+	printf '%s\n' "$_f"
+}
+
+# pci_vendors_support CHIP MACHINE: "state|architecture|reason" from the chip
+# name (first word of the pciconf device name, for example TU104) and the
+# header's tables.  A GSP image this build lacks is no-firmware.
+pci_vendors_support() {
+	if ! _t=$(arch_floor_table "$1" "$2"); then
+		printf 'unknown||the architecture table is unreadable; nvidia.ko decides when it probes\n'
+		return 0
+	fi
+	printf '%s\n' "$_t"
+}
+
+# sel_location SELECTOR: the PCI location of a pciconf selector such as
+# vgapci1@pci0:13:0:0: the part after the @, in the decimal form pciconf
+# prints.  Prints nothing for any other shape.
+sel_location() {
+	printf '%s\n' "$1" | awk '
+	{
+		s = $0; if (!sub(/^[^@]*@/, "", s)) exit
+		if (s !~ /^pci[0-9]+:[0-9]+:[0-9]+:[0-9]+$/) exit
+		print s
+	}'
+}
+
+# sel_chip SELECTOR PCICONF-LV-OUTPUT: the first word of the device name pciconf
+# -lv gives that selector (GB206 for 'GB206 [GeForce RTX 5060 Ti]'); nothing
+# when there is none.
+sel_chip() {
+	printf '%s\n' "$2" | awk -v sel="$1:" -v q="'" '
+	/^[^ \t]/ { inblk = ($1 == sel); next }
+	inblk && /^[ \t]+device[ \t]*=/ {
+		s = substr($0, index($0, q) + 1); s = substr(s, 1, index(s, q) - 1)
+		split(s, w, " "); print w[1]; exit
+	}'
+}
+
+# kernel_support VGAPCI LOCATION KERNEL-DEV KERNEL-REFUSED KERNEL-REFUSED-COUNT:
+# "state|reason" from what nvidia.ko says about this device, which it decides
+# itself.  KERNEL-DEV is "sysctl dev.nvidia" output (the attached nvidia
+# children), KERNEL-REFUSED the text of hw.nvidia.refused, and
+# KERNEL-REFUSED-COUNT the value of hw.nvidia.refused_count.
+# The line of hw.nvidia.refused is "<pciconf selector> <parent name>
+# <device id> <keyword> <message>": the keyword is the fourth field, and it
+# is the only thing this build accepts; anything else is "unknown" with the
+# kernel's own message as the reason.
+kernel_support() {
+	_ks_att=$(printf '%s\n' "$3" | awk -v v="$1" '
+	$1 ~ /^dev\.nvidia\.[0-9]+\.%parent:$/ && $2 == v { print "yes"; exit }')
+	if [ "$_ks_att" = yes ]; then
+		printf 'supported|nvidia.ko attached to it\n'
+		return 0
+	fi
+	if [ -n "$2" ]; then
+		_ks_ref=$(printf '%s\n' "$4" | awk -v loc="$2" '
+		$1 == loc && NF >= 5 {
+			m = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /, "", m)
+			print $4 "|" m; exit
+		}')
+		if [ -n "$_ks_ref" ]; then
+			case ${_ks_ref%%|*} in
+			below-floor|no-firmware|unknown|not-responding|unreadable)
+				printf '%s\n' "$_ks_ref"
+				;;
+			*)
+				printf 'unknown|%s\n' "${_ks_ref#*|}"
+				;;
+			esac
+			return 0
+		fi
+	fi
+	# The kernel refused more GPUs than it lists: it says so, and the
+	# number is the size of the list (NV_ARCH_FLOOR_MAX_REFUSED).
+	_ks_lines=$(printf '%s\n' "$4" | grep -c . || true)
+	case $5 in
+	''|*[!0-9]*) ;;
+	*)
+		if [ "$5" -gt "$_ks_lines" ]; then
+			printf 'unknown|nvidia.ko refused more GPUs than hw.nvidia.refused lists (16); see dmesg for %s: nvidia:\n' "$1"
+			return 0
+		fi
+		;;
+	esac
+	printf 'unknown|nvidia.ko has neither attached nor refused it; see dmesg | grep %s\n' "$1"
+}
+
+# gpu_support_text STATE: the verdict of a device, without the reason: the
+# reason goes on the line under it.
+gpu_support_text() {
+	case $1 in
+	supported) printf 'present, supported' ;;
+	below-floor) printf 'present, below the supported floor' ;;
+	no-firmware) printf 'present, cannot attach' ;;
+	not-responding|unreadable) printf 'present, not attaching' ;;
+	*) printf 'present, support unknown' ;;
+	esac
 }
 
 # foreign_drm DESTDIR: 0 when DESTDIR/boot/modules/drm.ko exists and our
@@ -511,11 +787,62 @@ kernel_patch_items() {
 	esac
 }
 
+# gpu_support_rows: fill $_devrows, one line per NVIDIA display device,
+# "selector|vendor|device|class|state|architecture|source|reason" (the reason
+# escaped as blk_esc does), and $_minarch ("value|name|source").  Nothing here
+# can fail preflight: a device nobody can classify is "unknown".
+gpu_support_rows() {
+	_devrows=
+	_minarch=
+	_k_on=0
+	_nvmin=$("$_sysctl" -n hw.nvidia.min_architecture 2>/dev/null) || _nvmin=
+	case $_nvmin in
+	''|*[!0-9]*) ;;
+	*) _k_on=1 ;;
+	esac
+	if [ "$_k_on" = 1 ]; then
+		_nvname=$("$_sysctl" -n hw.nvidia.min_architecture_name 2>/dev/null) || _nvname=
+		_minarch="$_nvmin|$_nvname|kernel"
+		_k_dev=$("$_sysctl" dev.nvidia 2>/dev/null) || _k_dev=
+		_k_ref=$("$_sysctl" -n hw.nvidia.refused 2>/dev/null) || _k_ref=
+		_k_count=$("$_sysctl" -n hw.nvidia.refused_count 2>/dev/null) || _k_count=
+	elif _fl=$(floor_from_header); then
+		_minarch="$_fl|header"
+	fi
+	[ -n "$_devs" ] || return 0
+	_pcv=$("$_pciconf" -lv 2>/dev/null) || _pcv=
+	while read -r _sel _v _d _c; do
+		[ -n "$_sel" ] || continue
+		_loc=$(sel_location "$_sel")
+		_chip=$(sel_chip "$_sel" "$_pcv")
+		_ps=$(pci_vendors_support "$_chip" "$_machine") || _ps='unknown||no verdict'
+		_parch=${_ps#*|}
+		_parch=${_parch%%|*}
+		if [ "$_k_on" = 1 ]; then
+			_ksp=$(kernel_support "${_sel%%@*}" "$_loc" "$_k_dev" "$_k_ref" "$_k_count")
+			_st=${_ksp%%|*}
+			_rs=${_ksp#*|}
+			_src=kernel
+		else
+			_st=${_ps%%|*}
+			_rs=${_ps#*|*|}
+			_src=pci_vendors
+		fi
+		_devrows="$_devrows$_sel|$_v|$_d|$_c|$_st|$_parch|$_src|$(blk_esc "$_rs")
+"
+	done <<EOF
+$_devs
+EOF
+}
+
 collect_preflight() {
 	setup
 	items=
+	_pciconf=$(mk_hook GB10_TEST_PCICONF pciconf) || _pciconf=pciconf
+	_sysctl=$(mk_hook GB10_TEST_SYSCTL sysctl) || _sysctl=sysctl
 	_os=$(uname -s)
 	_arch=$(uname -p 2>/dev/null || uname -m)
+	_machine=$(mk_hook GB10_TEST_MACHINE_ARCH "$_arch") || _machine=$_arch
 	_run=$(running_osreldate)
 	if [ "$_os" = FreeBSD ] && [ "$_arch" = aarch64 ]; then
 		add_item platform ok "FreeBSD $(uname -r) $_arch" ""
@@ -613,6 +940,7 @@ EOF
 	# reported, and it does not fail preflight (the build needs no GPU)
 	_pcierr=0
 	_devs=$(nvidia_devices) || _pcierr=1
+	gpu_support_rows
 	if [ "$_pcierr" = 1 ]; then
 		_device="device check unavailable"
 	elif [ -n "$_devs" ]; then
@@ -643,14 +971,26 @@ render_preflight() {
 		done
 		printf '\n  ],\n  "items": ['
 		_i=0
-		printf '%s\n' "$_devs" | while read -r _sel _v _d _c; do
+		printf '%s' "$_devrows" | while IFS='|' read -r _sel _v _d _c _st _ar _src _rs; do
 			[ -n "$_sel" ] || continue
 			[ "$_i" = 0 ] || printf ','
-			printf '\n    {"index": %s, "selector": "%s", "vendor": "%s", "device": "%s", "class": "%s"}' \
-			    "$_i" "$(json_str "$_sel")" "$_v" "$_d" "$_c"
+			if [ -n "$_ar" ]; then _arj="\"$(json_str "$_ar")\""; else _arj=null; fi
+			printf '\n    {"index": %s, "selector": "%s", "vendor": "%s", "device": "%s", "class": "%s", "support": {"state": "%s", "architecture": %s, "source": "%s", "reason": "%s"}}' \
+			    "$_i" "$(json_str "$_sel")" "$_v" "$_d" "$_c" "$_st" "$_arj" "$_src" \
+			    "$(json_str "$(blk_unesc "$_rs")")"
 			_i=$((_i + 1))
 		done
-		printf '\n  ],\n  "device": "%s",\n  "missing": %s\n}\n' "$_device" "$_missing"
+		printf '\n  ],\n'
+		if [ -n "$_minarch" ]; then
+			IFS='|' read -r _mv _mn _ms <<EOF
+$_minarch
+EOF
+			printf '  "min_architecture": {"value": %s, "name": "%s", "source": "%s"},\n' \
+			    "$_mv" "$(json_str "$_mn")" "$_ms"
+		else
+			printf '  "min_architecture": {"value": null, "name": null, "source": "unavailable"},\n'
+		fi
+		printf '  "device": "%s",\n  "missing": %s\n}\n' "$_device" "$_missing"
 	else
 		printf 'preflight: purpose=%s os=%s arch=%s work=%s\n' "${MK_PURPOSE:-application}" "$_os" "$_arch" "$WORK"
 		printf '%s' "$items" | while IFS='|' read -r _n _s _r _f; do
@@ -662,8 +1002,13 @@ render_preflight() {
 				printf 'miss  %s: %s%s\n' "$_n" "$_r" "${_f:+ (fix: $_f)}"
 			fi
 		done
-		if [ -n "$_devs" ]; then
-			printf '%s\n' "$_devs" | sed 's/^/gpu   /'
+		if [ -n "$_devrows" ]; then
+			printf '%s' "$_devrows" | while IFS='|' read -r _sel _v _d _c _st _ar _src _rs; do
+				[ -n "$_sel" ] || continue
+				printf 'gpu   %s %s %s %s: %s\n' "$_sel" "$_v" "$_d" "$_c" \
+				    "$(gpu_support_text "$_st")"
+				printf '      %s\n' "$(blk_unesc "$_rs")"
+			done
 		fi
 		if [ "$_pcierr" = 1 ]; then
 			printf 'gpu   %s: pciconf -l failed (the build and install need no GPU)\n' "$_device"

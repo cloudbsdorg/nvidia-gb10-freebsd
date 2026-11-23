@@ -123,6 +123,17 @@ you ran, as in `make install ACCEPT_NVIDIA_LICENSE=1`. For a missing kernel chan
 [`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
 without installing.
 
+`make preflight` also says, for each NVIDIA display device, whether the driver will take it
+(it attaches to Ampere and later only): with `nvidia.ko` loaded the answer is the kernel's (attached,
+or refused with its message), otherwise it comes from the chip name `pciconf -lv` gives and the
+architecture table in `src/gb10-archfloor/nv_arch_floor.h`. A Maxwell or Turing card below the
+floor prints `present, below the supported floor: ...`; an older card (Kepler, Fermi, ...) has no
+name in that table and prints `present, support unknown: ...` until `nvidia.ko` has probed it,
+and the kernel then refuses it as below the floor. It is never a missing item, because the build
+needs no GPU. In the JSON each item has a `support` object (`state`, `architecture`, `source`,
+`reason`) and the document has `min_architecture`; both are required (schema 1.1, and the
+`schema_version` of a document stays 1.0: it names the 1.x contract line).
+
 For machines, `JSON=1` makes preflight or install print one JSON object on stdout; `JSONL=1`
 streams install progress objects followed by the summary and wins when both are set. When a
 run fails, BSD make's own error lines are mixed in, so a machine should call the
@@ -222,7 +233,9 @@ Developers who need the individual build and test-load commands should use
 
 `nvidia.ko` depends on the GSP firmware module for its GPUs. `nvidia_gsp_ga10x_fw` serves
 Ampere other than GA100, Ada, Hopper and Blackwell, on every architecture. `nvidia_gsp_tu10x_fw`
-serves Turing and GA100 (GA100 uses the tu10x firmware) and is built on amd64 only. Once the
+serves the GA100 (it uses the tu10x firmware) and is built on amd64 only, so an arm64 build
+refuses a GA100 when it probes it. The driver attaches to nothing older than Ampere, so no
+Turing GPU needs that image. Once the
 modules are installed next to `nvidia.ko` and `kldxref` has indexed the directory, `kldload nvidia`
 loads them first, as root, so the first open of the GPU by an unprivileged process finds the
 firmware already registered. The kernel names the module after the file with `_fw` appended, so
@@ -243,6 +256,7 @@ find it by PCI bus, never by assuming 0. See `man/nvidia.4`.
 | | Status |
 |---|---|
 | `nvidia.ko` loads and attaches to the GPU; GSP firmware boots | works |
+| GPUs older than Ampere (RTX 20 series and earlier) | refused at probe on purpose, for now: no `/dev/nvidiaN`, one log line, listed in `hw.nvidia.refused` |
 | `nvidia-modeset.ko` and `nvidia-drm.ko` load | works |
 | Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node, found by PCI bus; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
@@ -332,8 +346,11 @@ from the ACPI MCFG table and reports the decision in `hw.nvidia.altra_device_wc_
   `linux_enable=YES` and let it do it at boot (`nvidia_linux_mode=AUTO` loads a provider only for a
   driver that is already loaded).
 - An Ampere-generation or newer GPU (RTX 30 series and later, and data-centre parts of the
-  same generations). Those run the `gsp_ga10x` firmware this repository builds; Turing needs
-  `gsp_tu10x`, which is not built yet.
+  same generations). For now the driver attaches to nothing older: when it probes a device it
+  reads the architecture from `PMC_BOOT_42` and refuses an earlier one (Turing, Volta, Pascal,
+  Maxwell) with `ENXIO`, so only the GPUs this repository is tested on are claimed. Ampere
+  and later run the `gsp_ga10x` firmware this repository builds. The GA100 runs `gsp_tu10x`,
+  which only the amd64 build carries, so the arm64 build refuses a GA100 as well.
 
 ## Memory attributes on arm64
 
@@ -488,6 +505,23 @@ sysctl hw.nvidia.altra_device_wc_active
 ```
 
 Forcing `0` on an Altra brings back the unsafe Normal accesses to BARs. Use it only to test.
+
+### Supported architecture and refused GPUs
+
+`nvidia.ko` attaches to Ampere (RTX 30) and later GPUs only, for now. A GPU it refuses is
+never attached, so it has no `dev.nvidia.N` tree; the refusals are listed under `hw.nvidia`:
+
+```sh
+sysctl hw.nvidia.min_architecture hw.nvidia.min_architecture_name   # 23 and Ampere
+sysctl hw.nvidia.refused_count
+sysctl -n hw.nvidia.refused
+```
+
+`hw.nvidia.refused` has one line per refused GPU: the PCI location, the device id, a verdict
+keyword (`below-floor`, `unknown`, `no-firmware`, `not-responding`, `unreadable`) and the
+message the driver logged once at probe. A machine whose NVIDIA GPUs are all refused keeps
+`nvidia.ko` and its firmware modules loaded and idle, and the devd rule does not load
+`nvidia-drm`; `kldunload nvidia` frees them. See `nvidia(4)`.
 
 ### Version and identity sysctls
 

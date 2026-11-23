@@ -28,6 +28,32 @@ started, on the first open of
 .Pa /dev/nvidia Ns Ar N ,
 and it is shut down again when the last open closes.
 .Pp
+For now the driver attaches to Ampere (RTX 30) and later GPUs only.
+The architecture names it knows are Turing, Volta, Pascal and Maxwell;
+a card of an earlier generation has no name in that table, and its
+message gives the architecture number instead.
+When it probes a device it reads the identification registers
+.Dv PMC_BOOT_0
+and
+.Dv PMC_BOOT_42
+from the first BAR, the same read the resource manager makes a moment later,
+and refuses a GPU of an earlier architecture with
+.Er ENXIO :
+the GPU stays unattached, gets no
+.Pa /dev/nvidia Ns Ar N
+and no
+.Va dev.nvidia.N
+tree, and the driver logs one line for it (see
+.Sx DIAGNOSTICS ) .
+The refused GPUs are listed in
+.Va hw.nvidia.refused .
+The GA100 needs the
+.Dq tu10x
+firmware image, which only the amd64 build carries, so the arm64 build refuses
+it too.
+The check reads the BAR the way the attach does and gives back what it took:
+the memory decode of the device is switched off again if it was off.
+.Pp
 The module is native: it has no
 .Dv MODULE_DEPEND
 on the Linuxulator
@@ -92,8 +118,10 @@ The images live in firmware modules.
 serves Ampere (other than GA100), Ada, Hopper and Blackwell GPUs on every
 architecture.
 .Nm nvidia_gsp_tu10x_fw
-serves Turing and GA100 GPUs and exists on amd64 only; the arm64 build does not
-support those GPUs.
+serves the GA100 and exists on amd64 only; the arm64 build refuses a GA100 when
+it probes it.
+The driver attaches to nothing older than Ampere, so no Turing GPU needs the
+image.
 .Pp
 .Nm
 depends on the modules built for its architecture, so
@@ -165,11 +193,29 @@ in
 .Xr rc.conf 5 ,
 which the installed
 .Xr devd 8
-rule reads before it loads
-.Nm nvidia-drm
-when an NVIDIA display device attaches to the
+rule reads.
+When an NVIDIA display device attaches to the
 .Xr pci 4
-bus.
+bus the rule loads
+.Nm ,
+and then
+.Nm nvidia-drm
+only if the device that raised the event got an attached
+.Nm
+device (its
+.Va dev.nvidia.N.%parent
+names the
+.Ql vgapci
+device).
+On a machine whose NVIDIA GPUs are all refused,
+.Nm
+and the firmware modules it depends on stay loaded and idle, and
+.Nm nvidia-drm
+is not loaded;
+.Xr kldunload 8
+of
+.Nm
+frees them.
 .Cm deinstall
 removes everything
 .Cm install
@@ -297,6 +343,52 @@ and
 have the same meanings and availability rules as the corresponding
 .Va hw.nvidia.version
 variables.
+.Pp
+The driver attaches to Ampere and later GPUs (the architecture named by
+.Va hw.nvidia.min_architecture_name ) .
+A GPU it refuses has no
+.Va dev.nvidia.N
+tree, so the refusals are listed here:
+.Bl -tag -width indent
+.It Va hw.nvidia.min_architecture
+The lowest
+.Dv PMC_BOOT_42
+architecture value the driver attaches to, as an integer: 23 (0x17) for Ampere.
+The architecture values are not in the order of the generations, but every
+Ampere or later value is at least 23 and every earlier one is below it.
+.It Va hw.nvidia.min_architecture_name
+The name of that architecture, for example
+.Qq Ampere .
+.It Va hw.nvidia.refused_count
+The number of GPUs refused at probe, as an integer: the ones listed in
+.Va hw.nvidia.refused
+plus any that did not fit that list, which holds 16.
+A GPU that is probed again counts once: the driver remembers the
+locations of 64 refused devices, and a location past that is counted
+and logged again.
+Past 64 refused locations the count can overstate the number of refused
+GPUs: a location that is not remembered is counted again on every probe
+and is never counted down.
+.It Va hw.nvidia.refused
+One line per refused GPU, lines joined by a newline, an empty string when none
+was refused:
+the PCI selector in the decimal form
+.Xr pciconf 8
+prints,
+.Pq Ar domain Ns \&: Ns Ar bus Ns \&: Ns Ar slot Ns \&: Ns Ar function ,
+the name of the PCI device the driver sits on
+.Pq Ar vgapci Ns Ar N ,
+the device id as
+.Qq 0x Ns Ar XXXX ,
+a verdict keyword and the message the driver logged.
+The keywords are
+.Qq below-floor ,
+.Qq unknown ,
+.Qq no-firmware ,
+.Qq not-responding
+and
+.Qq unreadable .
+.El
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia.registry.EnableGpuFirmware
@@ -323,14 +415,48 @@ of the driver.
 .It Pa /usr/local/etc/devd/nvidia_gb10.conf
 the
 .Xr devd 8
-rule that loads the driver
+rule that loads the driver, and
+.Nm nvidia-drm
+for a GPU the driver attached to
 .It Pa /var/db/nvidia-gb10-freebsd/installed.manifest
 every file
 .Cm make install
 wrote, with its mode, owner and sha256
 .El
 .Sh DIAGNOSTICS
+Each of the following is logged once per PCI location, when the driver refuses
+a device at probe; the device stays unattached.
+The line is logged against the PCI device the driver sits on, so it starts
+with that device's name
+.Pq Ar vgapci Ns Ar N
+and the driver writes
+.Dq nvidia:
+before its own words.
+The text before the parenthesis is the device name the resource manager knows,
+or
+.Dq NVIDIA GPU
+when it has none, and the parenthesis holds the PCI device id.
 .Bl -tag -width indent
+.It Dq vgapciN: nvidia: ... is Ar architecture ; this driver supports Ampere (RTX 30) and later
+The GPU is of an earlier architecture: Turing, Volta, Pascal or Maxwell.
+.It Dq vgapciN: nvidia: ... is architecture 0x Ns Ar NN , older than Ampere; this driver supports Ampere (RTX 30) and later
+The same, for an earlier architecture the driver has no name for: the table
+has no name for the generations before Maxwell.
+.It Dq vgapciN: nvidia: ... reports unknown architecture 0x Ns Ar NN ; this driver supports Ampere (RTX 30) and later
+The architecture value is at or above the floor but not one the driver knows.
+.It Dq vgapciN: nvidia: ... is Ampere GA100, which needs the gsp_tu10x firmware; only the amd64 build carries it
+The GA100 runs the
+.Dq tu10x
+firmware image, which only the amd64 build carries.
+Use an amd64 machine for that card.
+.It Dq vgapciN: nvidia: ... does not respond (PMC_BOOT_0 and PMC_BOOT_42 read 0xffffffff); not attaching
+Both identification registers read all ones: the GPU is off the bus or in reset.
+Reseat or power-cycle the card, and check its power connectors.
+.It Dq vgapciN: nvidia: ...: cannot read PMC_BOOT_42 (BAR0 not available); not attaching
+The first BAR could not be allocated, so the architecture is unknown.
+Check
+.Xr devinfo 8
+-r for another owner of the memory range.
 .It Dq KLD nvidia.ko: depends on nvidia_gsp_ga10x_fw_fw - not available or version mismatch
 .Xr kldload 8
 of the driver found no firmware module of that name, and the driver is not
@@ -365,7 +491,7 @@ loaded: the driver was built without the module for that GPU, or it was not
 installed with the driver.
 Load
 .Pa nvidia_gsp_ga10x_fw.ko
-(Turing and GA100: nvidia_gsp_tu10x_fw.ko) with
+(GA100: nvidia_gsp_tu10x_fw.ko) with
 .Xr kldload 8
 as root before the first open.
 .El

@@ -109,3 +109,35 @@ no comments; `mksdk.sh` generates it from `cuda.h`.
 The test checks this. It fails if any file under `lib/cuda-native` or `tests/cuda-native` lacks
 the header, names NVIDIA Corporation, or carries another copyright line in any spelling. Two
 planted mutants prove that the check works.
+
+# Provenance: nvidia.ko architecture floor (Track #2457)
+
+Applies to `src/gb10-archfloor/`, `patches/patch-zz-2457-arch-floor_*`, the preflight support
+verdict in `scripts/make.sh`, `devd/nvidia_gb10.conf`, `tests/arch_floor*`,
+`tests/devd_rule_test.sh` and `tests/preflight_support_test.sh`.
+
+## Consulted (read)
+
+| Source | Licence checked | Used for |
+|---|---|---|
+| open-gpu-kernel-modules 580.178.04, `src/common/inc/swref/published/nv_ref.h` (`NV_PMC_BOOT_0`, `NV_PMC_BOOT_42` and its `ARCHITECTURE` and `IMPLEMENTATION` fields, the architecture values only) | SPDX MIT | `PMC_BOOT_0` at 0x0, `PMC_BOOT_42` at 0xA00, architecture in bits 29:24 and implementation in bits 23:20; the values GM100 0x11, GM200 0x12, GP100 0x13, GV100 0x14, GV110 0x15, TU100 0x16, GA100 0x17, GH100 0x18, AD100 0x19, GB100 0x1A, GB200 0x1B, AMODEL 0x1F. They are not chronological, but every Ampere or later value is at least 0x17 and every older one is below it, so the floor is the integer 0x17 |
+| open-gpu-kernel-modules 580.178.04, `src/common/inc/swref/published/nv_arch.h` (the implementation values only) | SPDX MIT | implementations GA100 0x0, GA102 0x2, AD102 0x2, GB206 0x6, GB20B 0xB (the DGX GB10 SoC; the render uAPI provenance above records 0x1bb for it), TU104 0x4, GP104 0x4: the test cases |
+| open-gpu-kernel-modules 580.178.04, `kernel-open/common/inc/nv-firmware.h` and `src/nvidia/arch/nvalloc/common/inc/nv-firmware-chip-family-select.h` | SPDX MIT | GA100 uses the `gsp_tu10x` GSP image; GA10x, AD10x, GH100, GB10x and GB20x use `gsp_ga10x` |
+| NVIDIA FreeBSD driver 580.178.04, `src/nvidia/nvidia_pci.c` (`nvidia_pci_probe`, `nvidia_pci_identify`) | NVIDIA's licence in the tarball, the file the patch edits | the probe flow: `rm_is_supported_pci_device()`, `rm_get_device_name()`, `device_set_desc_copy()`; where the check goes |
+| NVIDIA FreeBSD driver 580.178.04, `src/nvidia/nvidia_subr.c` (`nvidia_alloc_hardware`), `src/nvidia/nvidia_sysctl.c`, `src/nvidia/Makefile` | same | BAR0 is allocated with flags 0 (not `RF_ACTIVE`); where the `hw.nvidia` node is created; the `SRCS` list |
+| open-gpu-kernel-modules 580.178.04, `src/nvidia/arch/nvalloc/unix/src/osapi.c` (`rm_is_supported_device`) | SPDX MIT | the attach path maps one page of BAR0 uncached, reads BOOT_0, BOOT_1 and BOOT_42, unmaps, and treats BOOT_0 equal to BOOT_42 equal to 0xffffffff as a device that fell off the bus; our probe does the same sequence earlier |
+| FreeBSD `sys/dev/pci/vga_pci.c`, `sys/dev/pci/pcivar.h`, `sys/sys/bus.h`, `sys/sys/mutex.h`, `sys/sys/sysctl.h`, `sys/arm64/include/pmap.h` (a FreeBSD 16.0-CURRENT source tree (/usr/src/sys)) | BSD | vgapci caches BAR resources and releases them when the last child reference goes, so a probe that allocates and releases BAR0 leaves nothing for attach; `pci_enable_io`, `pci_disable_io`, `pmap_mapdev`, `pmap_unmapdev`, the resource calls and the sysctl macros; `MTX_SYSINIT` registers the matching destroy |
+| FreeBSD `devd.conf(5)` (installed manual page) | BSD | variable expansion: `$name` becomes `$'value'`, which is wrong inside single quotes, so `$device-name` sits outside them in the rule |
+| this repository: `patches/patch-zz-nvidia_fw_depend_pci.c`, `src/gb10-version/nv_version_sysctl.c`, `tests/version_sysctl_test.sh`, `docs/DEVICE-DECISION.md` of the provider-registry branch (sections 8 and 8.2) | ours | `gsp_tu10x` is depended on for amd64 only; the code and test style; where the floor goes when the registry lands (the named constant moves to a generated value) |
+
+## Not consulted
+
+- No Linux kernel source, no GPL source and no nouveau source, local or online, not even a grep.
+- Nothing of NVIDIA's Linux driver beyond the MIT files of open-gpu-kernel-modules named above.
+
+## Licence of the result
+
+`src/gb10-archfloor/` is ours, BSD-2-Clause (SPDX line in each file); the tests are BSD-3-Clause
+like the repository. The patches apply to NVIDIA's FreeBSD OS layer files and keep NVIDIA's
+licence for those files; they add two small calls and one `SRCS` line. The register offsets and
+field positions are facts of the MIT `nv_ref.h`; no NVIDIA header is included or copied.
