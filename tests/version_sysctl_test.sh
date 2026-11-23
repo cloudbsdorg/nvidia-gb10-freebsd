@@ -12,7 +12,7 @@ export PATH LC_ALL
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$REPO/work}
 mkdir -p "$WORK/tmp"
 TESTROOT=$(mktemp -d "$WORK/tmp/version-sysctl-test.XXXXXXXX") || exit 1
 cleanup() { rm -rf "$TESTROOT"; }
