@@ -11,6 +11,8 @@
 
 #include <nvrm/nvrm.h>
 
+#include "nvrm_fake.h"
+
 /*
  * Properties a backend can report.  A backend returns 0 and sets *out, or a
  * nonzero enum nvrm_reason.  Properties are RM-shaped but backend-neutral:
@@ -49,6 +51,8 @@ enum nvrm_prop {
 
 enum nvrm_sprop {
 	NVRM_SP_UUID,
+	NVRM_SP_VBIOS,
+	NVRM_SP_GSP_FIRMWARE,
 	NVRM_SP_COUNT
 };
 
@@ -71,8 +75,10 @@ typedef struct nvrm_backend_ops {
 	/* Open, check the version, attach.  Returns enum nvrm_error. */
 	int	(*open)(nvrm_backend **be, char *err, size_t errlen);
 	void	(*close)(nvrm_backend *be);
-	/* The running kernel module's version, as it reports it. */
+	/* The running kernel module's legacy short version and parsed versions. */
 	void	(*running_version)(nvrm_backend *be, nvrm_str *out);
+	void	(*driver_version)(nvrm_backend *be, nvrm_version *out);
+	void	(*rm_api_version)(nvrm_backend *be, nvrm_version *out);
 	/* Probed GPU ids, attached.  Returns enum nvrm_error. */
 	int	(*list_gpus)(nvrm_backend *be, uint32_t *ids, unsigned max,
 		    unsigned *n, char *err, size_t errlen);
@@ -105,9 +111,19 @@ uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
-/* Test seam: stands in for getpid() where the RM backend asks who owns a
- * descriptor; NULL = the real one. */
+/* Translate a stored reason id; -1 means the id is not in the reason table. */
+int	nvrm_reason_from_id(const char *id);
+/* The process and fork generation that own backend objects. */
+typedef struct nvrm_owner {
+	pid_t		pid;
+	unsigned long	generation;
+} nvrm_owner;
+void	nvrm_owner_set(nvrm_owner *o);
+int	nvrm_owner_is_me(const nvrm_owner *o);
+/* Test seam: stands in for getpid(); NULL = the real one. */
 extern pid_t (*nvrm_getpid_hook)(void);
+/* Test seam: runs the pthread_atfork(3) child handler. */
+void	nvrm_owner_fork_seam(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
@@ -119,6 +135,8 @@ typedef struct nvrm_family {
 } nvrm_family;
 extern const nvrm_family nvrm_family_table[];
 extern const unsigned nvrm_family_count;
+int	nvrm_compute_capability_for(uint64_t architecture,
+	    uint64_t implementation, uint32_t *major, uint32_t *minor);
 
 /* Board decorators: add or override options, never decide support. */
 typedef struct nvrm_decorator {
@@ -151,6 +169,7 @@ struct nvrm_ctx {
 	nvrm_backend	*be;
 	unsigned	ndev;
 	nvrm_str	running;
+	nvrm_version	driver, rm_api;
 	nvrm_device	dev[NVRM_MAX_GPUS];
 };
 
@@ -196,8 +215,9 @@ typedef struct nvrm_bmem_info {
  * its own, says why in err.  The core owns the bookkeeping (VA allocator,
  * lists, argument rules); a backend only talks to the GPU.  A release (unmap,
  * free) that the GPU side refuses returns an error too, so the core can keep
- * what is still held out of reuse; a release a backend skips on purpose (a
- * fork child, which does not own the RM client) is a success.
+ * what is still held out of reuse.  A release gets owner == 0 in a fork
+ * child: the backend releases its own records and does process-local work,
+ * but does not act on the parent's RM client or fake GPU.
  */
 typedef struct nvrm_mem_ops {
 	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
@@ -208,24 +228,24 @@ typedef struct nvrm_mem_ops {
 		    size_t errlen);
 	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
 		    int sparse, nvrm_bres **r, char *err, size_t errlen);
-	int	(*va_release)(nvrm_bres *r, char *err, size_t errlen);
+	int	(*va_release)(nvrm_bres *r, int owner, char *err, size_t errlen);
 	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
 	int	(*mem_register)(nvrm_bclient *bc, void *addr, uint64_t bytes,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
-	int	(*mem_free)(nvrm_bmem *m, char *err, size_t errlen);
+	int	(*mem_free)(nvrm_bmem *m, int owner, char *err, size_t errlen);
 	int	(*map_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
 		    uint64_t offset, uint64_t length, int read_only, char *err,
 		    size_t errlen);
 	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
-		    uint64_t length, char *err, size_t errlen);
+		    uint64_t length, int owner, char *err, size_t errlen);
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
 	 * descriptor carry one mapping); the core closes it on unmap. */
 	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
 		    char *err, size_t errlen);
-	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, char *err,
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, int owner, char *err,
 		    size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
@@ -302,6 +322,7 @@ struct nvrm_client {
 	nvrm_u64	max_page_size;
 	int		host_arm64;
 	int		allow_map;
+	nvrm_owner	owner;
 	nvrm_pool	pool[NVRM_DESC__COUNT];	/* indexed by NVRM_DESC_* */
 	nvrm_client_stats st;
 	char		errmsg[160];
@@ -320,12 +341,26 @@ extern int (*nvrm_capmode_hook)(void);
 int	nvrm_fake_gpu_access(nvrm_client *cl, uint64_t va, void *buf,
 	    size_t len, int write);
 
+/* The fake memory test seam: the public counters plus the objects the
+ * last-close sweep found leaked (more references held than the wrappers a
+ * fork child released). */
+typedef struct nvrm_fake_mem_test_stats {
+	nvrm_fake_mem_stats	base;
+	unsigned		leaked_objects;
+} nvrm_fake_mem_test_stats;
+void	nvrm_fake_mem_test_stats_get(nvrm_fake_mem_test_stats *st);
+/* Plant a leak: hold a reference on the object of a wrapper that nothing
+ * releases (tests). */
+void	nvrm_fake_mem_test_leak_ref(nvrm_bmem *m);
+
 /* Capsicum helper shared by the backends (nvrm_cap.c). */
 int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);
 /* Limit a spare descriptor (mapping or export) to what it is for. */
 int	nvrm_cap_limit_desc(int fd, int kind);
 
 /* Field and capability descriptors (nvrm_fields.c); one definition. */
+#define NVRM_STRINGIFY_(x)	#x
+#define NVRM_STRINGIFY(x)	NVRM_STRINGIFY_(x)
 /* Most GPCs an enabled-unit mask can describe (the masks are 32 bits). */
 #define NVRM_MAX_GPCS	32
 

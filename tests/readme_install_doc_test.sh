@@ -258,11 +258,21 @@ fi
 # "~/" at all (they say GB10_WORK or work/).
 needles=$repo/tests/lib/personal-paths.txt
 # personal_hit FILE: 0 when FILE holds a needle or a "~/"; 1 when clean; 2 on error.
-personal_hit() {
-	grep -F -f "$needles" -e '~/' "$1" >/dev/null 2>&1
-}
+# One loader, tests/lib/personal-paths.sh, shared with tests/make_install_flow_test.sh.
+. "$repo/tests/lib/personal-paths.sh"
+pp_pat=$(mktemp "$S/personal-patterns.XXXXXX") || { echo "cannot make a scratch file under $S" >&2; exit 1; }
+pp_allow=$(mktemp "$S/personal-allows.XXXXXX") || { echo "cannot make a scratch file under $S" >&2; exit 1; }
 scan_bad=
-[ -s "$needles" ] || scan_bad=" tests/lib/personal-paths.txt(missing)"
+if pp_load "$needles" "$pp_pat" "$pp_allow"; then :; else
+	scan_bad=" tests/lib/personal-paths.txt(missing, empty, unreadable or a mistyped line)"
+	: > "$pp_pat"
+fi
+# Documents also may not use "~/" at all: it is one more needle here.
+printf '~/\n' >> "$pp_pat"
+personal_hit() {
+	_ph=$(pp_hits "$pp_pat" "$pp_allow" "$1") || return 2
+	[ -n "$_ph" ]
+}
 for f in "$repo/README.md" "$repo"/docs/*.md "$repo"/man/*.1 "$repo"/man/*.4 "$repo"/lib/libnvrm/man/*; do
 	[ -e "$f" ] || { scan_bad="$scan_bad ${f#$repo/}(missing)"; continue; }
 	if [ ! -r "$f" ]; then

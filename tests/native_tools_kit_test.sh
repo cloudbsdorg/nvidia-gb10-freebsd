@@ -38,7 +38,7 @@ LC_ALL=C
 export PATH LC_ALL
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/native-tools-testboot
-WORK=${GB10_WORK:-$HOME/work/gb10}
+WORK=${GB10_WORK:-$repo/work}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/nvnt-kit.XXXXXX") || exit 2
 
@@ -282,7 +282,7 @@ guard_trace "$T/sp.kd" "$T/x y" "$T/x.rep" > /dev/null; _s=$?
 guard_trace "$T/fx.kd" "$T/good.sh" "$T/x.rep" > /dev/null; expect 2 $? "guard_trace: an exec with no path in the trace (fexecve) is an error"
 { cat "$T/good.kd"; echo ' 77777 sh       CALL  fexecve(0x3,0x4,0x5)'; echo ' 77777 sh       NAMI  "/libexec/ld-elf.so.1"'; echo ' 77777 sh       RET   fexecve JUSTRETURN'; } > "$T/fx2.kd"
 guard_trace "$T/fx2.kd" "$T/good.sh" "$T/x.rep" > /dev/null; expect 2 $? "guard_trace: an fexecve is an error even when its interpreter has a path"
-guard_plain_path /home/a/b > /dev/null; expect 0 $? "guard_plain_path: a plain path passes"
+guard_plain_path /var/a/b > /dev/null; expect 0 $? "guard_plain_path: a plain path passes"
 for _bad in relative/x /a/b/ /a//b /a/./b /a/../b /a/b/.. '/a/*/b'; do
 	guard_plain_path "$_bad" > /dev/null; expect 1 $? "guard_plain_path: '$_bad' is refused"
 done

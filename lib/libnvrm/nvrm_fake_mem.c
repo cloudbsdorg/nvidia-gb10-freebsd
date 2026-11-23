@@ -59,6 +59,8 @@ typedef struct fake_obj {
 	uint64_t	serial, off, bytes, page_size;
 	int		place;
 	int		exported;
+	unsigned	orphans;	/* wrappers a fork child released (their
+					 * references stay until the sweep) */
 	unsigned	refs;
 } fake_obj;
 
@@ -83,18 +85,22 @@ struct nvrm_bmem {
 	fake_obj	*o;		/* NULL for registered user pages */
 	void		*user;
 	uint64_t	bytes;
+	uint64_t	serial;		/* this wrapper, never reused */
 	struct nvrm_bmem *held_next;	/* next in nvrm_bclient.held, while on it */
 };
 
 typedef struct fake_map {
 	struct fake_map	*next;
 	uint64_t	va, length, offset;
-	nvrm_bmem	*m;
+	uint64_t	wrapper;	/* serial of the nvrm_bmem that made it */
+	fake_obj	*o;		/* what the software GPU reads: copied,
+					 * as the wrapper may be gone */
+	void		*user;
 	int		read_only;
 } fake_map;
 
 struct nvrm_bres {
-	fake_res	r;		/* first: the list holds &r */
+	fake_res	*r;		/* the parent's list outlives a child record */
 	nvrm_bclient	*c;
 };
 
@@ -110,9 +116,11 @@ struct nvrm_bclient {
 static fake_dev *devs;
 static unsigned fail_nth[NVRM_FAKE_OP__COUNT];
 static uint64_t n_traps, n_checked;
-static uint64_t next_serial = 1;
+static uint64_t next_serial = 1;	/* objects */
+static uint64_t next_wrapper = 1;	/* nvrm_bmem wrappers */
 static uint64_t host_page;	/* 0: sysconf(_SC_PAGESIZE) */
 static unsigned live_objects, live_res, live_maps, live_clients;
+static unsigned leaked_objects;
 
 void
 nvrm_fake_mem_fail(int op, unsigned nth)
@@ -217,12 +225,23 @@ static void
 dev_put(fake_dev *d)
 {
 	fake_dev **pp;
+	fake_obj *o;
 
 	if (--d->nclients != 0)
 		return;
 	for (pp = &devs; *pp != d; pp = &(*pp)->next)
 		;
 	*pp = d->next;
+	/* A fork child frees its backend records but not the parent's objects.
+	 * The in-process owner-hook test relies on the last client sweep. */
+	while ((o = d->objs) != NULL) {
+		d->objs = o->next;
+		/* Counted clean only when every reference it still holds is a
+		 * wrapper a child released; anything else is a leak. */
+		live_objects--;
+		leaked_objects += o->orphans < o->refs;
+		free(o);
+	}
 	nvrm_va_destroy(d->region[0]);
 	nvrm_va_destroy(d->region[1]);
 	close(d->fd);
@@ -328,7 +347,7 @@ fk_client_close(nvrm_bclient *c)
 	while ((r = c->res) != NULL) {
 		c->res = r->next;
 		live_res--;
-		free((nvrm_bres *)r);
+		free(r);
 	}
 	while ((m = c->held) != NULL) {
 		c->held = m->held_next;
@@ -407,27 +426,38 @@ fk_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
+	r->r = NVRM_CALLOC(1, sizeof(*r->r));
+	if (r->r == NULL) {
+		free(r);
+		snprintf(err, errlen, "out of memory");
+		return (NVRM_E_NOMEM);
+	}
 	r->c = c;
-	r->r.va = va;
-	r->r.bytes = bytes;
-	r->r.sparse = sparse;
-	r->r.next = c->res;
-	c->res = &r->r;
+	r->r->va = va;
+	r->r->bytes = bytes;
+	r->r->sparse = sparse;
+	r->r->next = c->res;
+	c->res = r->r;
 	live_res++;
 	*rp = r;
 	return (NVRM_OK);
 }
 
 static int
-fk_va_release(nvrm_bres *r, char *err, size_t errlen)
+fk_va_release(nvrm_bres *r, int owner, char *err, size_t errlen)
 {
 	fake_res **pp;
 
+	if (!owner) {
+		free(r);
+		return (NVRM_OK);
+	}
 	INJECT(NVRM_FAKE_OP_VA_RELEASE, err, errlen);
-	for (pp = &r->c->res; *pp != &r->r; pp = &(*pp)->next)
+	for (pp = &r->c->res; *pp != r->r; pp = &(*pp)->next)
 		;
-	*pp = r->r.next;
+	*pp = r->r->next;
 	live_res--;
+	free(r->r);
 	free(r);
 	return (NVRM_OK);
 }
@@ -458,6 +488,7 @@ fk_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	}
 	m->c = c;
 	m->o = o;
+	m->serial = next_wrapper++;
 	m->bytes = o->bytes;
 	out->bytes = o->bytes;
 	out->page_size = ps;
@@ -480,6 +511,7 @@ fk_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	}
 	m->c = c;
 	m->user = addr;
+	m->serial = next_wrapper++;
 	m->bytes = bytes;
 	out->bytes = bytes;
 	out->page_size = 4096;
@@ -488,20 +520,35 @@ fk_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	return (NVRM_OK);
 }
 
+/* Whether the GPU mapping g was made by the wrapper m.  Two wrappers can
+ * share one object (an import in the same client) or one set of user pages
+ * (registered twice), so the object and the pages cannot tell them apart. */
+static int
+same_wrapper(const fake_map *g, const nvrm_bmem *m)
+{
+	return (g->wrapper == m->serial);
+}
+
 static int
 mapped_somewhere(const nvrm_bmem *m)
 {
 	const fake_map *g;
 
 	for (g = m->c->maps; g != NULL; g = g->next)
-		if (g->m == m)
+		if (same_wrapper(g, m))
 			return (1);
 	return (0);
 }
 
 static int
-fk_mem_free(nvrm_bmem *m, char *err, size_t errlen)
+fk_mem_free(nvrm_bmem *m, int owner, char *err, size_t errlen)
 {
+	if (!owner) {
+		if (m->o != NULL)
+			m->o->orphans++;
+		free(m);
+		return (NVRM_OK);
+	}
 	/* Still mapped (an unmap was refused): like the RM, the mapping keeps
 	 * the memory alive, until the client closes. */
 	if (mapped_somewhere(m)) {
@@ -537,7 +584,9 @@ fk_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 	g->va = va;
 	g->length = length;
 	g->offset = offset;
-	g->m = m;
+	g->wrapper = m->serial;
+	g->o = m->o;
+	g->user = m->user;
 	g->read_only = read_only;
 	g->next = r->c->maps;
 	r->c->maps = g;
@@ -547,13 +596,15 @@ fk_map_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t offset,
 
 static int
 fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
-    char *err, size_t errlen)
+    int owner, char *err, size_t errlen)
 {
 	fake_map **pp, *g;
 
 	(void)length;
+	if (!owner)
+		return (NVRM_OK);
 	INJECT(NVRM_FAKE_OP_UNMAP_GPU, err, errlen);
-	for (pp = &r->c->maps; (*pp)->m != m || (*pp)->va != va;
+	for (pp = &r->c->maps; !same_wrapper(*pp, m) || (*pp)->va != va;
 	    pp = &(*pp)->next)
 		;
 	g = *pp;
@@ -583,9 +634,11 @@ fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 }
 
 static int
-fk_unmap_cpu(nvrm_bmem *m, void *addr, char *err, size_t errlen)
+fk_unmap_cpu(nvrm_bmem *m, void *addr, int owner, char *err, size_t errlen)
 {
 	munmap(addr, m->o->bytes);
+	if (!owner)
+		return (NVRM_OK);
 	INJECT(NVRM_FAKE_OP_UNMAP_CPU, err, errlen);
 	return (NVRM_OK);
 }
@@ -671,6 +724,7 @@ fk_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	o->refs++;
 	m->c = c;
 	m->o = o;
+	m->serial = next_wrapper++;
 	m->bytes = o->bytes;
 	out->bytes = o->bytes;
 	out->page_size = o->page_size;
@@ -774,17 +828,16 @@ gpu_copy(const nvrm_bclient *c, const fake_map *g, uint64_t va, void *buf,
     size_t n, int write)
 {
 	uint64_t off = g->offset + (va - g->va);
-	nvrm_bmem *m = g->m;
 
-	if (m->user != NULL) {
+	if (g->user != NULL) {
 		if (write)
-			memcpy((char *)m->user + off, buf, n);
+			memcpy((char *)g->user + off, buf, n);
 		else
-			memcpy(buf, (char *)m->user + off, n);
+			memcpy(buf, (char *)g->user + off, n);
 	} else if (write)
-		(void)pwrite(c->dev->fd, buf, n, (off_t)(m->o->off + off));
+		(void)pwrite(c->dev->fd, buf, n, (off_t)(g->o->off + off));
 	else
-		(void)pread(c->dev->fd, buf, n, (off_t)(m->o->off + off));
+		(void)pread(c->dev->fd, buf, n, (off_t)(g->o->off + off));
 }
 
 int
@@ -847,4 +900,19 @@ nvrm_fake_mem_stats_get(nvrm_fake_mem_stats *st)
 		st->sys_free += nvrm_va_free_bytes(d->region[1]);
 		st->sys_extents += nvrm_va_extents(d->region[1]);
 	}
+}
+
+void
+nvrm_fake_mem_test_stats_get(nvrm_fake_mem_test_stats *st)
+{
+	nvrm_fake_mem_stats_get(&st->base);
+	st->leaked_objects = leaked_objects;
+}
+
+/* Hold a reference on the wrapper's object that nothing will release: the
+ * leak the last-close sweep exists to find. */
+void
+nvrm_fake_mem_test_leak_ref(nvrm_bmem *m)
+{
+	m->o->refs++;
 }

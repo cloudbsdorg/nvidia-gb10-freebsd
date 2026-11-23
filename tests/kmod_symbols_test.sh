@@ -223,11 +223,11 @@ fresh_reason() {
 		echo "$_fr_prep carries no manifest lines"
 		return 1
 	fi
-	while read -r _fr_name _fr_sha; do
+	while read -r _fr_name _fr_sha _fr_dest; do
 		[ -n "$_fr_name" ] || continue
 		case $_fr_name in
 		patch-*) _fr_src=$_fr_repo/patches/$_fr_name ;;
-		src/*) _fr_src=$_fr_repo/$_fr_name ;;
+		src/*|lib/*) _fr_src=$_fr_repo/$_fr_name ;;
 		# an MIT interface header copied from the pinned open RM core
 		# checkout (prepare-tree.sh copy_repo_src)
 		ogkm:*) _fr_src=$WORK/sources/open-gpu-kernel-modules-580.178.04/${_fr_name#ogkm:} ;;
@@ -246,6 +246,12 @@ fresh_reason() {
 		fi
 		if [ "$_fr_now" != "$_fr_sha" ]; then
 			echo "$_fr_name changed since the tree was prepared (manifest $_fr_sha, now $_fr_now)"
+			return 1
+		fi
+		# an entry with a destination column is a copy: that copy in the
+		# tree must still be the repo file
+		if [ -n "$_fr_dest" ] && ! cmp -s "$_fr_src" "$_fr_tree/$_fr_dest"; then
+			echo "$_fr_tree/$_fr_dest differs from $_fr_name (a hand-edited or stale copy)"
 			return 1
 		fi
 	done < "$TMPD/fr-manifest"
@@ -267,6 +273,17 @@ if [ "$_fr_rc" -ne 0 ] || [ -n "$_fr_reason" ]; then
 fi
 echo "fresh: .prepared says state done, its manifest matches patches/ and src/, nvidia.ko is newer than .prepared"
 
+# populate_copies DIR: put a faithful copy of every file the manifest gives a
+# destination column into DIR, so a scratch tree differs from a real one only
+# in what its control changes.
+populate_copies() {
+	sed -n '3,$p' "$TREE/.prepared" | while read -r _pc_name _pc_sha _pc_dest; do
+		[ -n "$_pc_dest" ] || continue
+		mkdir -p "$1/$(dirname "$_pc_dest")"
+		cp "$REPO/$_pc_name" "$1/$_pc_dest"
+	done
+}
+
 # (e-control-1) Falsifiability: a nvidia.ko that PREDATES .prepared must be
 # refused. The scratch tree holds a copy of the real .prepared and a copy
 # of nvidia.ko with an old timestamp - everything else is identical, so
@@ -274,6 +291,7 @@ echo "fresh: .prepared says state done, its manifest matches patches/ and src/, 
 STALE=$TMPD/stale-tree
 mkdir -p "$STALE/nvidia"
 cp "$TREE/.prepared" "$STALE/.prepared"
+populate_copies "$STALE"
 cp "$KO" "$STALE/nvidia/nvidia.ko"
 touch -t 202501010000 "$STALE/nvidia/nvidia.ko"
 _fr_rc=0
@@ -291,6 +309,7 @@ BAD=$TMPD/bad-manifest-tree
 mkdir -p "$BAD/nvidia"
 awk 'NR == 3 { sub(/[0-9a-f]+$/, "0000000000000000000000000000000000000000000000000000000000000000") } { print }' \
 	"$TREE/.prepared" > "$BAD/.prepared"
+populate_copies "$BAD"
 cp "$KO" "$BAD/nvidia/nvidia.ko"
 touch "$BAD/nvidia/nvidia.ko"
 _fr_rc=0
@@ -300,6 +319,29 @@ if [ "$_fr_rc" -ne 0 ]; then
 else
 	fail "(e-control-2) a changed patch hash passes the freshness check"
 fi
+
+# (e-control-3) Falsifiability: a hand-edited copy of one of the two version
+# sysctl copies must be refused, and the reason must name which copy. The
+# scratch tree holds the real manifest and a faithful copy of every file the
+# manifest gives a destination for; then one destination is changed.
+COPYBAD=$TMPD/bad-copy-tree
+mkdir -p "$COPYBAD/nvidia"
+cp "$TREE/.prepared" "$COPYBAD/.prepared"
+cp "$KO" "$COPYBAD/nvidia/nvidia.ko"
+touch "$COPYBAD/nvidia/nvidia.ko"
+populate_copies "$COPYBAD"
+_fr_rc=0
+_fr_out=$(fresh_reason "$COPYBAD" "$REPO") || _fr_rc=$?
+[ "$_fr_rc" -eq 0 ] || fail "(e-control-3) faithful copies are refused: $_fr_out"
+echo '/* hand edit */' >> "$COPYBAD/nvidia-modeset/nv_version_sysctl.c"
+_fr_rc=0
+_fr_out=$(fresh_reason "$COPYBAD" "$REPO") || _fr_rc=$?
+case $_fr_out in
+*nvidia-modeset/nv_version_sysctl.c*)
+	[ "$_fr_rc" -ne 0 ] && echo "freshness control: a hand-edited copy is refused and named: $_fr_out" ||
+	    fail "(e-control-3) a hand-edited copy passes the freshness check" ;;
+*) fail "(e-control-3) a hand-edited copy is not named by the freshness check (rc $_fr_rc): $_fr_out" ;;
+esac
 
 # (a) ELF header: AArch64 machine, DYN (shared object) type. The .ko is
 # DYN, not REL: bsd.kmod.mk links the intermediate nvidia.kld (REL, from
@@ -356,6 +398,9 @@ append_defined_syms "$KERNEL" "$TMPD/defined"
 nm "$KO" > "$TMPD/nm-all" || fail "nm failed on $KO"
 grep '_nvidia_depend_on_' "$TMPD/nm-all" | awk '{print $NF}' \
     | sed 's/.*_nvidia_depend_on_//' | sort -u > "$TMPD/deps"
+if grep -q 'nv_version_sysctl_modeset' "$TMPD/nm-all"; then
+	fail "nvidia.ko carries the nvidia-modeset version sysctl entry points: nv_version_sysctl.c must be built without -DNV_VERSION_SYSCTL_MODESET in nvidia.ko"
+fi
 [ -s "$TMPD/deps" ] || fail "no MODULE_DEPEND symbols found in nvidia.ko"
 echo "deps: $(tr '\n' ' ' < "$TMPD/deps")"
 # Exact set, not membership: an extra dependency (a regression putting
@@ -465,6 +510,9 @@ echo "modeset elf: AArch64, DYN"
 nm "$MSKO" > "$TMPD/ms-nm-all" || fail "nm failed on $MSKO"
 grep '_nvidia_modeset_depend_on_' "$TMPD/ms-nm-all" | awk '{print $NF}' \
     | sed 's/.*_nvidia_modeset_depend_on_//' | sort -u > "$TMPD/ms-deps"
+if grep -q 'nv_version_sysctl_gpu' "$TMPD/ms-nm-all"; then
+	fail "nvidia-modeset.ko carries the per-GPU version sysctl entry points: nv_version_sysctl.c must be built with -DNV_VERSION_SYSCTL_MODESET in nvidia-modeset.ko"
+fi
 [ -s "$TMPD/ms-deps" ] || fail "no MODULE_DEPEND symbols found in nvidia-modeset.ko"
 while IFS= read -r _ms_dep; do
 	case $_ms_dep in

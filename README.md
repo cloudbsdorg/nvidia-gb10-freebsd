@@ -63,6 +63,18 @@ every licence encountered by the install. `YES=1` alone never accepts a licence.
 accept setting, a terminal shows the licence and asks; acceptance is tied to the licence's
 sha256, so a changed licence must be accepted again.
 
+Optional, for Linux binaries only (Steam, the Linux CUDA stack): after `make install` the two
+Linux providers load by module name. They pull in the Linuxulator; native use does not need them.
+Run these lines as root, with the root tool you set up above:
+
+```sh
+# as root:
+kldload nvidia_linux
+kldload nvidia_modeset_linux
+sysrc linux_enable=YES           # the Linuxulator at boot, which rc.d/nvidia_linux needs
+sysrc nvidia_linux_mode=AUTO     # rc.d/nvidia_linux loads the providers at boot when it is on
+```
+
 ### Installed
 
 A successful install exits 0. Example output (from `scripts/make.sh`), an excerpt of a
@@ -214,6 +226,26 @@ Developers who need the individual build and test-load commands should use
   packages are published.
 - Report problems at <https://github.com/cloudbsdorg/nvidia-gb10-freebsd/issues> with the
   failing step's output, `dmesg` and `uname -a`.
+
+## Firmware
+
+`nvidia.ko` depends on the GSP firmware module for its GPUs. `nvidia_gsp_ga10x_fw` serves
+Ampere other than GA100, Ada, Hopper and Blackwell, on every architecture. `nvidia_gsp_tu10x_fw`
+serves Turing and GA100 (GA100 uses the tu10x firmware) and is built on amd64 only. Once the
+modules are installed next to `nvidia.ko` and `kldxref` has indexed the directory, `kldload nvidia`
+loads them first, as root, so the first open of the GPU by an unprivileged process finds the
+firmware already registered. The kernel names the module after the file with `_fw` appended, so
+`nvidia_gsp_ga10x_fw_fw` shows in `kldstat -v`; a firmware module cannot be unloaded while
+`nvidia` is loaded. If `kldload` says `depends on nvidia_gsp_ga10x_fw_fw - not available`, the
+module is not installed or the index is stale: run `make install` again, which runs `kldxref`.
+See `man/nvidia.4`.
+
+## Diagnostics
+
+The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN`. If that first
+open fails (`nvidiaN: NVRM: rm_init_adapter() failed!` in `dmesg`, and the program gets `EIO`),
+the driver frees what the open took and the open can be tried again. `N` is the unit number:
+find it by PCI bus, never by assuming 0. See `man/nvidia.4`.
 
 ## What works
 
@@ -465,6 +497,21 @@ sysctl hw.nvidia.altra_device_wc_active
 ```
 
 Forcing `0` on an Altra brings back the unsafe Normal accesses to BARs. Use it only to test.
+
+### Version and identity sysctls
+
+The driver exposes its version as integers, so a script never has to parse a version
+string, and the UUID and PCI location of each GPU:
+
+```sh
+sysctl hw.nvidia.version_major hw.nvidia.version_minor hw.nvidia.version_patch
+sysctl hw.nvidia.gpus.0.vbios_major hw.nvidia.gpus.0.firmware_major
+sysctl dev.nvidia.0.uuid dev.nvidia.0.pci_bus_id
+```
+
+`nvidia-modeset.ko` has the same `version_*` variables under `hw.nvidiamodeset`. The full
+list, the meaning of the `*_available` flags and what a read returns before the GPU is
+initialized are in `nvidia(4)`.
 
 ## The UVM interface in nvidia.ko
 

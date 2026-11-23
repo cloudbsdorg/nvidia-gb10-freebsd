@@ -59,3 +59,14 @@ NVRM_1.1 {
 		nvrm_mem_export_fd;
 		nvrm_mem_import_fd;
 } NVRM_1.0;
+
+/* API minor 2: version numbers (nvrm(3)). */
+NVRM_1.2 {
+	global:
+		nvrm_driver_version;
+		nvrm_rm_api_version;
+		nvrm_built_for_version;
+		nvrm_library_version;
+		nvrm_symbol_version;
+		nvrm_schema_version;
+} NVRM_1.1;
