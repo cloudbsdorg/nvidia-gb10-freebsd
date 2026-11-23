@@ -545,8 +545,8 @@ test_model_unknown_and_sparse(void)
 	CHECK(NVRM_HAVE(i->classes));
 	nvrm_close(ctx);
 
-	/* GB20C has no row either: the 0x0a04 alias cannot invent CC 12.0. */
-	ctx = must_enum("alias");
+	/* GB20C has no row either: the raw 0x0a04 cannot invent CC 12.0. */
+	ctx = must_enum("untabled");
 	i = info_of(ctx, 0);
 	CHECK_EQ(i->architecture.value, 0x1b0);
 	CHECK_EQ(i->implementation.value, 0x0c);
@@ -559,7 +559,8 @@ test_model_unknown_and_sparse(void)
 	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
 	nvrm_close(ctx);
 
-	/* With no table row, raw zero leaves compute capability unavailable. */
+	/* With no table row the reason is family_unknown whatever the raw code
+	 * is: the table does not read it (zero here). */
 	reset_env();
 	nvrm_fake_inject_value(NVRM_P_SM_VERSION, 0);
 	ctx = must_enum("unknown");
@@ -570,9 +571,9 @@ test_model_unknown_and_sparse(void)
 	CHECK(!NVRM_HAVE(i->rm_sm_version));
 	CHECK_EQ(i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED);
 	CHECK(!NVRM_HAVE(i->compute_capability_major));
-	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_INPUT_MISSING);
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK(!NVRM_HAVE(i->compute_capability_minor));
-	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_INPUT_MISSING);
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
 	nvrm_close(ctx);
 
 	/* everything missing: every value says why, nothing is a fake zero */
@@ -945,7 +946,8 @@ test_decorators(void)
 static void
 test_abi_1_0_layout(void)
 {
-	/* Offsets measured from tmp/round-a/nvrm-1.0.h (8702134). */
+	/* The 1.0 layout (LP64), measured from the header of commit 8702134:
+	 * the file lib/libnvrm/include/nvrm/nvrm.h in that commit. */
 	/* CPD-OFF -- ABI offset expectations are tabular data. */
 	static const struct {
 		const char *name;
@@ -1052,6 +1054,9 @@ test_names_and_fields(void)
 	CHECK_EQ(nvrm_reason_from_id("version_inconsistent"),
 	    NVRM_R_VERSION_INCONSISTENT);
 	CHECK_EQ(nvrm_reason_from_id("not_a_reason"), -1);
+	CHECK_EQ(nvrm_reason_from_id(NULL), -1);
+	/* the documented contract: the NONE id is not a reason a value gives */
+	CHECK_EQ(nvrm_reason_from_id(nvrm_reason_id(NVRM_R_NONE)), -1);
 	CHECK_STR(nvrm_source_name(NVRM_S_BOARD), "board");
 	CHECK_STR(nvrm_source_name(-1), "unknown");
 	CHECK_STR(nvrm_source_name(NVRM_S__COUNT), "unknown");
@@ -1090,7 +1095,7 @@ test_field_table(void)
 	 * overlap, so a new member without a row is caught here */
 	{
 		size_t pos = 0, sz = 0;
-		unsigned j, found, rows = 0;
+		unsigned j, found, rows = 0, appended = 0;
 
 		while (pos < offsetof(nvrm_device_info, caps)) {
 			found = 0;
@@ -1111,8 +1116,28 @@ test_field_table(void)
 			pos += sz;
 		}
 		CHECK_EQ(pos, offsetof(nvrm_device_info, caps));
-		/* The five appended members are checked separately below. */
-		CHECK_EQ(rows + 5, nvrm_nfields);
+		/* The rows of the members appended after the 1.0 layout, from
+		 * rm_sm_version on, are checked separately below. */
+		for (j = 0; j < nvrm_nfields; j++)
+			if (NVRM_ADDED_AFTER_1_0(nvrm_fields[j].offset))
+				appended++;
+		CHECK_EQ(rows + appended, nvrm_nfields);
+		/* NVRM_NFIELDS_1_0 is the table position where the appended
+		 * rows start: the rows before it are 1.0 rows, every row from
+		 * it on was added later (a row inserted mid-table fails here),
+		 * and a duplicated row is caught by the count and by the
+		 * pairwise distinct offsets. */
+		CHECK_EQ(nvrm_nfields - appended, NVRM_NFIELDS_1_0);
+		CHECK_EQ(appended, 5);
+		for (j = 0; j < nvrm_nfields; j++) {
+			unsigned k;
+
+			CHECK(NVRM_ADDED_AFTER_1_0(nvrm_fields[j].offset) ==
+			    (j >= NVRM_NFIELDS_1_0));
+			for (k = j + 1; k < nvrm_nfields; k++)
+				CHECK(nvrm_fields[j].offset !=
+				    nvrm_fields[k].offset);
+		}
 	}
 	/* ... and the whole struct is tied, not only the part before the
 	 * capabilities: the capability array, the decorator count and the
@@ -1386,6 +1411,13 @@ test_fake_direct(void)
 	CHECK_EQ(o->gpu_u64(g, NVRM_P_RM_GPU_ID, 0, &v), 0);
 	CHECK_EQ(v, ids[0]);
 	CHECK_EQ(o->gpu_str(g, NVRM_SP_UUID, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "GPU-00000000-0000-4000-8000-0000000000a1");
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_VBIOS, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "96.06.1e.00.4a");
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_GSP_FIRMWARE, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "580.178.04");
+	CHECK_EQ(o->gpu_str(g, (enum nvrm_sprop)-1, buf, sizeof(buf)),
+	    NVRM_R_BACKEND_NONE);
 	CHECK_EQ(o->gpu_str(g, NVRM_SP_COUNT, buf, sizeof(buf)),
 	    NVRM_R_BACKEND_NONE);
 	CHECK_EQ(o->gpu_classes(g, cl, 2, &n), 0);
@@ -1424,21 +1456,21 @@ static void
 test_public_versions(void)
 {
 	static const uint32_t built_for[] = { 580, 178, 4 };
-	static const uint32_t library[] = { 1, 2, 0 };
-	static const uint32_t symbols[] = { 1, 2 };
-	static const uint32_t schema[] = { 1, 2 };
+	static const uint32_t library[] = { 1, 3, 0 };
+	static const uint32_t symbols[] = { 1, 3 };
+	static const uint32_t schema[] = { 1, 3 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
 	CHECK_EQ(NVRM_API_MAJOR, 1);
-	CHECK_EQ(NVRM_API_MINOR, 2);
+	CHECK_EQ(NVRM_API_MINOR, 3);
 	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
 	    "");
-	t_check_version(nvrm_library_version(), "1.2.0", library, 3, "");
+	t_check_version(nvrm_library_version(), "1.3.0", library, 3, "");
 	v = nvrm_symbol_version();
-	t_check_version(v, "NVRM_1.2", symbols, 2, "");
+	t_check_version(v, "NVRM_1.3", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.2", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "1.3", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1478,7 +1510,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":2") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":3") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1490,13 +1522,13 @@ test_json(void)
 	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
 	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library\":{\"available\":true,"
-	    "\"string\":\"1.2.0\",\"major\":1,\"minor\":2,\"patch\":0,"
-	    "\"parts\":[1,2,0],\"source\":\"derived\"}") != NULL);
+	    "\"string\":\"1.3.0\",\"major\":1,\"minor\":3,\"patch\":0,"
+	    "\"parts\":[1,3,0],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
-	    "\"string\":\"NVRM_1.2\",\"major\":1,\"minor\":2,\"patch\":0,"
-	    "\"parts\":[1,2],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.2\","
-	    "\"major\":1,\"minor\":2,\"patch\":0,\"parts\":[1,2],"
+	    "\"string\":\"NVRM_1.3\",\"major\":1,\"minor\":3,\"patch\":0,"
+	    "\"parts\":[1,3],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.3\","
+	    "\"major\":1,\"minor\":3,\"patch\":0,\"parts\":[1,3],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1602,7 +1634,7 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 2") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 3") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "

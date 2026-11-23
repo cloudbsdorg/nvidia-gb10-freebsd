@@ -106,7 +106,7 @@ expect_rc "drift mutant: the build fails with 'schema drift'" $rc 0
 
 # ---- unit tests with coverage ---------------------------------------------
 CINC="-pthread -I$L -I$L/include -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
-LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c"
+LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
 mkdir -p "$W/cov"
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/core_test" "$T/core_test.c" $LIBSRC >"$W/cc1.log" 2>&1
 rc=$?
@@ -131,6 +131,40 @@ printf '%s\n' '#include <nvrm/nvrm_version.h>' | cc -I"$L/include" -fsyntax-only
 rc=$?
 expect_rc "version header compiles alone for user space" $rc 0
 
+# NVRM_1.0 callers: dlvsym on the built library; the 1.0 symbols return only
+# the 1.0 rows, in 1.0 order (security: no row of a kind 1.0 does not know)
+cc $CINC -o "$W/compat_test" "$T/compat_test.c" >"$W/cc-compat.log" 2>&1
+rc=$?
+expect_rc "compat_test compiles" $rc 0
+"$W/compat_test" "$O/lib/libnvrm.so.1"
+rc=$?
+expect_rc "NVRM_1.0 field table: dlvsym returns the 1.0 rows in 1.0 order, no version rows" $rc 0
+# mutant: the 1.0 accessor returns the whole table; the test must fail
+M=$W/mut-compat
+[ -n "$W" ] && rm -rf "$M" "$W/mo-compat"
+mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib" && cp "$SRC/SOURCES" "$M/SOURCES"
+sed -i '' 's/^#define NVRM_NFIELDS_1_0.*/#define NVRM_NFIELDS_1_0	35/' "$M/lib/libnvrm/nvrm_internal.h"
+grep -q 'NFIELDS_1_0	35' "$M/lib/libnvrm/nvrm_internal.h"
+rc=$?
+expect_rc "compat mutant: the edit is in place" $rc 0
+mkdir -p "$W/mo-compat"
+(cd "$M/lib/libnvrm" && MAKEOBJDIR=$W/mo-compat OGKM=${COMPAT_MUTANT_OGKM:-$OGKM} make >"$W/mo-compat.log" 2>&1)
+rc=$?
+expect_rc "compat mutant builds" $rc 0
+[ -f "$W/mo-compat/libnvrm.so.1" ]
+rc=$?
+expect_rc "compat mutant: the library exists" $rc 0
+if [ $rc -eq 0 ]; then
+	"$W/compat_test" "$W/mo-compat/libnvrm.so.1" >/dev/null 2>&1
+	rc=$?
+	# exit 1 is a row check failing; 3 is "could not load" and is no kill
+	if [ $rc -eq 1 ]; then ok "compat mutant killed: a 1.0 caller would meet the new rows"; else bad "compat mutant SURVIVED or was not run (rc=$rc)"; fi
+fi
+# the static archive carries no compat names
+nm "$O/lib/libnvrm.a" 2>/dev/null | grep -q '_1_0'
+rc=$?
+expect_rc "static archive has no nvrm_info_*_1_0 symbol" $rc 1
+
 (cd "$W/cov" && LLVM_PROFILE_FILE=core.%m.profraw ./core_test)
 rc=$?
 expect_rc "core_test (registry, enumeration, model, decorators, JSON, fake)" $rc 0
@@ -150,6 +184,9 @@ expect_rc "mem_test compiles" $rc 0
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/rm_mem_test" "$T/rm_mem_test.c" $LIBSRC >"$W/cc5.log" 2>&1
 rc=$?
 expect_rc "rm_mem_test compiles" $rc 0
+cc $CINC -Werror -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/chan_test" "$T/chan_test.c" $LIBSRC >"$W/cc6.log" 2>&1
+rc=$?
+expect_rc "chan_test compiles" $rc 0
 (cd "$W/cov" && HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=mem.%p.profraw ./mem_test >"$W/mem_test.out" 2>&1)
 rc=$?
 expect_rc "mem_test (VA allocator, memory core, fake software GPU)" $rc 0
@@ -158,6 +195,25 @@ expect_rc "mem_test (VA allocator, memory core, fake software GPU)" $rc 0
 rc=$?
 expect_rc "rm_mem_test (RM memory backend against the scripted kernel)" $rc 0
 [ $rc -eq 0 ] || grep '^FAIL' "$W/rm_mem_test.out" | head -20
+(cd "$W/cov" && HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=chan.%m.profraw ./chan_test >"$W/chan_test.out" 2>&1)
+rc=$?
+expect_rc "chan_test (GPFIFO core, tickets, fake semaphores, copies and faults)" $rc 0
+[ $rc -eq 0 ] || grep '^FAIL' "$W/chan_test.out" | head -20
+# The client's message lock: two threads make failing waits and status queries
+# on one client; ThreadSanitizer must report no race.
+if echo 'int main(void) { return 0; }' | cc -fsanitize=thread -x c - -o "$W/tsan_probe" >/dev/null 2>&1; then
+	cc $CINC -Werror -fsanitize=thread -g -o "$W/cov/chan_tsan" "$T/chan_test.c" $LIBSRC >"$W/cc7.log" 2>&1
+	rc=$?
+	expect_rc "chan_test compiles with ThreadSanitizer" $rc 0
+	(cd "$W/cov" && NVRM_TEST_ONLY=errmsg_race HOME=$W TMPDIR=$W ./chan_tsan >"$W/tsan.out" 2>&1)
+	rc=$?
+	expect_rc "errmsg_race under ThreadSanitizer: the test passes" $rc 0
+	! grep -q 'ThreadSanitizer' "$W/tsan.out"
+	rc=$?
+	expect_rc "errmsg_race under ThreadSanitizer: no data race is reported" $rc 0
+else
+	ok "ThreadSanitizer is not available with this compiler: the errmsg_race run is skipped"
+fi
 
 cc $CINC -o "$W/cov/info_test" "$T/info_test.c" $LIBSRC >"$W/cc-info.log" 2>&1
 rc=$?
@@ -178,7 +234,7 @@ expect_rc "text mode explains the inconsistent running version" $rc 0
 "$W/cov/info_test" sparse >"$W/info-sparse.txt"
 rc=$?
 expect_rc "scripted nvrm-info runs with unavailable per-GPU versions" $rc 0
-grep -Eq 'vbios +unknown \(the RM control returned an error\)' "$W/info-sparse.txt" && grep -Eq 'gsp_firmware +unknown \(the RM reports the control is not supported on this GPU\)' "$W/info-sparse.txt"
+grep -Eq 'vbios +unavailable: the RM control returned an error$' "$W/info-sparse.txt" && grep -Eq 'gsp_firmware +unavailable: the RM reports the control is not supported on this GPU$' "$W/info-sparse.txt" && ! grep -Eq '(vbios|gsp_firmware) +unknown' "$W/info-sparse.txt"
 rc=$?
 expect_rc "text mode explains unavailable per-GPU versions with reason text" $rc 0
 "$W/cov/info_test" default --json >"$W/info-scripted.json"
@@ -200,7 +256,7 @@ sed -i '' 's/text_version(nvrm_schema_version());/printf("0.0");/' "$MD/nvrm-inf
 if cmp -s "$MD/nvrm-info.c" "$L/nvrm-info/nvrm-info.c"; then
 	bad "mutant schema-text-source: the edit did not apply"
 else
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
 	rc=$?
 	if [ $rc -ne 0 ]; then
@@ -237,6 +293,7 @@ expect_rc "core + fake backend: 100% line and branch coverage" $rc 0
 (cd "$W/cov" && llvm-cov export ./rm_test -object ./rm_mem_test -instr-profile=rm.profdata --summary-only $L/nvrm_rm.c | python3 -I "$T/coverage_gate.py" nvrm_rm.c)
 rc=$?
 expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc 0
+# the memory gate counts mem_test alone: channel tests must not hide a gap
 (cd "$W/cov" && llvm-profdata merge -o mem.profdata mem.*.profraw && llvm-profdata merge -o rmmem.profdata rmmem.*.profraw)
 (cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_owner.c nvrm_fake_mem.c)
 rc=$?
@@ -244,6 +301,9 @@ expect_rc "memory core, VA allocator and fake memory model: 100% line and branch
 (cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c)
 rc=$?
 expect_rc "RM memory backend: 100% line and branch coverage by the scripted kernel" $rc 0
+(cd "$W/cov" && llvm-profdata merge -o chan.profdata chan.*.profraw && llvm-cov export ./chan_test -instr-profile=chan.profdata --summary-only $L/nvrm_chan.c $L/nvrm_fake_chan.c | python3 -I "$T/coverage_gate.py" nvrm_chan.c nvrm_fake_chan.c)
+rc=$?
+expect_rc "channel core and fake GPFIFO: 100% line and branch coverage" $rc 0
 # gate plant: skipping the release tests must drop the memory core below 100%
 (cd "$W/cov" && NVRM_TEST_SKIP=release HOME=$W TMPDIR=$W LLVM_PROFILE_FILE=mskip.profraw ./mem_test >/dev/null 2>&1; llvm-profdata merge -o mskip.profdata mskip.profraw && llvm-cov export ./mem_test -instr-profile=mskip.profdata --summary-only $L/nvrm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_mem.c >"$W/mplant.out" 2>&1)
 rc=$?
@@ -274,12 +334,14 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
 	if [ "$4" = version_test ]; then MUTSRC=; fi
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
 	if [ $? -ne 0 ]; then ok "mutant killed: $1"; else bad "mutant SURVIVED: $1"; fi
 }
+mutant dup-appended-row nvrm_fields.c 's/F("versions", gsp_firmware, NVRM_K_VERSION, "GSP firmware version"),/&	F("versions", gsp_firmware, NVRM_K_VERSION, "GSP firmware version"),/' core_test
+mutant nfields-1-0-low nvrm_internal.h 's/^#define NVRM_NFIELDS_1_0.*/#define NVRM_NFIELDS_1_0	29/' core_test
 mutant sm-shift nvrm.c 's/>>= 8;/>>= 7;/' core_test
 mutant sm-mask nvrm.c 's/&= 0xff;/\&= 0x7f;/' core_test
 mutant compute-table-minor nvrm_table.c 's/{ 0x1b0, 0x06, 12, 0 }/{ 0x1b0, 0x06, 12, 1 }/' core_test
@@ -320,6 +382,7 @@ mutant rm-least-privilege nvrm_rm.c 's/if (!allow_alloc)/if (0)/' cap_test
 mutant opts-default nvrm.c 's/(opts->flags \& NVRM_ENUM_ALLOW_ALLOC) != 0);/1);/' cap_test
 mutant opts-null nvrm.c 's/rc = ops->limit(ctx->be, opts != NULL \&\&$/rc = ops->limit(ctx->be, 1 ||/' cap_test
 mutant struct-member include/nvrm/nvrm.h 's/nvrm_u64	vram_size, bar1_size/nvrm_u64	l2_size, vram_size, bar1_size/' core_test
+mutant fake-str-swap nvrm_fake.c '/case NVRM_SP_VBIOS:/,/break;/s/g->p->vbios/g->p->gsp_firmware/' core_test
 mutant fields-bound nvrm_fields.c 's/index < nvrm_nfields ?/1 ?/' core_test
 mutant fields-abort nvrm_fields.c 's/abort();/return (NULL);/' core_test
 mutant family-no-value nvrm.c 's/NVRM_R_FAMILY_NO_CLASS, NVRM_S_FAMILY/NVRM_R_FAMILY_UNKNOWN, NVRM_S_FAMILY/' core_test
@@ -400,6 +463,30 @@ mutant fd-leak-version nvrm_rm.c '/NVRM_RM_VERSION, NVRM_RM_VERSION);/,/NVRM_E_V
 mutant fork-guard-gpu nvrm_rm.c 's/	if (nvrm_rm_owner(g->be)) {/	if (1) {/' rm_test
 mutant fork-guard-pid nvrm_owner.c 's/o->pid = my_pid();/o->pid = 0;/' rm_test
 mutant nogpu-error nvrm.c 's|/\* No GPU is a result, not an error: the context holds zero devices. \*/|if (rc == NVRM_OK \&\& n == 0) rc = NVRM_E_NODEV;|' core_test
+# channels: every rule has a focused mutant
+mutant chan-capacity nvrm_chan.c 's/return (ch->entries - 2 - pending);/return (ch->entries - 1 - pending);/' chan_test
+mutant chan-incomplete-split nvrm_chan.c 's/unit = unit_len(e, n, pos + len);/unit = 1;/' chan_test
+mutant chan-ticket-order nvrm_chan.c 's/if (ch->q_head != \&sc->w) {/if (0) {/' chan_test
+mutant chan-queued-deadline nvrm_chan.c '/^wait_turn/,/^}/s/if (deadline_reached(deadline))/if (0)/' chan_test
+mutant chan-turn-broadcast nvrm_chan.c 's/(void)pthread_cond_broadcast(\&ch->turn);//' chan_test
+mutant chan-flush-order nvrm_chan.c 's/nvrm_barrier_normal();/ch->cl->ops->chan->gp_put(ch->b, put);/' chan_test
+mutant chan-release-wfi nvrm_methods.h 's/NVRM_SEM_RELEASE | NVRM_SEM_WFI | NVRM_SEM_PAYLOAD_64/NVRM_SEM_RELEASE | NVRM_SEM_PAYLOAD_64/' chan_test
+mutant chan-payload-64 nvrm_methods.h 's/NVRM_SEM_RELEASE | NVRM_SEM_WFI | NVRM_SEM_PAYLOAD_64/NVRM_SEM_RELEASE | NVRM_SEM_WFI/' chan_test
+mutant chan-dead-only-own nvrm_fake_chan.c 's/if (b->error == 0) {/for (b = channels; b != NULL; b = b->next) if (b->error == 0) {/' chan_test
+mutant chan-acq-geq nvrm_fake_chan.c 's/(int64_t)(value - payload) < 0/(int64_t)(value - payload) <= 0/' chan_test
+mutant chan-copy-on-graphics nvrm_chan.c 's/if (ch->runlist == NVRM_RUNLIST_GRAPHICS \&\&/if (0 \&\&/' chan_test
+# review round 1: the wire encoding, the kick before a space wait, fork children,
+# the semaphore sanity check, a refused destroy, wakeups, deadlines and grants
+mutant chan-addr-lo-encoding nvrm_methods.h 's/seg\[1\] = (uint32_t)sem_va \& 0xfffffffcU;/seg[1] = (uint32_t)((sem_va >> 2) \& 0x3fffffffU);/' chan_test
+mutant chan-no-kick-before-wait nvrm_chan.c '/^submit_step/,/^}/s/if (ch->kick_pending) {/if (0) {/' chan_test
+mutant chan-fork-refresh nvrm_chan.c '/^refresh_all/,/^}/s/if (!nvrm_owner_is_me(\&ch->cl->owner))/if (0)/' chan_test
+mutant chan-no-sem-check nvrm_chan.c '/^sem_update/,/^}/s/if (value > ch->submitted || value < ch->completed)/if (0)/' chan_test
+mutant chan-free-on-destroy-failure nvrm_chan.c '/^nvrm_chan_destroy/,/^}/s/if (!held)/if (1)/' chan_test
+mutant chan-lost-wakeup nvrm_fake_chan.c 's/if (progress_count == gen)/if (1)/' chan_test
+mutant chan-sleep-past-deadline nvrm_chan.c 's/return (left < nvrm_chan_slice_ns ? left : nvrm_chan_slice_ns);/return (nvrm_chan_slice_ns);/' chan_test
+mutant chan-set-object-any nvrm_fake_chan.c 's/if (data != 0 \&\& data != b->granted\[subch\]) {/if (0) {/' chan_test
+mutant chan-ring-writable nvrm_chan.c 's/	    .flags = NVRM_MAP_READ_ONLY };/	    .flags = 0 };/' chan_test
+mutant chan-stats-v11 nvrm_mem.c 's/if (want != sizeof(full) \&\& want != v11)/if (want != sizeof(full))/' mem_test
 
 # ---- JSON modes against the schema --------------------------------------
 export NVRM_BACKEND=fake
@@ -417,6 +504,29 @@ for p in discrete unified unknown sparse discrete,unified discrete,unified,unkno
 	rc=$?
 	expect_rc "--jsonl validates (header, devices, end), profile $p" $rc 0
 done
+# the gpu group is one JSON object per device (no duplicate key) holding the
+# rows appended after 1.0, and each field is listed once per GPU in the text
+NVRM_FAKE_PROFILE=discrete,unified $INFO --json >"$W/grp.json"
+NVRM_FAKE_PROFILE=discrete,unified $INFO >"$W/grp.txt"
+python3 -I - "$W/grp.json" "$W/grp.txt" <<'PY'
+import json, sys
+def no_dups(pairs):
+    keys = [k for k, _ in pairs]
+    assert len(keys) == len(set(keys)), keys
+    return dict(pairs)
+raw = open(sys.argv[1]).read()
+doc = json.loads(raw, object_pairs_hook=no_dups)
+assert raw.count('"gpu":{') == len(doc["devices"]) == 2, raw.count('"gpu":{')
+for d in doc["devices"]:
+    assert "rm_sm_version" in d["gpu"] and "compute_capability_major" in d["gpu"]
+txt = open(sys.argv[2]).read().split("\n")
+heads = [l for l in txt if l.startswith("GPU ")]
+assert len(heads) == 2, heads
+for name in ("rm_sm_version", "uuid"):
+    assert sum(1 for l in txt if l.split()[:1] == [name]) == 2, name
+PY
+rc=$?
+expect_rc "JSON: one gpu key per device with the appended rows; text: each field once per GPU" $rc 0
 # --json is one line, one document
 NVRM_FAKE_PROFILE=discrete,unified $INFO --json | wc -l | grep -qx ' *1'
 rc=$?
@@ -884,7 +994,7 @@ rc=$?
 expect_rc "text mode shows the values" $rc 0
 grep -q 'built for RM 580.178.04, running RM 580.178.04' "$W/text.out"; rc=$?
 expect_rc "text mode shows the built-for and the running RM version" $rc 0
-for v in 'RM API version 580.178.04' 'library version 1.2.0' 'library symbol version NVRM_1.2' 'schema version 1.2'; do
+for v in 'RM API version 580.178.04' 'library version 1.3.0' 'library symbol version NVRM_1.3' 'schema version 1.3'; do
 	grep -Fqx "$v" "$W/text.out"; rc=$?
 	expect_rc "text mode shows the version string: $v" $rc 0
 done
@@ -1087,14 +1197,41 @@ printf '#!/bin/sh\ncat "%s"\n' "$W/pciconf-good.txt" >"$W/pciconf-good.sh"
 printf '#!/bin/sh\ncat "%s"\n' "$W/pciconf-badbar.txt" >"$W/pciconf-badbar.sh"
 # a sysctl with no compat.linux (the real one says "unknown oid", exit 1), a marker
 # line for the hw.nvidia.gpus read, and the real sysctl for everything else
-cat >"$W/sysctl-none.sh" <<'EOF'
+# The fake discrete GPU is at 0000:0d:00.0; the stand-in numbers its device unit
+# 0 (the real board is unit 1).  The RM version comes from STUB_TAG.
+# STUB_DEV_UUID, STUB_HW_UUID, STUB_BUS_ID and STUB_VERSION_AVAILABLE change
+# what the OS layer says.  Every call is appended to STUB_LOG when set; the two
+# nodes the script may read, hw.nvidia and dev.nvidia, each leave their own mark.
+cat >"$W/sysctl-none.sh" <<'EOS'
 #!/bin/sh
+FAKE_UUID=GPU-00000000-0000-4000-8000-0000000000a1
+MAJ=$(echo "$STUB_TAG" | awk -F. '{print $1 + 0}')
+MIN=$(echo "$STUB_TAG" | awk -F. '{print $2 + 0}')
+PAT=$(echo "$STUB_TAG" | awk -F. '{print $3 + 0}')
+banner() { echo "hw.nvidia.version: NVIDIA UNIX Open Kernel Module for aarch64  $STUB_TAG  Release Build"; }
+versions() {
+	echo "hw.nvidia.version_string: $STUB_TAG"
+	echo "hw.nvidia.version_major: $MAJ"
+	echo "hw.nvidia.version_minor: $MIN"
+	echo "hw.nvidia.version_patch: $PAT"
+	echo "hw.nvidia.version_suffix: "
+	echo "hw.nvidia.version_available: ${STUB_VERSION_AVAILABLE:-1}"
+}
+gpus() { echo "hw.nvidia.gpus.0.uuid: ${STUB_HW_UUID:-$FAKE_UUID}"; echo "hw.nvidia.gpus.0.model: SYSCTLMARK-HW"; }
+dev() {
+	echo "dev.nvidia.0.uuid: ${STUB_DEV_UUID:-$FAKE_UUID}"
+	echo "dev.nvidia.0.pci_bus_id: ${STUB_BUS_ID:-0000:0d:00.0}"
+	echo "dev.nvidia.0.%location: slot=0 function=0 dbsf=pci0:13:0:0"
+	echo "dev.nvidia.0.%desc: SYSCTLMARK-DEV"
+}
+[ -z "$STUB_LOG" ] || echo "$*" >>"$STUB_LOG"
 case "$*" in
 *compat.linux.osrelease*) echo "sysctl: unknown oid 'compat.linux.osrelease'" >&2; exit 1 ;;
-*hw.nvidia.gpus*) echo "hw.nvidia.gpus.0.uuid: SYSCTLMARK"; exit 0 ;;
+"hw.nvidia") banner; versions; gpus; exit 0 ;;
+"dev.nvidia") dev; exit 0 ;;
 esac
 exec /sbin/sysctl "$@"
-EOF
+EOS
 printf '#!/bin/sh\necho 5.15.0\n' >"$W/sysctl-linux.sh"
 printf '#!/bin/sh\necho "sysctl: permission denied" >&2\nexit 1\n' >"$W/sysctl-broken.sh"
 printf '#!/bin/sh\nexit 1\n' >"$W/sysctl-silent.sh"
@@ -1117,7 +1254,7 @@ printf '#!/bin/sh\necho "Id Refs Address Size Name"\necho " 1 40 0x0 0x0 kernel"
 for m in linux.ko linux64.ko linux_common.ko; do
 	printf '#!/bin/sh\necho "Id Refs Address Size Name"\necho " 1 40 0x0 0x0 kernel"\necho " 2 1 0x0 0x0 %s"\necho " 4 2 0x0 0x0 nvidia.ko"\n' "$m" >"$W/kld-$m.sh"
 done
-# a nvrm-info whose JSON says VRAM 1 byte, SM 99.7 and BAR1 3 bytes
+# a nvrm-info whose JSON says VRAM 1 byte, SM and compute capability 99.7 and BAR1 3 bytes
 cat >"$W/doctor.py" <<'PY'
 import json, sys
 fixed = 0
@@ -1127,6 +1264,8 @@ def fix(d):
     d["memory"]["bar1_size"]["value"] = 3
     d["gpu"]["sm_version_major"]["value"] = 99
     d["gpu"]["sm_version_minor"]["value"] = 7
+    d["gpu"]["compute_capability_major"]["value"] = 99
+    d["gpu"]["compute_capability_minor"]["value"] = 7
     fixed += 1
 for line in sys.stdin:
     o = json.loads(line)
@@ -1152,47 +1291,85 @@ chmod +x "$W/nvrm-info-doctored"
 bootrun() {
 	_d=$1; _i=$2; shift 2
 	mkdir -p "$_d"
-	env BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake BOOT_PCICONF="sh $W/pciconf-good.sh" BOOT_SYSCTL="sh $W/sysctl-none.sh" "$@" \
+	env STUB_TAG="$TAG" BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake BOOT_PCICONF="sh $W/pciconf-good.sh" BOOT_SYSCTL="sh $W/sysctl-none.sh" "$@" \
 	    sh "$T/boot_nvrm_info.sh" "$_d" "$_i" "$SCHEMA" >/dev/null 2>&1
 }
 line() { grep -q "$2" "$1/results.txt"; }
-# BOOT_EXPECT_SM is raw RM numbering (10.4), not compute capability (12.0).
-EXP="BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_SM=10.4"
+# BOOT_EXPECT_SM is the compute capability (12.0), not the RM numbering (10.4).
+. "$T/board-amp001.env"
+EXP="BOOT_EXPECT_VRAM_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_RESERVE_MAX_BYTES BOOT_EXPECT_SM=$BOARD_SM"
 # the true values: each of VRAM, SM and BAR1 has a PASS and no FAIL
-bootrun "$W/ba" "$INFO" $EXP
+bootrun "$W/ba" "$INFO" $EXP STUB_LOG="$W/ba.calls"
 line "$W/ba" '^PASS GPU 0 vram_size '; rc=$?
 expect_rc "boot script, true values: VRAM is compared with the board and passes" $rc 0
-line "$W/ba" '^PASS GPU 0 SM version '; rc=$?
-expect_rc "boot script, true values: the SM version is compared with the board and passes" $rc 0
+line "$W/ba" '^PASS GPU 0 compute capability '; rc=$?
+expect_rc "boot script, true values: the compute capability is compared with the board and passes" $rc 0
 line "$W/ba" '^PASS GPU 0 bar1_size '; rc=$?
 expect_rc "boot script, true values: BAR1 is compared with pciconf -lvb and passes" $rc 0
-! grep -E '^FAIL GPU 0 (vram_size|SM version|bar1_size)|^FAIL BOOT_EXPECT' "$W/ba/results.txt" >/dev/null; rc=$?
+! grep -E '^FAIL GPU 0 (vram_size|compute capability|bar1_size|uuid)|^FAIL BOOT_EXPECT' "$W/ba/results.txt" >/dev/null; rc=$?
 expect_rc "boot script, true values: no VRAM, SM, BAR1 or expectation FAIL" $rc 0
 # a doctored report (VRAM 1, SM 99.7, BAR1 3) must FAIL each of the three
 bootrun "$W/bb" "$W/nvrm-info-doctored" $EXP
 python3 -I -c 'import json,sys
 d=json.load(open(sys.argv[1]+"/nvrm-info.json"))["devices"][0]
-assert d["memory"]["vram_size"]["value"]==1 and d["gpu"]["sm_version_major"]["value"]==99 and d["memory"]["bar1_size"]["value"]==3' "$W/bb"; rc=$?
-expect_rc "boot script, doctored report: the record says VRAM 1, SM 99.7, BAR1 3 (parsed)" $rc 0
+assert d["memory"]["vram_size"]["value"]==1 and d["gpu"]["compute_capability_major"]["value"]==99 and d["memory"]["bar1_size"]["value"]==3' "$W/bb"; rc=$?
+expect_rc "boot script, doctored report: the record says VRAM 1, SM and compute capability 99.7, BAR1 3 (parsed)" $rc 0
 line "$W/bb" '^FAIL GPU 0 vram_size '; rc=$?
 expect_rc "boot script, doctored report: wrong VRAM is a FAIL" $rc 0
-line "$W/bb" '^FAIL GPU 0 SM version '; rc=$?
-expect_rc "boot script, doctored report: wrong SM version is a FAIL" $rc 0
+line "$W/bb" '^FAIL GPU 0 compute capability '; rc=$?
+expect_rc "boot script, doctored report: wrong compute capability is a FAIL" $rc 0
 line "$W/bb" '^FAIL GPU 0 bar1_size '; rc=$?
 expect_rc "boot script, doctored report: BAR1 unlike every pciconf BAR is a FAIL" $rc 0
 # expectations missing or malformed: FAIL, never skipped
 bootrun "$W/bc" "$INFO"
-line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc" '^FAIL BOOT_EXPECT_SM' && line "$W/bc" '^FAIL GPU 0 vram_size ' && line "$W/bc" '^FAIL GPU 0 SM version '; rc=$?
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc" '^FAIL BOOT_EXPECT_SM' && line "$W/bc" '^FAIL GPU 0 vram_size ' && line "$W/bc" '^FAIL GPU 0 compute capability '; rc=$?
 expect_rc "boot script: without BOOT_EXPECT_* the run FAILs (nothing is skipped)" $rc 0
-line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES must be the board.s VRAM in bytes (e.g. 17179869184' && line "$W/bc" '^FAIL BOOT_EXPECT_SM must be the board.s SM version as major.minor (e.g. 12.0)'; rc=$?
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES must be the board.s nominal VRAM in bytes (e.g. 17179869184' && line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES must be the most the driver may reserve, in bytes, below the nominal VRAM (e.g. 268435456' && line "$W/bc" '^FAIL BOOT_EXPECT_SM must be the board.s compute capability as major.minor (e.g. 12.0)'; rc=$?
 expect_rc "boot script: a missing expectation FAILs with a sentence that says what to set, with an example" $rc 0
-bootrun "$W/bc2" "$INFO" BOOT_EXPECT_VRAM_BYTES=16G BOOT_EXPECT_SM=12
-line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_SM' && line "$W/bc2" "got '16G'"; rc=$?
+bootrun "$W/bc2" "$INFO" BOOT_EXPECT_VRAM_BYTES=16G BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=256M BOOT_EXPECT_SM=12
+line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_SM' && line "$W/bc2" "got '16G'" && line "$W/bc2" "got '256M'"; rc=$?
 expect_rc "boot script: malformed BOOT_EXPECT_* values FAIL and are quoted back" $rc 0
-sh "$T/boot_nvrm_info.sh" 2>&1 | grep -q 'usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m'; rc=$?
-expect_rc "boot script: the usage line names the two required variables" $rc 0
-grep -q SYSCTLMARK "$W/ba/sysctl.txt"; rc=$?
-expect_rc "boot script: every sysctl call goes through the stand-in (the hw.nvidia read too)" $rc 0
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES .*make-be.sh -V' && line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES .*make-be.sh -R .*nvidia_native_tools_testboot_vram_reserve' && line "$W/bc" '^FAIL BOOT_EXPECT_SM .*make-be.sh -S'; rc=$?
+expect_rc "boot script: each expectation FAIL names the make-be.sh option and the rc.conf variable that sets it" $rc 0
+bootrun "$W/bc3" "$INFO" BOOT_EXPECT_VRAM_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_SM=$BOARD_SM
+line "$W/bc3" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES must be .*below the nominal VRAM'; rc=$?
+expect_rc "boot script: a reserve that is not below the nominal VRAM is a FAIL" $rc 0
+bootrun "$W/bc4" "$INFO" BOOT_EXPECT_VRAM_BYTES=0 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_RESERVE_MAX_BYTES BOOT_EXPECT_SM=$BOARD_SM
+line "$W/bc4" '^PASS BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES is '; rc=$?
+expect_rc "boot script: any reserve is accepted when the nominal VRAM is 0" $rc 0
+sh "$T/boot_nvrm_info.sh" 2>&1 | grep -q 'usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R BOOT_EXPECT_SM=M.m'; rc=$?
+expect_rc "boot script: the usage line names the three required variables" $rc 0
+grep -q SYSCTLMARK-HW "$W/ba/sysctl.txt" && grep -q SYSCTLMARK-DEV "$W/ba/sysctl.txt"; rc=$?
+expect_rc "boot script: the hw.nvidia and the dev.nvidia reads both go through the stand-in" $rc 0
+grep -qx 'hw.nvidia' "$W/ba.calls" && grep -qx 'dev.nvidia' "$W/ba.calls" && ! grep -E '^hw\.nvidia\.' "$W/ba.calls" >/dev/null; rc=$?
+expect_rc "boot script: one read of hw.nvidia and one of dev.nvidia, no narrower hw.nvidia.* call (they are in the node)" $rc 0
+line "$W/ba" '^PASS GPU 0 uuid .*unit 0 found by pci_bus_id 0000:0d:00.0'; rc=$?
+expect_rc "boot script, true values: the uuid is found through dev.nvidia.<unit>.pci_bus_id and passes" $rc 0
+line "$W/ba" '^PASS versions.driver ' && line "$W/ba" '^PASS nvrm-info running_rm_version is available and equals versions.driver.string'; rc=$?
+expect_rc "boot script, true values: the driver version integers and the running RM version pass" $rc 0
+grep -q '^dev.nvidia.0.pci_bus_id: ' "$W/ba/sysctl.txt" && grep -q '^hw.nvidia.version_major: ' "$W/ba/sysctl.txt"; rc=$?
+expect_rc "boot script: sysctl.txt captures the hw.nvidia and dev.nvidia nodes" $rc 0
+bootrun "$W/bu1" "$INFO" $EXP STUB_DEV_UUID=GPU-00000000-0000-4000-8000-0000000000a2
+line "$W/bu1" '^FAIL GPU 0 uuid '; rc=$?
+expect_rc "boot script: a different dev.nvidia.<unit>.uuid is a FAIL" $rc 0
+bootrun "$W/bu2" "$INFO" $EXP STUB_HW_UUID=GPU-00000000-0000-4000-8000-0000000000a2
+line "$W/bu2" '^FAIL GPU 0 uuid '; rc=$?
+expect_rc "boot script: a different hw.nvidia.gpus.<unit>.uuid is a FAIL" $rc 0
+bootrun "$W/bu3" "$INFO" $EXP STUB_BUS_ID=0000:0e:00.0
+line "$W/bu3" '^FAIL GPU 0 uuid: no dev.nvidia.<unit> is at 0000:0d:00.0'; rc=$?
+expect_rc "boot script: no sysctl unit at the device location is a FAIL naming the location" $rc 0
+bootrun "$W/bu4" "$INFO" $EXP STUB_VERSION_AVAILABLE=0
+line "$W/bu4" '^FAIL versions.driver '; rc=$?
+expect_rc "boot script: hw.nvidia.version_available 0 is a FAIL" $rc 0
+bootrun "$W/bu5" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu5" '^PASS GPU 0 vram_size '; rc=$?
+expect_rc "boot script: VRAM equal to the nominal size passes with a reserve of 1" $rc 0
+bootrun "$W/bu6" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869183 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu6" '^FAIL GPU 0 vram_size '; rc=$?
+expect_rc "boot script: VRAM above the nominal size is a FAIL" $rc 0
+bootrun "$W/bu7" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869186 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu7" '^FAIL GPU 0 vram_size nvrm-info=17179869184 expected 17179869185\.\.17179869186 '; rc=$?
+expect_rc "boot script: VRAM below nominal minus the largest reserve is a FAIL" $rc 0
 # BAR1 is the BAR at config offset 0x14, and nothing else counts
 bootrun "$W/bd" "$INFO" $EXP BOOT_PCICONF="sh $W/pciconf-badbar.sh"
 line "$W/bd" '^FAIL GPU 0 bar1_size .*BAR1 (config offset 0x14)'; rc=$?
@@ -1294,27 +1471,29 @@ printf 'on the RM backend with no linux kmod loaded is shown by boot_nvrm_info.s
 want=$(awk '$1=="ogkm_tag"{print $2}' "$SRC/SOURCES")
 grep -q "#define NVRM_RM_VERSION		\"$want\"" "$L/include/nvrm/nvrm.h"; rc=$?
 expect_rc "NVRM_RM_VERSION equals SOURCES ogkm_tag ($want)" $rc 0
-nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T"{sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported.txt"
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T"{sub(/@.*/,"",$3); print $3}' | sort -u >"$W/exported.txt"
 # declarations only: a comment line (one that starts with "/*" or " *") may
 # name a manual page, nvrm_mem(3), which is not a function
-grep -vE '^[[:space:]]*/?\*' "$L/include/nvrm/nvrm.h" | grep -oE '\bnvrm_[a-z_0-9]+\(' | tr -d '(' | sort -u >"$W/declared.txt"
+grep -vE '^[[:space:]]*/?\*' "$L/include/nvrm/nvrm.h" "$L/include/nvrm/nvrm_chan.h" | grep -oE '\bnvrm_[a-z_0-9]+\(' | tr -d '(' | sort -u >"$W/declared.txt"
 cmp -s "$W/exported.txt" "$W/declared.txt"; rc=$?
-expect_rc "the library exports exactly the functions nvrm.h declares" $rc 0
+expect_rc "the library exports exactly the functions its public headers declare" $rc 0
 [ $rc -eq 0 ] || diff "$W/exported.txt" "$W/declared.txt"
 # symbol versions: discovery is NVRM_1.0, memory and VA NVRM_1.1, version
-# numbers NVRM_1.2, and each version's calls are the ones its man page documents
+# numbers NVRM_1.2, channels NVRM_1.3, and each version's calls are the ones its
+# man page documents
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.0$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported10.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.1$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported11.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.2$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported12.txt"
-[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
-expect_rc "every export is in NVRM_1.0, NVRM_1.1 or NVRM_1.2, and all are used" $rc 0
-readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0'; rc=$?
-expect_rc "readelf: nvrm_client_open@@NVRM_1.1 and nvrm_enumerate@@NVRM_1.0" $rc 0
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.3$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported13.txt"
+[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ -s "$W/exported13.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" "$W/exported13.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
+expect_rc "every export is in NVRM_1.0, NVRM_1.1, NVRM_1.2 or NVRM_1.3, and all are used" $rc 0
+readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_chan_create@@NVRM_1\.3'; rc=$?
+expect_rc "readelf: discovery, memory and channel symbol versions" $rc 0
 # (LLD does not write the parent of a version node into the object, so the
 # inheritance is checked where it is declared)
-grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map"; rc=$?
-expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0 and NVRM_1.2 inherits NVRM_1.1" $rc 0
-for v in NVRM_1.0 NVRM_1.1 NVRM_1.2; do
+grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map" && grep -q '^} NVRM_1\.2;$' "$L/Version.map"; rc=$?
+expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0, NVRM_1.2 NVRM_1.1 and NVRM_1.3 NVRM_1.2" $rc 0
+for v in NVRM_1.0 NVRM_1.1 NVRM_1.2 NVRM_1.3; do
 	objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q "$v" || readelf -V "$O/lib/libnvrm.so.1" | grep -q "$v"
 	rc=$?
 	expect_rc "symbols carry the version $v" $rc 0
@@ -1325,7 +1504,7 @@ for f in nvrm_driver_version nvrm_rm_api_version nvrm_built_for_version nvrm_lib
 done
 
 # ---- man pages ---------------------------------------------------------------
-for m in "$L/man/nvrm.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
+for m in "$L/man/nvrm.3" "$L/man/nvrm_chan.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
 	mandoc -T lint -W warning "$m" >"$W/mandoc.out" 2>&1; rc=$?
 	expect_rc "mandoc -T lint: $(basename "$m")" $rc 0
 done
@@ -1333,8 +1512,8 @@ printf '.Dd November 21, 2026\n.Dt BAD 3\n.Os\n.Sh NAME\n.Nm bad\n.Xx nonsense\n
 mandoc -T lint -W warning "$W/bad.3" >/dev/null 2>&1; rc=$?
 if [ $rc -ne 0 ]; then ok "man lint plant: a broken page fails mandoc"; else bad "man lint plant: broken page passed"; fi
 for code in $(grep -oE 'NVRM_E_[A-Z]+' "$L/include/nvrm/nvrm.h" | sort -u | grep -v -e NVRM_E__COUNT); do
-	grep -q "$code" "$L/man/nvrm.3"; rc=$?
-	expect_rc "nvrm(3) documents $code" $rc 0
+	grep -q "$code" "$L/man/nvrm.3" "$L/man/nvrm_chan.3"; rc=$?
+	expect_rc "nvrm(3) or nvrm_chan(3) documents $code" $rc 0
 done
 for r in not_queried rm_control_failed rm_not_supported os_not_reported family_unknown family_has_no_class input_unavailable no_numa_node backend_does_not_provide class_absent os_call_failed value_unusable version_unparsed version_inconsistent; do
 	grep -q "$r" "$L/man/nvrm.7"; rc=$?
@@ -1351,7 +1530,7 @@ done
 grep -qi "zero-initialize" "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) tells callers to zero-initialize the options" $rc 0
 cat "$W/exported10.txt" "$W/exported12.txt" | sort >"$W/exported10_12.txt"
-for pg in nvrm:10_12:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS; do
+for pg in nvrm:10_12:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS nvrm_chan:13:NVRM_CHAN_FUNCS; do
 	_page=${pg%%:*}; _rest=${pg#*:}; _v=${_rest%%:*}; _var=${_rest#*:}
 	case $_v in 10_12) _lbl="NVRM_1.0 and NVRM_1.2" ;; *) _lbl="NVRM_1.${_v#1}" ;; esac
 	sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$L/man/$_page.3" | grep -oE '^\.Fn nvrm_[a-z_0-9]+' | awk '{print $2}' | sort -u >"$W/man-fn-$_page.txt"
@@ -1377,8 +1556,8 @@ for f in nvrm_version nvrm_version_parse nvrm_version_find nvrm_version_format; 
 done
 grep -q 'versions' "$L/man/nvrm.3" && grep -q 'parts' "$L/man/nvrm.3" && grep -q 'source' "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) documents the JSON version object and its integer parts" $rc 0
-grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 2;' "$L/man/nvrm.7"; rc=$?
-expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 2" $rc 0
+grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 3;' "$L/man/nvrm.7"; rc=$?
+expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 3" $rc 0
 for s in version_string version_major version_minor version_patch version_suffix version_available; do
 	grep -q "hw.nvidia.$s" "$L/nvrm-info/nvrm-info.8"; rc=$?
 	expect_rc "nvrm-info(8) documents hw.nvidia.$s" $rc 0
@@ -1481,7 +1660,7 @@ expect_rc "libnvrm installs" $rc 0
 (cd "$L/nvrm-info" && MAKEOBJDIR=$O/info LIBNVRM_OBJ=$O/lib make install DESTDIR=$D $OWN >"$W/inst2.log" 2>&1)
 rc=$?
 expect_rc "nvrm-info installs" $rc 0
-for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/include/nvrm/nvrm_version.h usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
+for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/include/nvrm/nvrm_version.h usr/include/nvrm/nvrm_chan.h usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man3/nvrm_chan.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
 	[ -f "$D/$f" ]; rc=$?
 	expect_rc "installed: $f" $rc 0
 done

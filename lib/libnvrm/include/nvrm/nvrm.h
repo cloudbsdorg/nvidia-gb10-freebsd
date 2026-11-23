@@ -39,11 +39,12 @@
 /* The RM version this library is built against (open-gpu-kernel-modules). */
 #define NVRM_RM_VERSION		"580.178.04"
 /* Library API version (shared object nvrm.so.1; symbol versions NVRM_1.0 for
- * discovery, NVRM_1.1 for memory and VA, NVRM_1.2 for version numbers).
+ * discovery, NVRM_1.1 for memory and VA, NVRM_1.2 for version numbers,
+ * NVRM_1.3 for channels).
  * PROVISIONAL: the interface and the structures below are frozen at the first
  * package release and not before; a future version may still reshape them. */
 #define NVRM_API_MAJOR		1
-#define NVRM_API_MINOR		2
+#define NVRM_API_MINOR		3
 
 #define NVRM_MAX_GPUS		32
 #define NVRM_MAX_CLASSES	200
@@ -72,6 +73,8 @@ enum nvrm_error {
 	NVRM_E_RANGE,		/* out of VA space, overlap, or outside the object */
 	NVRM_E_NOTSUP,		/* the backend does not provide the operation */
 	NVRM_E_BUSY,		/* still in use: unmap or free what depends on it */
+	NVRM_E_TIMEOUT,		/* the operation reached its deadline */
+	NVRM_E_LOST,		/* the channel is dead */
 	NVRM_E__COUNT
 };
 
@@ -343,7 +346,9 @@ typedef struct nvrm_mem_info {
 	uint32_t	gpu_maps;
 } nvrm_mem_info;
 
-/* What a client holds now and what it has done: leak checks read this. */
+/* What a client holds now and what it has done: leak checks read this.
+ * size is 0, sizeof(nvrm_client_stats), or offsetof(nvrm_client_stats,
+ * live_channels) for a caller built against NVRM_1.1 (that much is filled). */
 typedef struct nvrm_client_stats {
 	uint32_t	size;
 	uint32_t	reserved;
@@ -355,6 +360,7 @@ typedef struct nvrm_client_stats {
 	 * with the RM client until it closes, and its VA is never handed out
 	 * again. */
 	uint64_t	failed_releases;
+	uint64_t	live_channels, channels_created;
 } nvrm_client_stats;
 
 __BEGIN_DECLS
@@ -418,6 +424,7 @@ const char	*nvrm_strerror(int error);
 const char	*nvrm_error_id(int error);	/* stable machine id */
 const char	*nvrm_reason_id(int reason);
 const char	*nvrm_reason_text(int reason);
+int		nvrm_reason_from_id(const char *id);
 const char	*nvrm_source_name(int source);
 /* Capability flag name for a stable index, NULL when out of range. */
 const char	*nvrm_cap_name(unsigned index);

@@ -238,6 +238,9 @@ setup() {
 # DEST (default: DESTDIR): a hook never takes effect where it could run as
 # root or write the live system.
 _installing=0
+# licence_run: the command named in a licence fix.  make preflight shows what
+# install-prereqs needs; do_install sets it to make install, the command run.
+licence_run='make install-prereqs'
 mk_hook() {
 	_mh_name=$1
 	eval "_mh_val=\${$_mh_name:-}"
@@ -878,11 +881,11 @@ EOF
 	if licence_current; then
 		add_item licence ok "NVIDIA driver licence $(sed -n 2p "$licence_ok")" ""
 	elif [ -f "$licence_ok" ] && [ -f "$tarball" ]; then
-		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted" "make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run it on a terminal and answer"
+		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
 	elif [ -n "$(licence_setting)" ]; then
-		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; make install-prereqs records the acceptance" "make install-prereqs"
+		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; $licence_run records the acceptance" "$licence_run"
 	else
-		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it" "make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer"
+		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
 	fi
 	_have=$(os_version_of "$SYSDIR")
 	if tree_fits "$SYSDIR"; then
@@ -1702,7 +1705,12 @@ install_progress() {
 		printf '{"schema_version":"1.0","tool":"install","kind":"progress","phase":"%s","message":"%s"}\n' \
 		    "$(json_str "$1")" "$(json_str "$2")"
 	elif [ "${MK_JSON:-0}" != 1 ]; then
-		printf 'install: %s: %s\n' "$1" "$2"
+		# the phase named install already carries the prefix: print it once
+		if [ "$1" = install ]; then
+			printf 'install: %s\n' "$2"
+		else
+			printf 'install: %s: %s\n' "$1" "$2"
+		fi
 	fi
 }
 
@@ -1740,22 +1748,37 @@ EOT
 	fi
 }
 
-# install_next_steps: what to do after a good install, one step per line.
-# With a DESTDIR the files are only staged: nothing is loaded from there.
-# Otherwise the module is loaded with the root tool this user has.
+# root_cmd COMMAND: COMMAND as the root tool this user has would run it: bare
+# as root, behind doas or sudo, inside su root -c, or with a note when this
+# user has no tool.
+root_cmd() {
+	case $(root_method) in
+	root) printf '%s\n' "$1" ;;
+	doas) printf 'doas %s\n' "$1" ;;
+	sudo) printf 'sudo %s\n' "$1" ;;
+	su) printf "su root -c '%s'\n" "$1" ;;
+	*) printf '%s (as root: this user has no doas, sudo or su)\n' "$1" ;;
+	esac
+}
+
+# install_next_steps: what to do after a good install, one command per line,
+# each one fit to paste.  With a DESTDIR the files are only staged: nothing is
+# loaded from there.  Otherwise the firmware setting comes first, then the
+# module is loaded, both with the root tool this user has.
 install_next_steps() {
 	if [ -n "$DESTDIR" ]; then
 		printf 'the files are staged under %s; nothing was loaded: install that tree on the target system to use it\n' "$DESTDIR"
 	else
-		case $(root_method) in
-		root) printf 'kldload nvidia-drm\n' ;;
-		doas) printf 'doas kldload nvidia-drm\n' ;;
-		sudo) printf 'sudo kldload nvidia-drm\n' ;;
-		su) printf "su root -c 'kldload nvidia-drm'\n" ;;
-		*) printf 'kldload nvidia-drm (as root: this user has no doas, sudo or su)\n' ;;
-		esac
+		root_cmd 'kenv hw.nvidia.registry.EnableGpuFirmware=1'
+		root_cmd 'kldload nvidia-drm'
 	fi
 	printf 'kldstat\nnvrm-info --json\n'
+}
+
+# install_next_note: one English line, printed before the next steps of a live
+# install: the boot-time alternative to the first two of them.
+install_next_note() {
+	[ -n "$DESTDIR" ] || printf 'to load the driver at boot instead of the first two next steps, run make configure YES=1 once\n'
 }
 
 # install_root_plan PACKAGES: the steps this install runs as root, one per
@@ -1871,6 +1894,7 @@ install_summary() {
 		printf '%s' "$install_records" | while IFS='|' read -r _p _m; do
 			[ -n "$_p" ] && printf 'installed %s %s\n' "$_p" "$_m"
 		done
+		install_next_note
 		install_next_steps | while read -r _ns; do
 			printf 'next: %s\n' "$_ns"
 		done
@@ -1880,6 +1904,7 @@ install_summary() {
 
 do_install() {
 	_installing=1
+	licence_run='make install'
 	install_blockers=
 	install_records=
 	install_outcome=blocked
@@ -2787,6 +2812,10 @@ _module-list) module_list ;;
 _next-steps)
 	setup
 	install_next_steps
+	;;
+_next-note)
+	setup
+	install_next_note
 	;;
 _licence)
 	setup
