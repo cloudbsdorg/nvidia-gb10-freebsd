@@ -742,3 +742,15 @@ Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
 - Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.
 - linux_bridge_test on a built tree (tests/linux_bridge_test.sh work/build/tree): 105 passed, 1 failed after; on cbe6ca3 104 passed, 3 failed. The two that went are check (g), the fresh-archive fuzz 0 apply of every patch ("does not apply with fuzz 0" and "a .rej file was left behind"). The one left is check (i), man/nvidia.4 line 272 `.Xr nvidia-smi 1` (mandoc STYLE "referenced manual not found"), which fails the same way on cbe6ca3.
 - Full suite (every tests/*_test.sh), here and on a cbe6ca3 baseline worktree, same build: the same tests fail on both, with identical FAIL lines. fw_depend and open_dev_failure fail on the nvidia.4 lint above; make_contract on two nvrm man3 links missing from expected.manifest; make_install_flow on a personal path in tests/version_sysctl_test.sh line 15; render_uapi_layout exits 2 on a skipped check. With the default tree argument, linux_bridge_test also reports the tree-2363 module files as missing (no tree-2363 is built here).
+
+## 2026-11-23T00:55Z #2455 checkpoint for an amp001 test boot
+- Committed and pushed: b413557 (design, gate rounds ff8d06fb and 6ef863ea), 9e9925e (merge of main 999b186, overlap gate 963bb2f3).
+- Suite stopped for the queued test boot: the merged branch and a 999b186 baseline (wt-2455-base) had 25 ok each, and the same four failures each (abi_layout, firmware, kmod_symbols, linux_bridge: modules not built in the prepared tree).
+- RESUME: after the boot, rerun make test in wt-2455 and wt-2455-base (GB10_WORK=<wt>/work, SYSDIR=~/rx7600/kc502/src/sys, OGKM set), compare, open the PR, hand back for Mark's go.
+- 2026-11-23T02:30Z after the boot: full suite on the branch and on the 999b186 baseline, same setup: 53 run, 8 failed on
+  both, the same 8 (abi_layout, firmware, kmod_symbols, linux_bridge, native_tools_kit, prime_import, stubs, uvm_glue: RM
+  cores, shim and modules not built in the prepared tree).
+- Round 3 (approved by the orchestrator): MiniMax (minimax-mlapointe) applied fixes F1-F15 for the round-2 Review-open
+  findings (tmp/2455/task-r3.md); the first attempt died on a transport error, the continuation finished. Orchestrator
+  review fixed one slip by hand (the sample Ampere generation claimed arm64 testing on 0x2d04, which is Blackwell).
+- Next: gate round 3, commit, push; PR #40 stays draft until Mark answers the 11 questions.

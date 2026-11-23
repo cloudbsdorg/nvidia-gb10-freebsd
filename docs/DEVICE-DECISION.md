@@ -9,7 +9,9 @@ promises a date.
 
 Every version this design exposes (driver branch, record, firmware, OS, schema) is a string plus
 integer major, minor and patch parts, and `available:false` with a reason when it cannot be read,
-so no consumer parses a string to compare versions ("versions as numbers").
+so no consumer parses a string to compare versions ("versions as numbers"). A version that cannot
+be read is `{"string": "", "available": false, "reason": "..."}`; the JSON writer omits the part
+fields when `available` is false. A version is never a bare string.
 
 ## 1. Purpose and Mark's words
 
@@ -171,9 +173,10 @@ Intel (`xe`, `i915`):
 - Claimed the same way, by the module's PNP info.
 - Firmware: `fwget` maps ids to `gpu-firmware-intel-kmod-<gen>` (`pci_video_intel`; for example
   `0x9a*` to `tigerlake`, `0x4c*` to `rocketlake` plus `tigerlake`).
-- Architectures: `xe` covers arm64. `i915` is amd64-only tested, so the i915 record lists only
-  amd64 in `archs` and an arm64 box is refused for i915 ("not built"; section 4.3, rule for built
-  and tested).
+- Architectures: `xe` covers arm64. `i915` is not built for arm64 by our packages, so the i915
+  record lists only `amd64` in `archs` and an arm64 box refuses i915 (`not_built_arm64`; section
+  4.3). `xe` is built for arm64 and is not tested there, so an arm64 box supports it with the
+  warning `not_tested_on_arm64` (section 4.3).
 - Capabilities: display, PRIME, runtime PM.
 - Not yet known: which Intel parts `fwget` does not map. The table covers Skylake to Alder Lake
   and DG1; newer parts are **unverified**.
@@ -223,7 +226,7 @@ vendor.
 ### 4.2 Provider ops table (vendor-free sketch)
 
 ```c
-#define DEV_SELECTOR_MAX 32          /* parsers reject a longer selector or version string */
+#define DEV_SELECTOR_MAX 32          /* room for the NUL: 32 bytes or more is rejected */
 #define DEV_VERSION_MAX  32          /* with an error, never truncate */
 
 /* identity as read from PCI config space; no vendor field is interpreted by the core */
@@ -253,10 +256,10 @@ struct dev_feature {                        /* one entry per index in the record
 struct dev_match {                          /* result of match() */
 	const char *family;                 /* opaque to the core */
 	const char *board;                  /* decorator name or NULL */
-	const char *const *backends;        /* candidate set, host-arch filtered; may be empty */
+	const char *const *backends;        /* candidate set, not host-arch filtered; may be empty */
 	size_t      nbackends;
 	const struct dev_feature *features; size_t nfeatures;
-	const char *refuse_code;            /* non-NULL: claimed, but refused (policy, not built, ...) */
+	const char *refuse_code;            /* non-NULL: claimed, but refused (policy, uncovered, ...) */
 	const char *refuse_reason;
 	const char *next;                   /* what to do about a refusal */
 	const char *warning;                /* for example "not_tested_on_arm64"; may be NULL */
@@ -291,18 +294,25 @@ DEV_PROVIDER_REGISTER(nvidia_open);        /* linker-set entry; the core never i
 Rules for the ops:
 
 - `match` returns `DEV_NOT_MINE`, or `DEV_MINE` with the struct filled. `DEV_MINE` with an empty
-  `backends` and no `refuse_code` means the record names the id and no backend serves it on this
-  host (`no_provider_yet`). A `refuse_code` means claimed and refused. Any other return value is
-  a `provider_error`: a fifth decision with its reason. It never falls through to a lower-scoring
-  provider. A claimed device is not offered to a lower-scoring provider either, unless the record
-  sets `fallback_ok`.
+  `backends` and no `refuse_code` means the record names the id and the provider offers no
+  backend. After the core filters the candidates by the host architecture, an empty candidate set
+  means no backend serves it on this host (`no_provider_yet`). A `refuse_code` means claimed and
+  refused. Any other return value is a `provider_error`: a fifth decision with its reason. It
+  never falls through to a lower-scoring provider. A claimed device is not offered to a
+  lower-scoring provider either, unless the record sets `fallback_ok`.
 - `match` does not choose a backend. It returns the candidate set. The binding step (section 9) is
   the only place a backend is chosen.
+- `match` takes no host information. It returns the candidates with their per-architecture
+  availability. The core filters the candidates by the host architecture between `match` and
+  binding. `plan_load` is the only place that emits `not_built_<arch>`; `match` never emits it.
 - `plan_load` is called for the bound backend. It may use `host_info` (architecture, installed
   modules from `kldxref`, loaded modules) and no vendor knowledge of other providers.
 - Plans are counted lists, with no fixed array size. The generator fails when a record exceeds a
   bound it declares itself (`max_steps`, `max_backends`, `max_features`). Fixed buffers (selector,
   version string) stay, with the length check above.
+- A selector or version string is rejected when its length is greater than or equal to the buffer
+  size, so the NUL always fits. In a 32-byte buffer 31 characters are accepted and 32 are
+  rejected. The parser errors; it never truncates.
 - Group merge: for one backend group, the steps of every device are merged in order (all firmware
   steps, then all driver steps) and de-duplicated by module name.
 
@@ -313,15 +323,17 @@ default:
 
 | Field | Meaning | Default |
 |---|---|---|
-| `record_version` | version object of the record schema this provider was generated for | required |
+| `schema_version` | version object of the record format (the schema) | required |
+| `record_version` | version object of the record content; the generator bumps it when the input sha256 or the data file changes | required |
 | `provider` | provider name | required |
 | `driver_branch` | version object, for example 580.178.04 (section 10) | required for providers with a branch |
 | `score` | tie-break between providers (4.6) | 0 |
-| `backends[]` | name, `archs`, `modules`, `licence_class`, `exclusive_group`, `score` (backend preference) | required |
-| `families[]` | `id`, `arch_values`, `impl_values`, `devids` or `devid_ranges`, `backends`, `firmware`, `tested_arch`, `verified_on_hardware` | required |
+| `backends[]` | name, `archs`, `modules`, `licence_class`, `exclusive_group`, `score` | required |
+| `families[]` | `id`, `arch_values`, `impl_values`, `devids`, `generations[]`, `backends`, `firmware` | required |
 | `decorators[]` | board decorators keyed by subvendor:subdevice | `[]` |
 | `features[]` | the flag indexes this provider can set; every one appears in the output | required |
 | `policy` | `{min_generation, reason}`, for example `ampere` (8.2) | none: no floor |
+| `preference` | lists of backend names; the earlier backend must outscore the later one (4.3) | `[]` |
 | `fallback_ok` | a claimed-but-refused device may be offered to a lower-scoring provider | false |
 | `on_conflict` | `best_cover` or `refuse` (9.1) | `best_cover` |
 | `acknowledged_moves[]` | ids that moved backend on a branch change and were acknowledged (10.3) | `[]` |
@@ -332,12 +344,23 @@ Family fields in more detail:
 - `impl_values` lists the implementation values a family covers. It is required when two families
   share an architecture value (GA100 and the GA10x group both have 0x17). The generator fails when
   two families match the same (architecture, implementation) pair.
-- `tested_arch` and `verified_on_hardware` are per family. Rule for equal evidence and equal
-  outcome: an architecture the family's backend or firmware is **not built** for is `refused`
-  (code `not_built_<arch>`). An architecture it is **built for but not tested** on is `supported`
-  with the warning `not_tested_on_<arch>` in the output.
-- Backend preference is data: each backend has a `score`. Convention: an open backend outscores a
-  closed one; the generator checks `rm-open` > `rm-closed` and fails otherwise.
+- `devids` is the exact device id list of the family, taken from the json (3.1). The generator
+  fails when any device id is in two families. A range is only a printing form of a list.
+- `generations[]` lists the generations inside the family. Each entry has a `name`, its own
+  `arch_values`, its own `tested_arch` and its own `verified_on_hardware`. The evidence is per
+  generation, not per family: Hopper inside the `gsp_ga10x` group is not tested on arm64, while
+  Blackwell in the same group is.
+- Rule for equal evidence and equal outcome: an architecture the generation's backend or firmware
+  is **not built** for is `refused` (code `not_built_<arch>`). An architecture it is **built for
+  but not tested** on is `supported` with the warning `not_tested_on_<arch>` in the output.
+- i915 is **not built** for arm64 by our packages. Its record lists only `amd64` in `archs`, so an
+  arm64 box gets `refused` with code `not_built_arm64`. The built-but-not-tested rule applies to
+  `xe`: `xe` is built for arm64, and while it is not tested on arm64 the device is `supported`
+  with the warning `not_tested_on_arm64`.
+- Backend preference is data: each backend has a `score`, and the provider file lists the
+  preferences as `"preference": [["rm-open","rm-closed"]]`. The generator checks each list
+  generically: the earlier backend must outscore the later one, and the generator fails
+  otherwise. The generator names no backend.
 
 ### 4.4 Feature flags
 
@@ -389,6 +412,10 @@ three classes, from our firmware rule:
 
 When unsure, treat the file as class 2 until the licence is read.
 
+The firmware module file name is `nvidia_gsp_ga10x_fw` (the `firmware.gsp_ga10x` name of the alias
+layer). The kernel names the module after the file with `_fw` appended, so `nvidia_gsp_ga10x_fw_fw`
+shows in `kldstat -v`. The plan step and the JSON carry the file name.
+
 ### 4.6 The factory and scoring
 
 ```
@@ -418,10 +445,10 @@ output, even though it is resolved.
   families, one with a decorator and one that refuses. The tests drive the whole decision step
   through it from fake `pciconf -l` text.
 - A **vendor-free lint test** greps the core sources (registry, factory, decision tool, generator
-  core, JSON writer) for any name from the set of provider names, and for the patterns
-  `vendor ==`, `vendor !=`, `0x10de`, `0x1002`, `0x8086`, and a vendor-named switch case. The
-  test also carries a planted file with `if (id->vendor == 0x10de)` and MUST fail on it. A lint
-  that cannot fail is not accepted.
+  core, JSON writer) for any name from the set of provider names and backend names, where the
+  backend names come from the data files, and for the patterns `vendor ==`, `vendor !=`, `0x10de`,
+  `0x1002`, `0x8086`, and a vendor-named switch case. The test also carries a planted file with
+  `if (id->vendor == 0x10de)` and MUST fail on it. A lint that cannot fail is not accepted.
 
 ## 5. The one definition
 
@@ -434,30 +461,41 @@ Shape:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": {"string": "1.0", "major": 1, "minor": 0, "patch": 0},
+  "record_version": {"string": "1.0", "major": 1, "minor": 0, "patch": 0},
   "provider": "nvidia-open",
   "score": 100,
   "fallback_ok": false,
   "on_conflict": "best_cover",
   "driver_branch": {"string": "580.178.04", "major": 580, "minor": 178, "patch": 4},
   "input": {"file": "supported-gpus.json", "licence": "zlib", "sha256": "..."},
+  "preference": [["rm-open", "rm-closed"]],
   "backends": [
     {"name": "rm-open", "archs": ["amd64", "arm64"], "exclusive_group": "nvidia-rm", "score": 20,
-     "modules": ["nvidia", "nvidia_modeset", "nvidia_drm"], "licence_class": "mit"},
+     "modules": ["nvidia", "nvidia-modeset", "nvidia-drm"], "licence_class": "mit"},
     {"name": "rm-closed", "archs": ["amd64"], "exclusive_group": "nvidia-rm", "score": 10,
-     "modules": ["nvidia", "nvidia_modeset", "nvidia_drm"], "licence_class": "nvidia-eula"}
+     "modules": ["nvidia", "nvidia-modeset", "nvidia-drm"], "licence_class": "nvidia-eula"}
   ],
   "policy": {"min_generation": "ampere", "reason": "interim floor, Track #2457"},
   "families": [
     {"id": "gsp_ga10x_group", "arch_values": [23, 24, 25, 26, 27],
      "impl_values": ["ga10x", "ad10x", "gh100", "gb10x", "gb10y", "gb20x", "gb20y"],
-     "devid_ranges": [["0x2200", "0x31c2"]],
+     "devids": ["0x2c05", "0x2d04", "0x2e12"],
      "note": "the firmware group: Ampere (not GA100), Ada, Hopper, Blackwell. GA100 has the same arch value 23 and is told apart by impl_values (stage 2) and by device id (stage 1)",
-     "backends": ["rm-open", "rm-closed"], "tested_arch": ["arm64"], "verified_on_hardware": ["0x2d04"],
-     "firmware": {"image": "gsp_ga10x", "module": "nvidia_gsp_ga10x_fw", "archs": ["amd64", "arm64"]}},
+     "backends": ["rm-open", "rm-closed"],
+     "generations": [
+       {"name": "ampere", "arch_values": [23], "tested_arch": [], "verified_on_hardware": []},
+       {"name": "hopper", "arch_values": [24], "tested_arch": [], "verified_on_hardware": []},
+       {"name": "ada", "arch_values": [25], "tested_arch": [], "verified_on_hardware": []},
+       {"name": "blackwell", "arch_values": [26, 27], "tested_arch": ["arm64"], "verified_on_hardware": ["0x2d04"]}],
+     "firmware": {"image": "gsp_ga10x", "module": "nvidia_gsp_ga10x_fw", "archs": ["amd64", "arm64"],
+                  "licence_class": "redistributable"}},
     {"id": "ga100", "arch_values": [23], "impl_values": ["ga100"], "devids": ["0x20b0"],
-     "backends": ["rm-open", "rm-closed"], "tested_arch": [], "verified_on_hardware": [],
-     "firmware": {"image": "gsp_tu10x", "module": "nvidia_gsp_tu10x_fw", "archs": ["amd64"]}}
+     "backends": ["rm-open", "rm-closed"],
+     "generations": [
+       {"name": "ampere-ga100", "arch_values": [23], "tested_arch": [], "verified_on_hardware": []}],
+     "firmware": {"image": "gsp_tu10x", "module": "nvidia_gsp_tu10x_fw", "archs": ["amd64"],
+                  "licence_class": "redistributable"}}
   ],
   "decorators": []
 }
@@ -465,7 +503,11 @@ Shape:
 
 `decorators` is empty until a real board needs one. The values in this sample are illustrations of
 the shape, not the final table: the real file is generated from the json input (5.2). The `impl_values` names are placeholders for the
-implementation numbers the generator takes from the NVIDIA headers.
+implementation numbers the generator takes from the NVIDIA headers. The evidence is per
+generation: the `hopper` entry has no tested architecture, so a Hopper card on arm64 is
+`not_tested_on_arm64` while a Blackwell card in the same family (the GB206, 0x2d04) is tested there (4.3). The device id
+lists are exact lists taken from the json; a range is only a printing form of a list, and the
+generator fails when one id is in two families.
 
 ### 5.2 Inputs
 
@@ -498,9 +540,11 @@ writes files; it makes no network calls). It writes:
 committed copy, and fails on any difference. It also fails when a provider data file does not
 validate against its schema, when two decorators conflict, when a firmware module named by a
 family is absent from the manifests, when two families match the same (architecture,
-implementation) pair, when `rm-open` does not outscore `rm-closed`, and when a record exceeds a
-bound it declares. The build runs it, so a hand edit of a generated file, or a
-data edit without regeneration, fails the build. The test has a planted-drift case that MUST fail.
+implementation) pair, when a preference list is not satisfied (the earlier backend must outscore
+the later one), and when a record exceeds a bound it declares. It also fails when the input
+sha256 or the data file changes and `record_version` does not move with it. The build runs it, so
+a hand edit of a generated file, or a data edit without regeneration, fails the build. The test
+has a planted-drift case that MUST fail.
 
 ## 6. The decision step
 
@@ -527,12 +571,17 @@ driver does the register read at the one time it is safe (section 8).
 
 ### 6.3 Algorithm
 
+Before step 1, and only with `--act`, the tool takes an exclusive `flock` on a fixed lock file
+under `/var/run` and holds it to the end of verify. A concurrent run waits for the lock, so it
+never acts on a plan it made before the other run changed the machine.
+
 1. **Enumerate** every display-class device (class 0x03, any subclass) from `pciconf -l`. If
    `pciconf` itself fails, the answer is "could not look", not "no device".
 2. **Match.** For each device, run the factory (4.6). The outcome is `refused`, `no_provider_yet`,
-   `no_provider`, `provider_error`, or a **candidate set of backends** (host-arch filtered). No
-   backend is chosen here.
-3. **Bind** (section 9). Group the devices that have candidates by `exclusive_group`. For each
+   `no_provider`, `provider_error`, or a **candidate set of backends**. No backend is chosen here.
+3. **Bind** (section 9). The core first filters each candidate set by the host architecture,
+   keeping the backends built for the running architecture; the provider's `match` never does this.
+   Then group the devices that have candidates by `exclusive_group`. For each
    group choose one backend. Each device's `backend`, `firmware` and `driver` fields come from the
    backend bound to its group. A device the bound backend does not cover becomes `refused` with
    code `uncovered`. Then compute one ordered plan per group: for every device of the group,
@@ -542,20 +591,22 @@ driver does the register read at the one time it is safe (section 8).
 4. **Check** each plan. A device is refused when its firmware is not built for the host
    architecture (`not_built_<arch>`), or a `package` step is not installed (`needs_install`, with
    the exact command in `next`), or a `kld` module is not installed. Each refusal has a stable
-   code, a plain reason and a `next` step.
-5. **Act**, only with `--act`. Decide-only is the default; `--act` is opt-in. `--act` takes an
-   exclusive `flock` on a fixed lock file under `/var/run` so concurrent runs are serialised. As
-   root, it runs the `kld` steps of the plan in order: `kldload` each firmware module, then each
-   driver module, only for modules that are installed. `--act` plans firmware for **every** device
-   of the bound group, not only the triggering one. `--device <selector>` names the device whose
-   event triggered the run; it does not limit the plan. A non-root `--act` stops with "needs root"
-   and prints the exact command. Without `--act` the tool only decides and prints (what preflight
-   and `nvrm-info` use).
+   code, a plain reason and a `next` step. Policy is checked before build availability: a device
+   below the provider's `min_generation` is `refused` with `below_policy`, even when its firmware
+   is also not built for the host architecture.
+5. **Act**, only with `--act`. Decide-only is the default; `--act` is opt-in. The lock taken before
+   step 1 is still held. As root, it runs the `kld` steps of the plan in order: `kldload` each
+   firmware module, then each driver module, only for modules that are installed. `--act` plans
+   firmware for **every** device of the bound group, not only the triggering one. `--device
+   <selector>` names the device whose event triggered the run; it does not limit the plan. A
+   non-root `--act` stops with "needs root" and prints the exact command. Without `--act` the tool
+   only decides and prints (what preflight and `nvrm-info` use).
 6. **Verify.** After the load, ask each provider's `verify` (module present, device attached,
-   stage 2 sysctls read back, section 8). The tool computes `agrees` by comparing the image its
-   stage 1 chose with the `fw_image` the driver reports, and maps `fw_image` only through the
-   provider record's firmware list. Any other value is refused and never passed to `kldload`.
-   Report the result per device.
+   stage 2 sysctls read back, section 8). The tool joins the stage 2 sysctl nodes to the devices by
+   the `selector` sysctl, never by the order of the nodes. The tool computes `agrees` by comparing
+   the image its stage 1 chose with the `fw_image` the driver reports, and maps `fw_image` only
+   through the provider record's firmware list. Any other value is refused and never passed to
+   `kldload`. Report the result per device.
 
 ### 6.4 Outputs
 
@@ -563,16 +614,19 @@ English, one line per device. One format:
 
 ```
 <label> (<selector>): <vendor> <vvvv:dddd> (<name>) <decision>, firmware <modules or none>, driver <modules>
+<label> (<selector>): <vendor> <vvvv:dddd> (<name>) <decision>, requires package <name>, driver <modules>
 <label> (<selector>): <vendor> <vvvv:dddd> (<name>) <decision>: <reason>; next: <next step>
 ```
 
 Module names are as `kldstat` lists them (the file name without `.ko`). A list joins names with
-`+`, and an empty list reads `none`. The JSON `english` field is byte-identical to the text line.
-For amp001:
+`+`, and an empty list reads `none`. A package step prints as `requires package <name>`. It never
+takes the firmware slot: that slot lists firmware modules only. A warning is appended as
+`; warning: <code>`, or `; warning: <code>, <code>` when there is more than one. The JSON
+`english` field is byte-identical to the text line. For amp001:
 
 ```
-gpu0 (pci0:0:1:0): amd 1002:7480 (Navi 33) supported, firmware gpu-firmware-amd-kmod-navi33, driver amdgpu
-gpu1 (pci0:0:2:0): nvidia 10de:2d04 (GB206) supported, firmware nvidia_gsp_ga10x_fw, driver nvidia+nvidia_modeset+nvidia_drm
+gpu0 (pci0:0:1:0): amd 1002:7480 (Navi 33) supported, requires package gpu-firmware-amd-kmod-navi33, driver amdgpu
+gpu1 (pci0:0:2:0): nvidia 10de:2d04 (GB206) supported, firmware nvidia_gsp_ga10x_fw, driver nvidia+nvidia-modeset+nvidia-drm
 gpu2 (pci0:0:3:0): aspeed 1a03:2000 (BMC display adapter) no_provider: no record names this device; next: none, it is never loaded
 ```
 
@@ -588,7 +642,8 @@ use `nvidia<unit> (<selector>)`.)
 
 Decisions: `supported`, `refused`, `no_provider_yet`, `no_provider`, `provider_error`. Every
 refusal carries a `next` field (JSON) and the clause in the English line. A `supported` device may
-carry warnings, for example `not_tested_on_arm64`.
+carry warnings, for example `not_tested_on_arm64`; they are printed as `; warning: <code>` at the
+end of the line, and they are also in the JSON `warnings` list.
 
 `--json` prints one document. `--jsonl` prints JSON Lines: a header record, one record per
 device, one per plan, one per verify result, an end record. The schema is
@@ -596,16 +651,18 @@ device, one per plan, one per verify result, an end record. The schema is
 enforced like the existing schemas. Versions are objects as in "versions as numbers". Every index
 in the chosen provider's `features[]` appears in a device's `features` list (available true or
 false, with a reason when false), and the schema requires it. A device with no provider
-(`no_provider`) has an empty `features` list: that is the rule for it.
+(`no_provider`) has an empty `features` list: that is the rule for it. Every `supported` device
+label appears in exactly one plan and in exactly one verify record, and the schema requires that
+too.
 
 Example for amp001 (selectors, the AMD record and the NVIDIA feature values are illustrative, not
 read from hardware):
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": {"string": "1.0", "major": 1, "minor": 0, "patch": 0},
   "tool": "device-decide",
-  "host": {"arch": "arm64", "os": "FreeBSD", "os_release": {"string": "16.0-CURRENT", "major": 16, "minor": 0, "patch": 0, "suffix": "-CURRENT"}},
+  "host": {"arch": "arm64", "os": "FreeBSD", "os_release": {"string": "16.0-CURRENT", "major": 16, "minor": 0, "patch": 0}},
   "enumeration": [
     {"selector": "pci0:0:1:0", "label": "gpu0", "vendor": "0x1002", "device": "0x7480",
      "subvendor": "0x1002", "subdevice": "0x0e1d", "class": "0x030000", "revision": "0xc1"},
@@ -617,7 +674,7 @@ read from hardware):
   "devices": [
     {"label": "gpu0", "decision": "supported", "provider": "amd", "family": "navi33", "board": null,
      "backend": "amdgpu", "warnings": [],
-     "english": "gpu0 (pci0:0:1:0): amd 1002:7480 (Navi 33) supported, firmware gpu-firmware-amd-kmod-navi33, driver amdgpu",
+     "english": "gpu0 (pci0:0:1:0): amd 1002:7480 (Navi 33) supported, requires package gpu-firmware-amd-kmod-navi33, driver amdgpu",
      "firmware": [{"module": "gpu-firmware-amd-kmod-navi33", "kind": "package"}],
      "driver": [{"module": "amdgpu", "kind": "kld"}],
      "features": [
@@ -627,10 +684,10 @@ read from hardware):
     {"label": "gpu1", "decision": "supported", "provider": "nvidia-open",
      "family": "gsp_ga10x_group", "board": null, "backend": "rm-open",
      "warnings": [],
-     "english": "gpu1 (pci0:0:2:0): nvidia 10de:2d04 (GB206) supported, firmware nvidia_gsp_ga10x_fw, driver nvidia+nvidia_modeset+nvidia_drm",
+     "english": "gpu1 (pci0:0:2:0): nvidia 10de:2d04 (GB206) supported, firmware nvidia_gsp_ga10x_fw, driver nvidia+nvidia-modeset+nvidia-drm",
      "firmware": [{"module": "nvidia_gsp_ga10x_fw", "kind": "kld"}],
-     "driver": [{"module": "nvidia", "kind": "kld"}, {"module": "nvidia_modeset", "kind": "kld"},
-                {"module": "nvidia_drm", "kind": "kld"}],
+     "driver": [{"module": "nvidia", "kind": "kld"}, {"module": "nvidia-modeset", "kind": "kld"},
+                {"module": "nvidia-drm", "kind": "kld"}],
      "driver_branch": {"string": "580.178.04", "major": 580, "minor": 178, "patch": 4},
      "features": [
        {"index": 1, "name": "display", "available": true},
@@ -647,7 +704,7 @@ read from hardware):
        {"index": 12, "name": "dp_gsync", "available": false, "reason": "not listed in supported-gpus.json for this id"},
        {"index": 13, "name": "hdmi_gsync", "available": false, "reason": "not listed in supported-gpus.json for this id"},
        {"index": 14, "name": "vdpau_featureset", "available": false, "reason": "not listed in supported-gpus.json for this id"}],
-     "aliases": [{"name": "nvidia", "kind": "module", "owner": "this-project", "since": {"string": "1.0.0", "major": 1, "minor": 0, "patch": 0}, "deprecated": false}],
+     "aliases": [{"name": "nvidia", "kind": "module", "owner": "this-project", "since": {"string": "1.0.0", "major": 1, "minor": 0, "patch": 0}, "deprecation": {"state": "none"}}],
      "replaced_driver": {"name": "nvidia-driver", "kind": "package"}},
     {"label": "gpu2", "decision": "no_provider",
      "english": "gpu2 (pci0:0:3:0): aspeed 1a03:2000 (BMC display adapter) no_provider: no record names this device; next: none, it is never loaded",
@@ -659,10 +716,14 @@ read from hardware):
     {"backend": "rm-open", "devices": ["gpu1"], "steps": [
       {"order": 1, "module": "nvidia_gsp_ga10x_fw", "kind": "kld", "state": "loaded"},
       {"order": 2, "module": "nvidia", "kind": "kld", "state": "loaded"},
-      {"order": 3, "module": "nvidia_modeset", "kind": "kld", "state": "loaded"},
-      {"order": 4, "module": "nvidia_drm", "kind": "kld", "state": "loaded"}]}
+      {"order": 3, "module": "nvidia-modeset", "kind": "kld", "state": "loaded"},
+      {"order": 4, "module": "nvidia-drm", "kind": "kld", "state": "loaded"}]},
+    {"backend": "amdgpu", "devices": ["gpu0"], "steps": [
+      {"order": 1, "module": "gpu-firmware-amd-kmod-navi33", "kind": "package", "state": "installed"},
+      {"order": 2, "module": "amdgpu", "kind": "kld", "state": "loaded"}]}
   ],
   "verify": [
+    {"label": "gpu0", "stage2": {"available": false, "reason": "the AMD provider has no stage 2"}},
     {"label": "gpu1", "stage2": {"available": true, "arch": 26, "fw_image": "gsp_ga10x", "fw_loaded": true, "agrees": true}}
   ],
   "exit": 0
@@ -674,16 +735,29 @@ with no part fields.
 
 ### 6.5 Exit codes
 
+A **claimed** device is one a provider record names. `no_provider_yet` is claimed (a record names
+its id). `no_provider` is unclaimed (nothing anywhere names it). The exit code counts claimed
+devices only.
+
 | Code | Meaning |
 |---|---|
-| 0 | every supported device was loaded and verified (including "everything was already loaded and verify passed") |
-| 1 | a load or verify step failed (the JSON names the step) |
+| 0 | every claimed device is served |
+| 1 | a load or verify step failed (the JSON names the step); only with `--act` |
 | 2 | usage error |
-| 3 | nothing claimed: every device is `no_provider` or `no_provider_yet`. devd treats only this as normal |
+| 3 | nothing claimed: every device is `no_provider`, or there is no display device. devd treats only 3 as normal |
 | 4 | could not look (`pciconf` failed) |
-| 5 | the stage 2 correction failed (module not installed, not available on this architecture, or a `fw_image` the record does not list) |
-| 6 | partial: at least one claimed device is refused, uncovered or `provider_error` while others loaded |
-| 7 | every claimed device is refused |
+| 5 | the stage 2 correction failed (module not installed, not available on this architecture, or a `fw_image` the record does not list); only with `--act` |
+| 6 | partial: some claimed device is served and some is refused, `no_provider_yet` or `provider_error` |
+| 7 | no claimed device is served: every claimed device is refused, `no_provider_yet` or `provider_error` |
+
+With `--act`, 0 means every claimed device was loaded and verified, including "everything was
+already loaded and verify passed". In decide-only mode, 0 means every claimed device would be
+served. 1 and 5 are returned only with `--act`: a decide-only run loads nothing and corrects
+nothing, so it has no load step and no correction that can fail.
+
+A stage 2 disagreement that the tool corrected (it loaded the image stage 2 named) is exit 0. It
+is logged with `logger -p daemon.warning` and its verify record carries `agrees:false`. A
+disagreement the tool could not correct is exit 5.
 
 When several apply, the highest-precedence code is reported: 4, then 5, then 1, then 7, then 6,
 then 3, then 0. devd logs refusals with `logger -p daemon.warning`.
@@ -724,8 +798,10 @@ Paths:
   reattach: it stays attached, sets `fw_loaded` to 0, and refuses opens of that device with
   `ENXIO` until the image is registered (the same behaviour as section 8.3). Why `ENXIO`: the
   device is "not configured" yet, and `EIO` stays reserved for a real initialisation failure
-  (README, "Diagnostics"), so a caller can tell the two apart. The kernel log gets one line, rate
-  limited to at most one per open attempt:
+  (README, "Diagnostics"), so a caller can tell the two apart. The kernel log gets the
+  missing-firmware line once per device each time `fw_loaded` goes from 1 to 0, and once at
+  attach. A per-device flag holds it: the flag is cleared when the image is registered, so the
+  next drop from 1 to 0 logs again. Every open still returns `ENXIO`:
   `nvidia<unit> (<selector>): firmware image <fw_image> is not registered (arch A, impl I); run as root: <tool> --act`
   (names through the alias layer). `nvrm-info` and `make preflight` print the `fw_loaded` state
   with the same command.
@@ -740,8 +816,9 @@ Paths:
 
 Removal of the `MODULE_DEPEND` is one change in `patches/patch-zz-nvidia_fw_depend_pci.c` (the
 patch's body shrinks to the log message on missing firmware). It lands in the same change set as
-the devd, loader.conf and test changes, never alone. After `make configure` has run, no state
-exists where the driver loads and nothing loads its firmware.
+the devd, loader.conf and test changes, never alone. After `make configure` has run, only a
+manual `kldload` loads the driver without its firmware, and that state is the stay-attached,
+ENXIO state of 8.3.
 
 Why #2417 still holds: (1) firmware registration still happens before the driver's MOD_LOAD, in the
 same `kldload` sequence the tool runs as root; (2) the device nodes appear only after the driver
@@ -755,11 +832,17 @@ Stage 2 runs at attach, after BAR0 is mapped, where the RM already reads `PMC_BO
 
 1. Read the architecture (BOOT_42) and the implementation.
 2. Look both up in the table generated from the provider record (`generated/nvidia_provider_table.h`).
+   The table also carries the firmware image each chip needs and the architectures that image is
+   built for.
 3. Outside the table (architecture unknown, or below the provider's `policy.min_generation`,
    or no (architecture, implementation) row): **decline with `ENXIO`**, log the architecture value
    and the reason, and create no `hw.nvidia.gpus.<n>` node. The decline is visible in the kernel log
    and in the tool's verify output.
 4. Inside the table: publish what was found, and the firmware image the table says it needs.
+5. The image the chip needs is not built for the running architecture: **decline with `ENXIO`** and
+   create no node, the same as step 3, and log the image and the architecture. A GA100 on an arm64
+   box with a GB206 is never attached: the GA100 needs `gsp_tu10x`, which is not built for arm64,
+   so stage 2 declines it while the GB206 attaches.
 
 This replaces the named minimum-architecture constant of the interim floor (section 8.2). It does
 not rely on stage 1 being right.
@@ -770,19 +853,22 @@ Under the existing root `hw.nvidia.gpus.<n>` (README, "Tunables and sysctls"):
 
 | Sysctl | Type | Meaning |
 |---|---|---|
+| `hw.nvidia.gpus.<n>.selector` | string | the pciconf selector of the device, for example `pci0:13:1:0:0` |
 | `hw.nvidia.gpus.<n>.arch` | integer | BOOT_42 architecture value |
 | `hw.nvidia.gpus.<n>.arch_available` | 0 or 1 | 0 when the value could not be read |
 | `hw.nvidia.gpus.<n>.impl` | integer | implementation value |
 | `hw.nvidia.gpus.<n>.fw_family` | string | chip family stage 2 found, for example `gb20x`; informational |
 | `hw.nvidia.gpus.<n>.fw_image` | string | image the chip needs, for example `gsp_ga10x` |
 | `hw.nvidia.gpus.<n>.fw_loaded` | 0 or 1 | the image is registered with firmware(9) |
-| `hw.nvidia.provider_record` | string | version of the provider record compiled in |
+| `hw.nvidia.provider_record` | string | `record_version` of the provider record compiled in |
 | `hw.nvidia.provider_record_major`, `_minor`, `_patch` | integer | its parts |
+| `hw.nvidia.provider_schema` | string | `schema_version` of the provider record format |
 | `hw.nvidia.policy_min_generation` | string | the policy field, for example `ampere` |
 
 A node `hw.nvidia.gpus.<n>` exists only for a device that passed stage 2, so there is no `stage2`
-sysctl. The driver cannot know what stage 1 chose: the tool compares stage 1's image with
-`fw_image` and reports `agrees`.
+sysctl. The `selector` sysctl is the join key: the tool matches a node to a device by its
+selector, so the order of the nodes never matters. The driver cannot know what stage 1 chose: the
+tool compares stage 1's image with `fw_image` and reports `agrees`.
 
 The existing `hw.nvidia.version` family and the per-GPU `vbios_*` and `firmware_*` families keep
 their meaning. The man page `nvidia(4)` documents the new ones.
@@ -817,8 +903,10 @@ needs `gsp_ga10x`):
 1. The driver stays attached. It sets `fw_loaded` to 0 and `fw_image` to what the chip needs. It
    cannot know what stage 1 chose, so its log line names only the image:
    `nvidia<unit> (<selector>): firmware image <fw_image> is not registered (arch A, impl I); run as root: <tool> --act`.
-2. Until that image is registered, the driver refuses opens of that device with `ENXIO`, with the
-   log line above (at most once per open attempt).
+2. Until that image is registered, the driver refuses opens of that device with `ENXIO`. The log
+   line above is written once per device each time `fw_loaded` goes from 1 to 0, and once at
+   attach. A per-device flag holds it and is cleared when the image is registered. Every open
+   still returns `ENXIO`.
 3. The devd rule fires on the driver's own attach event (or the tool's verify step runs right
    after its load). The tool reads `fw_image` and `fw_loaded`, compares `fw_image` with the image
    its stage 1 chose, reports the disagreement (`"agrees": false`), and, as root, loads the
@@ -1036,11 +1124,11 @@ Module, package, sysctl, device node and tool names go through one alias layer. 
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": {"string": "1.0", "major": 1, "minor": 0, "patch": 0},
   "names": [
     {"key": "driver.core", "kind": "module", "name": "nvidia"},
-    {"key": "driver.modeset", "kind": "module", "name": "nvidia_modeset"},
-    {"key": "driver.drm", "kind": "module", "name": "nvidia_drm"},
+    {"key": "driver.modeset", "kind": "module", "name": "nvidia-modeset"},
+    {"key": "driver.drm", "kind": "module", "name": "nvidia-drm"},
     {"key": "firmware.gsp_ga10x", "kind": "module", "name": "nvidia_gsp_ga10x_fw"},
     {"key": "firmware.gsp_tu10x", "kind": "module", "name": "nvidia_gsp_tu10x_fw"},
     {"key": "tool.decide", "kind": "tool", "name": "device-decide"}
@@ -1048,13 +1136,22 @@ Module, package, sysctl, device node and tool names go through one alias layer. 
   "aliases": [
     {"key": "driver.core", "alias": "nvidia", "owner": "this-project",
      "since": {"string": "1.0.0", "major": 1, "minor": 0, "patch": 0},
+     "deprecation": {"state": "none"}},
+    {"key": "driver.modeset", "alias": "nvidia_modeset", "owner": "this-project",
+     "since": {"string": "1.0.0", "major": 1, "minor": 0, "patch": 0},
+     "deprecation": {"state": "none"}},
+    {"key": "driver.drm", "alias": "nvidia_drm", "owner": "this-project",
+     "since": {"string": "1.0.0", "major": 1, "minor": 0, "patch": 0},
      "deprecation": {"state": "none"}}
   ]
 }
 ```
 
-The entries above are shapes. The names in `names` are today's names. The neutral names are Mark's
-to give (question 9).
+The entries above are shapes. The names in `names` are today's names: the module file names as
+`kldstat` and `kld_list` use them (`nvidia`, `nvidia-modeset`, `nvidia-drm`, and the firmware
+file names `nvidia_gsp_ga10x_fw` and `nvidia_gsp_tu10x_fw`). The underscore spellings
+`nvidia_modeset` and `nvidia_drm` appear only as declared aliases, never as names. The neutral
+names are Mark's to give (question 9).
 
 Rules:
 
@@ -1063,6 +1160,9 @@ Rules:
 - When ours replaces an existing driver, the old names stay as **declared aliases**: owner,
   since-version (a version object), deprecation state (`none`, `deprecated` with a version, or
   `removed`). One owner per device.
+- Every alias entry carries the same `"deprecation": {"state": "..."}` object as this file. There
+  is no boolean `deprecated` field anywhere. The device JSON (6.4) carries the same object, so a
+  deprecated alias validates in the device output.
 - A man page COMPATIBILITY section lists the aliases for the tool and the modules.
 - Tests cover: each alias resolves; a removed alias gives a clear error naming the replacement; an
   alias that two providers claim fails generation.
@@ -1107,37 +1207,53 @@ All tests run from fake `pciconf -l` input and the fake provider. None needs har
 | Case | Expected |
 |---|---|
 | supported NVIDIA card (GB206 `0x2d04`, subsystem 1462:5351) | `supported`, firmware `gsp_ga10x`, driver set named, firmware first |
-| NVIDIA id claimed but below policy (Turing on arm64) | `refused`, code `below_policy`; nothing loads |
+| NVIDIA id claimed but below policy (Turing on arm64) | `refused`, code `below_policy`; policy is checked first, so it wins over `not_built_arm64` |
 | NVIDIA id in no family | `no_provider`: no record names it; the fix is a newer input |
-| legacy card (a Kepler id) | `no_provider_yet` until a legacy backend record exists; then the candidate is `rm-legacy-470` on amd64 |
+| legacy card (a Kepler id) | with the interim floor it is `refused` (`below_policy`); without it, `no_provider_yet` until a legacy backend record exists |
 | non-NVIDIA card (BMC display adapter) | `no_provider`; never loaded; empty `features` |
 | mixed two-vendor box (AMD plus NVIDIA) | two plans, different groups; both decided |
-| NVIDIA card not at index 0 | decided by selector; asserted by shuffling the order |
+| NVIDIA card not at index 0 | two NVIDIA cards with shuffled `<n>`; decided by selector, not by index |
 | stage 2 image differs from stage 1 | fake sysctls report another `fw_image`; `agrees:false`; the right module loads; exit 5 if unavailable |
+| stage 2: fake BOOT_42 below `min_generation` | attach declines with `ENXIO`; no `hw.nvidia.gpus.<n>` node; a log line names the architecture value |
+| stage 2: the image the chip needs is not built for this arch | a GA100 with a GB206 on arm64 declines with `ENXIO`, no node; the GB206 attaches |
 | `fw_image=../../x` | refused, never passed to `kldload`; exit 5 |
 | GA100 on arm64 | `refused`, code `not_built_arm64`, with the English line of 6.4 |
-| built but untested (Hopper on arm64) | `supported` with the warning `not_tested_on_arm64` |
+| built but untested (Hopper on arm64) | `supported` with the warning `not_tested_on_arm64`; the English line carries `warning: not_tested_on_arm64` |
 | i915 on arm64 | `refused` (not built) |
 | mixed generations, one backend covers all | one plan, no conflict; the open backend wins only if it covers all |
 | mixed generations, no backend covers all | conflict with both device lists; default loads best cover; `on_conflict: refuse` refuses the group |
+| two Ampere cards on amd64, `rm-open` and `rm-closed` both installed | `rm-open` is bound: the preference list and the scores decide |
 | two-card box, `--act --device A` | the plan lists both cards' firmware modules before the driver |
-| two concurrent `--act` runs | serialised by the lock; the second finds everything loaded |
-| `kld_list="nvidia-drm"`, `nvidia` loaded, firmware not loaded | plan is only the firmware module; result loaded |
+| two concurrent `--act` runs | the lock is taken before step 1 and held to the end of verify; the second run waits, never acting on a stale plan |
+| `kld_list="nvidia-drm"`, `nvidia` loaded, firmware not loaded | the `nvidia-drm` step is marked `already listed`; the plan loads only the firmware module |
 | run as root without `--act` | nothing loaded |
 | `provider_error` from a fake provider | `provider_error`; no fall-through to a lower-scoring provider |
 | exit precedence | each pair in the order 4, 5, 1, 7, 6, 3, 0 gives the higher code |
+| decide-only on amp001 | exit 0: every claimed device would be served |
+| decide-only, a GA100 alone on arm64 | exit 7: the only claimed device is refused |
+| decide-only, a Pascal card alone on arm64 | exit 7, not 3: the card is claimed, so something is missing |
+| one card whose provider `match` returns EIO | exit 7: `provider_error` |
 | English line | JSON `english` equals the plain text line for every device |
-| over-long selector or version string | parser error, no truncation |
+| the amp001 gpu0 English line | contains `requires package gpu-firmware-amd-kmod-navi33` |
+| every `supported` device label | appears in exactly one plan and in exactly one verify record |
+| fake provider features: one with a value, one with a reason | both appear in the JSON: index 14 with its value, the other with its reason |
+| AMD fixture, firmware package missing, `--act`, stub `pkg` and `fwget` on PATH | result `needs_install`; the stubs are never called; exit 7 |
+| 10000 opens with the image absent | one log line; every open returns `ENXIO` |
+| over-long selector or version string | parser error, no truncation; 31 characters are accepted in a 32-byte buffer, 32 are rejected |
 | decorator conflict | the generator fails |
 | two families match one (architecture, implementation) | the generator fails |
-| `rm-open` not above `rm-closed`, or a record over its declared bound | the generator fails |
+| a planted Turing entry containing `0x20b0` | generation fails: that device id is in two families |
+| a preference list whose earlier backend does not outscore the later, or a record over its bound | the generator fails |
 | lint | the core is clean; the planted vendor check makes the lint fail |
 | drift | a stale generated file or an unregenerated data edit fails the build; the planted drift fails |
+| drift: the input file changes | `record_version` changes with it; the diff fails until the record is regenerated |
 | tie by score | resolved by name; warning present |
 | manual `kldload` without firmware | driver stays attached; `fw_loaded=0`; open returns `ENXIO`; the log line names the command; no hang |
 | #2417 regression | a non-root user opens the node after the devd action and the open succeeds |
 | JSON | validates against the schema; versions have string and integer parts; `available:false` has a reason; every feature index appears |
 | names | every alias resolves; the removed alias error names the replacement |
+| a deprecated alias | validates in the device output: the `deprecation` object, never a boolean |
+| the same pciconf input, host arm64 then amd64, interim floor off | a Pascal card gives `no_provider_yet` on arm64 and a candidate set on amd64 |
 
 ## 15. Open questions for Mark
 
@@ -1170,8 +1286,10 @@ All tests run from fake `pciconf -l` input and the fake provider. None needs har
 9. **Neutral names.** The rebrand names for the modules, package, sysctl root, node and tool are
    yours to give. The design needs them only as data. Recommendation: pick them any time; nothing
    waits on them.
-10. **Intel on arm64.** `xe` covers arm64 and `i915` is amd64-only tested. Options: refuse i915 on
-    arm64, or allow it with a "not tested" warning. Recommendation: refuse, with the reason.
+10. **Intel on arm64.** `i915` is not built for arm64 by our packages, so an arm64 box refuses it
+    (`not_built_arm64`). `xe` is built for arm64 but is not tested there, so it is `supported`
+    with the warning `not_tested_on_arm64`. Options: refuse i915 on arm64, or allow it with a
+    "not tested" warning. Recommendation: refuse i915, with the reason.
 11. **Stage 1 id ranges.** Our derived split at 0x2200 comes from the json plus the family-select
     header; stage 2 confirms it. Options: ship it as the default, or require a hardware sample for
     each family before it is marked supported. Recommendation: ship it, and mark each family with

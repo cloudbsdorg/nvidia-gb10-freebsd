@@ -233,7 +233,7 @@ See `man/nvidia.4`.
 
 Today `nvidia.ko` loads both GSP firmware modules on every machine (amd64; arm64 loads the one it builds).
 [`docs/DEVICE-DECISION.md`](docs/DEVICE-DECISION.md) designs a step that decides, per card and before
-anything loads, which firmware and driver it gets. Design only; nothing changes yet (Track #2455).
+anything loads, which firmware and driver it gets. Design only; nothing changes yet.
 
 ## Diagnostics
 
