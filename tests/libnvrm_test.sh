@@ -450,6 +450,16 @@ mutant chan-sleep-past-deadline nvrm_chan.c 's/return (left < nvrm_chan_slice_ns
 mutant chan-set-object-any nvrm_fake_chan.c 's/if (data != 0 \&\& data != b->granted\[subch\]) {/if (0) {/' chan_test
 mutant chan-ring-writable nvrm_chan.c 's/	    .flags = NVRM_MAP_READ_ONLY };/	    .flags = 0 };/' chan_test
 mutant chan-stats-v11 nvrm_mem.c 's/if (want != sizeof(full) \&\& want != v11)/if (want != sizeof(full))/' mem_test
+# the channel mutants pin: the ring space rule, the ordered submit queue, the
+# release segment reuse, a refused destroy kept until close and forgotten at
+# close, the fork child that makes no backend call, the fake engine running
+# one process's channels only, a backend without forget refused, and the
+# client stats size rule
+mutant chan-segment-reuse nvrm_chan.c 's/if (ch->slot_point\[slot\] > ch->completed)/if (0)/' chan_test
+mutant chan-held-forget nvrm_chan.c 's/cl->ops->chan->forget(ch->b);//' chan_test
+mutant chan-foreign-run nvrm_fake_chan.c 's/if (!nvrm_owner_is_me(\&b->core->cl->owner))/if (0)/' chan_test
+mutant chan-forget-required nvrm_chan.c 's/if (cl->ops->chan->destroy == NULL || cl->ops->chan->forget == NULL)/if (0)/' chan_test
+mutant chan-stats-zero-size nvrm_mem.c 's/size_t want = st->size == 0 ? sizeof(full) : st->size;/size_t want = st->size == 0 ? v11 : st->size;/' mem_test
 
 # ---- JSON modes against the schema --------------------------------------
 export NVRM_BACKEND=fake
