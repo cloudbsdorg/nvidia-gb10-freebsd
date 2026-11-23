@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 21, 2026
+.Dd November 22, 2026
 .Dt NVRM-INFO 8
 .Os
 .Sh NAME
@@ -20,14 +20,20 @@ utility lists every NVIDIA GPU with the values
 reports.
 After it has opened its descriptors it enters capability mode and queries the
 GPUs again through them; if capability mode is not available it fails.
-The text output lists every value of the library, as the JSON does.
+The text output lists every value of the library, as the JSON does, and prints
+the running driver, RM API, built-for RM, library, library-symbol and schema
+version strings, and each GPU's VBIOS and GSP firmware version strings.
 It needs no Linux compatibility layer.
 .Bl -tag -width ".Fl -backend Ar name"
 .It Fl -json
 Print one JSON document on one line, schema
 .Li nvrm-info/1 .
+Every version is an object containing its preserved string and, when available,
+its integer parts.
 .It Fl -jsonl
 Print JSON Lines: a header record, one record per GPU, an end record.
+Every version has the same string-plus-integer-parts object as in
+.Fl -json .
 Output is flushed per line; a closed pipe ends the program quietly.
 .It Fl -schema
 Print the JSON Schema that every JSON mode validates against.
@@ -46,6 +52,123 @@ In the JSON modes a failure prints one error record on standard output.
 Values that cannot be read are
 .Li "available": false
 with a reason, never a made-up number.
+.Ss Versions
+Document and header records contain a
+.Li versions
+object with
+.Li driver ,
+.Li rm_api ,
+.Li built_for ,
+.Li library ,
+.Li library_symbols
+and
+.Li schema
+members.
+An available version contains
+.Li available ,
+.Li string ,
+.Li major ,
+.Li minor ,
+.Li patch ,
+the complete
+.Li parts
+array and
+.Li source .
+A non-empty
+.Li suffix
+is also present.
+An unavailable version instead contains
+.Li available ,
+.Li string ,
+.Li reason_id ,
+.Li reason
+and
+.Li source ,
+with no part fields.
+The legacy
+.Li built_for_rm_version
+and
+.Li running_rm_version
+members are unchanged.
+.Ss GPU versions
+Each device record has a
+.Li versions
+group containing
+.Li vbios
+and
+.Li gsp_firmware
+version objects, both with source
+.Li rm .
+The VBIOS object combines the RM revision and OEM revision and parses its five
+hexadecimal fields in base 16.
+The GSP firmware object is parsed in base 10 when the RM marks it valid.
+A failed control gives reason
+.Li rm_control_failed ;
+When the RM does not run on the GPU System Processor, or does not mark its
+firmware version valid, the reason is
+.Li rm_not_supported .
+While an RM client holds a GPU open, the OS layer exposes the same values as
+the
+.Va hw.nvidia.gpus.N.vbios_*
+and
+.Va hw.nvidia.gpus.N.firmware_*
+sysctls.
+With no client holding the GPU open, those sysctls read
+.Li N/A
+or
+.Li ?? .
+.Pp
+.Li rm_sm_version
+is the raw RM SM version code, and
+.Li sm_version_major
+and
+.Li sm_version_minor
+are the RM's own numbering from that code.
+They are not necessarily CUDA numbers.
+.Li compute_capability_major
+and
+.Li compute_capability_minor
+are derived only from the architecture and implementation table.
+With no table row they are unavailable with reason
+.Li family_unknown ;
+an alias or a raw RM code is never presented as a compute capability.
+Thus a GB206 can report RM SM 10.4 and compute capability 12.0, while GB20B has
+compute capability 12.1.
+.Ss Operating-system values
+The running driver version comes from these sysctls when the kernel module
+provides the complete set:
+.Bl -tag -width ".Va hw.nvidia.version_available" -compact
+.It Va hw.nvidia.version_string
+The preserved short version string.
+.It Va hw.nvidia.version_major
+The integer major part.
+.It Va hw.nvidia.version_minor
+The integer minor part.
+.It Va hw.nvidia.version_patch
+The integer patch part.
+.It Va hw.nvidia.version_suffix
+The suffix, including its leading delimiter, or an empty string.
+.It Va hw.nvidia.version_available
+1 when the version has a readable numeric scheme, otherwise 0.
+.El
+.Pp
+The integer parts and suffix must agree with the parsed version string.
+Any disagreement makes the driver version unavailable with reason
+.Li version_inconsistent
+and preserves the version string.
+A zero
+.Va hw.nvidia.version_available
+also makes it unavailable.
+.Pp
+On an older module without that set,
+.Nm
+reads the banner from
+.Va hw.nvidia.version
+after probing its length, reads up to 64 KiB, and finds its first numeric
+version token.
+The legacy running-version text contains only the short version, never the
+whole banner.
+The RM API version is read separately with the RM version-query ioctl.
 .Sh ENVIRONMENT
 .Ev NVRM_BACKEND ,
 .Ev NVRM_FAKE_PROFILE

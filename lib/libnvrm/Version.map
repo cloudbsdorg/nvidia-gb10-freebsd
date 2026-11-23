@@ -60,8 +60,19 @@ NVRM_1.1 {
 		nvrm_mem_import_fd;
 } NVRM_1.0;
 
-/* API minor 2: GPFIFO channels and ordered submission (nvrm_chan(3)). */
+/* API minor 2: version numbers (nvrm(3)). */
 NVRM_1.2 {
+	global:
+		nvrm_driver_version;
+		nvrm_rm_api_version;
+		nvrm_built_for_version;
+		nvrm_library_version;
+		nvrm_symbol_version;
+		nvrm_schema_version;
+} NVRM_1.1;
+
+/* API minor 3: GPFIFO channels and ordered submission (nvrm_chan(3)). */
+NVRM_1.3 {
 	global:
 		nvrm_chan_create;
 		nvrm_chan_submit;
@@ -71,4 +82,4 @@ NVRM_1.2 {
 		nvrm_chan_status_get;
 		nvrm_chan_info_get;
 		nvrm_chan_destroy;
-} NVRM_1.1;
+} NVRM_1.2;

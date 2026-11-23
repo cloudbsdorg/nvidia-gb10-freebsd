@@ -1,5 +1,37 @@
+# Personal-path needles, fixed strings (no anchor, no regexp): a needle matches
+# anywhere on a line, so "-L<path>", "../../<path>", a backtick or a quote
+# before it cannot hide it.  Line kinds, each exactly as written:
+#   a plain line         a needle
+#   "# sample+: TEXT"    a line the needle just above it must match
+#   "# sample-: TEXT"    a line no needle may match, after the allows are removed
+#   "# allow: LITERAL"   an exact substring removed from each scanned line first
+# Any other line starting with "#" is a comment, except that a line whose first
+# word after the "#" starts with "sample" or "allow" must be one of the kinds
+# above: a mistyped kind is an error, not a comment.  An allow literal must
+# contain a needle, be at least 8 characters, and not start with "/".
 /home/
+# sample+: cd /home/anyone/x
+# sample+: see `/home/anyone/x`
+# sample+: (/home/anyone/x)
+# sample+: -L/home/anyone/x
+# sample+: -I/home/anyone/x
+# sample+: ../../home/anyone/x
+# sample+: cd /usr/home/anyone/x
+# sample+: "/home/anyone/x"
+# sample-: zroot/home/test
+# sample-: the dataset zroot/home/test
+# allow: zroot/home/test
 /Users/
+# sample+: cd /Users/anyone/x
+# sample+: see `/Users/anyone/x`
+# sample+: -I/Users/anyone/x
+# sample+: ../../Users/anyone/x
 $HOME/work
+# sample+: cd $HOME/work/x
+# sample+: `$HOME/work/x`
 ${HOME}/work
+# sample+: cd ${HOME}/work/x
+# sample+: (${HOME}/work/x)
 ~/work
+# sample+: cd ~/work/x
+# sample+: `~/work/x`

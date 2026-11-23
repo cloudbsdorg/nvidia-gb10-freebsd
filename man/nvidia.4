@@ -125,9 +125,7 @@ On a stock
 .Fx
 arm64 install, from a checkout of the repository, as a normal user who can
 become root with
-.Xr doas 1
-or
-.Xr sudo 8 :
+doas or sudo from ports:
 .Bd -literal -offset indent
 make install-prereqs YES=1 ACCEPT_NVIDIA_LICENSE=1
 make install YES=1
@@ -169,15 +167,136 @@ which the installed
 .Xr devd 8
 rule reads before it loads
 .Nm nvidia-drm
-when
-.Xr vgapci 4
-attaches to an NVIDIA display device.
+when an NVIDIA display device attaches to the
+.Xr pci 4
+bus.
 .Cm deinstall
 removes everything
 .Cm install
 and
 .Cm configure
 wrote.
+.Sh SYSCTL VARIABLES
+All variables in this section are read-only.
+.Pp
+.Va hw.nvidia.version
+is the full NVRM banner of the loaded
+.Nm nvidia
+module.
+The following variables are derived from it:
+.Bl -tag -width indent
+.It Va hw.nvidia.version_string
+The version token selected from the banner, for example
+.Qq 580.178.04 ,
+or an empty string when no version can be parsed.
+.It Va hw.nvidia.version_major
+.It Va hw.nvidia.version_minor
+.It Va hw.nvidia.version_patch
+The corresponding integer version parts.
+A part that the version does not have reads 0:
+.Qq 580.178
+gives
+.Va hw.nvidia.version_patch
+0.
+.It Va hw.nvidia.version_available
+1 when the banner version was parsed, otherwise 0.
+.It Va hw.nvidia.version_suffix
+The version suffix, including its leading delimiter, or an empty string.
+.El
+.Pp
+Each GPU has the strings
+.Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios
+and
+.Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware .
+The following integer and suffix variables are parsed from those two strings:
+.Bl -tag -width indent
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_major
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_minor
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_patch
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_build
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_revision
+The five VBIOS version fields.
+The VBIOS string is hexadecimal; these variables show each field in decimal,
+so the VBIOS
+.Qq 96.06.1e.00.4a
+reads 150, 6, 30, 0 and 74.
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_available
+1 when the VBIOS version was parsed, otherwise 0.
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios_suffix
+The VBIOS version suffix, or an empty string.
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware_major
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware_minor
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware_patch
+The firmware version parts, parsed as decimal integers.
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware_available
+1 when the firmware version was parsed, otherwise 0.
+.It Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware_suffix
+The firmware version suffix, or an empty string.
+.El
+.Pp
+Before the GPU is initialized, the VBIOS string can be
+.Qq ??.??.??.??.??
+and the firmware string
+.Qq N/A .
+The availability variable then reads 0 and every part reads 0.
+An absent suffix is an empty string.
+.Pp
+Each read of any of these variables is fetched from the resource manager anew
+and parsed on its own; no two variables share one fetch.
+The GPU can become ready between two reads, so a part read first and its
+availability variable read second can disagree.
+A reader that needs a consistent set reads the string variable
+.Pq Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios
+or
+.Va hw.nvidia.gpus.\& Ns Ar N Ns .firmware )
+once and parses it, or reads the availability variable, then the parts,
+then reads it again after the parts and repeats while it changed.
+.Pp
+Two variables identify the GPU.
+.Ar N
+is the device unit number: it is the same unit number as in
+.Va hw.nvidia.gpus.\& Ns Ar N ,
+so
+.Va dev.nvidia.\& Ns Ar N
+and
+.Va hw.nvidia.gpus.\& Ns Ar N
+describe one GPU.
+.Bl -tag -width indent
+.It Va dev.nvidia.\& Ns Ar N Ns .uuid
+The GPU UUID, fetched at each read.
+The read fails with
+.Er EIO
+until the GPU has been initialized, for example by opening
+.Pa /dev/nvidia Ns Ar N
+or by running
+.Xr nvidia-smi 1 ;
+read it again afterwards.
+.It Va dev.nvidia.\& Ns Ar N Ns .pci_bus_id
+The PCI location as
+.Qq DDDD:BB:SS.F ,
+in lowercase hexadecimal.
+The domain DDDD has at least four digits, zero padded, and more when the domain
+is above 0xffff, for example
+.Qq 10000:01:00.0 .
+The bus BB and slot SS have two digits and the function F one digit.
+.El
+.Pp
+The
+.Nm nvidia-modeset
+module provides
+.Va hw.nvidiamodeset.version ,
+its short version string; this module has no banner.
+.Va hw.nvidiamodeset.version_string
+equals it.
+.Va hw.nvidiamodeset.version_major ,
+.Va hw.nvidiamodeset.version_minor ,
+.Va hw.nvidiamodeset.version_patch ,
+.Va hw.nvidiamodeset.version_available
+and
+.Va hw.nvidiamodeset.version_suffix
+have the same meanings and availability rules as the corresponding
+.Va hw.nvidia.version
+variables.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia.registry.EnableGpuFirmware

@@ -52,10 +52,12 @@
 #include <ctrl/ctrl0000/ctrl0000unix.h>
 #include <ctrl/ctrl0041.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
+#include <ctrl/ctrl2080/ctrl2080bios.h>
 #include <ctrl/ctrl2080/ctrl2080bus.h>
 #include <ctrl/ctrl2080/ctrl2080fb.h>
 #include <ctrl/ctrl2080/ctrl2080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080gr.h>
+#include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_rm_priv.h"	/* struct nvrm_gpu: the card-list test below */
@@ -158,6 +160,17 @@ find(int fd, NvHandle h)
 		if (M.o[i].fd == fd && M.o[i].h == h && M.o[i].live)
 			return (&M.o[i]);
 	return (NULL);
+}
+
+/* How many objects of a session are still live in the scripted kernel. */
+static int
+live_in_session(int fd)
+{
+	int i, n = 0;
+
+	for (i = 0; i < M.n; i++)
+		n += M.o[i].fd == fd && M.o[i].live;
+	return (n);
 }
 
 static mobj *
@@ -524,6 +537,15 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 		if (mine) {
 			nv_ioctl_rm_api_version_t *v = arg;
 
+			if (v->cmd == NV_RM_API_VERSION_CMD_QUERY) {
+				/* the RM API version query of the session
+				 * (nvrm_rm_api_version(3)): not the check */
+				v->reply = NV_RM_API_VERSION_REPLY_RECOGNIZED;
+				snprintf(v->versionString,
+				    sizeof(v->versionString), "%s",
+				    NVRM_RM_VERSION);
+				return (0);
+			}
 			if (v->cmd != NV_RM_API_VERSION_CMD_STRICT ||
 			    strcmp(v->versionString, NVRM_RM_VERSION) != 0)
 				bad("session version check");
@@ -1084,7 +1106,11 @@ test_alloc_page_writeback(void)
 	frees = M.nmine_free;
 	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m),
 	    NVRM_E_NOTSUP);
-	HAS(cl, "RM did not say which page size it used");
+	HAS(cl, "requested 4 KiB page");
+	HAS(cl, "the object was freed");
+	HAS(cl, "this RM version cannot be used for that allocation");
+	CHECK(strstr(nvrm_client_errmsg(cl), "given back") == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "ask for an explicit") == NULL);
 	CHECK(m == NULL);
 	CHECK_EQ(M.nmine_free, frees + 1);
 	CHECK_EQ(not_freed_explicitly(), 0);
@@ -1101,7 +1127,7 @@ test_alloc_page_writeback(void)
 	CHECK_EQ(not_freed_explicitly(), 0);
 	M.surf_attr = NOVERRIDE;
 	M.wb_page = M.wb_huge = NOVERRIDE;
-	/* a page the table does not have: the object is given back */
+	/* a page the table does not have: the object is freed */
 	M.wb_page = NVOS32_ATTR_PAGE_SIZE_HUGE;
 	M.wb_huge = NVOS32_ATTR2_PAGE_SIZE_HUGE_256GB;
 	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 4 * MiB, 2 * MiB, &m), NVRM_E_NOTSUP);
@@ -1427,7 +1453,7 @@ test_fork_child(void)
 	nvrm_gpu_map_params gp;
 	static char pages[65536] __attribute__((aligned(65536)));
 	uint64_t va, va2;
-	int fd, frees, opens, parent_fd;
+	int fd, frees, opens, parent_fd, munmaps;
 	void *p;
 
 	up();
@@ -1452,8 +1478,9 @@ test_fork_child(void)
 	CHECK_EQ(nvrm_mem_map_gpu(m, &gp), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_import_fd(cl, 0, &x), NVRM_E_DENIED);
+	munmaps = M.nmunmap;
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
-	CHECK_EQ(M.nmunmap, 1);		/* the child's own mapping is removed */
+	CHECK_EQ(M.nmunmap, munmaps + 1); /* the child's own mapping is removed */
 	CHECK_EQ(M.nunmapmem, 0);	/* but the parent's RM mapping is not */
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p), NVRM_E_DENIED);
 	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_OK);
@@ -1474,9 +1501,13 @@ test_fork_child(void)
 	/* This in-process simulation must also close the second RM session as
 	 * its parent; a real fork parent still has its own client core. */
 	nvrm_getpid_hook = NULL;
+	/* The second session's client must still be there: the child close
+	 * freed none of it, so the hand free below frees it and not nothing. */
+	CHECK(live_in_session(parent_fd) > 0);
 	memset(&parent_free, 0, sizeof(parent_free));
 	parent_free.hObjectOld = CLIENT;
 	CHECK_EQ(m_ioctl(parent_fd, IOC_RM_FREE, &parent_free), 0);
+	CHECK_EQ(live_in_session(parent_fd), 0);
 	nvrm_client_close(cl);
 	down("fork child");
 }

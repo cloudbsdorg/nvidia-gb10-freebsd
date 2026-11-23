@@ -13,6 +13,7 @@ void	nvrm_fake_inject(int prop, int reason);
 void	nvrm_fake_inject_value(int prop, uint64_t value);
 void	nvrm_fake_inject_tpc_fail(int gpc);
 void	nvrm_fake_inject_uuid_fail(int reason);
+void	nvrm_fake_inject_str_fail(int prop, int reason);
 void	nvrm_fake_inject_classes(const uint32_t *list, unsigned n);
 void	nvrm_fake_inject_classes_fail(int reason);
 void	nvrm_fake_inject_clear(void);

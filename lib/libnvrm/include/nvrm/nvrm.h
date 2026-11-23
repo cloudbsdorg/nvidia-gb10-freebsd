@@ -34,14 +34,17 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <nvrm/nvrm_version.h>
+
 /* The RM version this library is built against (open-gpu-kernel-modules). */
 #define NVRM_RM_VERSION		"580.178.04"
 /* Library API version (shared object nvrm.so.1; symbol versions NVRM_1.0 for
- * discovery, NVRM_1.1 for memory and VA).
+ * discovery, NVRM_1.1 for memory and VA, NVRM_1.2 for version numbers,
+ * NVRM_1.3 for channels).
  * PROVISIONAL: the interface and the structures below are frozen at the first
  * package release and not before; a future version may still reshape them. */
 #define NVRM_API_MAJOR		1
-#define NVRM_API_MINOR		1
+#define NVRM_API_MINOR		3
 
 #define NVRM_MAX_GPUS		32
 #define NVRM_MAX_CLASSES	200
@@ -90,6 +93,8 @@ enum nvrm_reason {
 	NVRM_R_OS_CALL_FAILED,	/* the system call to the driver failed */
 	NVRM_R_VALUE_UNUSABLE,	/* the RM answered; the library cannot verify it */
 	NVRM_R_FAMILY_NO_CLASS,	/* the family is known and has no class of this kind */
+	NVRM_R_VERSION_UNPARSED,	/* a version has no readable numeric scheme */
+	NVRM_R_VERSION_INCONSISTENT,	/* the version sysctls disagree */
 	NVRM_R__COUNT
 };
 
@@ -122,6 +127,12 @@ typedef struct nvrm_list {
 	int		source;
 } nvrm_list;
 
+/* A parsed version and the layer which supplied its source string. */
+typedef struct nvrm_version_field {
+	nvrm_version	version;
+	int		source;
+} nvrm_version_field;
+
 #define NVRM_HAVE(f)	((f).reason == NVRM_R_NONE)
 
 /*
@@ -140,6 +151,7 @@ typedef struct nvrm_device_info {
 	nvrm_str	uuid;
 	/* class: gpu */
 	nvrm_u64	architecture, implementation, chip_id;
+	/* sm_version is the RM's numbering, not necessarily CUDA's. */
 	nvrm_u64	sm_version_major, sm_version_minor;
 	nvrm_u64	gpc_count, tpc_count, sm_count;
 	nvrm_u64	cls_gpfifo, cls_compute, cls_eng3d, cls_copy;
@@ -154,11 +166,16 @@ typedef struct nvrm_device_info {
 	/* board decorators that matched (names, static strings) */
 	unsigned	ndecorators;
 	const char	*decorators[NVRM_MAX_DECORATORS];
+	/* NVRM_1.1: appended so every NVRM_1.0 member keeps its offset. */
+	nvrm_u64	rm_sm_version;
+	nvrm_u64	compute_capability_major, compute_capability_minor;
+	/* firmware versions reported by the RM */
+	nvrm_version_field vbios, gsp_firmware;
 } nvrm_device_info;
 
 /* Describes one member of nvrm_device_info (the one definition that drives
  * the JSON output, the schema and the text view). */
-enum nvrm_kind { NVRM_K_U64, NVRM_K_STR, NVRM_K_LIST };
+enum nvrm_kind { NVRM_K_U64, NVRM_K_STR, NVRM_K_LIST, NVRM_K_VERSION };
 typedef struct nvrm_field {
 	const char	*group;
 	const char	*name;
@@ -359,6 +376,12 @@ void		nvrm_close(nvrm_ctx *ctx);
 
 const char	*nvrm_backend_name(const nvrm_ctx *ctx);
 const nvrm_str	*nvrm_rm_running_version(const nvrm_ctx *ctx);
+const nvrm_version *nvrm_driver_version(const nvrm_ctx *ctx);
+const nvrm_version *nvrm_rm_api_version(const nvrm_ctx *ctx);
+const nvrm_version *nvrm_built_for_version(void);
+const nvrm_version *nvrm_library_version(void);
+const nvrm_version *nvrm_symbol_version(void);
+const nvrm_version *nvrm_schema_version(void);
 unsigned	nvrm_device_count(const nvrm_ctx *ctx);
 nvrm_device	*nvrm_device_get(const nvrm_ctx *ctx, unsigned index);
 const nvrm_device_info *nvrm_device_info_get(const nvrm_device *dev);

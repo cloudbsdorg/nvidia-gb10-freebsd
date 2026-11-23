@@ -419,7 +419,8 @@ The backend has no memory support; or the GPU has no device node, so
 cannot be honoured (open without it to use GPU mappings only); or the RM
 cannot express what was asked, or allocated with a page size the library
 does not know; or the RM did not report the page size an allocation got
-(ask for an explicit page size).
+(the object is freed and the message names the requested page size and says
+that this RM version cannot be used for that allocation).
 .It Bq Er NVRM_E_RM
 The RM refused a call; the message names the call and the RM status.
 .It Bq Er NVRM_E_IO
