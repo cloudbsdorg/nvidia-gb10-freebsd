@@ -68,7 +68,7 @@ other_pid(void)
 	return (getpid() + 1);
 }
 
-static unsigned destroy_calls, backend_calls;
+static unsigned destroy_calls, backend_calls, forget_calls;
 static int destroy_fails;
 
 static int
@@ -80,6 +80,14 @@ counting_destroy(nvrm_bchan *b, char *err, size_t errlen)
 		return (NVRM_E_RM);
 	}
 	return (nvrm_fake_chan_ops.destroy(b, err, errlen));
+}
+
+static void
+counting_forget(nvrm_bchan *b)
+{
+	forget_calls++;
+	backend_calls++;
+	nvrm_fake_chan_ops.forget(b);
 }
 
 /* Every other backend call is counted: a fork child must make none. */
@@ -171,6 +179,7 @@ setup(void)
 	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
 	nvrm_fake_chan_ops.copy_on_graphics = 1;
 	nvrm_fake_chan_manual(0);
+	nvrm_fake_chan_lag(0);
 	nvrm_fake_chan_event_hook = NULL;
 	nvrm_barrier_hook = NULL;
 	nvrm_chan_slice_ns = NVRM_CHAN_SLICE_DEFAULT_NS;
@@ -206,6 +215,8 @@ teardown(nvrm_client *cl)
 	ctx = NULL;
 	nvrm_fake_mem_fail_clear();
 	nvrm_fake_chan_manual(0);
+	nvrm_fake_chan_lag(0);
+	nvrm_fake_chan_read_fail(0);
 	nvrm_fake_chan_event_hook = NULL;
 	nvrm_barrier_hook = NULL;
 	nvrm_chan_slice_ns = NVRM_CHAN_SLICE_DEFAULT_NS;
@@ -1201,6 +1212,7 @@ swap_destroy_ops(nvrm_client *cl, nvrm_backend_ops *be, nvrm_chan_ops *co,
 	*saved = cl->ops;
 	*co = nvrm_fake_chan_ops;
 	co->destroy = counting_destroy;
+	co->forget = counting_forget;
 	co->gp_get = counting_gp_get;
 	co->error = counting_error;
 	co->progress_gen = counting_gen;
@@ -1210,6 +1222,7 @@ swap_destroy_ops(nvrm_client *cl, nvrm_backend_ops *be, nvrm_chan_ops *co,
 	cl->ops = be;
 	destroy_calls = 0;
 	backend_calls = 0;
+	forget_calls = 0;
 	destroy_fails = 0;
 }
 
@@ -2041,6 +2054,8 @@ test_wait_rules(void)
 	drain(ch, 2);
 	CHECK_EQ(nvrm_chan_wait(ch, r.point, UINT64_MAX), NVRM_OK);
 	CHECK_EQ(nvrm_chan_wait(ch, r.point + 1, 0), NVRM_E_INVAL);
+	nvrm_fake_chan_fault(ch, NVRM_FAKE_CHAN_ERR_MMU);
+	CHECK_EQ(nvrm_chan_wait(ch, r.point + 5, 0), NVRM_E_LOST);
 	nvrm_chan_destroy(ch);
 	buf_release(cl, &pb);
 	teardown(cl);
@@ -2639,18 +2654,15 @@ test_destroy_failure(void)
 	nvrm_chan_ops co;
 	nvrm_client_stats before, after;
 	nvrm_fake_mem_stats bs;
-	nvrm_bchan *backend;
 	nvrm_client *cl;
 	nvrm_chan *ch;
 	uint64_t ring_va, again = 0;
-	char err[160];
 
 	setup();
 	cl = open_client();
 	swap_destroy_ops(cl, &be, &co, &saved);
 	ch = make_chan(cl, NVRM_ENG_COMPUTE, 8);
 	ring_va = ch->ring_va;
-	backend = ch->b;
 	before = client_stats(cl);
 	destroy_fails = 1;
 	nvrm_chan_destroy(ch);
@@ -2669,13 +2681,325 @@ test_destroy_failure(void)
 	CHECK(again != ring_va);
 	CHECK_EQ(nvrm_va_release(cl, again), NVRM_OK);
 	destroy_fails = 0;
-	CHECK_EQ(co.destroy(backend, err, sizeof(err)), NVRM_OK);
-	cl->ops = saved;
+	CHECK_EQ(forget_calls, 0);
 	nvrm_client_close(cl);
+	CHECK_EQ(forget_calls, 1);
+	CHECK_EQ(destroy_calls, 1);
 	nvrm_fake_mem_stats_get(&bs);
 	CHECK_EQ(bs.objects, 0);
 	CHECK_EQ(bs.reservations, 0);
 	teardown(NULL);
+}
+
+/* A refused destroy while the engine still runs.  Another channel waits on
+ * an acquire, so the fake scans every channel: the refused one must still be
+ * readable (its core record lives until the client closes), and the close
+ * forgets it before the memory goes. */
+static void
+test_refused_destroy_running(void)
+{
+	const nvrm_backend_ops *saved;
+	nvrm_backend_ops be;
+	nvrm_chan_ops co;
+	nvrm_gp_entry e, ea;
+	nvrm_submit_result r = { .size = sizeof(r) };
+	nvrm_fake_mem_stats bs;
+	test_buf pb, pba, sem;
+	nvrm_client *cl;
+	nvrm_chan *ch, *other;
+	uint32_t value = 9;
+
+	setup();
+	cl = open_client();
+	swap_destroy_ops(cl, &be, &co, &saved);
+	ch = make_chan(cl, NVRM_ENG_COMPUTE, 8);
+	other = make_chan(cl, NVRM_ENG_COMPUTE, 8);
+	CHECK_EQ(buf_init(cl, &pb, 4096), NVRM_OK);
+	CHECK_EQ(buf_init(cl, &pba, 4096), NVRM_OK);
+	CHECK_EQ(buf_init(cl, &sem, 4096), NVRM_OK);
+	make_nops(&pb, 1);
+	e = buf_entry(&pb, 0, 0);
+	(void)put_sem_frame(&pba, 0, sem.va, 7, NVRM_SEM_ACQ_CIRC_GEQ);
+	ea = (nvrm_gp_entry){ .va = pba.va, .dwords = 6 };
+	nvrm_fake_chan_manual(1);
+	CHECK_EQ(nvrm_chan_submit(ch, &e, 1, NULL, &r), NVRM_OK);
+	destroy_fails = 1;
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(destroy_calls, 1);
+	destroy_fails = 0;
+	nvrm_fake_chan_manual(0);
+	CHECK_EQ(nvrm_chan_submit(other, &ea, 1, NULL, &r), NVRM_OK);
+	CHECK_EQ(nvrm_chan_wait(other, r.point, 0), NVRM_E_TIMEOUT);
+	CHECK_EQ(nvrm_mem_write(sem.mem, 0, &value, sizeof(value)), NVRM_OK);
+	CHECK_EQ(nvrm_chan_submit(other, &e, 1, NULL, &r), NVRM_OK);
+	CHECK_EQ(nvrm_chan_wait(other, r.point, UINT64_MAX), NVRM_OK);
+	nvrm_chan_destroy(other);
+	buf_release(cl, &sem);
+	buf_release(cl, &pba);
+	buf_release(cl, &pb);
+	CHECK_EQ(forget_calls, 0);
+	nvrm_client_close(cl);
+	CHECK_EQ(forget_calls, 1);
+	CHECK_EQ(destroy_calls, 2);
+	nvrm_fake_mem_stats_get(&bs);
+	CHECK_EQ(bs.objects, 0);
+	CHECK_EQ(bs.reservations, 0);
+	teardown(NULL);
+}
+
+/* Submit n entries with a zero timeout: a ring without room returns
+ * NVRM_E_TIMEOUT with the accepted count in r. */
+static int
+submit_now(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
+    nvrm_submit_result *r)
+{
+	nvrm_submit_opts o = { .size = sizeof(o), .timeout_ns = 0 };
+
+	r->size = sizeof(*r);
+	return (nvrm_chan_submit(ch, e, n, &o, r));
+}
+
+static void
+read_segment(const nvrm_chan *ch, unsigned slot, uint32_t *words)
+{
+	memcpy(words, (const char *)ch->cpu +
+	    NVRM_CHAN_SEG_OFF(ch->entries, slot), NVRM_CHAN_SEG_BYTES);
+}
+
+/* A release segment is read by the GPU after GP_GET passes its ring slot.
+ * With GP_GET moving at the fetch and the pushbuffer running later, a full
+ * ring of single-element batches must not hand the segment of a release that
+ * has not run to a new batch. */
+static void
+test_release_segment_reuse(void)
+{
+	nvrm_gp_entry e[3];
+	nvrm_submit_result r = { .size = sizeof(r) };
+	nvrm_chan_status st = { .size = sizeof(st) };
+	uint32_t before[NVRM_RELEASE_SEG_DWORDS], after[NVRM_RELEASE_SEG_DWORDS];
+	unsigned i, space = 99;
+	test_buf pb;
+	nvrm_client *cl;
+	nvrm_chan *ch;
+
+	ch = setup_nops(&cl, &pb, 3, e);
+	nvrm_fake_chan_manual(1);
+	nvrm_fake_chan_lag(1);
+	for (i = 0; i < 3; i++)
+		CHECK_EQ(submit_now(ch, e, 1, &r), NVRM_OK);
+	CHECK_EQ(r.point, 3);
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(nvrm_fake_chan_step(ch, 1), NVRM_OK);
+	CHECK_EQ(nvrm_chan_status_get(ch, &st), NVRM_OK);
+	CHECK_EQ(st.gp_get, 3);
+	CHECK_EQ(st.completed, 0);
+	read_segment(ch, 1, before);
+	CHECK_EQ(nvrm_chan_gp_space(ch, &space), NVRM_OK);
+	CHECK_EQ(space, 2);
+	CHECK_EQ(submit_now(ch, e, 3, &r), NVRM_E_TIMEOUT);
+	CHECK_EQ(r.accepted, 2);
+	read_segment(ch, 1, after);
+	CHECK(memcmp(before, after, sizeof(before)) == 0);
+	CHECK_EQ(nvrm_chan_gp_space(ch, &space), NVRM_OK);
+	CHECK_EQ(space, 0);
+	drain(ch, 12);
+	CHECK_EQ(nvrm_chan_wait(ch, r.point, 0), NVRM_OK);
+	CHECK_EQ(nvrm_chan_gp_space(ch, &space), NVRM_OK);
+	CHECK_EQ(space, 6);
+	CHECK_EQ(submit_now(ch, e, 3, &r), NVRM_OK);
+	CHECK_EQ(r.accepted, 3);
+	drain(ch, 12);
+	CHECK_EQ(nvrm_chan_wait(ch, r.point, 0), NVRM_OK);
+	nvrm_chan_destroy(ch);
+	buf_release(cl, &pb);
+	teardown(cl);
+}
+
+/* A read of the ring that fails leaves the entry where it is: the ring
+ * position does not move past an entry the GPU never saw, and the entry
+ * runs once the read works again. */
+static void
+test_fetch_read_failure(void)
+{
+	nvrm_gp_entry e[2];
+	nvrm_submit_result r = { .size = sizeof(r) };
+	nvrm_chan_status st = { .size = sizeof(st) };
+	nvrm_fake_chan_counts_t counts;
+	test_buf pb;
+	nvrm_client *cl;
+	nvrm_chan *ch;
+
+	ch = setup_nops(&cl, &pb, 2, e);
+	nvrm_fake_chan_manual(1);
+	nvrm_fake_chan_lag(1);
+	CHECK_EQ(submit_now(ch, e, 2, &r), NVRM_OK);
+	CHECK_EQ(r.accepted, 2);
+	/* the read of the ring fails: the entry stays in the ring */
+	nvrm_fake_chan_read_fail(1);
+	CHECK_EQ(nvrm_fake_chan_step(ch, 1), NVRM_OK);
+	CHECK_EQ(nvrm_chan_status_get(ch, &st), NVRM_OK);
+	CHECK_EQ(st.gp_get, 0);
+	counts = nvrm_fake_chan_counts(ch);
+	CHECK_EQ(counts.entries, 0);
+	/* the read works again: every ring entry runs, once */
+	nvrm_fake_chan_read_fail(0);
+	drain(ch, 8);
+	counts = nvrm_fake_chan_counts(ch);
+	CHECK_EQ(counts.entries, 3);
+	CHECK_EQ(nvrm_chan_status_get(ch, &st), NVRM_OK);
+	CHECK_EQ(st.gp_get, 3);
+	nvrm_chan_destroy(ch);
+	buf_release(cl, &pb);
+	teardown(cl);
+}
+
+/* The space a batch may use depends on the releases that have run, so a
+ * submit that waits for space waits for the progress semaphore: it wakes
+ * when the semaphore advances. */
+static void
+test_submit_waits_for_space(void)
+{
+	nvrm_gp_entry e[3];
+	nvrm_submit_opts o = { .size = sizeof(o), .timeout_ns = UINT64_MAX };
+	nvrm_submit_result r = { .size = sizeof(r) };
+	submit_arg a;
+	pthread_t tid;
+	test_buf pb;
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	unsigned i;
+
+	ch = setup_nops(&cl, &pb, 3, e);
+	nvrm_fake_chan_manual(1);
+	nvrm_fake_chan_lag(1);
+	for (i = 0; i < 3; i++)
+		CHECK_EQ(submit_now(ch, e, 1, &r), NVRM_OK);
+	CHECK_EQ(r.point, 3);
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(nvrm_fake_chan_step(ch, 1), NVRM_OK);
+	/* the ring is full of the three batches: the submit below waits for
+	 * the releases to run */
+	a.ch = ch;
+	a.e = e;
+	a.n = 3;
+	a.o = &o;
+	submit_start(&tid, &a);
+	wait_queued(ch, 1);
+	/* the fake runs the releases: the semaphore advances and the waiter
+	 * wakes with room for the rest */
+	drain(ch, 12);
+	submit_join(tid, &a);
+	CHECK_EQ(a.rc, NVRM_OK);
+	CHECK_EQ(a.r.accepted, 3);
+	drain(ch, 12);
+	CHECK_EQ(nvrm_chan_wait(ch, a.r.point, 0), NVRM_OK);
+	nvrm_chan_destroy(ch);
+	buf_release(cl, &pb);
+	teardown(cl);
+}
+
+/* A backend that cannot forget a channel cannot take one: the core would
+ * have no way to drop the record of a channel whose destroy was refused. */
+static void
+test_create_without_forget(void)
+{
+	nvrm_backend_ops be;
+	nvrm_chan_ops co;
+	const nvrm_backend_ops *saved;
+	nvrm_chan_params p = { .engines = NVRM_ENG_COMPUTE, .entries = 8 };
+	nvrm_chan *ch = (nvrm_chan *)(uintptr_t)1;
+	nvrm_client *cl;
+
+	setup();
+	cl = open_client();
+	saved = cl->ops;
+	co = nvrm_fake_chan_ops;
+	co.forget = NULL;
+	be = *saved;
+	be.chan = &co;
+	cl->ops = &be;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "forget") != NULL);
+	co.forget = nvrm_fake_chan_ops.forget;
+	co.destroy = NULL;
+	cl->ops = &be;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "destroy") != NULL);
+	cl->ops = saved;
+	teardown(cl);
+}
+
+/* A fork child owns no backend record: the close of a client whose channel
+ * destroy was refused makes no backend call at all. */
+static void
+test_fork_child_release_held(void)
+{
+	const nvrm_backend_ops *saved;
+	nvrm_backend_ops be;
+	nvrm_chan_ops co;
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	unsigned calls;
+
+	setup();
+	cl = open_client();
+	swap_destroy_ops(cl, &be, &co, &saved);
+	ch = make_chan(cl, NVRM_ENG_COMPUTE, 8);
+	destroy_fails = 1;
+	nvrm_chan_destroy(ch);
+	destroy_fails = 0;
+	CHECK_EQ(destroy_calls, 1);
+	CHECK_EQ(forget_calls, 0);
+	calls = backend_calls;
+	nvrm_getpid_hook = other_pid;
+	nvrm_client_close(cl);
+	CHECK_EQ(backend_calls, calls);
+	CHECK_EQ(forget_calls, 0);
+	nvrm_getpid_hook = NULL;
+	teardown(NULL);
+}
+
+/* The fake engine runs the channels of the calling process only: another
+ * process's client opened under a different pid is not scanned or stepped. */
+static void
+test_fork_child_scan(void)
+{
+	nvrm_gp_entry e, ec;
+	nvrm_submit_result r = { .size = sizeof(r) };
+	nvrm_fake_chan_counts_t counts;
+	test_buf pb, pbc;
+	nvrm_client *cl, *child;
+	nvrm_chan *ch, *cch;
+
+	ch = setup_nops(&cl, &pb, 1, &e);
+	nvrm_fake_chan_manual(1);
+	CHECK_EQ(nvrm_chan_submit(ch, &e, 1, NULL, &r), NVRM_OK);
+	nvrm_fake_chan_manual(0);
+	nvrm_getpid_hook = other_pid;
+	child = open_client();
+	cch = make_chan(child, NVRM_ENG_COMPUTE, 8);
+	CHECK_EQ(buf_init(child, &pbc, 4096), NVRM_OK);
+	make_nops(&pbc, 1);
+	ec = buf_entry(&pbc, 0, 0);
+	CHECK_EQ(nvrm_chan_submit(cch, &ec, 1, NULL, &r), NVRM_OK);
+	CHECK_EQ(nvrm_chan_wait(cch, r.point, 0), NVRM_OK);
+	counts = nvrm_fake_chan_counts(ch);
+	CHECK_EQ(counts.entries, 0);
+	CHECK_EQ(nvrm_fake_chan_step(ch, 4), NVRM_E_DENIED);
+	counts = nvrm_fake_chan_counts(ch);
+	CHECK_EQ(counts.entries, 0);
+	nvrm_chan_destroy(cch);
+	buf_release(child, &pbc);
+	nvrm_client_close(child);
+	nvrm_getpid_hook = NULL;
+	CHECK_EQ(nvrm_fake_chan_step(ch, 4), NVRM_OK);
+	counts = nvrm_fake_chan_counts(ch);
+	CHECK_EQ(counts.entries, 2);
+	nvrm_chan_destroy(ch);
+	buf_release(cl, &pb);
+	teardown(cl);
 }
 
 typedef struct race_arg {
@@ -2780,6 +3104,13 @@ run_review_tests(const char *only)
 	RUN(test_ring_read_only);
 	RUN(test_semaphore_sanity);
 	RUN(test_destroy_failure);
+	RUN(test_refused_destroy_running);
+	RUN(test_release_segment_reuse);
+	RUN(test_fetch_read_failure);
+	RUN(test_submit_waits_for_space);
+	RUN(test_create_without_forget);
+	RUN(test_fork_child_release_held);
+	RUN(test_fork_child_scan);
 	RUN(test_wait_rules);
 	RUN(test_copy);
 	RUN(test_lifetime);

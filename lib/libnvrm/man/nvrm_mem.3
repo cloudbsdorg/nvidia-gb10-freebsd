@@ -150,8 +150,15 @@ A caller built against NVRM_1.1 passes
 .Va size
 as the offset of
 .Va live_channels
-and receives only the members before the channel counts; zero or the full
-size returns all.
+and receives only the members before the channel counts.
+A zero
+.Va size
+and
+.Li sizeof(nvrm_client_stats)
+both return the whole structure.
+The members past the size the call returns are not written, so a caller reads
+.Va size
+after the call to know how much it got.
 .Ss Virtual address space
 The library hands out the GPU virtual addresses; the RM maps at exactly the
 addresses it is given.

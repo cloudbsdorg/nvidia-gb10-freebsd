@@ -22,6 +22,9 @@
 #define RUN_WAIT	1
 #define RUN_BAD		2
 
+/* Lag mode: entries fetched ahead of the pushbuffer that is running. */
+#define LAG_DEPTH	2
+
 typedef struct fake_copy {
 	uint64_t	in, out;
 	uint32_t	pitch_in, pitch_out, line_length, line_count;
@@ -37,6 +40,8 @@ struct nvrm_bchan {
 	uint32_t	granted[8];	/* class granted on each subchannel */
 	uint32_t	*pb;
 	uint32_t	pb_dwords, pb_pos, pb_next;
+	uint32_t	lag_entry[LAG_DEPTH][2]; /* fetched, oldest first */
+	unsigned	fetched;	/* lag mode: entries fetched, not run */
 	fake_copy	copy;
 	nvrm_fake_chan_counts_t counts;
 };
@@ -45,7 +50,8 @@ static pthread_mutex_t fake_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fake_cond = PTHREAD_COND_INITIALIZER;
 static nvrm_bchan *channels;
 static unsigned next_index;
-static int manual;
+static int manual, lag;
+static unsigned read_fail;
 static uint64_t progress_count;
 void (*nvrm_fake_chan_event_hook)(int);
 
@@ -76,6 +82,10 @@ fault(nvrm_bchan *b, uint32_t code)
 static int
 gpu_read(nvrm_bchan *b, uint64_t va, void *buf, size_t len)
 {
+	if (read_fail != 0) {
+		read_fail--;
+		return (-1);
+	}
 	if (nvrm_fake_gpu_access(b->core->cl, va, buf, len, 0) == 0)
 		return (0);
 	fault(b, NVRM_FAKE_CHAN_ERR_MMU);
@@ -128,8 +138,8 @@ fake_create(nvrm_bclient *bc, const nvrm_bchan_cfg *cfg, nvrm_bchan **bp,
 	return (NVRM_OK);
 }
 
-static int
-fake_destroy(nvrm_bchan *b, char *err, size_t errlen)
+static void
+fake_forget(nvrm_bchan *b)
 {
 	nvrm_bchan **pp;
 
@@ -142,6 +152,12 @@ fake_destroy(nvrm_bchan *b, char *err, size_t errlen)
 	progress();
 	pthread_mutex_unlock(&fake_lock);
 	free(b);
+}
+
+static int
+fake_destroy(nvrm_bchan *b, char *err, size_t errlen)
+{
+	fake_forget(b);
 	return (NVRM_OK);
 }
 
@@ -469,7 +485,9 @@ load_entry(nvrm_bchan *b)
 	uint32_t dwords;
 	size_t bytes;
 
-	if (gpu_read(b, b->ring_va + (uint64_t)b->gp_get * 8, entry,
+	if (b->fetched)
+		memcpy(entry, b->lag_entry[0], sizeof(entry));
+	else if (gpu_read(b, b->ring_va + (uint64_t)b->gp_get * 8, entry,
 	    sizeof(entry)) != 0)
 		return (NVRM_E_RM);
 	va = nvrm_gp_decode_va(entry[0], entry[1]);
@@ -488,50 +506,111 @@ load_entry(nvrm_bchan *b)
 	return (NVRM_OK);
 }
 
+/* Lag mode: GP_GET moves when an entry is fetched, and the pushbuffer runs
+ * later, as on hardware that fetches ahead of the engine.  A read that fails
+ * leaves the entry where it is: the fetch is retried and the ring position
+ * does not move past an entry the GPU never saw. */
+static int
+fetch_entry(nvrm_bchan *b)
+{
+	if (gpu_read(b, b->ring_va + (uint64_t)b->gp_get * 8,
+	    b->lag_entry[b->fetched], sizeof(b->lag_entry[0])) != 0)
+		return (NVRM_E_RM);
+	b->fetched++;
+	b->gp_get = (b->gp_get + 1) & (b->entries - 1);
+	return (NVRM_OK);
+}
+
+/* The entry is finished: the ring position moves now, unless lag mode moved
+ * it at the fetch. */
+static void
+finish_entry(nvrm_bchan *b)
+{
+	free(b->pb);
+	b->pb = NULL;
+	if (b->fetched != 0) {
+		b->fetched--;
+		memmove(b->lag_entry[0], b->lag_entry[1],
+		    sizeof(b->lag_entry) - sizeof(b->lag_entry[0]));
+	} else
+		b->gp_get = (b->gp_get + 1) & (b->entries - 1);
+	b->counts.entries++;
+}
+
+/* Run the pushbuffer that is loaded, frame by frame.  A wait or a fault on
+ * the channel ends the run. */
+static int
+run_loaded(nvrm_bchan *b)
+{
+	int rc;
+
+	while (b->pb_pos < b->pb_dwords) {
+		rc = run_frame(b);
+		if (rc == RUN_WAIT)
+			return (RUN_WAIT);
+		if (rc == RUN_BAD)
+			return (RUN_BAD);
+	}
+	return (RUN_OK);
+}
+
 static int
 run_entries(nvrm_bchan *b, unsigned max_entries)
 {
 	unsigned done = 0;
 	int rc;
 
-	while (done < max_entries && b->gp_get != b->gp_put && b->error == 0) {
+	/* The engine of a client this process does not own is not run: a fork
+	 * child must not touch the parent's channel. */
+	if (!nvrm_owner_is_me(&b->core->cl->owner))
+		return (NVRM_E_DENIED);
+	while (done < max_entries && (b->gp_get != b->gp_put || b->fetched) &&
+	    b->error == 0) {
+		if (lag && b->fetched < LAG_DEPTH && b->gp_get != b->gp_put) {
+			rc = fetch_entry(b);
+			if (rc != NVRM_OK)	/* a fault is on the channel */
+				return (NVRM_OK);
+			done++;
+			progress();
+			continue;
+		}
 		if (b->pb == NULL) {
 			rc = load_entry(b);
 			if (rc != NVRM_OK)	/* a fault is on the channel */
 				return (rc == NVRM_E_NOMEM ? rc : NVRM_OK);
 		}
-		while (b->pb_pos < b->pb_dwords) {
-			rc = run_frame(b);
-			if (rc == RUN_WAIT)
-				return (NVRM_OK);
-			if (rc == RUN_BAD)
-				return (NVRM_OK);
-		}
-		free(b->pb);
-		b->pb = NULL;
-		b->gp_get = (b->gp_get + 1) & (b->entries - 1);
-		b->counts.entries++;
+		rc = run_loaded(b);
+		if (rc != RUN_OK)	/* a wait or a fault on the channel */
+			return (NVRM_OK);
+		finish_entry(b);
 		done++;
 		progress();
 	}
 	return (NVRM_OK);
 }
 
-/* Run every channel until none moves.  A channel whose entry cannot be
- * loaded is dead or short of memory: the others still run. */
+/* Where a channel stands: one value that changes on every step. */
+static uint64_t
+position(const nvrm_bchan *b)
+{
+	return ((uint64_t)b->gp_get * (LAG_DEPTH + 1) + b->fetched);
+}
+
+/* Run every channel until none moves.  A channel of a client this process
+ * does not own is not run: run_entries refuses it. */
 static void
 run_auto(void)
 {
 	nvrm_bchan *b;
-	uint32_t before;
+	uint64_t before;
 	int again;
 
 	do {
 		again = 0;
 		for (b = channels; b != NULL; b = b->next) {
-			before = b->gp_get;
+			before = position(b);
 			(void)run_entries(b, b->entries);
-			if (before != b->gp_get)
+			if (before != position(b))
 				again = 1;
 		}
 	} while (again != 0);
@@ -556,6 +635,14 @@ nvrm_fake_chan_manual(int on)
 	pthread_mutex_unlock(&fake_lock);
 }
 
+void
+nvrm_fake_chan_lag(int on)
+{
+	pthread_mutex_lock(&fake_lock);
+	lag = on;
+	pthread_mutex_unlock(&fake_lock);
+}
+
 int
 nvrm_fake_chan_step(nvrm_chan *ch, unsigned max_entries)
 {
@@ -565,6 +652,16 @@ nvrm_fake_chan_step(nvrm_chan *ch, unsigned max_entries)
 	rc = run_entries(ch->b, max_entries);
 	pthread_mutex_unlock(&fake_lock);
 	return (rc);
+}
+
+/* Make the next nth GPU reads fail (0 disarms it).  A read error is not a
+ * fault: the channel stays alive and the work is read again. */
+void
+nvrm_fake_chan_read_fail(unsigned nth)
+{
+	pthread_mutex_lock(&fake_lock);
+	read_fail = nth;
+	pthread_mutex_unlock(&fake_lock);
 }
 
 void
@@ -590,6 +687,7 @@ nvrm_chan_ops nvrm_fake_chan_ops = {
 	.copy_on_graphics = 1,
 	.create = fake_create,
 	.destroy = fake_destroy,
+	.forget = fake_forget,
 	.gp_get = fake_gp_get,
 	.gp_put = fake_gp_put,
 	.doorbell = fake_doorbell,
