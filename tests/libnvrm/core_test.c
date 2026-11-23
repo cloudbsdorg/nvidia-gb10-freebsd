@@ -1712,35 +1712,45 @@ test_registry_threads(void)
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
-int
-main(int argc, char **argv)
+static void
+test_boot_select(void)
 {
-	const char *skip = getenv("NVRM_TEST_SKIP");	/* the gate's plant */
-
-	test_registry_threads();
 	reset_env();
 	/* the first selection registers the built-in providers by itself */
 	CHECK(nvrm_backend_select("fake") == &nvrm_backend_fake_ops);
 	CHECK(nvrm_backend_select("rm") == &nvrm_backend_rm_ops);
-	test_registry();
-	test_enumerate();
-	test_model_discrete();
-	test_model_unified();
-	test_model_unknown_and_sparse();
-	test_device_versions();
-	test_model_injections();
-	test_compute_capability_table();
-	test_family_match();
-	if (skip == NULL || strcmp(skip, "decorators") != 0)
-		test_decorators();
-	test_abi_1_0_layout();
-	test_names_and_fields();
-	test_field_table();
-	test_accessors_refresh_json_table();
-	test_field_reason_and_masks();
-	test_cap_helper();
-	test_fake_direct();
-	test_public_versions();
-	test_json();
+}
+
+#define CORE_TESTS(X, N)						\
+	N("threads", test_registry_threads, \
+	    "it needs a registry no other test has touched") \
+	N("boot", test_boot_select, \
+	    "the registry is lazy: it fills on the first selection") \
+	X("registry", test_registry) \
+	X("enumerate", test_enumerate) \
+	X("model", test_model_discrete) \
+	X("model", test_model_unified) \
+	X("model", test_model_unknown_and_sparse) \
+	X("model", test_device_versions) \
+	X("model", test_model_injections) \
+	X("model", test_compute_capability_table) \
+	X("model", test_family_match) \
+	X("decorators", test_decorators) \
+	X("abi", test_abi_1_0_layout) \
+	X("names", test_names_and_fields) \
+	X("names", test_field_table) \
+	X("names", test_accessors_refresh_json_table) \
+	X("names", test_field_reason_and_masks) \
+	X("cap", test_cap_helper) \
+	X("fake", test_fake_direct) \
+	X("version", test_public_versions) \
+	X("json", test_json)
+
+T_TABLE(tests, CORE_TESTS);
+
+int
+main(int argc, char **argv)
+{
+	t_run(tests, sizeof(tests) / sizeof(tests[0]));
 	return (t_done("core_test"));
 }

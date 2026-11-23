@@ -608,6 +608,7 @@ STATUS, hand back.
 - Resume: check round A (tmp/libnvrm-s3/rounds/A-s2defects), review, suite, gate 2 rounds, commit, push; then run round B.
 - 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
 - Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
+- 2026-11-22T21:40Z A6 on main 44617da (PR 15 merged): the three DEFECTs left open on 297e307 (fake leak sweep, dangling fake_map pointer, DEFAULT write-back advice) and three DEBTs (give_back helper, munmap delta, second session asserted). Started by Kimi k3.1-pro (round A6, stopped), finished by Sonnet (Kimi quota out); mem_test main() runs a test table (CPD, the copy-paste detector of PMD). Suite 490 ok. Next: gate 2 rounds, commit, push, PR. Answers: tmp/libnvrm-s3/answers/answers-A6.txt.
 ## 2026-11-22 (nvrm-info boot fixes and version sysctls, #2378 libnvrm, #2362 kit): PAUSED for a test boot
 Worktree /home/mlapointe/work/gb10/wt-2378-versions, branch agent/2378-version-numbers, cut from origin/main 8702134.
 No code is written yet, and no opencode round has started. Baseline: tests/libnvrm_test.sh 412 ok, 0 FAILED on 8702134.
@@ -714,6 +715,16 @@ RESUME:
 RESUME: after PR 22 is merged, rebase wt-2378-sysctl on main (drop its nvrm_version.h copy), gate 2 rounds, PR;
 then kit round C; then the staged build, make-be dry run and check-be.
 
+## 2026-11-22T21:59Z #2448 kapi logdevice round 1
+- New patches/ogkm/patch-src_nvidia-modeset_kapi_include_nvkms-kapi-internal.h adds nvKmsKapiLogDevice (nvEvoLog, EVO_LOG_WARN, uses (__device)->gpuId); the patch was missing, so SetConsoleOwner called an undefined symbol. Applies with fuzz 0, no offset, and all ogkm patches apply in sequence.
+- tests/console_owner_patch_test.sh: KAPI_I copied and patched, check_logdevice_macro, check_logdevice_defined, 4 plant controls. 31 passed, 0 failed.
+- docs/CONSOLE-SHARING.md 6.1 paragraph. build-rmcore_test 23/0, enumerate_gpus_patch_test 5/0, kapi_table_test 30/0, prime_import_test 18/1 (D6 needs work/build/tree/nvidia-drm, not present in this worktree; unrelated).
+- scripts/build-rmcore.sh apply_patches globs patch-*; console_owner_patch_test.sh lists the patches it applies in one variable (OGKM_PATCHES).
+
+## 2026-11-22T22:22Z #2448 kapi logdevice round 2
+- Review-gate fixes: checks split so each failure names one cause (called, defined, warning level, own device argument, unconditional and never undefined, same prefix as the Debug macro); 11 new plant controls; one OGKM_PATCHES list for the required check and the apply loop; patch comment says operator and kernel log; test header states the missing macro is a clang implicit-declaration warning and an undefined symbol in the .ko.
+- console_owner_patch_test 42 passed 0 failed; kapi_table_test 30/0; build-rmcore_test 23/0. All ogkm patches apply in lexical order, fuzz 0.
+
 ## 2026-11-22 (UTC) libnvrm review follow-up (#2378, agent/2378-libnvrm-review-followup)
 - The alias/raw fallback plan of the PAUSED entry (nvrm-info boot fixes and version sysctls) was dropped: with
   architecture and implementation available but no table row, compute capability is family_unknown, whatever
@@ -729,3 +740,11 @@ then kit round C; then the staged build, make-be dry run and check-be.
     switches with a default; core_test counts the appended rows instead of "rows + 5"; nvrm-info(8) says the
     vbios_* and firmware_* sysctls come with the kernel module of PR 33.
 - Left for the owner: security.2 (host names and home paths in this journal).
+
+## 2026-11-23 01:30Z checkpoint before the native-tools test boot (#2378)
+- aba0014 pushed (agent/2378-libnvrm-review-followup). A --no-ff merge of main cbe6ca3 is staged, not committed
+  (JOURNAL.md conflict resolved; this entry is unstaged on top of it).
+- Full suite stopped at a clean point after make_contract_test (29 of 54; reds so far match main).
+- Resume: rerun the suite from make_install_flow_test, overlap gate round, commit the merge, push, open the PR.
+- BE nvidia-native-tools-test-20261123-1 (main 937f89f, check-be 65 ok) is queued with the orchestrator; after the
+  boot, read logs/native-tools-testboot/<stamp>/ and report the nvrm-info rows.

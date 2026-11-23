@@ -1337,19 +1337,69 @@ fi
 # are covered too.
 needles=$repo/tests/lib/personal-paths.txt
 scan=$S/no-user-paths
-if [ -s "$needles" ]; then ok "personal-path needle list exists"; else bad "tests/lib/personal-paths.txt is missing or empty"; fi
-: > "$scan"
-for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
-	grep -R -n -F -f "$needles" "$repo/$p" >> "$scan" 2>/dev/null || true
+# The list and its samples are read by tests/lib/personal-paths.sh, shared with
+# tests/readme_install_doc_test.sh.  A missing, empty or unreadable list is one
+# failure, never also a pass.
+. "$repo/tests/lib/personal-paths.sh"
+pp_ok=0
+pp_pat=$S/personal-patterns
+pp_allow=$S/personal-allows
+if pp_load "$needles" "$pp_pat" "$pp_allow"; then pp_ok=1; fi
+# The library's failure paths: each bad list must fail, never pass.
+pp_t=$S/pp-lists
+mkdir -p "$pp_t"
+: > "$pp_t/empty"
+printf '# only a comment\n\n' > "$pp_t/comments"
+printf '# sample: x\nfoo\n# sample+: foo\n' > "$pp_t/badkind-sample"
+printf 'foo\n# sample+: foo\n# allow x-literal-long\n' > "$pp_t/badkind-allow"
+printf 'foo\n# sample+:\n' > "$pp_t/badkind-empty"
+printf 'foo\n# sample+: foo\n# the samples below\n' > "$pp_t/badkind-typo-ok"
+pp_load "$pp_t/missing" "$pp_t/n" "$pp_t/a" && bad "pp_load accepts a missing list" || ok "pp_load refuses a missing list"
+for pp_c in empty comments badkind-sample badkind-allow badkind-empty; do
+	if pp_load "$pp_t/$pp_c" "$pp_t/n" "$pp_t/a"; then bad "pp_load accepts the list $pp_c"; else ok "pp_load refuses the list $pp_c"; fi
 done
-for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
-	[ ! -f "$p" ] || grep -n -F -f "$needles" "$p" >> "$scan" 2>/dev/null || true
+# A comment that merely mentions another word is a comment.
+if pp_load "$pp_t/badkind-typo-ok" "$pp_t/n" "$pp_t/a"; then ok "pp_load keeps a comment whose first word is not sample or allow"; else bad "pp_load refuses a plain comment"; fi
+# pp_selftest branches: sample before a needle (both kinds), a needle without a positive sample, a positive
+# sample that misses, a negative sample that is flagged, and each bad allow literal.
+printf '# sample+: x\nfoo\n# sample+: foo\n' > "$pp_t/st-first-pos"
+printf '# sample-: x\nfoo\n# sample+: foo\n' > "$pp_t/st-first-neg"
+printf 'foo\n# sample+: foo\nbar\n' > "$pp_t/st-no-sample"
+printf 'foo\n# sample+: nomatch\n' > "$pp_t/st-misses"
+printf 'foo\n# sample+: foo\n# sample-: a foo b\n' > "$pp_t/st-flagged"
+printf 'foo\n# sample+: foo\n# allow: foo\n' > "$pp_t/st-allow-short"
+printf '/foo/\n# sample+: /foo/x\n# allow: /foo/bar-long\n' > "$pp_t/st-allow-slash"
+printf 'foo\n# sample+: foo\n# allow: unrelated-literal\n' > "$pp_t/st-allow-noneedle"
+printf 'foo\n' > "$pp_t/st-no-samples"
+pp_selftest_refuses() {	# a subshell with silent ok and bad, so only the return status counts
+	pp_load "$pp_t/$1" "$pp_t/n" "$pp_t/a" || return 0
+	(ok() { :; }; bad() { :; }; pp_selftest "$pp_t/$1" "$pp_t/n" "$pp_t/a") && return 1
+	return 0
+}
+for pp_c in st-first-pos st-first-neg st-no-sample st-misses st-flagged st-allow-short st-allow-slash st-allow-noneedle st-no-samples; do
+	if pp_selftest_refuses "$pp_c"; then ok "pp_selftest refuses the list $pp_c"; else bad "pp_selftest accepts the list $pp_c"; fi
 done
-if [ -s "$scan" ]; then
-	sed "s|$repo|<repo>|g" "$scan"
-	bad "personal paths remain"
+# a good list, with allow, negative sample and no newline at the end, passes
+printf 'foo/\n# sample+: -Lfoo/x\n# sample-: a zfoo/test\n# allow: zfoo/test\n# sample+: ../foo/x' > "$pp_t/st-good"
+pp_load "$pp_t/st-good" "$pp_t/n" "$pp_t/a" && (ok() { :; }; bad() { :; }; pp_selftest "$pp_t/st-good" "$pp_t/n" "$pp_t/a") && ok "pp_selftest passes a good list that has no final newline" || bad "pp_selftest refuses a good list"
+if [ "$pp_ok" = 1 ]; then
+	pp_selftest "$needles" "$pp_pat" "$pp_allow" || true
+	: > "$S/pp-files"
+	for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
+		find "$repo/$p" -type f >> "$S/pp-files" 2>/dev/null || true
+	done
+	for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
+		[ ! -f "$p" ] || printf '%s\n' "$p" >> "$S/pp-files"
+	done
+	pp_hits "$pp_pat" "$pp_allow" $(cat "$S/pp-files") > "$scan" 2>/dev/null || bad "personal-path scan could not run"
+	if [ -s "$scan" ]; then
+		sed "s|$repo|<repo>|g" "$scan"
+		bad "personal paths remain"
+	else
+		ok "no personal paths in code, tests, README.md, docs or man"
+	fi
 else
-	ok "no personal paths in code, tests, README.md, docs or man"
+	bad "tests/lib/personal-paths.txt is missing, empty, unreadable or has a mistyped line"
 fi
 
 if [ "$fail" = 0 ]; then

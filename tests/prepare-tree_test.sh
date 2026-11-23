@@ -128,9 +128,21 @@ GB10_WORK="$TESTROOT" PATCHES="$TESTROOT/patches-empty" \
 if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/tree-a/nvidia/a.c" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia/nv-uvm-interface.c" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia/nv_uvm_types.h" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv_version_sysctl.c" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv_version_sysctl.h" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nvrm_version.h" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nv_version_sysctl.c" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nv_version_sysctl.h" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nvrm_version.h" ] \
+    && [ "$(grep -c '^src/gb10-version/nv_version_sysctl.c  [0-9a-f]*  nvidia/nv_version_sysctl.c$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^src/gb10-version/nv_version_sysctl.c  [0-9a-f]*  nvidia-modeset/nv_version_sysctl.c$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^src/gb10-version/nv_version_sysctl.h  [0-9a-f]*  nvidia/nv_version_sysctl.h$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^src/gb10-version/nv_version_sysctl.h  [0-9a-f]*  nvidia-modeset/nv_version_sysctl.h$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^lib/libnvrm/include/nvrm/nvrm_version.h  [0-9a-f]*  nvidia/nvrm_version.h$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^lib/libnvrm/include/nvrm/nvrm_version.h  [0-9a-f]*  nvidia-modeset/nvrm_version.h$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
     && grep -q '^src/gb10-uvm/nv-uvm-interface.c  ' "$TESTROOT/build/tree-a/.prepared" \
     && grep -q '^ogkm:src/nvidia/interface/nv_uvm_types.h  ' "$TESTROOT/build/tree-a/.prepared"; then
-	ok "(a) no patches: nvidia/a.c present, UVM glue and MIT headers copied and recorded, exit 0"
+	ok "(a) no patches: source, UVM glue, version sysctl copies and shared parser recorded in both modules, exit 0"
 else
 	fail "(a) no patches: rc=$rc out=$(cat "$TESTROOT/out-a")"
 fi
