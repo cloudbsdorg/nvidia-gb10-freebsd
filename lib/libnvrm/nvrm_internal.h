@@ -11,6 +11,8 @@
 
 #include <nvrm/nvrm.h>
 
+#include "nvrm_fake.h"
+
 /*
  * Properties a backend can report.  A backend returns 0 and sets *out, or a
  * nonzero enum nvrm_reason.  Properties are RM-shaped but backend-neutral:
@@ -338,6 +340,18 @@ extern int (*nvrm_capmode_hook)(void);
 #define NVRM_FAKE_FAULT_READONLY	2
 int	nvrm_fake_gpu_access(nvrm_client *cl, uint64_t va, void *buf,
 	    size_t len, int write);
+
+/* The fake memory test seam: the public counters plus the objects the
+ * last-close sweep found leaked (more references held than the wrappers a
+ * fork child released). */
+typedef struct nvrm_fake_mem_test_stats {
+	nvrm_fake_mem_stats	base;
+	unsigned		leaked_objects;
+} nvrm_fake_mem_test_stats;
+void	nvrm_fake_mem_test_stats_get(nvrm_fake_mem_test_stats *st);
+/* Plant a leak: hold a reference on the object of a wrapper that nothing
+ * releases (tests). */
+void	nvrm_fake_mem_test_leak_ref(nvrm_bmem *m);
 
 /* Capsicum helper shared by the backends (nvrm_cap.c). */
 int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);

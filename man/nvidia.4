@@ -125,9 +125,7 @@ On a stock
 .Fx
 arm64 install, from a checkout of the repository, as a normal user who can
 become root with
-.Xr doas 1
-or
-.Xr sudo 8 :
+doas or sudo from ports:
 .Bd -literal -offset indent
 make install-prereqs YES=1 ACCEPT_NVIDIA_LICENSE=1
 make install YES=1
@@ -169,9 +167,9 @@ which the installed
 .Xr devd 8
 rule reads before it loads
 .Nm nvidia-drm
-when
-.Xr vgapci 4
-attaches to an NVIDIA display device.
+when an NVIDIA display device attaches to the
+.Xr pci 4
+bus.
 .Cm deinstall
 removes everything
 .Cm install
