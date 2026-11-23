@@ -1147,14 +1147,41 @@ printf '#!/bin/sh\ncat "%s"\n' "$W/pciconf-good.txt" >"$W/pciconf-good.sh"
 printf '#!/bin/sh\ncat "%s"\n' "$W/pciconf-badbar.txt" >"$W/pciconf-badbar.sh"
 # a sysctl with no compat.linux (the real one says "unknown oid", exit 1), a marker
 # line for the hw.nvidia.gpus read, and the real sysctl for everything else
-cat >"$W/sysctl-none.sh" <<'EOF'
+# The fake discrete GPU is at 0000:0d:00.0; the stand-in numbers its device unit
+# 0 (the real board is unit 1).  The RM version comes from STUB_TAG.
+# STUB_DEV_UUID, STUB_HW_UUID, STUB_BUS_ID and STUB_VERSION_AVAILABLE change
+# what the OS layer says.  Every call is appended to STUB_LOG when set; the two
+# nodes the script may read, hw.nvidia and dev.nvidia, each leave their own mark.
+cat >"$W/sysctl-none.sh" <<'EOS'
 #!/bin/sh
+FAKE_UUID=GPU-00000000-0000-4000-8000-0000000000a1
+MAJ=$(echo "$STUB_TAG" | awk -F. '{print $1 + 0}')
+MIN=$(echo "$STUB_TAG" | awk -F. '{print $2 + 0}')
+PAT=$(echo "$STUB_TAG" | awk -F. '{print $3 + 0}')
+banner() { echo "hw.nvidia.version: NVIDIA UNIX Open Kernel Module for aarch64  $STUB_TAG  Release Build"; }
+versions() {
+	echo "hw.nvidia.version_string: $STUB_TAG"
+	echo "hw.nvidia.version_major: $MAJ"
+	echo "hw.nvidia.version_minor: $MIN"
+	echo "hw.nvidia.version_patch: $PAT"
+	echo "hw.nvidia.version_suffix: "
+	echo "hw.nvidia.version_available: ${STUB_VERSION_AVAILABLE:-1}"
+}
+gpus() { echo "hw.nvidia.gpus.0.uuid: ${STUB_HW_UUID:-$FAKE_UUID}"; echo "hw.nvidia.gpus.0.model: SYSCTLMARK-HW"; }
+dev() {
+	echo "dev.nvidia.0.uuid: ${STUB_DEV_UUID:-$FAKE_UUID}"
+	echo "dev.nvidia.0.pci_bus_id: ${STUB_BUS_ID:-0000:0d:00.0}"
+	echo "dev.nvidia.0.%location: slot=0 function=0 dbsf=pci0:13:0:0"
+	echo "dev.nvidia.0.%desc: SYSCTLMARK-DEV"
+}
+[ -z "$STUB_LOG" ] || echo "$*" >>"$STUB_LOG"
 case "$*" in
 *compat.linux.osrelease*) echo "sysctl: unknown oid 'compat.linux.osrelease'" >&2; exit 1 ;;
-*hw.nvidia.gpus*) echo "hw.nvidia.gpus.0.uuid: SYSCTLMARK"; exit 0 ;;
+"hw.nvidia") banner; versions; gpus; exit 0 ;;
+"dev.nvidia") dev; exit 0 ;;
 esac
 exec /sbin/sysctl "$@"
-EOF
+EOS
 printf '#!/bin/sh\necho 5.15.0\n' >"$W/sysctl-linux.sh"
 printf '#!/bin/sh\necho "sysctl: permission denied" >&2\nexit 1\n' >"$W/sysctl-broken.sh"
 printf '#!/bin/sh\nexit 1\n' >"$W/sysctl-silent.sh"
@@ -1177,7 +1204,7 @@ printf '#!/bin/sh\necho "Id Refs Address Size Name"\necho " 1 40 0x0 0x0 kernel"
 for m in linux.ko linux64.ko linux_common.ko; do
 	printf '#!/bin/sh\necho "Id Refs Address Size Name"\necho " 1 40 0x0 0x0 kernel"\necho " 2 1 0x0 0x0 %s"\necho " 4 2 0x0 0x0 nvidia.ko"\n' "$m" >"$W/kld-$m.sh"
 done
-# a nvrm-info whose JSON says VRAM 1 byte, SM 99.7 and BAR1 3 bytes
+# a nvrm-info whose JSON says VRAM 1 byte, SM and compute capability 99.7 and BAR1 3 bytes
 cat >"$W/doctor.py" <<'PY'
 import json, sys
 fixed = 0
@@ -1187,6 +1214,8 @@ def fix(d):
     d["memory"]["bar1_size"]["value"] = 3
     d["gpu"]["sm_version_major"]["value"] = 99
     d["gpu"]["sm_version_minor"]["value"] = 7
+    d["gpu"]["compute_capability_major"]["value"] = 99
+    d["gpu"]["compute_capability_minor"]["value"] = 7
     fixed += 1
 for line in sys.stdin:
     o = json.loads(line)
@@ -1212,47 +1241,85 @@ chmod +x "$W/nvrm-info-doctored"
 bootrun() {
 	_d=$1; _i=$2; shift 2
 	mkdir -p "$_d"
-	env BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake BOOT_PCICONF="sh $W/pciconf-good.sh" BOOT_SYSCTL="sh $W/sysctl-none.sh" "$@" \
+	env STUB_TAG="$TAG" BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake BOOT_PCICONF="sh $W/pciconf-good.sh" BOOT_SYSCTL="sh $W/sysctl-none.sh" "$@" \
 	    sh "$T/boot_nvrm_info.sh" "$_d" "$_i" "$SCHEMA" >/dev/null 2>&1
 }
 line() { grep -q "$2" "$1/results.txt"; }
-# BOOT_EXPECT_SM is raw RM numbering (10.4), not compute capability (12.0).
-EXP="BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_SM=10.4"
+# BOOT_EXPECT_SM is the compute capability (12.0), not the RM numbering (10.4).
+. "$T/board-amp001.env"
+EXP="BOOT_EXPECT_VRAM_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_RESERVE_MAX_BYTES BOOT_EXPECT_SM=$BOARD_SM"
 # the true values: each of VRAM, SM and BAR1 has a PASS and no FAIL
-bootrun "$W/ba" "$INFO" $EXP
+bootrun "$W/ba" "$INFO" $EXP STUB_LOG="$W/ba.calls"
 line "$W/ba" '^PASS GPU 0 vram_size '; rc=$?
 expect_rc "boot script, true values: VRAM is compared with the board and passes" $rc 0
-line "$W/ba" '^PASS GPU 0 SM version '; rc=$?
-expect_rc "boot script, true values: the SM version is compared with the board and passes" $rc 0
+line "$W/ba" '^PASS GPU 0 compute capability '; rc=$?
+expect_rc "boot script, true values: the compute capability is compared with the board and passes" $rc 0
 line "$W/ba" '^PASS GPU 0 bar1_size '; rc=$?
 expect_rc "boot script, true values: BAR1 is compared with pciconf -lvb and passes" $rc 0
-! grep -E '^FAIL GPU 0 (vram_size|SM version|bar1_size)|^FAIL BOOT_EXPECT' "$W/ba/results.txt" >/dev/null; rc=$?
+! grep -E '^FAIL GPU 0 (vram_size|compute capability|bar1_size|uuid)|^FAIL BOOT_EXPECT' "$W/ba/results.txt" >/dev/null; rc=$?
 expect_rc "boot script, true values: no VRAM, SM, BAR1 or expectation FAIL" $rc 0
 # a doctored report (VRAM 1, SM 99.7, BAR1 3) must FAIL each of the three
 bootrun "$W/bb" "$W/nvrm-info-doctored" $EXP
 python3 -I -c 'import json,sys
 d=json.load(open(sys.argv[1]+"/nvrm-info.json"))["devices"][0]
-assert d["memory"]["vram_size"]["value"]==1 and d["gpu"]["sm_version_major"]["value"]==99 and d["memory"]["bar1_size"]["value"]==3' "$W/bb"; rc=$?
-expect_rc "boot script, doctored report: the record says VRAM 1, SM 99.7, BAR1 3 (parsed)" $rc 0
+assert d["memory"]["vram_size"]["value"]==1 and d["gpu"]["compute_capability_major"]["value"]==99 and d["memory"]["bar1_size"]["value"]==3' "$W/bb"; rc=$?
+expect_rc "boot script, doctored report: the record says VRAM 1, SM and compute capability 99.7, BAR1 3 (parsed)" $rc 0
 line "$W/bb" '^FAIL GPU 0 vram_size '; rc=$?
 expect_rc "boot script, doctored report: wrong VRAM is a FAIL" $rc 0
-line "$W/bb" '^FAIL GPU 0 SM version '; rc=$?
-expect_rc "boot script, doctored report: wrong SM version is a FAIL" $rc 0
+line "$W/bb" '^FAIL GPU 0 compute capability '; rc=$?
+expect_rc "boot script, doctored report: wrong compute capability is a FAIL" $rc 0
 line "$W/bb" '^FAIL GPU 0 bar1_size '; rc=$?
 expect_rc "boot script, doctored report: BAR1 unlike every pciconf BAR is a FAIL" $rc 0
 # expectations missing or malformed: FAIL, never skipped
 bootrun "$W/bc" "$INFO"
-line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc" '^FAIL BOOT_EXPECT_SM' && line "$W/bc" '^FAIL GPU 0 vram_size ' && line "$W/bc" '^FAIL GPU 0 SM version '; rc=$?
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc" '^FAIL BOOT_EXPECT_SM' && line "$W/bc" '^FAIL GPU 0 vram_size ' && line "$W/bc" '^FAIL GPU 0 compute capability '; rc=$?
 expect_rc "boot script: without BOOT_EXPECT_* the run FAILs (nothing is skipped)" $rc 0
-line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES must be the board.s VRAM in bytes (e.g. 17179869184' && line "$W/bc" '^FAIL BOOT_EXPECT_SM must be the board.s SM version as major.minor (e.g. 12.0)'; rc=$?
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES must be the board.s nominal VRAM in bytes (e.g. 17179869184' && line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES must be the most the driver may reserve, in bytes, below the nominal VRAM (e.g. 268435456' && line "$W/bc" '^FAIL BOOT_EXPECT_SM must be the board.s compute capability as major.minor (e.g. 12.0)'; rc=$?
 expect_rc "boot script: a missing expectation FAILs with a sentence that says what to set, with an example" $rc 0
-bootrun "$W/bc2" "$INFO" BOOT_EXPECT_VRAM_BYTES=16G BOOT_EXPECT_SM=12
-line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_SM' && line "$W/bc2" "got '16G'"; rc=$?
+bootrun "$W/bc2" "$INFO" BOOT_EXPECT_VRAM_BYTES=16G BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=256M BOOT_EXPECT_SM=12
+line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES' && line "$W/bc2" '^FAIL BOOT_EXPECT_SM' && line "$W/bc2" "got '16G'" && line "$W/bc2" "got '256M'"; rc=$?
 expect_rc "boot script: malformed BOOT_EXPECT_* values FAIL and are quoted back" $rc 0
-sh "$T/boot_nvrm_info.sh" 2>&1 | grep -q 'usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m'; rc=$?
-expect_rc "boot script: the usage line names the two required variables" $rc 0
-grep -q SYSCTLMARK "$W/ba/sysctl.txt"; rc=$?
-expect_rc "boot script: every sysctl call goes through the stand-in (the hw.nvidia read too)" $rc 0
+line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_BYTES .*make-be.sh -V' && line "$W/bc" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES .*make-be.sh -R .*nvidia_native_tools_testboot_vram_reserve' && line "$W/bc" '^FAIL BOOT_EXPECT_SM .*make-be.sh -S'; rc=$?
+expect_rc "boot script: each expectation FAIL names the make-be.sh option and the rc.conf variable that sets it" $rc 0
+bootrun "$W/bc3" "$INFO" BOOT_EXPECT_VRAM_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_BYTES BOOT_EXPECT_SM=$BOARD_SM
+line "$W/bc3" '^FAIL BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES must be .*below the nominal VRAM'; rc=$?
+expect_rc "boot script: a reserve that is not below the nominal VRAM is a FAIL" $rc 0
+bootrun "$W/bc4" "$INFO" BOOT_EXPECT_VRAM_BYTES=0 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=$BOARD_VRAM_RESERVE_MAX_BYTES BOOT_EXPECT_SM=$BOARD_SM
+line "$W/bc4" '^PASS BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES is '; rc=$?
+expect_rc "boot script: any reserve is accepted when the nominal VRAM is 0" $rc 0
+sh "$T/boot_nvrm_info.sh" 2>&1 | grep -q 'usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R BOOT_EXPECT_SM=M.m'; rc=$?
+expect_rc "boot script: the usage line names the three required variables" $rc 0
+grep -q SYSCTLMARK-HW "$W/ba/sysctl.txt" && grep -q SYSCTLMARK-DEV "$W/ba/sysctl.txt"; rc=$?
+expect_rc "boot script: the hw.nvidia and the dev.nvidia reads both go through the stand-in" $rc 0
+grep -qx 'hw.nvidia' "$W/ba.calls" && grep -qx 'dev.nvidia' "$W/ba.calls" && ! grep -E '^hw\.nvidia\.' "$W/ba.calls" >/dev/null; rc=$?
+expect_rc "boot script: one read of hw.nvidia and one of dev.nvidia, no narrower hw.nvidia.* call (they are in the node)" $rc 0
+line "$W/ba" '^PASS GPU 0 uuid .*unit 0 found by pci_bus_id 0000:0d:00.0'; rc=$?
+expect_rc "boot script, true values: the uuid is found through dev.nvidia.<unit>.pci_bus_id and passes" $rc 0
+line "$W/ba" '^PASS versions.driver ' && line "$W/ba" '^PASS nvrm-info running_rm_version is available and equals versions.driver.string'; rc=$?
+expect_rc "boot script, true values: the driver version integers and the running RM version pass" $rc 0
+grep -q '^dev.nvidia.0.pci_bus_id: ' "$W/ba/sysctl.txt" && grep -q '^hw.nvidia.version_major: ' "$W/ba/sysctl.txt"; rc=$?
+expect_rc "boot script: sysctl.txt captures the hw.nvidia and dev.nvidia nodes" $rc 0
+bootrun "$W/bu1" "$INFO" $EXP STUB_DEV_UUID=GPU-00000000-0000-4000-8000-0000000000a2
+line "$W/bu1" '^FAIL GPU 0 uuid '; rc=$?
+expect_rc "boot script: a different dev.nvidia.<unit>.uuid is a FAIL" $rc 0
+bootrun "$W/bu2" "$INFO" $EXP STUB_HW_UUID=GPU-00000000-0000-4000-8000-0000000000a2
+line "$W/bu2" '^FAIL GPU 0 uuid '; rc=$?
+expect_rc "boot script: a different hw.nvidia.gpus.<unit>.uuid is a FAIL" $rc 0
+bootrun "$W/bu3" "$INFO" $EXP STUB_BUS_ID=0000:0e:00.0
+line "$W/bu3" '^FAIL GPU 0 uuid: no dev.nvidia.<unit> is at 0000:0d:00.0'; rc=$?
+expect_rc "boot script: no sysctl unit at the device location is a FAIL naming the location" $rc 0
+bootrun "$W/bu4" "$INFO" $EXP STUB_VERSION_AVAILABLE=0
+line "$W/bu4" '^FAIL versions.driver '; rc=$?
+expect_rc "boot script: hw.nvidia.version_available 0 is a FAIL" $rc 0
+bootrun "$W/bu5" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869184 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu5" '^PASS GPU 0 vram_size '; rc=$?
+expect_rc "boot script: VRAM equal to the nominal size passes with a reserve of 1" $rc 0
+bootrun "$W/bu6" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869183 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu6" '^FAIL GPU 0 vram_size '; rc=$?
+expect_rc "boot script: VRAM above the nominal size is a FAIL" $rc 0
+bootrun "$W/bu7" "$INFO" BOOT_EXPECT_VRAM_BYTES=17179869186 BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=1 BOOT_EXPECT_SM=12.0
+line "$W/bu7" '^FAIL GPU 0 vram_size nvrm-info=17179869184 expected 17179869185\.\.17179869186 '; rc=$?
+expect_rc "boot script: VRAM below nominal minus the largest reserve is a FAIL" $rc 0
 # BAR1 is the BAR at config offset 0x14, and nothing else counts
 bootrun "$W/bd" "$INFO" $EXP BOOT_PCICONF="sh $W/pciconf-badbar.sh"
 line "$W/bd" '^FAIL GPU 0 bar1_size .*BAR1 (config offset 0x14)'; rc=$?

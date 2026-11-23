@@ -6,8 +6,8 @@
 +#include <sys/bus.h>
  #include <sys/module.h>
  #include <sys/errno.h>
-@@ -38,4 +39,10 @@
- #include "nv-kthread-q.h"
+@@ -39,4 +40,10 @@
+ #include "nv_version_sysctl.h"
  
 +#include "nvmisc.h"
 +#define NVRM
@@ -17,7 +17,7 @@
 +
  #include "nv-retpoline.h"
  
-@@ -805,7 +812,59 @@
+@@ -813,7 +820,59 @@
  }
  
 -NvU32 nvkms_enumerate_gpus(nv_gpu_info_t *gpu_info)

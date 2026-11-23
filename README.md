@@ -77,16 +77,24 @@ sysrc nvidia_linux_mode=AUTO     # rc.d/nvidia_linux loads the providers at boot
 
 ### Installed
 
-A successful install exits 0. Example output (from `scripts/make.sh`; the `kldload` line
-names the root tool you have, so yours may start with `sudo`, with `su root -c`, or have no
-tool):
+A successful install exits 0. Example output (from `scripts/make.sh`), an excerpt of a
+planted install:
 
 ```text
-install: install: done
+install: done
+install: installed
+```
+
+A live install, without a DESTDIR, also lists its next steps, one command per line. Example
+output (from `scripts/make.sh`) for a user who has doas; yours names the root tool you have:
+`sudo`, `su root -c`, no prefix as root, or a note when you have no tool:
+
+```text
+to load the driver at boot instead of the first two next steps, run make configure YES=1 once
+next: doas kenv hw.nvidia.registry.EnableGpuFirmware=1
 next: doas kldload nvidia-drm
 next: kldstat
 next: nvrm-info --json
-install: installed
 ```
 
 The summary lists every installed file and mode. Kernel modules go into `/boot/modules`;
@@ -114,12 +122,13 @@ lines follow it):
 
 ```text
 blocked licence: NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it
-fix: make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer
+fix: make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question
 install: blocked
 ```
 
-Follow the `fix:` line for each blocker. The licence setting in it also works on the command
-you ran, as in `make install ACCEPT_NVIDIA_LICENSE=1`. For a missing kernel change, see
+Follow the `fix:` line for each blocker. For the licence, the line names the command you
+ran, so under `make install` it says `make install`, as above; `make preflight` shows the
+same check with `make install-prereqs` in its fix. For a missing kernel change, see
 [`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
 without installing.
 
@@ -806,6 +815,35 @@ the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json
 [tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
 statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
 tests the kit without a boot.
+
+What the `nvrm-info` row expects of the board. `boot_nvrm_info.sh` requires three environment
+variables; `make-be.sh` always writes them to `rc.conf.d` from its options, whose defaults are the
+amp001 board (the 16 GiB RTX 5060 Ti; the values are in `tests/libnvrm/board-amp001.env`, the one
+place that states them). The comparison is `tests/libnvrm/boot_compare.py`, which refuses a reserve
+the boot would reject, as `make-be.sh` does:
+
+- `-V` (`BOOT_EXPECT_VRAM_BYTES`, default 17179869184): the nominal VRAM in bytes, 0 for a
+  unified-memory part;
+- `-R` (`BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES`, default 268435456): the most the driver may reserve
+  of it, below `-V` unless `-V` is 0. The RM reports the usable size (17103323136 on that card),
+  which must lie between nominal less the reserve and nominal;
+- `-S` (`BOOT_EXPECT_SM`, default 12.0): the compute capability. It is compared with
+  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card).
+
+The GPU uuid is found through the device unit whose `dev.nvidia.<unit>.pci_bus_id` is the device's
+PCI location (000d:01:00.0 on amp001; the units are not nvrm-info's indexes: a BMC display can take
+unit 0). When the unit was found that way (a module with the new sysctls),
+`dev.nvidia.<unit>.uuid` is required and must equal the nvrm-info uuid, as must
+`hw.nvidia.gpus.<unit>.uuid`. When it was found only through `dev.nvidia.<unit>.%location` (an older
+module), only `hw.nvidia.gpus.<unit>.uuid` is required. A `pci_bus_id` that is present but not
+`dddd:bb:ss.f` in lowercase hex is a FAIL of its own ("malformed"), and the `%location` fallback is
+still tried. `versions.driver` must equal
+`hw.nvidia.version_major`, `_minor` and `_patch` as integers, with `hw.nvidia.version_available`
+1 and the string equal to the pinned tag; `running_rm_version` must equal it.
+`sh tests/libnvrm/boot_fixture_test.sh` runs the comparison on the real capture of the first boot
+(`tests/data/nvrm-info-boot-20261122T095018Z`, which must fail), on a derived fixture (which must
+pass) and on mutations of it. It makes its scratch directory (default `tmp/` of the checkout) when
+it is missing; its exit status is the number of failures, or 99 when it cannot make the directory.
 
 ## Native CUDA toolchain (cuda-native)
 

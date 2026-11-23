@@ -38,6 +38,7 @@ LC_ALL=C
 export PATH LC_ALL
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/native-tools-testboot
+. "$repo/tests/libnvrm/board-amp001.env"
 WORK=${GB10_WORK:-$repo/work}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/nvnt-kit.XXXXXX") || exit 2
@@ -530,6 +531,21 @@ EOF
 	expect 1 $? "make-be.sh refuses a base whose loader.conf loads linux"
 	sh "$KIT/make-be.sh" -h > "$T/help.out" 2>&1; grep -q 'NVNT_NO_GIT_CHECK (the work tree is installed)' "$T/help.out" && ok "make-be.sh -h prints the whole header" || no "make-be.sh -h is cut short"
 	grep -q "logs/native-tools-testboot" "$R/etc/rc.conf.d/nvidia_native_tools_testboot" && grep -q "^nvidia_native_tools_testboot_copyout=\"$WORK/logs/native-tools-testboot\"" "$R/etc/rc.conf.d/nvidia_native_tools_testboot" && ok "make-be.sh: the copy-out is under GB10_WORK by default" || no "make-be.sh: copy-out $(grep copyout "$R/etc/rc.conf.d/nvidia_native_tools_testboot")"
+	# the VRAM reserve (make-be.sh -R): written to rc.conf.d (the board default), checked by check-be.sh, malformed refused
+	grep -q "^nvidia_native_tools_testboot_vram_reserve=\"$BOARD_VRAM_RESERVE_MAX_BYTES\"\$" "$R/etc/rc.conf.d/nvidia_native_tools_testboot" && ok "make-be.sh: the VRAM reserve is written to rc.conf.d (the board default)" || no "make-be.sh: no default VRAM reserve in rc.conf.d: $(cat "$R/etc/rc.conf.d/nvidia_native_tools_testboot")"
+	grep -q 'RESERVE_BYTES' "$T/help.out" && ok "make-be.sh -h documents -R" || no "make-be.sh -h does not document -R"
+	MB -D 20990105 -m "$STAGE" -R 12G > "$T/mb7.out" 2>&1; expect 2 $? "make-be.sh refuses a -R that is not a number of bytes"
+	MB -D 20990106 -m "$STAGE" -V 268435456 -R 268435456 > "$T/mb8.out" 2>&1; expect 2 $? "make-be.sh refuses a -R that is not below -V (the boot would reject it)"
+	grep -q 'must be below -V' "$T/mb8.out" && ok "make-be.sh: the -R refusal says -R must be below -V" || no "make-be.sh: -R refusal text: $(cat "$T/mb8.out")"
+	MB -D 20990106 -m "$STAGE" -V 100 -R 100 > "$T/mb9.out" 2>&1; expect 2 $? "make-be.sh refuses -V 100 -R 100"
+	MB -D 20990106 -m "$STAGE" -V 0 -R 268435456 --dry-run > "$T/mb10.out" 2>&1; _rc=$?
+	if [ "$_rc" -ne 2 ] && ! grep -q 'must be below -V' "$T/mb10.out"; then ok "make-be.sh accepts any -R when -V is 0"; else no "make-be.sh refused -V 0 -R 268435456: $(cat "$T/mb10.out")"; fi
+	grep -q '^ok   the board.s nominal VRAM, the largest VRAM reserve and the compute capability are set' "$T/cb.out" && ok "check-be.sh: the VRAM reserve variable is checked and set on the fake clone" || no "check-be.sh: no ok for the VRAM reserve on the fake clone"
+	_rcf=$R/etc/rc.conf.d/nvidia_native_tools_testboot
+	cp "$_rcf" "$T/rcconf.orig"; grep -v '_vram_reserve=' "$T/rcconf.orig" > "$_rcf"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-noreserve.out" 2>&1
+	grep -q '^FAIL the board.s nominal VRAM, VRAM reserve (make-be.sh -R)' "$T/cb-noreserve.out" && ok "check-be.sh: a clone without the VRAM reserve variable is a FAIL" || no "check-be.sh did not FAIL on a missing VRAM reserve"
+	cp "$T/rcconf.orig" "$_rcf"
 	printf '#!/bin/sh\nexit 1\n' > "$T/bectl-bad"; chmod 0755 "$T/bectl-bad"
 	env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl-bad" NVNT_MNT="$T/clone3/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/make-be.sh" -D 20990103 -m "$STAGE" > "$T/mb4.out" 2>&1
 	expect 2 $? "make-be.sh stops when bectl list fails"
@@ -674,7 +690,7 @@ EOF
 		    nvidia_native_tools_testboot_kit="$T/kitroot" nvidia_native_tools_testboot_mods="$T/mods" \
 		    nvidia_native_tools_testboot_work="$1" nvidia_native_tools_testboot_fallback="$1.fallback" \
 		    nvidia_native_tools_testboot_copyout="$2" nvidia_native_tools_testboot_return="$3" \
-		    nvidia_native_tools_testboot_devdir="$T/dev" nvidia_native_tools_testboot_vram=17179869184 nvidia_native_tools_testboot_sm=12.0 \
+		    nvidia_native_tools_testboot_devdir="$T/dev" nvidia_native_tools_testboot_vram=$BOARD_VRAM_BYTES nvidia_native_tools_testboot_vram_reserve=$BOARD_VRAM_RESERVE_MAX_BYTES nvidia_native_tools_testboot_sm=$BOARD_SM \
 		    nvidia_native_tools_testboot_lockfile="${RC_LOCK:-$T/nolock}" nvidia_native_tools_testboot_version="$T/nover" ${RC_EXTRA:-} \
 		    sh "${RC_SCRIPT:-$KIT/nvidia_native_tools_testboot}" onestart > "$1.out" 2>&1
 		ls -d "$1"/* 2> /dev/null | head -1
@@ -989,6 +1005,21 @@ if [ ! -s "$SENT/hits" ]; then
 else
 	no "G2 unexpected shutdown sentinel hits: $(cat "$SENT/hits")"
 fi
+
+# the boot comparison against the real boot capture of 2026-11-22 (Track #2362): its own result is counted here
+_bf=$(sh "$repo/tests/libnvrm/boot_fixture_test.sh" "$T" 2>&1); _bfrc=$?
+[ "$_bfrc" = 0 ] && ok "boot_fixture_test.sh: boot_compare.py fails the old capture, passes the derived one, fails every mutation ($(printf '%s\n' "$_bf" | grep -c '^ok') ok)" || no "boot_fixture_test.sh: $_bfrc failure(s): $(printf '%s\n' "$_bf" | grep '^FAIL' | head -3)"
+
+# the documented standalone run (no argument) works on a fresh checkout, which has no tmp/, and says so when it cannot
+_fc=$T/fresh-checkout
+mkdir -p "$_fc/tests/libnvrm" "$_fc/tests/data"
+cp "$repo/tests/libnvrm/boot_fixture_test.sh" "$repo/tests/libnvrm/boot_compare.py" "$repo/tests/libnvrm/board-amp001.env" "$_fc/tests/libnvrm/"
+cp -R "$repo/tests/data/nvrm-info-boot-20261122T095018Z" "$_fc/tests/data/"
+cp "$repo/SOURCES" "$_fc/"
+_fo=$(cd "$_fc" && sh tests/libnvrm/boot_fixture_test.sh 2>&1); _forc=$?
+[ "$_forc" = 0 ] && [ -d "$_fc/tmp" ] && printf '%s\n' "$_fo" | grep -q '^== boot_fixture_test: 0 failures' && ok "boot_fixture_test.sh with no argument on a checkout without tmp/ runs and exits 0" || no "boot_fixture_test.sh with no argument on a fresh checkout: rc=$_forc: $(printf '%s\n' "$_fo" | tail -2)"
+_fo=$(sh "$repo/tests/libnvrm/boot_fixture_test.sh" /dev/null/nope 2>&1); _forc=$?
+[ "$_forc" = 99 ] && printf '%s\n' "$_fo" | grep -q 'cannot create a scratch directory under /dev/null/nope' && ok "boot_fixture_test.sh: a scratch directory that cannot be made exits 99 with a message (not a failure count)" || no "boot_fixture_test.sh with an unusable scratch dir: rc=$_forc: $_fo"
 
 echo "native_tools_kit_test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
