@@ -1,0 +1,109 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * nvrm_chan.h - GPFIFO channels, ordered submission and progress semaphores.
+ */
+#ifndef _NVRM_NVRM_CHAN_H_
+#define _NVRM_NVRM_CHAN_H_
+
+#include <nvrm/nvrm.h>
+
+__BEGIN_DECLS
+
+typedef struct nvrm_chan nvrm_chan;
+
+#define NVRM_ENG_3D		0x01	/* graphics runlist */
+#define NVRM_ENG_COMPUTE	0x02	/* graphics runlist */
+#define NVRM_ENG_I2M		0x04	/* graphics runlist (inline to memory) */
+#define NVRM_ENG_2D		0x08	/* graphics runlist */
+#define NVRM_ENG_COPY		0x10	/* copy runlist, or its graphics partner */
+#define NVRM_ENG_KNOWN		0x1f
+
+enum nvrm_runlist {
+	NVRM_RUNLIST_GRAPHICS = 1,
+	NVRM_RUNLIST_COPY
+};
+
+#define NVRM_CHAN_ENTRIES_DEFAULT	1024	/* 0 means this */
+#define NVRM_CHAN_ENTRIES_MIN		8
+#define NVRM_CHAN_ENTRIES_MAX		32768	/* powers of two only */
+
+typedef struct nvrm_chan_params {
+	uint32_t	size;		/* sizeof(nvrm_chan_params); 0 means that */
+	uint32_t	engines;	/* NVRM_ENG_* */
+	uint32_t	entries;	/* a power of two; 0 means the default */
+	uint32_t	flags;		/* none yet: must be 0 */
+} nvrm_chan_params;
+
+/* One GPFIFO element: a pushbuffer segment in GPU memory. */
+#define NVRM_GP_NO_PREFETCH	0x1	/* fetch only after prior work is done */
+#define NVRM_GP_INCOMPLETE	0x2	/* keep this element with the next one */
+#define NVRM_GP_KNOWN		0x3
+
+typedef struct nvrm_gp_entry {
+	uint64_t	va;
+	uint32_t	dwords;
+	uint32_t	flags;		/* NVRM_GP_* */
+} nvrm_gp_entry;
+
+#define NVRM_SUBMIT_NO_KICK	0x1	/* publish GP_PUT without a doorbell */
+
+typedef struct nvrm_submit_opts {
+	uint32_t	size;		/* sizeof(nvrm_submit_opts); 0 means that */
+	uint32_t	flags;		/* NVRM_SUBMIT_* */
+	uint64_t	timeout_ns;	/* 0: never wait; UINT64_MAX: no limit */
+} nvrm_submit_opts;
+
+typedef struct nvrm_submit_result {
+	uint32_t	size;		/* sizeof(nvrm_submit_result); 0 means that */
+	uint32_t	accepted;	/* caller elements placed */
+	uint64_t	point;		/* last batch's progress point, or 0 */
+} nvrm_submit_result;
+
+enum nvrm_chan_state {
+	NVRM_CHAN_ALIVE = 1,
+	NVRM_CHAN_DEAD
+};
+
+/*
+ * Error notifier values in nvrm_chan_status.error are the backend's own.  The
+ * core reports one itself: the progress semaphore, which the GPU can write,
+ * held a value above the submitted point or below the completed point.  The
+ * value is above any code a backend reports.
+ */
+#define NVRM_CHAN_ERR_SEMAPHORE	0xffff0001U
+
+typedef struct nvrm_chan_status {
+	uint32_t	size;		/* sizeof(nvrm_chan_status); 0 means that */
+	uint32_t	state;		/* enum nvrm_chan_state */
+	uint32_t	error;		/* error notifier or NVRM_CHAN_ERR_*; 0 none */
+	uint32_t	gp_get, gp_put;
+	uint32_t	reserved;
+	uint64_t	submitted, completed;
+} nvrm_chan_status;
+
+typedef struct nvrm_chan_info {
+	uint32_t	size;		/* sizeof(nvrm_chan_info); 0 means that */
+	uint32_t	engines;
+	uint32_t	entries;
+	uint32_t	runlist;	/* enum nvrm_runlist */
+	uint32_t	cls_gpfifo;
+	uint32_t	subch_class[8];	/* bound class on each subchannel, 0 none */
+	uint64_t	sem_va;		/* 64-bit progress semaphore, GPU read-write */
+} nvrm_chan_info;
+
+int	nvrm_chan_create(nvrm_client *cl, const nvrm_chan_params *p,
+	    nvrm_chan **chp);
+int	nvrm_chan_submit(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
+	    const nvrm_submit_opts *o, nvrm_submit_result *r);
+int	nvrm_chan_kick(nvrm_chan *ch);
+int	nvrm_chan_gp_space(nvrm_chan *ch, unsigned *n);
+int	nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns);
+int	nvrm_chan_status_get(nvrm_chan *ch, nvrm_chan_status *st);
+int	nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info);
+void	nvrm_chan_destroy(nvrm_chan *ch);
+
+__END_DECLS
+
+#endif /* _NVRM_NVRM_CHAN_H_ */

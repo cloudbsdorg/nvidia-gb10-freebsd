@@ -725,6 +725,11 @@ then kit round C; then the staged build, make-be dry run and check-be.
 - Review-gate fixes: checks split so each failure names one cause (called, defined, warning level, own device argument, unconditional and never undefined, same prefix as the Debug macro); 11 new plant controls; one OGKM_PATCHES list for the required check and the apply loop; patch comment says operator and kernel log; test header states the missing macro is a clang implicit-declaration warning and an undefined symbol in the .ko.
 - console_owner_patch_test 42 passed 0 failed; kapi_table_test 30/0; build-rmcore_test 23/0. All ogkm patches apply in lexical order, fuzz 0.
 
+## 2026-11-22T21:30Z libnvrm S3 slice 1 (Track 2437, branch agent/2437-libnvrm-s3-chan, on main 44617da)
+- nvrm_chan API (nvrm_chan.h), core ring rules (nvrm_chan.c: E-2 per batch, splitting, INCOMPLETE runs, a FIFO of submit waiters with a turn condvar, flush order with two barriers), fake GPFIFO (nvrm_fake_chan.c: NOP, semaphore release and acquire 32/64-bit, ACQ_CIRC_GEQ, copy class), encoders in nvrm_methods.h, barriers in nvrm_barrier.h, nvrm_chan(3).
+- Written by opencode Kimi k3.1-pro (round B), finished by Sonnet (B2, B3: queued submit timeout and handoff, ring-wrap space fix; lint exemption for the fake channel data) after the Kimi quota ran out.
+- tests/libnvrm_test.sh 505 ok, 0 failed. chan_test about 200961 checks; nvrm_chan.c and nvrm_fake_chan.c at 100 percent lines and branches; 11 chan mutants killed.
+- Next: gate rounds 1 and 2, commit, push, PR.
 ## 2026-11-22T23:25Z #2448 zz-2448 enumerate-gpus patch: fuzz 0 on main after d1752ad
 - patches/patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c regenerated with diff -U2 against the tree after every earlier patch (incl. the nv_version_sysctl.h include from d1752ad). Hunk 2 now anchors on that include; the NVRM include block still sits before nv-retpoline.h. Added (+) lines are byte-identical; hunks apply with no fuzz and no offset.
 - Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.

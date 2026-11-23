@@ -26,6 +26,8 @@ static const char *const error_text[] = {
 	[NVRM_E_RANGE] = "address or range not available",
 	[NVRM_E_NOTSUP] = "not supported by the backend",
 	[NVRM_E_BUSY] = "still in use",
+	[NVRM_E_TIMEOUT] = "timed out",
+	[NVRM_E_LOST] = "the channel is dead",
 };
 _Static_assert(sizeof(error_text) / sizeof(error_text[0]) == NVRM_E__COUNT,
     "an error code has no text");
@@ -55,6 +57,8 @@ static const char *const error_ids[] = {
 	[NVRM_E_RANGE] = "range_unavailable",
 	[NVRM_E_NOTSUP] = "not_supported",
 	[NVRM_E_BUSY] = "busy",
+	[NVRM_E_TIMEOUT] = "timeout",
+	[NVRM_E_LOST] = "channel_lost",
 };
 _Static_assert(sizeof(error_ids) / sizeof(error_ids[0]) == NVRM_E__COUNT,
     "an error code has no id");

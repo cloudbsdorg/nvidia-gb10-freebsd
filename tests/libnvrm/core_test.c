@@ -1424,21 +1424,21 @@ static void
 test_public_versions(void)
 {
 	static const uint32_t built_for[] = { 580, 178, 4 };
-	static const uint32_t library[] = { 1, 2, 0 };
-	static const uint32_t symbols[] = { 1, 2 };
-	static const uint32_t schema[] = { 1, 2 };
+	static const uint32_t library[] = { 1, 3, 0 };
+	static const uint32_t symbols[] = { 1, 3 };
+	static const uint32_t schema[] = { 1, 3 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
 	CHECK_EQ(NVRM_API_MAJOR, 1);
-	CHECK_EQ(NVRM_API_MINOR, 2);
+	CHECK_EQ(NVRM_API_MINOR, 3);
 	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
 	    "");
-	t_check_version(nvrm_library_version(), "1.2.0", library, 3, "");
+	t_check_version(nvrm_library_version(), "1.3.0", library, 3, "");
 	v = nvrm_symbol_version();
-	t_check_version(v, "NVRM_1.2", symbols, 2, "");
+	t_check_version(v, "NVRM_1.3", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.2", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "1.3", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1478,7 +1478,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":2") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":3") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1490,13 +1490,13 @@ test_json(void)
 	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
 	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library\":{\"available\":true,"
-	    "\"string\":\"1.2.0\",\"major\":1,\"minor\":2,\"patch\":0,"
-	    "\"parts\":[1,2,0],\"source\":\"derived\"}") != NULL);
+	    "\"string\":\"1.3.0\",\"major\":1,\"minor\":3,\"patch\":0,"
+	    "\"parts\":[1,3,0],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
-	    "\"string\":\"NVRM_1.2\",\"major\":1,\"minor\":2,\"patch\":0,"
-	    "\"parts\":[1,2],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.2\","
-	    "\"major\":1,\"minor\":2,\"patch\":0,\"parts\":[1,2],"
+	    "\"string\":\"NVRM_1.3\",\"major\":1,\"minor\":3,\"patch\":0,"
+	    "\"parts\":[1,3],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.3\","
+	    "\"major\":1,\"minor\":3,\"patch\":0,\"parts\":[1,3],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1602,7 +1602,7 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 2") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 3") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "

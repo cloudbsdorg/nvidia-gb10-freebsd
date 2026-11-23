@@ -539,4 +539,5 @@ const nvrm_backend_ops nvrm_backend_fake_ops = {
 	.gpu_classes = fake_gpu_classes,
 	.limit = fake_limit,
 	.mem = &nvrm_fake_mem_ops,
+	.chan = &nvrm_fake_chan_ops,
 };

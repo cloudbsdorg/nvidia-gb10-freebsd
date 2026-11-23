@@ -279,15 +279,15 @@ returns the version answer to the RM query with source
 returns the RM version against which the library was built.
 .Fn nvrm_library_version
 returns the library API version, currently
-.Li 1.2.0 .
+.Li 1.3.0 .
 .Fn nvrm_symbol_version
 returns the library symbol version, currently the string
-.Li NVRM_1.2
-with integer parts 1 and 2.
+.Li NVRM_1.3
+with integer parts 1 and 3.
 .Fn nvrm_schema_version
 returns the JSON schema version, currently
-.Li 1.2
-with integer parts 1 and 2.
+.Li 1.3
+with integer parts 1 and 3.
 The built-for, library, symbol and schema versions have source
 .Li derived .
 The schema version is also the
@@ -493,9 +493,10 @@ This interface is provisional.
 The symbol versions
 .Li NVRM_1.0
 and its additive successors
-.Li NVRM_1.1
+.Li NVRM_1.1 ,
+.Li NVRM_1.2
 and
-.Li NVRM_1.2 ,
+.Li NVRM_1.3 ,
 and the structures behind them, are frozen at the first package release and not
 before; a future version may still reshape them.
 The memory calls are
@@ -504,6 +505,11 @@ API minor 1.
 The version calls are
 .Li NVRM_1.2 ,
 API minor 2.
+The channel calls are
+.Li NVRM_1.3 ,
+API minor 3
+(see
+.Xr nvrm_chan 3 ).
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev NVRM_FAKE_PROFILE"
 .It Ev NVRM_BACKEND
