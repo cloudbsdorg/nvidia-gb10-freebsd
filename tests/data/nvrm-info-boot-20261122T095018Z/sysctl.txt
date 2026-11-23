@@ -1,0 +1,8 @@
+hw.nvidia.version: NVIDIA UNIX Open Kernel Module for aarch64  580.178.04  Release Build  (cloudbsd@build)  Sun Nov 22 06:36:44 UTC 2026
+hw.nvidia.altra_device_wc_active: 1
+hw.nvidia.gpus.1.type: PCIe
+hw.nvidia.gpus.1.uuid: GPU-17743da2-61b3-ef41-e46e-5679f4ed15ec
+hw.nvidia.gpus.1.firmware: N/A
+hw.nvidia.gpus.1.vbios: ??.??.??.??.??
+hw.nvidia.gpus.1.irq: 707
+hw.nvidia.gpus.1.model: NVIDIA GeForce RTX 5060 Ti

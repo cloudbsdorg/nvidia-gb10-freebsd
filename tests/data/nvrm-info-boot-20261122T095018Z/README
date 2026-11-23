@@ -1,0 +1,33 @@
+nvrm-info on a real board, 2026-11-22 (Track #2362)
+====================================================
+
+Real, captured by tests/libnvrm/boot_nvrm_info.sh in a test boot of amp001 (an
+RTX 5060 Ti, device unit 1, a BMC display on unit 0).  Never edited:
+
+  nvrm-info.json   nvrm-info --json of that boot (library before the fixes:
+                   no compute capability, no versions object,
+                   running_rm_version unavailable)
+  sysctl.txt       hw.nvidia.version, altra_device_wc_active, hw.nvidia.gpus.*
+                   (no dev.nvidia.*, no hw.nvidia.version_*: not yet captured)
+  pciconf.txt      pciconf -lvb
+  results.txt      the four FAIL rows this capture produced
+
+Derived, written by make-after.py (python3 -I make-after.py [DIR]) from the
+real files; only the fields the fixed code adds, with the values the fixed code
+gives for this boot's raw values:
+
+  nvrm-info.after.json  schema_minor 2; gpu.rm_sm_version 2564 (0x0A04);
+                        gpu.compute_capability_major/minor 12/0 (derived);
+                        top-level versions with driver (source os) and
+                        built_for (derived) only; running_rm_version available
+                        "580.178.04" (source os).  Not complete against the
+                        schema: the device versions group and the other
+                        versions members are not added, no comparison reads them.
+  sysctl.after.txt      the real sysctl.txt plus hw.nvidia.version_string,
+                        _major, _minor, _patch, _suffix, _available and
+                        dev.nvidia.1.uuid, .pci_bus_id (000d:01:00.0) and
+                        .%location, in the output form of sysctl(8).
+
+tests/libnvrm/boot_fixture_test.sh runs boot_compare.py on the original (the
+SM, uuid, running-version and versions rows must FAIL) and on the derived
+fixture (every row must PASS), and on mutations of the derived one.

@@ -42,14 +42,22 @@ is running.
 .Sh ENVIRONMENT
 .Bl -tag -width ".Ev GB10_WORK"
 .It Ev GB10_WORK
-Work root, default
-.Pa $HOME/work/gb10 .
+Work root.
+The default is the
+.Pa work/
+directory of the checkout.
+.Ev GB10_WORK
+overrides it.
 .It Ev MODELS
-Model directory, default
-.Pa $HOME/work/models .
+Model directory, for example
+.Pa /path/to/models .
+When unset, the default is
+.Pa models/
+under the work root.
 .It Ev ONLY
 Space-separated subset of
 .Cm 3b 7b ornith qwen .
+When unset, all four run.
 .El
 .Sh EXIT STATUS
 0 when every run succeeded; 1 when a run failed; 2 for a usage error or a running stress test.

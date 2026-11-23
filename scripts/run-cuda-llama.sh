@@ -16,7 +16,7 @@
 #              libraries merged in (default $GB10_WORK/llm/cuda/llama-b12531-cuda/llama-b12531)
 #   SHIMDIR    directory holding shim.so (default $GB10_WORK/build/linux-cuda)
 #
-# Exit status: that of PROG; 2 usage or no HOME; 1 a path is missing.
+# Exit status: that of PROG; 2 usage; 1 a path is missing.
 set -eu
 
 case "${1:-}" in

@@ -177,8 +177,8 @@ records the source tag even when a shallow clone reports build number 1.
 .It Fl -models Ar dir
 Read the two GGUF models from
 .Ar dir .
-The default is
-.Pa ~/work/models .
+Set it explicitly, for example
+.Pa /path/to/models .
 .It Fl -out Ar rundir
 Write raw results and run metadata below
 .Ar rundir .
@@ -208,8 +208,8 @@ Emit JSON Lines instead of one indented JSON document.
 .It Fl -hw-preflight Ar path
 Run the hardware preflight helper at
 .Ar path .
-The default is
-.Pa ~/git/skills/skills/hardware-preflight-and-verify/scripts/hw-preflight .
+The default is the hardware preflight helper from the skills checkout.
+Use this option to give its path explicitly.
 .It Fl -icd-dir Ar dir
 Search
 .Ar dir
@@ -229,8 +229,11 @@ Print usage and exit.
 .Bl -tag -width "NLB_HW_PREFLIGHT"
 .It Ev GB10_WORK
 Base directory for the default build and output paths.
-The default is
-.Pa ~/work/gb10 .
+The default is the
+.Pa work/
+directory of the checkout;
+.Ev GB10_WORK
+overrides it.
 .It Ev VK_DRIVER_FILES
 An inherited value is accepted only when its sole entry is identical to the
 selected native ICD manifest.
@@ -249,6 +252,8 @@ These dynamic-loader and device-order overrides are refused when set,
 including when empty.
 .It Ev NLB_TEST
 Set to 1 to enable the fixture-command interface.
+Any other value, or none, leaves it off, and the command overrides listed after
+this entry are refused.
 Test rows and metadata carry test_mode true and path_status test, never native
 history provenance.
 .It Ev NLB_VULKANINFO , Ev NLB_PCICONF , Ev NLB_SYSCTL , Ev NLB_KLDSTAT , Ev NLB_FSTAT , Ev NLB_FILE , Ev NLB_BECTL , Ev NLB_UNAME , Ev NLB_HW_PREFLIGHT , Ev NLB_LLAMA_BENCH

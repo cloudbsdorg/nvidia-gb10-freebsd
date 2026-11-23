@@ -79,6 +79,11 @@ stop_cmd=:
 : "${kernel_patches_testboot_model:=}"
 : "${kernel_patches_testboot_return:=/usr/local/sbin/testboot-return}"
 : "${kernel_patches_testboot_version:=/usr/local/etc/kernel_patches_testboot.version}"
+kernel_patches_testboot_real_shutdown=/sbin/shutdown
+: "${kernel_patches_testboot_shutdown:=$kernel_patches_testboot_real_shutdown}"
+: "${kernel_patches_testboot_marker:=/usr/local/etc/kernel_patches_testboot.marker}"
+: "${kernel_patches_testboot_lockfile:=/var/run/noshutdown}"
+: "${kernel_patches_testboot_bectl:=bectl}"
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=$kernel_patches_testboot_work/$STAMP
@@ -120,10 +125,80 @@ dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, 
 	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
 }
 
-dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+dm_confirm()
 {
 	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
 	[ "$_dm_ps" = "$2shutdown" ]
+}
+
+# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE
+# The pure decision for the REAL shutdown path: no side effects, no files, no commands.  It
+# prints the reason and returns 1 when the real shutdown(8) must not be called, and returns 0
+# only when all of these hold: uid 0; a real rc boot; a marker whose first line is non-empty;
+# a current BE that equals it.  /etc/rc.subr strips the one/fast/force prefix, so rc_arg is
+# "start" for onestart too and cannot tell a boot from a hand run.  Only autoboot=yes (set by
+# /etc/rc autoboot) and rc_fast=yes (set by the faststart prefix /etc/rc uses) can, so a real
+# boot needs autoboot=yes, rc_fast=yes and rc_arg=start together.
+dm_decide()
+{
+	if [ "$1" != 0 ]; then
+		echo "uid $1 is not 0"
+		return 1
+	fi
+	if [ "$2" != yes ] || [ "$3" != yes ] || [ "$4" != start ]; then
+		echo "not an rc boot start (needs autoboot=yes, rc_fast=yes, rc_arg=start; have autoboot=${2:-unset}, rc_fast=${3:-unset}, rc_arg=${4:-unset})"
+		return 1
+	fi
+	if [ -z "$5" ]; then
+		echo "the marker is missing or its first line is empty"
+		return 1
+	fi
+	if [ -z "$6" ]; then
+		echo "bectl list shows no BE has the N flag"
+		return 1
+	fi
+	if [ "$6" != "$5" ]; then
+		echo "running BE $6 does not match marker $5"
+		return 1
+	fi
+	return 0
+}
+
+# deadman_allowed returns 0 only when it is safe to call the shutdown program.  Outside an rc
+# boot (autoboot is not yes) an override of kernel_patches_testboot_shutdown is honoured when it
+# is an absolute path to an executable file that is not setuid (a file that is not setuid cannot
+# restart the host).  At an rc boot (autoboot=yes) the override is ignored: the real conditions
+# of dm_decide apply and the call goes through kernel_patches_testboot_real_shutdown.
+# Decided: a hand run (onestart, not an rc boot) as root with a stub override is allowed, because
+# a stub that is a non-setuid file cannot reboot; the host test pins it with "control: same stub
+# on a hand run is used".
+deadman_allowed()
+{
+	_dm_refuse=
+	_dm_stub=0
+	if [ "${autoboot:-}" != yes ]; then
+		if [ "$kernel_patches_testboot_shutdown" != "$kernel_patches_testboot_real_shutdown" ]; then
+			case $kernel_patches_testboot_shutdown in
+			/*)
+				if [ -f "$kernel_patches_testboot_shutdown" ] && [ -x "$kernel_patches_testboot_shutdown" ] &&
+				    [ ! -u "$kernel_patches_testboot_shutdown" ]; then
+					_dm_stub=1
+					return 0
+				fi
+				;;
+			esac
+		fi
+	else
+		kernel_patches_testboot_shutdown=$kernel_patches_testboot_real_shutdown
+	fi
+	_dm_marker=
+	[ ! -f "$kernel_patches_testboot_marker" ] || _dm_marker=$(sed -n '1p' "$kernel_patches_testboot_marker" 2> /dev/null)
+	_dm_be=$("$kernel_patches_testboot_bectl" list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}')
+	if ! _dm_refuse=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_marker" "$_dm_be"); then
+		return 1
+	fi
+	return 0
 }
 
 deadman_arm()
@@ -132,28 +207,62 @@ deadman_arm()
 	''|*[!0-9]*|0) row deadman fail "kernel_patches_testboot_deadman is '$kernel_patches_testboot_deadman', not a positive number of minutes"; return 0 ;;
 	esac
 	DM_CHILD=
-	shutdown -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	DM_OK=0
+	if ! deadman_allowed; then
+		row deadman fail "REFUSED: not calling shutdown: $_dm_refuse; this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	if [ -e "$kernel_patches_testboot_lockfile" ]; then
+		row deadman fail "$kernel_patches_testboot_lockfile exists; not calling shutdown; this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	"$kernel_patches_testboot_shutdown" -r "+$kernel_patches_testboot_deadman" "kernel_patches_testboot dead-man: restart in $kernel_patches_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
 	_dm_status=$?
 	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
 	_dm_fail=
-	if [ -e /var/run/noshutdown ]; then
-		_dm_fail="/var/run/noshutdown exists"
-	elif [ "$_dm_status" -ne 0 ]; then
+	if [ "$_dm_status" -ne 0 ]; then
 		_dm_fail="shutdown exit status $_dm_status"
 	elif [ -z "$_dm_pid" ]; then
 		_dm_fail="no pid line"
-	elif ! dm_confirm "$_dm_pid" 0; then
-		_dm_fail="pid $_dm_pid is not a root shutdown"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
 	fi
 	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
 	if [ -n "$_dm_fail" ]; then
 		row deadman fail "$_dm_fail; first line of deadman.txt: ${_dm_first:-<empty>}"
 	else
 		DM_CHILD=$_dm_pid
-		row deadman pass "shutdown -r +$kernel_patches_testboot_deadman is pending as pid $DM_CHILD"
+		if [ "$_dm_stub" = 1 ]; then
+			row deadman pass "stubbed shutdown -r +$kernel_patches_testboot_deadman is pending as pid $DM_CHILD"
+		else
+			row deadman pass "shutdown -r +$kernel_patches_testboot_deadman is pending as pid $DM_CHILD"
+		fi
 		DM_OK=1
 	fi
 	sync
+}
+
+deadman_cancel()
+{
+	case $DM_CHILD in
+	''|*[!0-9]*)
+		row deadman fail "dead-man not pending: no confirmed shutdown pid; killing nothing"
+		return 0
+		;;
+	esac
+	if ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman fail "dead-man pid $DM_CHILD is no longer a shutdown owned by uid $(id -u); killing nothing"
+		return 0
+	fi
+	if kill "$DM_CHILD" > /dev/null 2>&1; then
+		row deadman pass "cancelled dead-man shutdown pid $DM_CHILD"
+		DM_CHILD=
+		DM_OK=0
+	else
+		row deadman fail "could not cancel dead-man shutdown pid $DM_CHILD"
+	fi
 }
 
 run_tests()
@@ -320,10 +429,7 @@ kernel_patches_testboot_start()
 	_trc=$?
 	echo "== testboot-return exit $_trc"
 	if [ "$_trc" = 3 ]; then
-		case $DM_CHILD in
-		''|*[!0-9]*) ;;
-		*) kill "$DM_CHILD" > /dev/null 2>&1 ;;
-		esac
+		deadman_cancel
 	fi
 	) > "$OUT/rc.log" 2>&1 &
 	return 0

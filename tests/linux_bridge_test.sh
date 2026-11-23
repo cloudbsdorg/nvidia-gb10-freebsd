@@ -510,10 +510,14 @@ readme_install_ok() {	# readme_install_ok <README>: 0 ok, 1 the old claim is bac
 	README_MISSING=
 	grep -q -e 'also loads linux64' -e 'plus linux64, linux_common' "$1" && return 1
 	# the commands of the Installation section's fenced blocks, continuation lines joined
-	_cmds=$(sed -n '/^## Installation/,/^## /p' "$1" | awk '/^```/ { f = !f; next } f { if (sub(/\\$/, "")) { buf = buf $0; next } print buf $0; buf = "" }')
-	for _w in 'kldload .*nvidia_linux\.ko' 'kldload .*nvidia_modeset_linux\.ko' 'install .*nvidia_linux\.ko' 'install .*nvidia_modeset_linux\.ko' \
-	    'install .*rc\.d/nvidia_linux ' 'sysrc linux_enable=YES' 'sysrc nvidia_linux_mode='; do
-		printf '%s\n' "$_cmds" | grep -q -e "$_w" || { README_MISSING=$_w; return 2; }
+	# The section runs from its "## Install" or "## Installation" heading to the next "## " heading of any
+	# name (sed checks the end pattern from the line after the start, so the heading itself does not end it).
+	_cmds=$(sed -E -n '/^## Install(ation)?$/,/^## /p' "$1" | awk '/^```/ { f = !f; next } f { if (sub(/\\$/, "")) { buf = buf $0; next } print buf $0; buf = "" }')
+	# make install puts the modules and the rc script in place, so the section loads them by name or by path
+	# a command starts the line (a root tool may come first), so "# kldload ..." and "echo kldload ..." do not count
+	_root='^(doas +|sudo +)?'
+	for _w in "${_root}kldload( +-[A-Za-z]+)* +(.*/)?nvidia_linux(\\.ko)?( |\$)" "${_root}kldload( +-[A-Za-z]+)* +(.*/)?nvidia_modeset_linux(\\.ko)?( |\$)" "${_root}sysrc linux_enable=YES" "${_root}sysrc nvidia_linux_mode="; do
+		printf '%s\n' "$_cmds" | grep -E -q -e "$_w" || { README_MISSING=${_w#"$_root"}; return 2; }
 	done
 	return 0
 }
@@ -537,11 +541,44 @@ printf '## Installation\nInstall nvidia_linux.ko, nvidia_modeset_linux.ko and rc
 _rc=0
 readme_install_ok "$TMPD/readme_prose.md" || _rc=$?
 [ "$_rc" = 2 ] && pass "plant (j): provider names in prose only are refused" || fail "plant (j): prose naming the providers was accepted (rc $_rc)"
-# the sysrc lines only in prose: refused, and the message names the missing command
-sed 's/^sysrc linux_enable=YES.*$//' "$REPO/README.md" > "$TMPD/readme_nosysrc.md"
+# the linux_enable command only in prose (outside any fenced block): refused, and the message names it
+awk '/^sysrc linux_enable=YES/ { print "```"; print "Run sysrc linux_enable=YES as root."; print "```sh"; next } { print }' "$REPO/README.md" > "$TMPD/readme_nosysrc.md"
 _rc=0
 readme_install_ok "$TMPD/readme_nosysrc.md" || _rc=$?
 [ "$_rc" = 2 ] && [ "$README_MISSING" = 'sysrc linux_enable=YES' ] && pass "plant (j): a README without the linux_enable command is refused and names it" || fail "plant (j): linux_enable command removed: rc $_rc missing [$README_MISSING]"
+# make install installs the providers and the rc script: the install-e2e manifest lists them and scripts/make.sh
+# builds and installs them (module_table, the install loop, the rc.d install line)
+install_covers() {	# install_covers <manifest> <make.sh>: 0 ok, 1 names what is missing
+	for _p in /boot/modules/nvidia_linux.ko /boot/modules/nvidia_modeset_linux.ko /usr/local/etc/rc.d/nvidia_linux; do
+		grep -q -e "^$_p " "$1" || { INSTALL_MISSING="manifest $_p"; return 1; }
+	done
+	for _p in 'nvidia-linux/nvidia_linux\.ko' 'nvidia-modeset-linux/nvidia_modeset_linux\.ko' 'install -m 555 -- "\$repo/rc\.d/nvidia_linux"'; do
+		grep -q -e "$_p" "$2" || { INSTALL_MISSING="make.sh $_p"; return 1; }
+	done
+	return 0
+}
+if install_covers "$REPO/tests/install-e2e/expected.manifest" "$REPO/scripts/make.sh"; then pass "(j) make install installs nvidia_linux.ko, nvidia_modeset_linux.ko and rc.d/nvidia_linux"; else fail "(j) make install does not cover the providers: $INSTALL_MISSING"; fi
+grep -v 'rc.d/nvidia_linux ' "$REPO/tests/install-e2e/expected.manifest" > "$TMPD/manifest_norc"
+install_covers "$TMPD/manifest_norc" "$REPO/scripts/make.sh" && fail "plant (j): a manifest without the rc script was accepted" || pass "plant (j): a manifest without the rc script is refused"
+grep -v 'nvidia_modeset_linux' "$REPO/scripts/make.sh" > "$TMPD/make_nomodeset"
+install_covers "$REPO/tests/install-e2e/expected.manifest" "$TMPD/make_nomodeset" && fail "plant (j): a make.sh without the modeset provider was accepted" || pass "plant (j): a make.sh without the modeset provider is refused"
+# one plant per accepted kldload form (and per refused one), in an otherwise complete Installation section
+frag() {	# frag <kldload line for nvidia_linux> > file
+	printf '## Install\n```sh\n# as root:\n%s\nkldload nvidia_modeset_linux\nsysrc linux_enable=YES\nsysrc nvidia_linux_mode=AUTO\n```\n## Next\n' "$1"
+}
+for _f in 'kldload nvidia_linux' 'kldload -v nvidia_linux' 'kldload /boot/modules/nvidia_linux.ko' 'kldload nvidia_linux.ko' 'doas kldload nvidia_linux' 'sudo kldload -v /boot/modules/nvidia_linux.ko'; do
+	frag "$_f" > "$TMPD/frag.md"; _rc=0; readme_install_ok "$TMPD/frag.md" || _rc=$?
+	[ "$_rc" = 0 ] && pass "plant (j): the form [$_f] is accepted" || fail "plant (j): the form [$_f] was refused (rc $_rc)"
+done
+for _f in '# kldload nvidia_linux' 'echo kldload nvidia_linux' 'kldload nvidia_linux_other' 'kldload -v nvidia_linux_x.ko'; do
+	frag "$_f" > "$TMPD/frag.md"; _rc=0; readme_install_ok "$TMPD/frag.md" || _rc=$?
+	[ "$_rc" = 2 ] && pass "plant (j): the form [$_f] is refused" || fail "plant (j): the form [$_f] was accepted (rc $_rc)"
+done
+# a commented-out linux_enable or modeset command does not count either
+frag 'kldload nvidia_linux' | sed 's/^sysrc linux_enable=YES/# sysrc linux_enable=YES/' > "$TMPD/frag2.md"; _rc=0; readme_install_ok "$TMPD/frag2.md" || _rc=$?
+[ "$_rc" = 2 ] && pass "plant (j): a commented-out linux_enable command is refused" || fail "plant (j): a commented-out linux_enable command was accepted (rc $_rc)"
+frag 'kldload nvidia_linux' | sed 's/^kldload nvidia_modeset_linux/# kldload nvidia_modeset_linux/' > "$TMPD/frag3.md"; _rc=0; readme_install_ok "$TMPD/frag3.md" || _rc=$?
+[ "$_rc" = 2 ] && pass "plant (j): a commented-out modeset kldload is refused" || fail "plant (j): a commented-out modeset kldload was accepted (rc $_rc)"
 # every build-shim.sh command in the README names its module with --module=
 readme_shim_ok() { grep -E 'build-shim\.sh +(nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux)( |$)' "$1" | grep -q . && return 1; return 0; }
 if readme_shim_ok "$REPO/README.md"; then pass "(j) no README build-shim.sh command names its module as a bare word"; else fail "(j) a README build-shim.sh command names the module as a bare word, not --module="; fi

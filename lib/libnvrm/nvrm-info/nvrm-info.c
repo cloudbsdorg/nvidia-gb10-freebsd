@@ -31,13 +31,40 @@ usage(FILE *fp)
 	    "usage: nvrm-info [--json | --jsonl | --schema] [--backend name]\n"
 	    "       nvrm-info --help\n"
 	    "\n"
-	    "  --json      one JSON document (schema nvrm-info/1)\n"
-	    "  --jsonl     JSON Lines: header, one record per GPU, end record\n"
+	    "  --json      one JSON document (schema nvrm-info/1); versions are\n"
+	    "              strings plus integer parts\n"
+	    "  --jsonl     JSON Lines: header, one record per GPU, end record;\n"
+	    "              versions are strings plus integer parts\n"
 	    "  --schema    print the JSON Schema of both outputs\n"
 	    "  --backend   rm (the kernel driver) or fake (no hardware);\n"
 	    "              default: NVRM_BACKEND, else rm\n"
 	    "Exit status: 0 success (including no GPU attached), 1 failure\n"
 	    "(a JSON error record is printed in the JSON modes), 2 usage.\n");
+}
+
+static int
+text_version_reason(const nvrm_version *v)
+{
+	int reason;
+
+	for (reason = 0; reason < NVRM_R__COUNT; reason++)
+		if (v->reason != NULL &&
+		    strcmp(v->reason, nvrm_reason_id(reason)) == 0)
+			return (reason);
+#ifdef NVRM_FAULT_INJECT
+	abort();	/* a stored id must name a table row */
+#else
+	return (NVRM_R_VERSION_UNPARSED);
+#endif
+}
+
+static void
+text_version(const nvrm_version *v)
+{
+	if (v->available)
+		printf("%s", v->string);
+	else
+		printf("unknown (%s)", nvrm_reason_text(text_version_reason(v)));
 }
 
 static void
@@ -46,6 +73,8 @@ text_value(const nvrm_field *f, const char *base)
 	const nvrm_u64 *u = (const nvrm_u64 *)(base + f->offset);
 	const nvrm_str *st = (const nvrm_str *)(base + f->offset);
 	const nvrm_list *l = (const nvrm_list *)(base + f->offset);
+	const nvrm_version_field *ver =
+	    (const nvrm_version_field *)(base + f->offset);
 	uint32_t k;
 
 	printf("  %-22s ", f->name);
@@ -59,6 +88,12 @@ text_value(const nvrm_field *f, const char *base)
 			printf(f->hex ? "%s%#jx" : "%s%ju", k != 0 ? " " : "",
 			    (uintmax_t)l->value[k]);
 		printf(" (%s)\n", nvrm_source_name(l->source));
+	} else if (f->kind == NVRM_K_VERSION && ver->version.available)
+		printf("%s (%s)\n", ver->version.string,
+		    nvrm_source_name(ver->source));
+	else if (f->kind == NVRM_K_VERSION) {
+		text_version(&ver->version);
+		putchar('\n');
 	} else
 		printf("unavailable: %s\n", nvrm_reason_text(
 		    f->kind == NVRM_K_U64 ? u->reason :
@@ -168,13 +203,23 @@ emit(nvrm_ctx *ctx, enum mode mode)
 			rc = nvrm_json_end(n, stdout);
 		return (rc);
 	default:
-		printf("backend %s, built for RM %s, running RM ",
-		    nvrm_backend_name(ctx), NVRM_RM_VERSION);
-		if (NVRM_HAVE(*nvrm_rm_running_version(ctx)))
-			printf("%s\n", nvrm_rm_running_version(ctx)->value);
-		else
-			printf("unknown (%s)\n", nvrm_reason_text(
-			    nvrm_rm_running_version(ctx)->reason));
+		printf("backend %s, built for RM ", nvrm_backend_name(ctx));
+		text_version(nvrm_built_for_version());
+		printf(", running RM ");
+		text_version(nvrm_driver_version(ctx));
+		putchar('\n');
+		printf("RM API version ");
+		text_version(nvrm_rm_api_version(ctx));
+		putchar('\n');
+		printf("library version ");
+		text_version(nvrm_library_version());
+		putchar('\n');
+		printf("library symbol version ");
+		text_version(nvrm_symbol_version());
+		putchar('\n');
+		printf("schema version ");
+		text_version(nvrm_schema_version());
+		putchar('\n');
 		if (n == 0)
 			printf("no GPU is attached\n");
 		for (i = 0; i < n; i++)

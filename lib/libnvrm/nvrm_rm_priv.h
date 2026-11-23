@@ -41,13 +41,13 @@
 /* ---- backend state ----------------------------------------------------- */
 
 struct nvrm_backend {
-	pid_t			pid;		/* the process that opened it */
-	unsigned		generation;	/* fork_generation when it was opened */
+	nvrm_owner		owner;		/* the process that opened it */
 	int			fd;
 	NvHandle		client;
 	uint32_t		next_handle;
 	nv_ioctl_card_info_t	cards[NV_MAX_DEVICES];
 	nvrm_str		running;
+	nvrm_version		driver, rm_api;
 	int			wc, wc_reason;
 };
 

@@ -496,3 +496,282 @@ Report: ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
 ## 2026-11-23T02:30Z round 2 pass 3 done (MiniMax; attempts r2d-r2f died with SseEventTooLarge from 22 GB of opencode state in obj/, r2g ran clean)
 All findings of gate round 1 (5ad4fa69) are addressed: one Version.map parser (lib/libcuda/version_map.awk, two modes), the CLI lists from the cudaNative* queries, visibility_filter named for what it holds and escaped in text, JSON and the empty-set diagnostic, the manual wording on the backend query, the 65-device overflow test, the help profile list and the duplicate rule. Test: 176 passed, 0 failed (was 151). Report ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
 Next: gate round 2 with answers to 5ad4fa69, commit, merge main, full tests/, PR.
+
+## 2026-11-22 (native-tools test-boot kit, agent/native-tools-testboot, #2362): PAUSED after the survey, no kit code written; resume at Next 1
+Brief (Mark): "we have native tooling, we need native test results, not going through linux". A one-shot test-boot kit
+that measures the NVIDIA card with native FreeBSD tools only: linux_enable=NO in the BE, no linux64 kldload, results as
+JSON/JSONL (a summary verdict plus per-tool JSON). Modelled on the uvm-bsd kit tests/ioctl/testboot (e3b07d9 on
+agent/2373-uvm-client-ownership): dead-man timer, self-recording rc one-shot, testboot-return to cloudbsd-rx7600, GSP
+firmware loaded as root first, root open before the probes, gpu-detect.sh (never /dev/nvidia0). Dry-run build and
+check-be.sh only; the orchestrator arms it. Every commit passes the review gate twice (two review-and-record rounds);
+author Mark LaPointe; push; a Track comment; a STATUS.md line.
+
+This is the one spec for the kit. It folds in the findings of review-and-record receipts aa2815b6, d1ea2742 and 03953fbd
+(five reviewing voices each) on earlier drafts of this entry; nothing here is decided by Mark yet.
+
+Layout and names:
+- BE nvidia-native-tools-test-YYYYMMDD-N, N from -n (default 1). A clashing name is refused with a message that names the
+  existing BE and the next free N.
+- the rc one-shot (root) writes to /var/db/nvidia-native-tools-test/<stamp>/ in the BE and copies the run to the copy-out
+  directory, a make-be.sh option whose default is /home/mlapointe/work/gb10/logs/native-tools-testboot (the home dataset
+  survives the return). check-be.sh fails when that directory is on the BE dataset (zfs list -H -o name for the path
+  equals the BE dataset or lies below it).
+- shared pieces of the model kit (dead-man, rc skeleton, gpu-detect.sh, testboot-return) are vendored with a sha256 pin
+  in VENDOR; check-be.sh compares them (testboot-return pin 3a88d17547c013ce93631d5aa4a414bcae6ccadb6e6653f641553f6df77f4d9d).
+
+Statuses and verdict:
+- every row has one status: pass, fail, error, needs-linux, needs-linuxkpi or not-available, each with a reason.
+- summary.json holds every planned row (its key set equals the planned list, a host test checks it), counts per status,
+  and the verdict: fail when any row is fail or error or the environment check failed; incomplete when no row failed
+  but some planned row is not pass; pass only when every planned row passed. A run that tested little never reads pass.
+- libnvrm S2 rows stay in the plan: not-available with the reason (no agent/2378-libnvrm-s2 on origin at assembly)
+  unless S2 is pushed by then.
+
+The no-Linux guard:
+- environment, once, before any row: error when kldstat -v exits non-zero, or its output lacks kernel, or lacks
+  nvidia.ko (either missing is an error; positive control). fail when any file or module name contains "linux" (linux,
+  linux64, linux_common, linuxkpi, nvidia_linux, nvidia_modeset_linux, any future bridge), or when sysctl -N compat.linux
+  answers; only its unknown-oid answer counts as absent, any other failure is error. An environment failure or error
+  makes every row not-available ("environment tainted") and the verdict fail. The message names the modules found and
+  the fix (rebuild the BE from a base without them).
+- make-be.sh sets linux_enable=NO, strips linuxkpi consumers (amdgpu, drm, i915kms) from the clone kld_list and
+  loader.conf; check-be.sh fails when any entry still loads one.
+- per row: the row runs under ktrace -i -t cn; every execve path comes from its NAMI records (the tool, a #! interpreter,
+  every ELF it runs), and each must be a FreeBSD-branded ELF (brandelf, readelf -n). An execve without a resolved path,
+  or a trace with no execve of the tool itself, is error. Any kldload call in the trace, or a kldunload of a module whose
+  name contains linux, is fail. After the row, kldstat -v must show no new module (a delta).
+- host tests: a /bin/sh script passes; an undeclared copy of /bin/echo branded Linux, run by absolute path, fails; a row
+  that loads and unloads a module named linux_test fails; canned kldstat with only kernel is error; canned kldstat with
+  nvidia_linux.ko and no linux64 fails; a stub sysctl with a non-oid error is error.
+
+Classification of rows that may need Linux (evidence recorded in the row):
+- from the .ko: the MODULE_DEPEND list (readelf, kldxref) and undefined symbols matching linux, lkpi or linuxkpi; from
+  the row binaries: their brands. A dependency on linux, linux64 or linux_common gives needs-linux, on linuxkpi gives
+  needs-linuxkpi; none gives a native row. An inspection that fails (missing file, nm error) gives not-available.
+- nvidia-uvm.ko is SUSPECTED to need the Linuxulator (the #2363 kit loads it only after linux64), UNVERIFIED. The uvm-bsd
+  79-check ioctl suite and the #2373 probe and race tests follow this rule.
+- render uAPI and PRIME rows are native when their ioctls are served by nvidia.ko or nvidia-modeset.ko of the #2363 build
+  and the guard passes; otherwise classified by the same rule.
+
+Survey done:
+- model kit read: make-be.sh, check-be.sh, nvidia_client_owner_testboot, gpu-detect.sh, summarize.sh, testboot-return.
+- origin/main is 7e28d7b. agent/2363-linux-bridges-optional (dc38ba9) is NOT merged into main yet, so nvidia.ko on main
+  still carries the Linux ioctl bridge; the kit uses the #2363 build and installs only its native modules (nvidia.ko,
+  nvidia-modeset.ko, the GSP firmware), never nvidia_linux.ko or nvidia_modeset_linux.ko. Not yet checked on the files.
+- libnvrm S2 is NOT pushed; wt-libnvrm-s2 holds uncommitted S2 work of another agent: do not touch it.
+
+Next:
+1. Check with readelf and nm, recording the output here: the main nvidia.ko of the v6 boot build (nvidia-v6-phase0.ko in
+   $GB10_WORK/logs/uvm-2373), the #2363 build in the tree its make-be.sh -t reads (default $GB10_WORK/build/tree, from
+   dc38ba9: nvidia/nvidia.ko, nvidia-modeset/nvidia-modeset.ko), and nvidia-uvm.ko (nvidia-uvm-v5.ko, same directory).
+2. Write tests/native-tools-testboot/ (make-be.sh, check-be.sh, the rc one-shot, summarize.sh writing summary.json, the
+   guard and statuses above) and the kit host test.
+3. Rows: nvrm-info on the booted card (tests/libnvrm/boot_nvrm_info.sh), gpu-detect and the root open, then the uvm,
+   render and PRIME rows by the classification rule, the S2 rows as above.
+4. Gate twice per commit, push, the dry-run BE, check-be.sh, a Track comment under #2362, STATUS.md, hand back.
+
+## 2026-11-22 (native-tools test-boot kit, #2362): RESUMED after the test boot; kit written, host test green
+- main is a682522 (#2363 merged); the branch is fast-forwarded to it, the earlier entry re-added on top.
+- nvidia-uvm.ko NEEDS the Linuxulator, verified: uvm-bsd sys/uvm_main.c declares MODULE_DEPEND(nvidia_uvm,
+  linux64elf or linux, 1, 1, 1) and MODULE_DEPEND(nvidia_uvm, linux_common, 1, 1, 1) and calls
+  linux_ioctl_register_handler; kldxref -d -v on nvidia-uvm-v5.ko (the v7 boot module) prints linux64elf.1 and
+  linux_common.1, nm -u shows linux_ioctl_register_handler and linux_ioctl_unregister_handler. The uvm rows are
+  needs-linux until uvm-bsd makes that bridge optional the way #2363 did for nvidia.ko.
+- nvidia.ko of main NEEDS NO Linux, verified on a fresh archive build of a682522 (work-native-a682522, SYSDIR
+  kc502, base LLD 21.1.8): depends on kernel, mem, nvidia_gsp_ga10x_fw_fw only, no undefined linux_ or lkpi_ symbol;
+  nvidia-modeset.ko depends on kernel and nvidia.2 only. The v6 and older builds all depended on linux64elf and
+  linux_common. Staged in logs/native-tools/stage-a682522 with SHA256-native-a682522.txt and nvrm-info built from
+  the same commit.
+- the normal BE loads amdgpu (kld_list, so linuxkpi and drm) and linux64 (linux_enable); the kit strips both in the
+  clone and blocks them in devmatch (rc.conf and loader kenv).
+- libnvrm S2 still not on origin: nvrm-s2-memory is not-available. Render uAPI: header and documents only. PRIME:
+  needs-linuxkpi (nvidia-drm.ko, amdgpu).
+- kit: tests/native-tools-testboot/ (make-be.sh, check-be.sh, the rc one-shot, guard.sh, summarize.py, the summary
+  schema, ROWS.md, vendored gpu-detect.sh and testboot-return pinned in VENDOR), tests/native_tools_kit_test.sh
+  91 passed 0 failed, README section.
+Next: gate 2 rounds, commit once the root Makefile is on main (merge it first), push, dry-run BE, check-be, Track,
+STATUS, hand back.
+- Gate round 1 (receipt 1c084a59, 5 Opus voices plus scanners; lizard CCN 37 in summarize.py fixed by splitting
+  it). Fixed: guard_trace parses kdump by event name (a process name with spaces), keeps only the paths of a
+  successful execve, and a relative or vanished path is an error; any kldload or kldunload fails (kldunload names a
+  file id, so the rule is "any"; comments say so); lindebugfs matched; nm failure or an empty nm list is an error
+  (guard_undef); the rc script reads rc.conf.d before its defaults (normal_be was ignored); the copy-out refuses a
+  symbolic link in its path, writes into a new 0700 directory from inside it, and copies testboot-return.txt and
+  rc.log again after the return; not-run for every unreached row, not-available only for a missing tool; a missing
+  row after any failed row (planned or not) is not-run; bectl list failure no longer masked; copy-out default under
+  GB10_WORK; check-be finds the steps by check-be markers, derives the BE root from bootfs (any name), prints no ok
+  after a failed override check, says what to do on failure; make-be -h prints the whole header. Kit test 121/0.
+  Branch fast-forwarded to main d015038 (root Makefile, #2440).
+- Kit committed as c26d46d (gate rounds 1c084a59 and ec926a58), pushed. The spec entry above is superseded by the code
+  and ROWS.md wherever they differ: only nvrm-info and gpu-detect.sh are traced, any kldunload fails, statuses as in
+  ROWS.md.
+- Follow-up commit, from the round-2 findings: the second copy-out goes into the same directory by device and inode
+  (no root cp through a planted link), the directory must be ours and 0700; an exec with no path in the trace
+  (fexecve) is an error; the dead-man check counts only root's shutdown (pgrep -U 0); check-be reads every pool's
+  bootfs (a data pool without one passes); make-be refuses a copy-out not in plain form, and --activate runs
+  check-be.sh first and arms nothing when it fails; static rows may only be needs-linux, needs-linuxkpi or
+  not-available; a planned check recording info is an error; gpu-detect.sh is traced (row gpu-detect-native, 32
+  planned rows); staged nvrm-info and libnvrm.so.1 must be ELF (guard_elf); check-be wants python3 in the clone and
+  the one-shot writes a FAIL summary when summarize.py cannot run; usage errors are one line. Kit test 133/0.
+- Follow-up gate round 1 (receipt 7b02720b) fixed: any fexecve is an error (its image has no path even when the
+  interpreter does); a summarize.py crash exits 4 and the one-shot needs exit 0, 1 or 3 AND a summary.json, else a
+  FAIL summary; info rows turn into errors before the not-run rule looks for failures; check-be adds the root of the
+  BE dataset itself (when it mounted the BE) to the bootfs roots, checks the copy-out path in plain form
+  (guard_plain_path, shared with make-be) under set -f, says what to do; option values missing give the right
+  message; the --activate refusal is tested. Kit test 146/0.
+
+## 2026-11-22 (native-tools test-boot kit, #2362): the first boot stopped at env-before on a false positive
+- Boot 20261122T072752Z of nvidia-native-tools-test-20261122-1 returned to cloudbsd-rx7600 with no panic. env-before
+  and env-after failed on module records compiled into /boot/kernel.rx7600/kernel (GENERIC has COMPAT_LINUXKPI):
+  uhub/usb_linux, lkpi_iic/iicbus, lkpi_iicbb/iicbb, drm and drmn lkpi_iic and lkpi_iicbb, pci/lkpi_mlx5_core_pci_table.
+  No Linux file was loaded and compat.linux was an unknown oid; nothing else ran (the loads were gated on env-before).
+- Fix (orchestrator rule): fail only on a loaded FILE other than the kernel with a Linux-layer name (contains linux,
+  or starts with lkpi, lindebugfs, linsysfs, linprocfs), on such a module record inside a loaded file other than the
+  kernel, or on compat.linux answering; the records inside the kernel file are an info row (env-*-kernel-records).
+  New rows ko-native-nvidia and ko-native-nvidia-modeset (kldxref dependencies and nm undefined symbols) gate the
+  loads. The boot listing is the fixture tests/data/native-tools-env-before-20261122T072752Z.kldstat. 34 planned
+  rows; kit test 163/0.
+- Gate round 1 (receipt 19a40871): the kernel exemption left a gap, a module calling built-in LinuxKPI by an
+  unprefixed name (idr_alloc) with no MODULE_DEPEND; closed by guard_lkpi_imports (undefined symbols of the module
+  against the symbols linuxkpi*.ko and lindebugfs.ko beside the running kernel define, linker-set bounds left out).
+  nvidia.ko and nvidia-modeset.ko of main import none; nvidia-drm-v5.ko imports 40 (the control). One name rule
+  (guard_layer_name) for files, records and dependencies, now with drm, dmabuf, ttm, amdgpu, radeonkms and i915kms;
+  guard_env prints the kernel records on a records line (no globals); kldxref positive control is the module
+  record; the record-inside-another-file branch is tested. Kit test 174/0.
+## 2026-11-22T11:45Z libnvrm S3 (Track 2437, branch agent/2437-libnvrm-s3)
+- Main sync: fast-forwarded to origin/main 4a745c7. A --no-ff merge was refused by merge-proof (MERGE_HEAD brings the GitHub merge commit 4a745c7 with no per-commit receipt); b98157c is an ancestor of main, so the fast-forward carries no branch content.
+- Baseline tests/libnvrm_test.sh: 478 ok, 0 failed.
+- Spike answer (MIT RM source, src/nvidia/src/kernel/gpu/fifo/channel_descendant.c): a copy-class object allocated on a channel whose engine type is GR is bound to the partner copy engine of that GR engine for the channel runqueue (kfifoGetEnginePartnerList, exactly one partner, else NV_ERR_INVALID_STATE). So a graphics-runlist channel can host the copy class (GRCE); the test boot probe proves it on the RTX 5060 Ti.
+- clc86f.h in open-gpu-kernel-modules defines PAYLOAD_SIZE 24:24 with only _32BIT 0; 64-bit is 1 (Mesa clc86f.h). The SEM_EXECUTE word: RELEASE 1, RELEASE_WFI 20:20, PAYLOAD_SIZE 24:24. The open-gpu-kernel-modules clcab5.h is trimmed; the Mesa (MIT) clcab5.h has the full copy class.
+- opencode rounds run with a private XDG_DATA_HOME (tmp/libnvrm-s3/ocdata): the shared opencode.db was locked by about 15 parallel runs and the first round A attempt died on SQLITE_BUSY.
+- Round A (Kimi k3.1-pro): S2 DEFECTs correctness.N1 (owner check into the core) and falsification.N1 (DEFAULT page-size write-back). Round B brief written: slice 1 (nvrm_chan API, ring rules, fake GPFIFO).
+- Resume: check round A (tmp/libnvrm-s3/rounds/A-s2defects), review, suite, gate 2 rounds, commit, push; then run round B.
+- 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
+- Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
+- 2026-11-22T21:40Z A6 on main 44617da (PR 15 merged): the three DEFECTs left open on 297e307 (fake leak sweep, dangling fake_map pointer, DEFAULT write-back advice) and three DEBTs (give_back helper, munmap delta, second session asserted). Started by Kimi k3.1-pro (round A6, stopped), finished by Sonnet (Kimi quota out); mem_test main() runs a test table (CPD, the copy-paste detector of PMD). Suite 490 ok. Next: gate 2 rounds, commit, push, PR. Answers: tmp/libnvrm-s3/answers/answers-A6.txt.
+## 2026-11-22 (nvrm-info boot fixes and version sysctls, #2378 libnvrm, #2362 kit): PAUSED for a test boot
+Worktree /home/mlapointe/work/gb10/wt-2378-versions, branch agent/2378-version-numbers, cut from origin/main 8702134.
+No code is written yet, and no opencode round has started. Baseline: tests/libnvrm_test.sh 412 ok, 0 FAILED on 8702134.
+
+Findings so far (evidence ~/work/gb10/logs/native-tools-testboot/20261122T095018Z/nvrm-info):
+- sm_version 10.4: libnvrm splits NV2080_CTRL_GR_INFO_INDEX_SM_VERSION (raw 0x0A04) into major and minor.
+  ctrl2080gr.h of ogkm 580.178.04 (MIT): 0x0A04 is SM_VERSION_10_04, the older name kept until 12_* is
+  validated; 12_00 is 0x0C00 and 12_01 is 0x0C01. ctrl2080mc.h: ARCHITECTURE_GB200 0x1B0, IMPLEMENTATION
+  GB202 2, GB203 3, GB205 5, GB206 6, GB207 7, GB20B 0xB, GB20C 0xC. Plan: new fields compute_capability_major and
+  compute_capability_minor (source derived), from an (architecture, implementation) table: TU10x 7.5, GA100 8.0,
+  GA10x 8.6, GA10B 8.7, AD10x 8.9, GH100 9.0, GB100 10.0, GB202..GB207 12.0, GB20B 12.1. With no row: the RM
+  code through an alias list (0x0A04 is 12.0), else the code as major<<8|minor. New raw field rm_sm_version
+  (source rm). Keep sm_version_major and sm_version_minor unchanged (additive minor bump) and document them as
+  the RM internal numbering. Fake profiles: discrete becomes raw 0x0A04 (what the board reports), arch 0x1B0
+  impl 6, expect 12.0; unified stays arch 0x1B0 impl 0xB, expect 12.1. Mutants on the table and the alias.
+- running_rm_version unavailable: hw.nvidia.version DOES exist (sysctl.txt line 1), but it holds the whole banner
+  (about 100 bytes) and nvrm_rm.c read_sysctls() reads it into nvrm_str (NVRM_STR_MAX): the read fails on a short
+  buffer and the code turns that into os_not_reported. Red test: a scripted sysctl that returns the real banner.
+- UUID check: hw.nvidia.gpus.N.uuid EXISTS, N is the device unit (1 on amp001, /dev/nvidia1). The kit indexed it
+  with the libnvrm index 0. Fix in the kit: match the GPU by PCI location (new dev.nvidia.N.pci_bus_id, falling
+  back to dev.nvidia.N.%location dbsf=pciD:B:S:F), then compare dev.nvidia.N.uuid and hw.nvidia.gpus.N.uuid;
+  boot_nvrm_info.sh must also capture sysctl dev.nvidia.
+- VRAM: BOOT_EXPECT_VRAM_BYTES stays the nominal board size; pass when nominal minus a stated reserve maximum is at
+  most the reported size, and the reported size is at most nominal (the boot: 17179869184 - 17103323136 = 73 MiB).
+
+Decisions to carry (report them to the orchestrator):
+- hw.nvidia.version is an existing upstream sysctl holding the banner: keep it unchanged. New sysctls follow Mark
+  pattern NAME plus NAME_major, NAME_minor, NAME_patch: hw.nvidia.driver_version (string 580.178.04) and its three
+  integers; per GPU dev.nvidia.N.uuid, dev.nvidia.N.pci_bus_id, dev.nvidia.N.vbios_version (hex parts, _major,
+  _minor, _patch, _part4, _part5) and dev.nvidia.N.gsp_firmware_version; hw.nvidiamodeset.driver_version in
+  nvidia-modeset.ko (like hw.nvidiadrm). An integer part that cannot be parsed or is missing reads -1; the string
+  keeps the raw text. Handlers reuse the upstream rm_get_vbios_version, rm_get_firmware_version, rm_get_gpu_uuid
+  calls that hw.nvidia.gpus.N already makes at read time.
+- One parser and one formatter: a freestanding header lib/libnvrm/include/nvrm/nvrm_version.h (no libc), used by
+  libnvrm and copied into the nvidia build tree by scripts/prepare-tree.sh for the BSD-C OS-layer file (new
+  src/gb10-version/nv_version_sysctl.c plus small hook hunks in patches/ for nvidia_sysctl.c nv_sysctl_init and
+  the modeset load). The kernel branch therefore stacks on the libnvrm branch.
+- JSON: every version is an object {available, string, major, minor, patch, parts, suffix, source}; unparsed: string
+  kept, parsed false, reason_id version_unparsed, no numbers. Existing keys kept; new top-level versions object
+  (driver from sysctl, rm_api from NV_RM_API_VERSION_CMD_QUERY reply, libnvrm, libnvrm symbol level NVRM_1.1,
+  schema) and per GPU vbios and gsp_firmware (NV2080_CTRL_CMD_BIOS_GET_INFO_V2, NV2080_CTRL_CMD_GSP_GET_FEATURES).
+  Schema minor bump. New API symbols go in NVRM_1.1 in Version.map. uvm-bsd version: note only, out of scope.
+
+RESUME here:
+1. Kimi round 1 (opencode run -m dgx-mlapointe/kimi-k3.1-pro via ocrun.sh with round-watchdog.sh; fall back to
+   kimi-k3, then kimi-k2.7-code; then a Sonnet agent): libnvrm parser/formatter, compute capability, running
+   version read, versions object, schema, man pages nvrm(3) nvrm-info(8), tests and mutants. Gate 2 rounds, commit.
+2. Kernel branch agent/2378-nvidia-version-sysctls stacked on 1: OS-layer sysctls, nvidia(4) (man/nvidia.4), build
+   nvidia.ko with base LLD using the recipe in ~/work/gb10/work-native-a682522/build.sh (check Linker: LLD).
+3. Kit branch from agent/native-tools-testboot f3286e3: boot_nvrm_info.sh fixes plus the fixture test from this
+   boot, staged build, new dry-run BE, check-be; hand back the arm command, never arm.
+4. Track comments #2378 and #2362, STATUS.md, PRs.
+
+## 2026-11-22 13:35Z resume after the amp001 ZFS panic (about 13:24Z)
+- Worktrees wt-2378-versions (libnvrm) and wt-2378-sysctl (kernel) checked: nothing half-written; a stray build
+  object nvrm-info.pieo had been staged by an orchestrator build in the source dir and was removed from the index.
+- libnvrm_test 456 ok 0 FAILED; version_sysctl_test PASS (3 mutants killed); prepare-tree_test 15/0.
+- All code so far by opencode Kimi kimi-k3.1-pro (round A passes 1-5, round B passes 1-3). Rounds use a private
+  XDG_DATA_HOME because the shared opencode.db locked and killed two rounds.
+- Gate round 1 for the libnvrm commit restarted (the first attempt was cut by the scanners, the second by the panic:
+  no receipt, not counted).
+- Next: gate 2 rounds libnvrm, commit, push; rebase the kernel branch on it, gate 2 rounds, commit, push; kit round C.
+
+## 2026-11-22 13:50Z sysctl names (supersedes "Decisions to carry" of the PAUSED entry above)
+- Mark: hw.nvidia.version already exists, so it stays exactly as it is (the banner, legacy). Its parts are added as
+  siblings: hw.nvidia.version_string ("580.178.04"), version_major, version_minor, version_patch (int),
+  version_suffix (string, empty when none), version_available (1 or 0). There is NO hw.nvidia.driver_version.
+- A part the scheme does not have reads 0 (not -1); version_available 0 means unreadable and every part reads 0
+  (skill versions-as-numbers, skills main cb09bf7). Per GPU: hw.nvidia.gpus.N.vbios and .firmware stay, with
+  vbios_major/_minor/_patch/_build/_revision/_available/_suffix (hex) and firmware_major/_minor/_patch/_available/
+  _suffix siblings; new dev.nvidia.N.uuid and dev.nvidia.N.pci_bus_id; hw.nvidiamodeset.version and siblings.
+- The PAUSED entry above was written before any code; the code in this commit implements RESUME step 1.
+- Gate round 1 of the libnvrm commit: receipt 215f871d (5 Opus voices, FINDINGS). Answers in the round-2 answers
+  file; fixes by Kimi pass 6.
+
+## 2026-11-22 15:20Z libnvrm committed, PR open, merge refused: STOPPED
+- c0102d7 (agent/2378-version-numbers, pushed): libnvrm compute capability, versions as numbers, running RM version.
+  Gate 215f871d and e782961d. Code by opencode Kimi kimi-k3.1-pro (round A passes 1-7).
+- PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/22. `gh pr merge 22 --merge --author-email
+  mark@cloudbsd.org` was denied by the permission check; stopped as the brief says.
+- Kernel change ready in /home/mlapointe/work/gb10/wt-2378-sysctl (branch agent/2378-nvidia-version-sysctls, staged,
+  not gated; holds a copy of nvrm_version.h). Code by Kimi (round B passes 1-3). nvidia.ko and nvidia-modeset.ko
+  built with base LLD in build/tree-2378-sysctl; version_sysctl_test PASS (3 mutants), prepare-tree_test 15/0,
+  kmod_symbols_test PASS, fw_depend_test 44/0.
+- Kit: brief ready at ~/work/gb10/tmp/briefs-2378/round-c.md, fixture capture copied to
+  /home/mlapointe/work/gb10/wt-2362-kit/tests/data/nvrm-info-boot-20261122T095018Z (worktree on f3286e3).
+RESUME:
+1. After PR 22 is on main: rebase the kernel worktree on main (drop its header copy, keep the rest), gate 2 rounds,
+   commit, push, PR.
+2. Follow-up libnvrm commit for the Review-open items of c0102d7 (security.3 first), 2 rounds.
+3. Kit: put the kit branch on main (it merges clean with f3286e3), run round C, gate, PR; staged build from main
+   (recipe ~/work/gb10/work-native-a682522/build.sh), make-be dry run, check-be; hand back the arm command.
+
+
+## 2026-11-22 21:20Z main merged into the branch, PR 22 merge refused again: STOPPED
+- 7cddc09 (pushed): --no-ff merge of origin/main b7993ca. S2 keeps NVRM_1.1 and schema minor 1; the version calls
+  are NVRM_1.2 (library 1.2.0), the version additions schema minor 2. Gate receipt ee398a8b on the overlap.
+  Resolution by a Claude Sonnet sub-agent (MiniMax token plan limit; kimi-k3.1-pro, kimi-k3, kimi-k2.7-code monthly
+  usage limit). tests: NVRM_IDS_BASE_REF=origin/main OGKM=~/work/gb10/sources/open-gpu-kernel-modules-580.178.04
+  SYSDIR=~/rx7600/kc502/src/sys sh tests/libnvrm_test.sh: 535 ok 0 FAILED. (main now defaults GB10_WORK to
+  <repo>/work, so OGKM must be given.)
+- gh pr merge 22 --merge --author-email mark@cloudbsd.org: denied by the permission check a second time. Stopped.
+- Stray pre-fix working-tree edits found before the merge were saved to tmp/stray-worktree-changes.patch and dropped.
+RESUME: after PR 22 is merged, rebase wt-2378-sysctl on main (drop its nvrm_version.h copy), gate 2 rounds, PR;
+then kit round C; then the staged build, make-be dry run and check-be.
+
+## 2026-11-22T21:59Z #2448 kapi logdevice round 1
+- New patches/ogkm/patch-src_nvidia-modeset_kapi_include_nvkms-kapi-internal.h adds nvKmsKapiLogDevice (nvEvoLog, EVO_LOG_WARN, uses (__device)->gpuId); the patch was missing, so SetConsoleOwner called an undefined symbol. Applies with fuzz 0, no offset, and all ogkm patches apply in sequence.
+- tests/console_owner_patch_test.sh: KAPI_I copied and patched, check_logdevice_macro, check_logdevice_defined, 4 plant controls. 31 passed, 0 failed.
+- docs/CONSOLE-SHARING.md 6.1 paragraph. build-rmcore_test 23/0, enumerate_gpus_patch_test 5/0, kapi_table_test 30/0, prime_import_test 18/1 (D6 needs work/build/tree/nvidia-drm, not present in this worktree; unrelated).
+- scripts/build-rmcore.sh apply_patches globs patch-*; console_owner_patch_test.sh lists the patches it applies in one variable (OGKM_PATCHES).
+
+## 2026-11-22T22:22Z #2448 kapi logdevice round 2
+- Review-gate fixes: checks split so each failure names one cause (called, defined, warning level, own device argument, unconditional and never undefined, same prefix as the Debug macro); 11 new plant controls; one OGKM_PATCHES list for the required check and the apply loop; patch comment says operator and kernel log; test header states the missing macro is a clang implicit-declaration warning and an undefined symbol in the .ko.
+- console_owner_patch_test 42 passed 0 failed; kapi_table_test 30/0; build-rmcore_test 23/0. All ogkm patches apply in lexical order, fuzz 0.
+
+## 2026-11-22T21:30Z libnvrm S3 slice 1 (Track 2437, branch agent/2437-libnvrm-s3-chan, on main 44617da)
+- nvrm_chan API (nvrm_chan.h), core ring rules (nvrm_chan.c: E-2 per batch, splitting, INCOMPLETE runs, a FIFO of submit waiters with a turn condvar, flush order with two barriers), fake GPFIFO (nvrm_fake_chan.c: NOP, semaphore release and acquire 32/64-bit, ACQ_CIRC_GEQ, copy class), encoders in nvrm_methods.h, barriers in nvrm_barrier.h, nvrm_chan(3).
+- Written by opencode Kimi k3.1-pro (round B), finished by Sonnet (B2, B3: queued submit timeout and handoff, ring-wrap space fix; lint exemption for the fake channel data) after the Kimi quota ran out.
+- tests/libnvrm_test.sh 505 ok, 0 failed. chan_test about 200961 checks; nvrm_chan.c and nvrm_fake_chan.c at 100 percent lines and branches; 11 chan mutants killed.
+- Next: gate rounds 1 and 2, commit, push, PR.
+## 2026-11-22T23:25Z #2448 zz-2448 enumerate-gpus patch: fuzz 0 on main after d1752ad
+- patches/patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c regenerated with diff -U2 against the tree after every earlier patch (incl. the nv_version_sysctl.h include from d1752ad). Hunk 2 now anchors on that include; the NVRM include block still sits before nv-retpoline.h. Added (+) lines are byte-identical; hunks apply with no fuzz and no offset.
+- Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.
+- linux_bridge_test on a built tree (tests/linux_bridge_test.sh work/build/tree): 105 passed, 1 failed after; on cbe6ca3 104 passed, 3 failed. The two that went are check (g), the fresh-archive fuzz 0 apply of every patch ("does not apply with fuzz 0" and "a .rej file was left behind"). The one left is check (i), man/nvidia.4 line 272 `.Xr nvidia-smi 1` (mandoc STYLE "referenced manual not found"), which fails the same way on cbe6ca3.
+- Full suite (every tests/*_test.sh), here and on a cbe6ca3 baseline worktree, same build: the same tests fail on both, with identical FAIL lines. fw_depend and open_dev_failure fail on the nvidia.4 lint above; make_contract on two nvrm man3 links missing from expected.manifest; make_install_flow on a personal path in tests/version_sysctl_test.sh line 15; render_uapi_layout exits 2 on a skipped check. With the default tree argument, linux_bridge_test also reports the tree-2363 module files as missing (no tree-2363 is built here).

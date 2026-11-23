@@ -14,12 +14,88 @@ KIT=$HERE/linux-bridge-testboot
 WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/linux_bridge_kit_test.XXXXXXXX") || exit 1
-trap 'rm -rf "$TMPD"' EXIT
 fails=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 pass() { echo "PASS: $*"; }
 
-for f in linux_bridge_testboot summarize.sh make-be.sh; do
+# ---- (guard) no path reaches /sbin/shutdown during host tests
+# G1: these sentinels and the override precede every kit read or run. The PATH
+# sentinel turns a bare shutdown into a harmless, visible failure. The stub's
+# child is a copy of sleep named shutdown, so dm_confirm checks its exact pid.
+SENT=$TMPD/sent
+SENT2=$TMPD/sent2
+GUARD=$TMPD/guard
+mkdir -p "$SENT" "$SENT2" "$GUARD/child"
+cat > "$SENT/shutdown" <<'EOF'
+#!/bin/sh
+printf 'REACHED %s %s\n' "$0" "$*" >> "${SENT:?}/hits"
+exit 99
+EOF
+cat > "$SENT2/real-shutdown" <<'EOF'
+#!/bin/sh
+printf 'REAL REACHED %s %s\n' "$0" "$*" >> "${SENT2:?}/hits"
+exit 99
+EOF
+cp /bin/sleep "$GUARD/child/shutdown"
+cat > "$GUARD/shutdown-stub" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${LB_STUB_LOG:?}"
+"$LB_STUB_CHILD" 300 &
+_dm_pid=$!
+printf '%s\n' "$_dm_pid" >> "${LB_STUB_PIDLOG:?}"
+_dm_i=0
+_dm_c=
+while [ "$_dm_i" -lt 2000 ]; do
+	_dm_c=$(ps -o comm= -p "$_dm_pid" 2> /dev/null | tr -d ' ')
+	[ "$_dm_c" = shutdown ] && break
+	_dm_i=$((_dm_i + 1))
+done
+if [ "$_dm_c" != shutdown ]; then
+	kill "$_dm_pid" 2> /dev/null
+	exit 1
+fi
+printf 'shutdown: [pid %s]\n' "$_dm_pid"
+exit 0
+EOF
+chmod 755 "$SENT/shutdown" "$SENT2/real-shutdown" "$GUARD/shutdown-stub"
+LB_STUB_CHILD=$GUARD/child/shutdown
+LB_STUB_LOG=$GUARD/stub.args
+LB_STUB_PIDLOG=$GUARD/stub.pids
+linux_bridge_testboot_shutdown=$GUARD/shutdown-stub
+export SENT SENT2 LB_STUB_CHILD LB_STUB_LOG LB_STUB_PIDLOG linux_bridge_testboot_shutdown
+PATH=$SENT:$PATH
+export PATH
+GUARD_EXTRA_PIDS=
+own_shutdown_pid() {
+	case ${1:-} in ''|*[!0-9]*) return 1 ;; esac
+	[ "$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ]
+}
+cleanup() {
+	if [ -f "$LB_STUB_PIDLOG" ]; then
+		while IFS= read -r _pid; do
+			if own_shutdown_pid "$_pid"; then kill "$_pid" 2> /dev/null || :; fi
+		done < "$LB_STUB_PIDLOG"
+	fi
+	for _pid in $GUARD_EXTRA_PIDS; do
+		if own_shutdown_pid "$_pid"; then kill "$_pid" 2> /dev/null || :; fi
+	done
+	GUARD_EXTRA_PIDS=
+	rm -rf "$TMPD"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+guard_harness_ok() {
+	[ -n "$1" ] && [ "$1" != /sbin/shutdown ] && [ -f "$1" ] && [ -x "$1" ] && [ ! -u "$1" ]
+}
+if ! guard_harness_ok "$linux_bridge_testboot_shutdown"; then
+	echo "guard: the harness left linux_bridge_testboot_shutdown at /sbin/shutdown" >&2
+	exit 1
+fi
+guard_harness_ok /sbin/shutdown && fail "G1 control: the real default passed the harness assertion" || pass "G1: PATH sentinel and non-setuid stub are set before kit code; the real-default control is seen"
+
+for f in linux_bridge_testboot summarize.sh make-be.sh bare-shutdown-check.sh; do
 	sh -n "$KIT/$f" && pass "$f parses" || fail "$f has a syntax error"
 done
 
@@ -90,6 +166,20 @@ sh "$KIT/summarize.sh" "$TMPD/nopass.jsonl" > /dev/null && fail "plant: a run wi
 
 # make-be.sh: the dry run changes nothing and puts no Linux module in kld_list
 out=$(sh "$KIT/make-be.sh" -b base --dry-run -t "$TMPD/none" 2>&1) && pass "dry run succeeds" || fail "dry run failed: $out"
+case $out in *'linux_bridge_testboot.marker: nvidia-linux-bridge-test-'*'(mode 0444)'*) pass "G6: the dry run writes the marker with the BE name and mode 0444" ;; *) fail "G6: the dry run has no marker write with its BE name" ;; esac
+# has_bare_shutdown FILE: 0 when a bare shutdown command word remains.  The one detector is
+# bare_shutdown_lines in the kit's bare-shutdown-check.sh; an unreadable file counts as bare.
+. "$KIT/bare-shutdown-check.sh"
+has_bare_shutdown() {
+	[ -n "$(bare_shutdown_lines "$1")" ]
+}
+make_be_guard_ok() {
+	! has_bare_shutdown "$1"
+}
+make_be_guard_ok "$KIT/make-be.sh" && pass "G6: make-be.sh has no bare shutdown command" || fail "G6: make-be.sh has a bare shutdown command"
+cp "$KIT/make-be.sh" "$TMPD/make-be-shutdown"
+printf '\nshutdown -r now\n' >> "$TMPD/make-be-shutdown"
+! cmp -s "$KIT/make-be.sh" "$TMPD/make-be-shutdown" && { make_be_guard_ok "$TMPD/make-be-shutdown" && fail "G6 control: a planted make-be.sh shutdown command was not seen" || pass "G6 control: a planted make-be.sh shutdown command is seen"; } || fail "G6 control: the make-be.sh mutant did not differ"
 case $out in *'linux_enable=NO'*) pass "the clone sets linux_enable=NO" ;; *) fail "no linux_enable=NO in the plan" ;; esac
 case $out in *'kld_list="nvidia_gsp_ga10x_fw nvidia nvidia-modeset"'*) pass "kld_list is the native modules only, by file name" ;; *) fail "unexpected kld_list in the plan" ;; esac
 case $out in *'testboot-return'*) pass "the plan installs testboot-return" ;; *) fail "the plan does not install testboot-return" ;; esac
@@ -197,7 +287,7 @@ grep -q 'mkdir -p "$OUT"' "$K" && fail "the run directory is made with mkdir -p 
 # behavioural plant: a planted symlink in the log root must not be followed
 mkdir -p "$TMPD/lr" "$TMPD/bin"
 chmod 755 "$TMPD/lr"
-for c in kldstat kldunload kldload service sync dmesg shutdown; do printf '#!/bin/sh\nexit 0\n' > "$TMPD/bin/$c"; chmod +x "$TMPD/bin/$c"; done
+for c in kldstat kldunload kldload service sync dmesg; do printf '#!/bin/sh\nexit 0\n' > "$TMPD/bin/$c"; chmod +x "$TMPD/bin/$c"; done
 mkdir -p "$TMPD/rcconfd"
 echo abc123 > "$TMPD/kit.version"
 export TMPD
@@ -205,22 +295,419 @@ printf '#!/bin/sh\necho "$@" > "$TMPD/return.args"\nexit 0\n' > "$TMPD/bin/testb
 printf '#!/bin/sh\necho 20260101T000000Z\n' > "$TMPD/bin/date"; chmod +x "$TMPD/bin/date"
 echo victim > "$TMPD/victim"
 ln -s "$TMPD/victim" "$TMPD/lr/linux-bridge-20260101T000000Z"
-run_kit() {	# run_kit <logroot>: source the recorder with rc.subr stubbed out, call its start
-	env PATH="$TMPD/bin:$PATH" LINUX_BRIDGE_TESTBOOT_SOURCE_ONLY=1 sh -c '
+run_kit() {	# run_kit <logroot> [recorder]: source the recorder with rc.subr stubbed out, call its start
+	env PATH="$TMPD/bin:$PATH" LINUX_BRIDGE_TESTBOOT_SOURCE_ONLY=1 \
+	    LB_RUN_DEADMAN="${RUN_DEADMAN:-0}" LB_RUN_UNSET_SHUTDOWN="${RUN_UNSET_SHUTDOWN:-0}" \
+	    LB_RUN_AUTOBOOT="${RUN_AUTOBOOT:-}" LB_RUN_RC_FAST="${RUN_RC_FAST:-}" LB_RUN_RC_ARG="${RUN_RC_ARG:-onestart}" \
+	    LB_RUN_COPYOUT="${RUN_COPYOUT:-$TMPD/copyout}" LB_RUN_OVERRIDE="${RUN_OVERRIDE:-}" sh -c '
+		[ "$LB_RUN_UNSET_SHUTDOWN" != 1 ] || unset linux_bridge_testboot_shutdown
+		[ -z "$LB_RUN_OVERRIDE" ] || linux_bridge_testboot_shutdown=$LB_RUN_OVERRIDE
 		. "$2"
 		linux_bridge_testboot_logroot="$1"
 		linux_bridge_testboot_owner=$(id -u)
 		linux_bridge_testboot_nvrm_info=/nonexistent/nvrm-info
 		linux_bridge_testboot_nvrm_proof=/nonexistent/boot_nvrm_info.sh
-		linux_bridge_testboot_deadman=0
+		linux_bridge_testboot_deadman=$LB_RUN_DEADMAN
+		linux_bridge_testboot_lockfile=$TMPD/no-shutdown-lock
+		linux_bridge_testboot_marker=$TMPD/test-boot.marker
+		linux_bridge_testboot_bectl=$TMPD/bin/bectl
+		autoboot=$LB_RUN_AUTOBOOT
+		rc_fast=$LB_RUN_RC_FAST
+		rc_arg=$LB_RUN_RC_ARG
 		linux_bridge_testboot_rcconfd=$TMPD/rcconfd
 		linux_bridge_testboot_return=$TMPD/bin/testboot-return
 		linux_bridge_testboot_normal_be=normal-be
-		linux_bridge_testboot_copyout=$TMPD/copyout
+		linux_bridge_testboot_copyout=$LB_RUN_COPYOUT
 		linux_bridge_testboot_hashes=$TMPD/nohashes
 		linux_bridge_testboot_version=$TMPD/kit.version
 		linux_bridge_testboot_start' sh "$1" "${2:-$K}" 2>&1
 }
+latest_results() { ls -1 "$1"/linux-bridge-*/results.jsonl 2> /dev/null | tail -1; }
+
+# G3: replace the sole real-path literal with a second sentinel before any
+# default-shutdown run. A non-root onestart must refuse before calling it.
+G3COPY=$TMPD/linux_bridge_testboot.sentinel
+_real_count=$(grep -Fo '/sbin/shutdown' "$K" | wc -l | tr -d ' ')
+[ "$_real_count" = 1 ] && pass "G3: the original recorder has exactly one real-shutdown literal" || fail "G3: expected one real-shutdown literal, got $_real_count"
+sed "s|/sbin/shutdown|$SENT2/real-shutdown|" "$K" > "$G3COPY"
+_copy_count=$(grep -Fo '/sbin/shutdown' "$G3COPY" | wc -l | tr -d ' ')
+_g3safe=0
+if [ "$_real_count" = 1 ] && [ "$_copy_count" = 0 ] && ! cmp -s "$K" "$G3COPY"; then
+	_g3safe=1
+	pass "G3: the sentinel substitution differs and leaves no real-shutdown literal"
+else
+	fail "G3: the sentinel substitution was not proven safe"
+fi
+RUN_COPYOUT=$TMPD/guard-copyout
+if [ "$(id -u)" = 0 ]; then
+	fail "G3: the real-default refusal test must run as the current non-root user"
+elif [ "$_g3safe" = 1 ]; then
+	mkdir -p "$TMPD/g3"
+	RUN_DEADMAN=1
+	RUN_UNSET_SHUTDOWN=1
+	RUN_AUTOBOOT=
+	RUN_RC_ARG=onestart
+	run_kit "$TMPD/g3" "$G3COPY" > "$TMPD/g3.out" || true
+	_g3res=$(latest_results "$TMPD/g3")
+	if [ ! -s "$SENT2/hits" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid ' "$_g3res"; then
+		pass "G3: the real default is refused on non-root onestart, names uid, and does not hit the sentinel"
+	else
+		fail "G3: non-root refusal or its uid detail is missing, or the sentinel was hit"
+	fi
+	# Fake every non-uid condition as far as an unprivileged test can: boot
+	# context, marker, and the next-boot BE. The uid refusal must still win.
+	printf 'guard-be\n' > "$TMPD/test-boot.marker"
+	printf '#!/bin/sh\n[ "$1 $2" = "list -H" ] || exit 1\nprintf "guard-be\\tN\\n"\n' > "$TMPD/bin/bectl"
+	chmod 755 "$TMPD/bin/bectl"
+	mkdir -p "$TMPD/g3-all"
+	RUN_AUTOBOOT=yes
+	RUN_RC_FAST=yes
+	RUN_RC_ARG=start
+	run_kit "$TMPD/g3-all" "$G3COPY" > "$TMPD/g3-all.out" || true
+	_g3allres=$(latest_results "$TMPD/g3-all")
+	if [ ! -s "$SENT2/hits" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid .*this boot is NOT protected against a hang' "$_g3allres"; then
+		pass "G3: faked boot and matching BE conditions do not bypass the non-root uid refusal, and the row says the boot is not protected"
+	else
+		fail "G3: refusal with boot and BE conditions faked did not name uid, lacked the suffix, or the sentinel was hit"
+	fi
+	# F1: at a boot (autoboot, rc_fast, start) a stub override is ignored: the real conditions
+	# apply, so the non-root uid refuses and the stub is not called.
+	mkdir -p "$TMPD/g3-bootstub"
+	: > "$LB_STUB_LOG"
+	RUN_UNSET_SHUTDOWN=0
+	run_kit "$TMPD/g3-bootstub" "$G3COPY" > "$TMPD/g3-bootstub.out" || true
+	_g3bsres=$(latest_results "$TMPD/g3-bootstub")
+	if [ ! -s "$SENT2/hits" ] && [ ! -s "$LB_STUB_LOG" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid ' "$_g3bsres"; then
+		pass "F1: at an rc boot the stub override is ignored, the real conditions refuse (uid) and the stub is not called"
+	else
+		fail "F1: at an rc boot the stub override was honoured or the sentinel was hit"
+	fi
+	# G3 overrides: an override that is not a safe absolute stub is refused (REFUSED row, empty
+	# stub log, no sentinel hit).  The setuid file is only a mode on a copy of our own stub.
+	cp "$GUARD/shutdown-stub" "$GUARD/shutdown-suid" && chmod u+s "$GUARD/shutdown-suid"
+	RUN_UNSET_SHUTDOWN=0
+	RUN_AUTOBOOT=
+	RUN_RC_FAST=
+	RUN_RC_ARG=onestart
+	if [ -u "$GUARD/shutdown-suid" ]; then
+		for _g3o in true relative setuid; do
+			case $_g3o in
+			true) RUN_OVERRIDE=true ;;
+			relative) RUN_OVERRIDE=shutdown-stub ;;
+			setuid) RUN_OVERRIDE=$GUARD/shutdown-suid ;;
+			esac
+			mkdir -p "$TMPD/g3o-$_g3o"
+			: > "$LB_STUB_LOG"
+			run_kit "$TMPD/g3o-$_g3o" "$G3COPY" > "$TMPD/g3o-$_g3o.out" || true
+			_g3ores=$(latest_results "$TMPD/g3o-$_g3o")
+			if [ ! -s "$SENT2/hits" ] && [ ! -s "$LB_STUB_LOG" ] && [ -n "$_g3ores" ] &&
+			    grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: ' "$_g3ores"; then
+				pass "G3: override '$_g3o' is refused: REFUSED row, empty stub log, no sentinel hit"
+			else
+				fail "G3: override '$_g3o' was not refused, called the stub or hit the sentinel"
+			fi
+		done
+	else
+		fail "G3: could not make the setuid stub copy"
+	fi
+	RUN_OVERRIDE=
+	# the decided hand-run stub case: an absolute non-setuid stub is used outside a boot
+	mkdir -p "$TMPD/g3o-hand"
+	: > "$LB_STUB_LOG"
+	run_kit "$TMPD/g3o-hand" "$G3COPY" > "$TMPD/g3o-hand.out" || true
+	_g3hres=$(latest_results "$TMPD/g3o-hand")
+	if [ ! -s "$SENT2/hits" ] && [ -s "$LB_STUB_LOG" ] && [ -n "$_g3hres" ] && grep -q 'stubbed shutdown' "$_g3hres"; then
+		pass "G3 control: same stub on a hand run is used (decided: a stub cannot reboot)"
+	else
+		fail "G3 control: the stub on a hand run was not used"
+	fi
+	RUN_UNSET_SHUTDOWN=1
+else
+	fail "G3: runtime refusal was not run because the sentinel copy was unsafe"
+fi
+RUN_DEADMAN=0
+RUN_UNSET_SHUTDOWN=0
+RUN_AUTOBOOT=
+RUN_RC_FAST=
+RUN_RC_ARG=onestart
+
+# G4: static checks cover the boot, root and BE conditions that an
+# unprivileged runtime test cannot satisfy for the real program.
+# It collects every failed rule in _gs_reason (separated by "; ").
+gs_add() { _gs_reason="${_gs_reason:+$_gs_reason; }$1"; }
+guard_static() {
+	_gs=$1
+	_gs_reason=
+	_fn=$(sed -n '/^deadman_allowed()$/,/^}$/p' "$_gs")
+	_dec=$(sed -n '/^dm_decide()$/,/^}$/p' "$_gs")
+	[ -n "$_fn" ] || gs_add 'deadman_allowed is missing'
+	[ -n "$_dec" ] || gs_add 'dm_decide is missing'
+	_both=$(printf '%s\n%s\n' "$_fn" "$_dec")
+	for _token in 'id -u' 'autoboot' 'rc_arg' 'rc_fast' 'linux_bridge_testboot_marker' 'linux_bridge_testboot_bectl' 'list -H' '$2 ~ /N/' 'dm_decide "'; do
+		printf '%s\n' "$_both" | grep -qF -- "$_token" || gs_add "the guard lacks $_token"
+	done
+	printf '%s\n' "$_dec" | grep -qF '"$6" != "$5"' || gs_add 'the active BE is not compared with the marker'
+	[ "$(grep -Fo '/sbin/shutdown' "$_gs" | wc -l | tr -d ' ')" = 1 ] || gs_add 'real path literal count is not 1'
+	grep -qF 'linux_bridge_testboot_real_shutdown=/sbin/shutdown' "$_gs" || gs_add 'the literal is not in the fixed real-path assignment'
+	[ "$(grep -Fc '"$linux_bridge_testboot_shutdown" -r ' "$_gs" | tr -d ' ')" = 1 ] || gs_add 'variable shutdown call count is not 1'
+	grep -qF '"$linux_bridge_testboot_shutdown" -r "+$linux_bridge_testboot_deadman"' "$_gs" || gs_add 'the call has no deadman minutes'
+	! grep -Eq 'pgrep|pkill' "$_gs" || gs_add 'pgrep/pkill remains'
+	! has_bare_shutdown "$_gs" || gs_add 'a bare shutdown call remains'
+	[ -z "$_gs_reason" ]
+}
+guard_static "$K" && pass "G4: one guarded quoted call, rc_fast and all refusal conditions, dm_decide, and no pgrep/pkill or bare shutdown" || fail "G4: the recorder's static dead-man guard is incomplete: $_gs_reason"
+
+# G5/M1: removing the variable from the call must hit the PATH sentinel.
+M1=$TMPD/mutant-m1
+sed 's/"\$linux_bridge_testboot_shutdown" -r /shutdown -r /' "$K" > "$M1"
+rm -f "$SENT/hits"
+if [ "${PATH%%:*}" != "$SENT" ] || [ ! -x "$SENT/shutdown" ] || [ -u "$SENT/shutdown" ]; then
+	fail "control: mutant M1 was not run: the PATH sentinel is not first in PATH with an executable shutdown"
+elif ! cmp -s "$K" "$M1" && ! grep -qF '"$linux_bridge_testboot_shutdown" -r ' "$M1" && [ ! -e "$TMPD/bin/shutdown" ]; then
+	mkdir -p "$TMPD/m1-run"
+	RUN_DEADMAN=1
+	run_kit "$TMPD/m1-run" "$M1" > "$TMPD/m1.out" || true
+	if grep -q 'REACHED .*shutdown' "$SENT/hits" 2> /dev/null; then
+		pass "control: mutant M1 is seen"
+	else
+		fail "control: mutant M1 (bare shutdown) did not hit the PATH sentinel"
+	fi
+else
+	fail "control: mutant M1 did not differ, retained the quoted call, or had a shadowing fake"
+fi
+rm -f "$SENT/hits"
+RUN_DEADMAN=0
+
+# G5/M2: removing the refusal from the sentinel-substituted copy must hit the
+# second sentinel. Do not run it unless G3 proved the real path is absent.
+M2=$TMPD/mutant-m2
+sed 's/if ! deadman_allowed; then/if false; then/' "$G3COPY" > "$M2"
+if [ "$_g3safe" = 1 ] && ! cmp -s "$G3COPY" "$M2"; then
+	mkdir -p "$TMPD/m2-run"
+	RUN_DEADMAN=1
+	RUN_UNSET_SHUTDOWN=1
+	run_kit "$TMPD/m2-run" "$M2" > "$TMPD/m2.out" || true
+	if grep -q 'REAL REACHED' "$SENT2/hits" 2> /dev/null; then
+		pass "control: mutant M2 is seen"
+	else
+		fail "control: mutant M2 (guard removed) did not hit the real-path sentinel"
+	fi
+else
+	fail "control: mutant M2 did not differ or its sentinel copy was unsafe"
+fi
+RUN_DEADMAN=0
+RUN_UNSET_SHUTDOWN=0
+
+# G5/M3: pattern cancellation is planted only as text; G4 must reject it.
+M3=$TMPD/mutant-m3
+sed '/^deadman_cancel()$/,/^}$/{
+/^{$/a\
+	pkill -f linux_bridge_testboot_deadman
+}' "$K" > "$M3"
+if ! cmp -s "$K" "$M3"; then
+	if guard_static "$M3"; then
+		fail "control: mutant M3 (pkill -f) passed G4"
+	elif [ "$_gs_reason" = 'pgrep/pkill remains' ]; then
+		pass "control: mutant M3 is seen ($_gs_reason)"
+	else
+		fail "control: mutant M3 failed G4 for more than the pkill rule: $_gs_reason"
+	fi
+else
+	fail "control: mutant M3 did not differ from the recorder"
+fi
+
+# G5/M4: the call rewritten as an if-negated bare call, planted only as text. M4a replaces the
+# call; M4b keeps it and adds the bare call, so only the bare-call rule may fire.
+M4=$TMPD/mutant-m4
+sed '/^[[:space:]]*"\$linux_bridge_testboot_shutdown" -r /c\
+	if ! shutdown -r "+$N" "m"; then :; fi' "$K" > "$M4"
+if ! cmp -s "$K" "$M4"; then
+	if guard_static "$M4"; then
+		fail "control: mutant M4 passed G4"
+	else
+		case $_gs_reason in
+		*'a bare shutdown call remains'*) pass "control: mutant M4 is seen ($_gs_reason)" ;;
+		*) fail "control: mutant M4 was not seen as a bare call: $_gs_reason" ;;
+		esac
+	fi
+else
+	fail "control: mutant M4 did not differ from the recorder"
+fi
+M4B=$TMPD/mutant-m4b
+sed '/^[[:space:]]*"\$linux_bridge_testboot_shutdown" -r /a\
+	if ! shutdown -r "+$N" "m"; then :; fi' "$K" > "$M4B"
+if ! cmp -s "$K" "$M4B"; then
+	if guard_static "$M4B"; then
+		fail "control: mutant M4b passed G4"
+	elif [ "$_gs_reason" = 'a bare shutdown call remains' ]; then
+		pass "control: mutant M4b is seen (only the bare-call rule: $_gs_reason)"
+	else
+		fail "control: mutant M4b failed G4 for more than the bare-call rule: $_gs_reason"
+	fi
+else
+	fail "control: mutant M4b did not differ from the recorder"
+fi
+
+# G5/M6, M7: a bare call hidden in quoted text, on a line of its own; planted only as text.
+for _mx in M6 M7; do
+	case $_mx in
+	M6) _mline='sh -c "shutdown -r now"' ;;
+	M7) _mline="eval 'shutdown -r now'" ;;
+	esac
+	{ cat "$K"; printf '%s\n' "$_mline"; } > "$TMPD/mutant-$_mx"
+	if cmp -s "$K" "$TMPD/mutant-$_mx"; then
+		fail "control: mutant $_mx did not differ from the recorder"
+	elif guard_static "$TMPD/mutant-$_mx"; then
+		fail "control: mutant $_mx passed G4"
+	elif [ "$_gs_reason" = 'a bare shutdown call remains' ]; then
+		pass "control: mutant $_mx is seen (only the bare-call rule: $_gs_reason)"
+	else
+		fail "control: mutant $_mx failed G4 for more than the bare-call rule: $_gs_reason"
+	fi
+done
+# G2: a broken shared detector must be seen: with a copy whose function reports nothing, M1
+# goes undetected, so the host test's own control would turn red.
+mkdir -p "$TMPD/shared-mut"
+sed 's/^bare_shutdown_lines()$/bare_shutdown_lines_orig()/' "$KIT/bare-shutdown-check.sh" > "$TMPD/shared-mut/bare-shutdown-check.sh"
+printf 'bare_shutdown_lines() { :; }\n' >> "$TMPD/shared-mut/bare-shutdown-check.sh"
+if cmp -s "$KIT/bare-shutdown-check.sh" "$TMPD/shared-mut/bare-shutdown-check.sh"; then
+	fail "control: mutant shared-detector did not differ from the original"
+elif [ -n "$(bare_shutdown_lines "$M1")" ] && [ -z "$(. "$TMPD/shared-mut/bare-shutdown-check.sh"; bare_shutdown_lines "$M1")" ]; then
+	pass "control: mutant shared-detector is seen (the original flags M1, the mutant does not)"
+else
+	fail "control: mutant shared-detector survived"
+fi
+
+# F5: the detector sees a bare shutdown after every command prefix, and not comments, quoted
+# text, the variable call or the assignment.
+_bare_bad=
+for _pre in '' 'if' 'if !' 'then' 'else' 'do' 'while' 'until' '!' '{' '(' ';' '&&' '||' '|' 'exec' 'command' 'nohup' 'time' 'x=1'; do
+	printf '%s shutdown -r +1 x\n' "$_pre" > "$TMPD/bare.t"
+	has_bare_shutdown "$TMPD/bare.t" || _bare_bad="$_bare_bad [$_pre]"
+done
+for _line in 'sh -c "shutdown -r now"' "eval 'shutdown -r now'" 'bash -c "x; shutdown now"' 'x=$(shutdown -h now)' 'env shutdown -p now' 'xargs shutdown -r'; do
+	printf '%s\n' "$_line" > "$TMPD/bare.t"
+	has_bare_shutdown "$TMPD/bare.t" || _bare_bad="$_bare_bad [$_line]"
+done
+[ -z "$_bare_bad" ] && pass "F5: the detector sees a bare shutdown after every command prefix and inside quoted sh -c and eval text" || fail "F5: the detector missed:$_bare_bad"
+_bare_bad=
+for _line in '# shutdown -r +1 x' '	# if shutdown -r +1' '"$linux_bridge_testboot_shutdown" -r "+1" "x"' 'row deadman fail "not calling shutdown: x"' "echo 'shutdown'" 'x=$linux_bridge_testboot_real_shutdown' 'linux_bridge_testboot_real_shutdown=/sbin/shutdown'; do
+	printf '%s\n' "$_line" > "$TMPD/bare.t"
+	if has_bare_shutdown "$TMPD/bare.t"; then _bare_bad="$_bare_bad [$_line]"; fi
+done
+[ -z "$_bare_bad" ] && pass "F5 control: comments, quoted text, the variable call and the assignment are not bare calls" || fail "F5: false positive:$_bare_bad"
+
+# F3: dm_decide is a pure function; run it as a table, then plant mutants.
+DD_ORIG=$TMPD/dm-decide.fn
+sed -n '/^dm_decide()$/,/^}$/p' "$K" > "$DD_ORIG"
+if [ -s "$DD_ORIG" ] && sh -n "$DD_ORIG"; then pass "F3: dm_decide is extracted from the recorder"; else fail "F3: could not extract dm_decide"; fi
+dd_table() {	# dd_table FILE: prints the numbers of the table rows with a wrong result
+	_dt_file=$1
+	_dt_i=0
+	_dt_wrong=
+	while IFS='|' read -r _dt_u _dt_ab _dt_rf _dt_ra _dt_mk _dt_be _dt_want _dt_why; do
+		_dt_i=$((_dt_i + 1))
+		_dt_got=$( . "$_dt_file"; dm_decide "$_dt_u" "$_dt_ab" "$_dt_rf" "$_dt_ra" "$_dt_mk" "$_dt_be" > "$TMPD/dd.out" 2>&1; echo $? )
+		_dt_msg=$(cat "$TMPD/dd.out")
+		if [ "$_dt_got" != "$_dt_want" ]; then
+			_dt_wrong="$_dt_wrong $_dt_i"
+		elif [ -n "$_dt_why" ]; then
+			case $_dt_msg in *"$_dt_why"*) ;; *) _dt_wrong="$_dt_wrong $_dt_i" ;; esac
+		elif [ -n "$_dt_msg" ]; then
+			_dt_wrong="$_dt_wrong $_dt_i"
+		fi
+	done <<'DDEOF'
+0|yes|yes|start|m|m|0|
+1001|yes|yes|start|m|m|1|uid 1001
+1001|||stop|||1|uid 1001
+0||yes|start|m|m|1|not an rc boot
+0|no|yes|start|m|m|1|not an rc boot
+0|yes||start|m|m|1|not an rc boot
+0|yes|no|start|m|m|1|not an rc boot
+0|yes|yes|stop|m|m|1|not an rc boot
+0|yes|yes||m|m|1|not an rc boot
+0|yes|yes|start||m|1|marker
+0|yes|yes|start|m|other|1|does not match
+0|yes|yes|start|m||1|no BE
+DDEOF
+	printf '%s' "$_dt_wrong"
+}
+_dd_wrong=$(dd_table "$DD_ORIG")
+[ -z "$_dd_wrong" ] && pass "F3: dm_decide table: the all-true row returns 0 and every single-condition failure returns 1 with its reason" || fail "F3: dm_decide table has wrong rows:$_dd_wrong"
+dd_mutant() {	# dd_mutant NAME SED-EXPRESSION
+	if ! sed "$2" "$DD_ORIG" > "$TMPD/dd-$1.fn" || cmp -s "$DD_ORIG" "$TMPD/dd-$1.fn"; then
+		fail "control: mutant dm_decide-$1 did not differ from the original"
+		return 0
+	fi
+	_dm_w=$(dd_table "$TMPD/dd-$1.fn")
+	if [ -n "$_dm_w" ]; then pass "control: mutant dm_decide-$1 is seen (wrong table rows:$_dm_w)"; else fail "control: mutant dm_decide-$1 survived the table"; fi
+}
+dd_mutant uid-dropped 's/if \[ "\$1" != 0 \]; then/if false; then/'
+dd_mutant autoboot-flipped 's/\[ "\$2" != yes \]/[ "$2" = yes ]/'
+dd_mutant rc_fast-dropped 's/ || \[ "\$3" != yes \]//'
+dd_mutant be-compare-dropped 's/if \[ "\$6" != "\$5" \]; then/if false; then/'
+
+# F4: a lock file refuses arming before the stub (or any shutdown) is called.
+: > "$LB_STUB_LOG"
+: > "$TMPD/no-shutdown-lock"
+mkdir -p "$TMPD/guard-lock"
+RUN_DEADMAN=1
+run_kit "$TMPD/guard-lock" > "$TMPD/guard-lock.out" || true
+RUN_DEADMAN=0
+rm -f "$TMPD/no-shutdown-lock"
+_lockres=$(latest_results "$TMPD/guard-lock")
+if [ ! -s "$LB_STUB_LOG" ] && grep -q 'no-shutdown-lock exists; not calling shutdown; this boot is NOT protected against a hang' "$_lockres"; then
+	pass "F4: the lock file refuses arming before any shutdown call and the row says the boot is not protected"
+else
+	fail "F4: the lock file did not stop the call or the row is wrong"
+fi
+
+# The normal stub follows the foreground protocol. A held return kills the
+# recorded child only; a same-named decoy started by this test stays alive.
+printf '#!/bin/sh\nexit 3\n' > "$TMPD/bin/testboot-return"
+chmod 755 "$TMPD/bin/testboot-return"
+: > "$LB_STUB_PIDLOG"
+: > "$LB_STUB_LOG"
+mkdir -p "$TMPD/guard-live"
+"$LB_STUB_CHILD" 300 &
+_decoy=$!
+GUARD_EXTRA_PIDS="$GUARD_EXTRA_PIDS $_decoy"
+_dm_i=0
+while ! own_shutdown_pid "$_decoy" && [ "$_dm_i" -lt 10000 ]; do _dm_i=$((_dm_i + 1)); done
+RUN_DEADMAN=1
+run_kit "$TMPD/guard-live" > "$TMPD/guard-live.out" || true
+RUN_DEADMAN=0
+_armed=$(tail -1 "$LB_STUB_PIDLOG" 2> /dev/null)
+case $_armed in ''|*[!0-9]*) fail "the foreground stub did not record a numeric child pid"; _armed= ;; esac
+_liveres=$(latest_results "$TMPD/guard-live")
+if [ -n "$_armed" ] && grep -q "stubbed shutdown.*pending as pid $_armed" "$_liveres" && grep -q '^-r +1 linux_bridge_testboot dead-man:' "$LB_STUB_LOG"; then
+	pass "the foreground stub arms a confirmed exact-pid shutdown -r +1"
+else
+	fail "the foreground stub did not arm and confirm its exact child"
+fi
+if [ -z "$_armed" ]; then
+	fail "exact-pid cancellation could not be checked"
+elif own_shutdown_pid "$_armed"; then
+	fail "deadman_cancel left the recorded pid alive"
+	kill "$_armed" 2> /dev/null || :
+elif grep -q "cancelled dead-man shutdown pid $_armed" "$_liveres"; then
+	pass "deadman_cancel killed the exact recorded pid"
+else
+	fail "the recorded pid is gone without a successful exact-pid cancellation row"
+fi
+if [ -n "$_armed" ] && [ "$_armed" != "$_decoy" ] && own_shutdown_pid "$_decoy"; then
+	pass "a same-named decoy is still alive after exact-pid cancellation"
+else
+	fail "the same-named decoy was killed or was not distinct"
+fi
+if own_shutdown_pid "$_decoy"; then kill "$_decoy" 2> /dev/null || :; fi
+wait "$_decoy" 2> /dev/null || :
+GUARD_EXTRA_PIDS=
+[ "$(tail -n 1 "$_liveres" | cut -c1-13)" = '{"row":"done"' ] && pass "a held return keeps done last after the cancellation row" || fail "a held return no longer ends with done"
+printf '#!/bin/sh\necho "$@" > "$TMPD/return.args"\nexit 0\n' > "$TMPD/bin/testboot-return"
+chmod 755 "$TMPD/bin/testboot-return"
+RUN_COPYOUT=$TMPD/copyout
+
 run_kit "$TMPD/lr" > "$TMPD/run1.out" || true
 ls "$TMPD"/lr/linux-bridge-20260101T000000Z.*/results.jsonl > /dev/null 2>&1 && pass "the run directory is a fresh mktemp directory beside the planted name" || fail "no fresh run directory: $(head -2 "$TMPD/run1.out")"
 [ "$(cat "$TMPD/victim")" = victim ] && pass "a planted symlink under the log root was not written through" || fail "the recorder wrote through a planted symlink"
@@ -439,6 +926,8 @@ if (cd "$FK" && env -u MAKEFLAGS make SYSDIR="$SYSDIR" LD=/usr/bin/ld OBJCOPY=/u
 	[ -s "$M/boot/modules.nvtest/linker.hints" ] && pass "kldxref ran on the staged directory" || fail "no linker.hints in the staged directory"
 	[ "$(sha256 -q "$M/usr/local/sbin/testboot-return")" = "$(sed -n 's/^sha256 *= *//p' "$KIT/VENDOR")" ] && pass "the vendored testboot-return is installed, equal to the pin" || fail "testboot-return is missing or differs from the pin"
 	[ "$(cat "$M/usr/local/etc/linux_bridge_testboot.version")" = abc123+unverified ] && pass "a kit that was not checked against git is recorded as +unverified (so --kit abc123 will not match)" || fail "the unchecked kit is not marked: $(cat "$M/usr/local/etc/linux_bridge_testboot.version")"
+	_marker_be=nvidia-linux-bridge-test-$(date -u +%Y%m%d)-1
+	[ "$(cat "$M/usr/local/etc/linux_bridge_testboot.marker")" = "$_marker_be" ] && [ "$(stat -f %Lp "$M/usr/local/etc/linux_bridge_testboot.marker")" = 444 ] && pass "G6: the fake BE marker contains its BE name and is mode 0444" || fail "G6: the fake BE marker is missing, has the wrong BE name, or is not mode 0444"
 	cmp -s "$M/usr/local/etc/linux_bridge_testboot.sha256" "$MB/good/logs/linux-bridge-testboot/nvidia-linux-bridge-test-$(date -u +%Y%m%d)-1.sha256" && pass "the staged hash list is in the BE and on the host" || fail "the hash list is missing or differs between the BE and the host"
 	[ "$(awk '$2 == "nvidia.ko" { print $1 }' "$M/usr/local/etc/linux_bridge_testboot.sha256")" = "$(sha256 -q "$M/boot/modules.nvtest/nvidia.ko")" ] && pass "the hash list names the staged nvidia.ko hash" || fail "the hash list does not match the staged nvidia.ko"
 	grep -q 'linux_bridge_testboot_normal_be="cloudbsd-rx7600"' "$M/etc/rc.conf.d/linux_bridge_testboot" && grep -q 'linux_bridge_testboot_copyout=' "$M/etc/rc.conf.d/linux_bridge_testboot" && pass "the BE names the normal BE and the copy-out directory" || fail "rc.conf.d/linux_bridge_testboot lacks the normal BE or the copy-out"
@@ -515,5 +1004,12 @@ else
 	fail "cannot build the fake kernel module for the make-be.sh tests: $(tail -3 "$FK/make.out")"
 fi
 
+# G2: M1's intentional hit was consumed by its control above; no ordinary test
+# path may leave another PATH-sentinel hit.
+if [ -s "$SENT/hits" ]; then
+	fail "G2: a host test reached the PATH shutdown sentinel: $(cat "$SENT/hits")"
+else
+	pass "G2: no host test path reached the PATH shutdown sentinel"
+fi
 [ "$fails" -eq 0 ] || { echo "linux_bridge_kit_test: $fails FAILED" >&2; exit 1; }
 echo "linux_bridge_kit_test: all passed"

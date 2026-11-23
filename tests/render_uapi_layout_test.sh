@@ -33,14 +33,20 @@
 #      with drm.h, a pointer member in a listed struct and in a new one) each
 #      make checks 1-5 fail, and for the stated reason (see the `mutate` lines).
 #
-# A check that cannot run (no SYSDIR, no NVIDIA header) is SKIPPED, said so
-# loudly, and the test then exits 2 instead of 0; set RENDER_UAPI_ALLOW_SKIP=1
-# to accept the skips (the other checks still decide the result).
+# A check that cannot run (no SYSDIR, no NVIDIA header) is SKIPPED and said so
+# loudly; every SKIPPED line stays in the output. The checks that can run still
+# decide the result: with neither CI nor REQUIRE_INPUTS=yes the test exits 0 and
+# its last line says plainly how many checks were skipped; with CI or
+# REQUIRE_INPUTS=yes a skip is a FAIL (exit 1). RENDER_UAPI_ALLOW_SKIP=1 is
+# still accepted, but it is now a no-op: a skip is a skip, not a failure.
 #
-# Environment: GB10_WORK (default <repo>/work; scratch goes to $GB10_WORK/tmp
-# unless TMPDIR is set), SYSDIR (default $HOME/src/csrc-90dcf68/sys, a FreeBSD
-# src/sys checkout), RENDER_UAPI_ALLOW_SKIP.
-# Exit: 0 all pass, 1 a check failed, 2 a prerequisite is missing or a check was skipped.
+# Environment: GB10_WORK (default <repo>/work; the NVIDIA header is looked for
+# under $GB10_WORK/sources), SYSDIR (no default; a FreeBSD src/sys checkout),
+# TMPDIR (default <repo>/tmp), RENDER_UAPI_ALLOW_SKIP (accepted, no-op).
+# Exit: 0 every check that could run passed (a skip is reported in the last
+#       line; with CI or REQUIRE_INPUTS=yes a skip exits 1 instead), 1 a check
+#       failed or a required input was missing, 2 a prerequisite of the test
+#       itself is missing (the header, the probe, cc or a temporary directory).
 # Run: sh tests/render_uapi_layout_test.sh
 
 set -u
@@ -53,8 +59,9 @@ REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
 # No $HOME defaults: inputs come from the environment or the repository.
 #   SYSDIR     a FreeBSD src/sys checkout (kernel compile)
 #   GB10_WORK  work root whose sources/ holds open-gpu-kernel-modules-580.178.04
+#               (default <repo>/work, so the path in a skip message is a real one)
 #   CI=1 or REQUIRE_INPUTS=yes make a missing input a FAIL (exit 1)
-WORK=${GB10_WORK:-}
+WORK=${GB10_WORK:-$REPO/work}
 TMPDIR=${TMPDIR:-$REPO/tmp}
 export TMPDIR
 SYSDIR=${SYSDIR:-}
@@ -64,10 +71,24 @@ PROBE=$TESTSDIR/render_uapi_layout.c
 die2() { echo "render_uapi_layout_test: $*" >&2; exit 2; }
 [ -f "$HDR_DIR/nvidia-drm-render.h" ] || die2 "missing $HDR_DIR/nvidia-drm-render.h"
 [ -f "$PROBE" ] || die2 "missing $PROBE"
+# RENDER_UAPI_ALLOW_SKIP is accepted for callers that still set it; it is now a
+# no-op, because a skip is a skip and never changes the exit status.
+RENDER_UAPI_ALLOW_SKIP=${RENDER_UAPI_ALLOW_SKIP:-0}
+SKIPS=0
+SKIP_LABELS=
+skipped() { # label - record a check that could not run
+	SKIPS=$((SKIPS + 1))
+	if [ -z "$SKIP_LABELS" ]; then
+		SKIP_LABELS=$1
+	else
+		SKIP_LABELS="$SKIP_LABELS, $1"
+	fi
+}
 HAVE_SYS=1
 if [ -z "$SYSDIR" ] || [ ! -f "$SYSDIR/sys/ioccom.h" ] || [ ! -d "$SYSDIR/arm64/include" ]; then
 	HAVE_SYS=0
 	echo "SKIPPED: kernel compile (check 3): SYSDIR $SYSDIR is not a FreeBSD src/sys tree; set SYSDIR=/path/to/src/sys (no default)"
+	skipped "kernel compile"
 fi
 command -v cc >/dev/null 2>&1 || die2 "cc not found"
 mkdir -p "$TMPDIR" || die2 "cannot create $TMPDIR"
@@ -168,7 +189,6 @@ else
 fi
 
 # ---- 6. NVIDIA's own table --------------------------------------------------
-SKIPS=0
 # pinned to the driver version this contract was written against
 NVH_PIN=${NVIDIA_IOCTL_H:-${WORK:+$WORK/sources/open-gpu-kernel-modules-580.178.04/kernel-open/nvidia-drm/nvidia-drm-ioctl.h}}
 NVHS=
@@ -191,13 +211,12 @@ if [ -n "$NVHS" ]; then
 		fi
 	done
 else
-	SKIPS=$((SKIPS + 1))
 	echo "SKIPPED: check 6: no NVIDIA nvidia-drm-ioctl.h under $WORK/sources (run scripts/fetch-sources.sh); the probe still asserts the NVR numbers are above 0x3f"
+	skipped "check 6"
 fi
-[ "$HAVE_SYS" -eq 0 ] && SKIPS=$((SKIPS + 1))
 if [ "$HAVE_CXX" -eq 0 ]; then
-	SKIPS=$((SKIPS + 1))
 	echo "SKIPPED: C++17 self-contained check (check 4): no c++ on PATH"
+	skipped "C++17 self-contained"
 fi
 
 # ---- 7. the test can fail ---------------------------------------------------
@@ -261,9 +280,11 @@ if [ "$FAILS" -eq 0 ]; then
 		echo "render_uapi_layout_test: FAIL: $SKIPS input(s) missing and CI or REQUIRE_INPUTS is set"
 		exit 1
 	fi
-	if [ "$SKIPS" -gt 0 ] && [ "${RENDER_UAPI_ALLOW_SKIP:-0}" != 1 ]; then
-		echo "render_uapi_layout_test: $SKIPS check(s) SKIPPED, so no PASS (exit 2); RENDER_UAPI_ALLOW_SKIP=1 accepts that"
-		exit 2
+	if [ "$SKIPS" -gt 0 ]; then
+		_skipword=checks
+		[ "$SKIPS" -eq 1 ] && _skipword=check
+		echo "render_uapi_layout_test: PASS ($SKIPS $_skipword SKIPPED: $SKIP_LABELS; set SYSDIR and run scripts/fetch-sources.sh to run them, or REQUIRE_INPUTS=yes to fail on a skip)"
+		exit 0
 	fi
 	echo "render_uapi_layout_test: PASS"
 	exit 0

@@ -31,6 +31,8 @@ reason 9 class_absent 0
 reason 10 os_call_failed 0
 reason 11 value_unusable 0
 reason 12 family_has_no_class 0
+reason 13 version_unparsed 2
+reason 14 version_inconsistent 2
 error 1 no_backend 0
 error 2 open_failed 0
 error 3 version_mismatch 0
@@ -45,6 +47,8 @@ error 11 no_spare_descriptor 1
 error 12 range_unavailable 1
 error 13 not_supported 1
 error 14 busy 1
+error 15 timeout 3
+error 16 channel_lost 3
 capability 0 dmabuf_export 0
 capability 1 ats 0
 capability 2 self_hosted 0

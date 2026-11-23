@@ -13,6 +13,7 @@ void	nvrm_fake_inject(int prop, int reason);
 void	nvrm_fake_inject_value(int prop, uint64_t value);
 void	nvrm_fake_inject_tpc_fail(int gpc);
 void	nvrm_fake_inject_uuid_fail(int reason);
+void	nvrm_fake_inject_str_fail(int prop, int reason);
 void	nvrm_fake_inject_classes(const uint32_t *list, unsigned n);
 void	nvrm_fake_inject_classes_fail(int reason);
 void	nvrm_fake_inject_clear(void);
@@ -51,4 +52,40 @@ void	nvrm_fake_mem_fail_clear(void);
 /* The host page size the fake aligns objects to (0: sysconf's). */
 void	nvrm_fake_mem_host_page(uint64_t bytes);
 void	nvrm_fake_mem_stats_get(nvrm_fake_mem_stats *st);
+
+/*
+ * The fake channel engine (nvrm_fake_chan.c): the class numbers it reports,
+ * the copy-engine methods it executes (offsets in bytes) and the launch bits
+ * it understands.  Tests build pushbuffers from these names.
+ */
+#define NVRM_FAKE_CLASS_3D		0xcd97
+#define NVRM_FAKE_CLASS_COMPUTE		0xcdc0
+#define NVRM_FAKE_CLASS_I2M		0xcd40
+#define NVRM_FAKE_CLASS_2D		0x902d
+#define NVRM_FAKE_CLASS_COPY		0xcab5
+#define NVRM_FAKE_CLASS_GPFIFO		0xca6f
+
+#define NVRM_FAKE_COPY_OFFSET_IN_UPPER	0x400
+#define NVRM_FAKE_COPY_OFFSET_IN_LOWER	0x404
+#define NVRM_FAKE_COPY_OFFSET_OUT_UPPER	0x408
+#define NVRM_FAKE_COPY_OFFSET_OUT_LOWER	0x40c
+#define NVRM_FAKE_COPY_PITCH_IN		0x410
+#define NVRM_FAKE_COPY_PITCH_OUT	0x414
+#define NVRM_FAKE_COPY_LINE_LENGTH_IN	0x418
+#define NVRM_FAKE_COPY_LINE_COUNT	0x41c
+#define NVRM_FAKE_COPY_LAUNCH_DMA	0x300
+
+/* The data transfer type is the low two bits of the launch word. */
+#define NVRM_FAKE_COPY_TYPE_MASK	0x3U
+#define NVRM_FAKE_COPY_TYPE_NONE	0U
+#define NVRM_FAKE_COPY_TYPE_PIPELINED	1U
+#define NVRM_FAKE_COPY_TYPE_INVALID	3U
+#define NVRM_FAKE_COPY_LAUNCH_SEMAPHORE	(0x3U << 3)
+#define NVRM_FAKE_COPY_LAUNCH_SRC_PITCH	(1U << 7)
+#define NVRM_FAKE_COPY_LAUNCH_DST_PITCH	(1U << 8)
+#define NVRM_FAKE_COPY_LAUNCH_MULTI_LINE (1U << 9)
+#define NVRM_FAKE_COPY_LAUNCH_REMAP	(1U << 10)
+#define NVRM_FAKE_COPY_LAUNCH_SRC_PHYSICAL (1U << 12)
+#define NVRM_FAKE_COPY_LAUNCH_DST_PHYSICAL (1U << 13)
+#define NVRM_FAKE_COPY_LAUNCH_SCRUB	(1U << 23)
 #endif

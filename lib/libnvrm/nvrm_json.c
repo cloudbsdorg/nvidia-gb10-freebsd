@@ -8,13 +8,32 @@
  * Every function returns 0, or -1 when the stream failed (EPIPE included);
  * output is one compact line per call, flushed.
  */
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nvrm_internal.h"
 
 #define SCHEMA_ID	"nvrm-info/1"
-#define SCHEMA_MINOR	1
+#define SCHEMA_MINOR	3
+#define SCHEMA_VERSION	"1." NVRM_STRINGIFY(SCHEMA_MINOR)
+
+static nvrm_version schema_version;
+static pthread_once_t schema_once = PTHREAD_ONCE_INIT;
+
+static void
+init_schema_version(void)
+{
+	(void)nvrm_version_parse(SCHEMA_VERSION, 10, &schema_version);
+}
+
+const nvrm_version *
+nvrm_schema_version(void)
+{
+	pthread_once(&schema_once, init_schema_version);
+	return (&schema_version);
+}
 
 /* ---- emitter ----------------------------------------------------------- */
 
@@ -81,6 +100,45 @@ put_strv(FILE *fp, const nvrm_str *v)
 }
 
 static void
+put_version(FILE *fp, const nvrm_version *v, int source)
+{
+	unsigned i;
+	int reason;
+
+	fputc('{', fp);
+	if (v->available) {
+		fputs("\"available\":true,\"string\":", fp);
+		put_str(fp, v->string);
+		fprintf(fp, ",\"major\":%ju,\"minor\":%ju,\"patch\":%ju,"
+		    "\"parts\":[", (uintmax_t)v->parts[0],
+		    (uintmax_t)v->parts[1], (uintmax_t)v->parts[2]);
+		for (i = 0; i < v->nparts; i++)
+			fprintf(fp, "%s%ju", i != 0 ? "," : "",
+			    (uintmax_t)v->parts[i]);
+		fputc(']', fp);
+		if (v->suffix[0] != '\0') {
+			fputs(",\"suffix\":", fp);
+			put_str(fp, v->suffix);
+		}
+	} else {
+		reason = nvrm_reason_from_id(v->reason);
+		if (reason < 0) {
+#ifdef NVRM_FAULT_INJECT
+			abort();	/* a stored id must name a table row */
+#else
+			reason = NVRM_R_VERSION_UNPARSED;
+#endif
+		}
+		fputs("\"available\":false,\"string\":", fp);
+		put_str(fp, v->string);
+		fprintf(fp, ",\"reason_id\":\"%s\",\"reason\":",
+		    nvrm_reason_id(reason));
+		put_str(fp, nvrm_reason_text(reason));
+	}
+	fprintf(fp, ",\"source\":\"%s\"}", nvrm_source_name(source));
+}
+
+static void
 put_list(FILE *fp, const nvrm_list *v)
 {
 	uint32_t i;
@@ -116,8 +174,14 @@ put_device(FILE *fp, const nvrm_device *dev, const nvrm_field *tab, unsigned n)
 				put_u64(fp, (const nvrm_u64 *)(base + f->offset));
 			else if (f->kind == NVRM_K_STR)
 				put_strv(fp, (const nvrm_str *)(base + f->offset));
-			else
+			else if (f->kind == NVRM_K_LIST)
 				put_list(fp, (const nvrm_list *)(base + f->offset));
+			else {
+				const nvrm_version_field *v =
+				    (const nvrm_version_field *)(base + f->offset);
+
+				put_version(fp, &v->version, v->source);
+			}
 		}
 		fputc('}', fp);
 	}
@@ -153,6 +217,24 @@ finish(FILE *fp)
 }
 
 static void
+put_versions(const nvrm_ctx *ctx, FILE *fp)
+{
+	fputs(",\"versions\":{\"driver\":", fp);
+	put_version(fp, nvrm_driver_version(ctx), NVRM_S_OS);
+	fputs(",\"rm_api\":", fp);
+	put_version(fp, nvrm_rm_api_version(ctx), NVRM_S_RM);
+	fputs(",\"built_for\":", fp);
+	put_version(fp, nvrm_built_for_version(), NVRM_S_DERIVED);
+	fputs(",\"library\":", fp);
+	put_version(fp, nvrm_library_version(), NVRM_S_DERIVED);
+	fputs(",\"library_symbols\":", fp);
+	put_version(fp, nvrm_symbol_version(), NVRM_S_DERIVED);
+	fputs(",\"schema\":", fp);
+	put_version(fp, nvrm_schema_version(), NVRM_S_DERIVED);
+	fputc('}', fp);
+}
+
+static void
 put_head(const nvrm_ctx *ctx, FILE *fp, const char *kind)
 {
 	fprintf(fp, "{\"schema\":\"%s\",\"schema_minor\":%d,\"kind\":\"%s\","
@@ -160,6 +242,7 @@ put_head(const nvrm_ctx *ctx, FILE *fp, const char *kind)
 	    "\"running_rm_version\":", SCHEMA_ID, SCHEMA_MINOR, kind,
 	    nvrm_backend_name(ctx), NVRM_RM_VERSION);
 	put_strv(fp, nvrm_rm_running_version(ctx));
+	put_versions(ctx, fp);
 }
 
 int
@@ -272,7 +355,8 @@ schema_group(FILE *fp, const char *group)
 		fprintf(fp, "%s        \"%s\": { \"$ref\": \"#/$defs/%s\", "
 		    "\"description\": \"%s\" }", n++ != 0 ? ",\n" : "",
 		    f->name, f->kind == NVRM_K_U64 ? "u64" :
-		    f->kind == NVRM_K_STR ? "text" : "list", f->desc);
+		    f->kind == NVRM_K_STR ? "text" :
+		    f->kind == NVRM_K_LIST ? "list" : "version", f->desc);
 	}
 	fputs("\n      }\n    },\n", fp);
 }
@@ -316,6 +400,57 @@ schema_prelude(FILE *fp)
 	    "        \"reason_id\": { \"$ref\": \"#/$defs/reason_id\" },\n"
 	    "        \"reason\": { \"type\": \"string\" },\n"
 	    "        \"source\": { \"$ref\": \"#/$defs/source\" }\n"
+	    "      }\n"
+	    "    },\n", fp);
+	fputs("    \"version_part\": { \"type\": \"integer\", \"minimum\": 0, "
+	    "\"maximum\": 4294967295 },\n"
+	    "    \"version\": {\n"
+	    "      \"oneOf\": [\n"
+	    "        {\n"
+	    "          \"type\": \"object\",\n"
+	    "          \"additionalProperties\": false,\n"
+	    "          \"required\": [\"available\", \"string\", \"major\", "
+	    "\"minor\", \"patch\", \"parts\", \"source\"],\n"
+	    "          \"properties\": {\n"
+	    "            \"available\": { \"const\": true },\n"
+	    "            \"string\": { \"type\": \"string\" },\n"
+	    "            \"major\": { \"$ref\": \"#/$defs/version_part\" },\n"
+	    "            \"minor\": { \"$ref\": \"#/$defs/version_part\" },\n"
+	    "            \"patch\": { \"$ref\": \"#/$defs/version_part\" },\n"
+	    "            \"parts\": { \"type\": \"array\", \"minItems\": 1, "
+	    "\"maxItems\": 6, \"items\": { \"$ref\": "
+	    "\"#/$defs/version_part\" } },\n"
+	    "            \"suffix\": { \"type\": \"string\" },\n"
+	    "            \"source\": { \"$ref\": \"#/$defs/source\" }\n"
+	    "          }\n"
+	    "        },\n"
+	    "        {\n"
+	    "          \"type\": \"object\",\n"
+	    "          \"additionalProperties\": false,\n"
+	    "          \"required\": [\"available\", \"string\", "
+	    "\"reason_id\", \"reason\", \"source\"],\n"
+	    "          \"properties\": {\n"
+	    "            \"available\": { \"const\": false },\n"
+	    "            \"string\": { \"type\": \"string\" },\n"
+	    "            \"reason_id\": { \"$ref\": \"#/$defs/reason_id\" },\n"
+	    "            \"reason\": { \"type\": \"string\" },\n"
+	    "            \"source\": { \"$ref\": \"#/$defs/source\" }\n"
+	    "          }\n"
+	    "        }\n"
+	    "      ]\n"
+	    "    },\n"
+	    "    \"versions\": {\n"
+	    "      \"type\": \"object\",\n"
+	    "      \"additionalProperties\": false,\n"
+	    "      \"required\": [\"driver\", \"rm_api\", \"built_for\", "
+	    "\"library\", \"library_symbols\", \"schema\"],\n"
+	    "      \"properties\": {\n"
+	    "        \"driver\": { \"$ref\": \"#/$defs/version\" },\n"
+	    "        \"rm_api\": { \"$ref\": \"#/$defs/version\" },\n"
+	    "        \"built_for\": { \"$ref\": \"#/$defs/version\" },\n"
+	    "        \"library\": { \"$ref\": \"#/$defs/version\" },\n"
+	    "        \"library_symbols\": { \"$ref\": \"#/$defs/version\" },\n"
+	    "        \"schema\": { \"$ref\": \"#/$defs/version\" }\n"
 	    "      }\n"
 	    "    },\n", fp);
 }
@@ -415,7 +550,7 @@ schema_documents(FILE *fp)
 	    "      \"additionalProperties\": false,\n"
 	    "      \"required\": [\"schema\", \"schema_minor\", \"kind\", "
 	    "\"backend\", \"built_for_rm_version\", \"running_rm_version\", "
-	    "\"devices\"],\n"
+	    "\"versions\", \"devices\"],\n"
 	    "      \"properties\": {\n"
 	    "        \"schema\": { \"const\": \"%s\" },\n"
 	    "        \"schema_minor\": { \"const\": %d },\n"
@@ -423,6 +558,7 @@ schema_documents(FILE *fp)
 	    "        \"backend\": { \"type\": \"string\" },\n"
 	    "        \"built_for_rm_version\": { \"type\": \"string\" },\n"
 	    "        \"running_rm_version\": { \"$ref\": \"#/$defs/text\" },\n"
+	    "        \"versions\": { \"$ref\": \"#/$defs/versions\" },\n"
 	    "        \"devices\": {\n"
 	    "          \"type\": \"array\",\n"
 	    "          \"minItems\": 0,\n"
@@ -435,14 +571,16 @@ schema_documents(FILE *fp)
 	    "      \"type\": \"object\",\n"
 	    "      \"additionalProperties\": false,\n"
 	    "      \"required\": [\"schema\", \"schema_minor\", \"kind\", "
-	    "\"backend\", \"built_for_rm_version\", \"running_rm_version\"],\n"
+	    "\"backend\", \"built_for_rm_version\", \"running_rm_version\", "
+	    "\"versions\"],\n"
 	    "      \"properties\": {\n"
 	    "        \"schema\": { \"const\": \"%s\" },\n"
 	    "        \"schema_minor\": { \"const\": %d },\n"
 	    "        \"kind\": { \"const\": \"header\" },\n"
 	    "        \"backend\": { \"type\": \"string\" },\n"
 	    "        \"built_for_rm_version\": { \"type\": \"string\" },\n"
-	    "        \"running_rm_version\": { \"$ref\": \"#/$defs/text\" }\n"
+	    "        \"running_rm_version\": { \"$ref\": \"#/$defs/text\" },\n"
+	    "        \"versions\": { \"$ref\": \"#/$defs/versions\" }\n"
 	    "      }\n"
 	    "    },\n", SCHEMA_ID, SCHEMA_MINOR);
 	fprintf(fp, "    \"device_record\": {\n"

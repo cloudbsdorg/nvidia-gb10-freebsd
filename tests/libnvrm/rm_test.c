@@ -35,15 +35,18 @@
 #include <class/cl2080.h>
 #include <ctrl/ctrl0000/ctrl0000gpu.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
+#include <ctrl/ctrl2080/ctrl2080bios.h>
 #include <ctrl/ctrl2080/ctrl2080bus.h>
 #include <ctrl/ctrl2080/ctrl2080fb.h>
 #include <ctrl/ctrl2080/ctrl2080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080gr.h>
+#include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_internal.h"
 #include "nvrm_rm_sys.h"
 #include "t.h"
+#include "t_version.h"
 
 #include "fault_calloc.h"
 
@@ -91,27 +94,18 @@ test_happy(void)
 	CHECK(K.saw_version && K.saw_card && K.saw_attach_fd && K.saw_client);
 	CHECK_EQ(K.cmds_seen[0], 1);		/* ATTACH_IDS once */
 	i = info0(ctx);
-	CHECK_EQ(i->pci_vendor.value, 0x10de);
-	CHECK_EQ(i->pci_device.value, 0x2d04);
+	t_check_common_device(i);
 	CHECK_EQ(i->pci_bus.value, 13);
 	CHECK(!NVRM_HAVE(i->pci_function));	/* the OS layer does not say */
 	CHECK_EQ(i->pci_function.reason, NVRM_R_OS_NOT_REPORTED);
-	CHECK_EQ(i->pci_subsystem_vendor.value, 0x1462);
-	CHECK_EQ(i->pci_subsystem_device.value, 0x5351);
 	CHECK_EQ(i->pci_revision.value, 0xa1);
 	CHECK_EQ(i->rm_gpu_id.value, 0x0d00);
 	CHECK_STR(i->uuid.value, "GPU-11111111-2222-4333-8444-555555555555");
-	CHECK_EQ(i->chip_id.value, 0x1b6);
 	CHECK_EQ(i->sm_version_major.value, 12);
 	CHECK_EQ(i->sm_version_minor.value, 0);
-	CHECK_EQ(i->gpc_count.value, 3);
-	CHECK_EQ(i->tpc_count.value, 18);
-	CHECK_EQ(i->sm_count.value, 36);
-	CHECK_EQ(i->vram_size.value, 16ULL << 30);	/* KiB -> bytes */
 	CHECK_EQ(i->bar1_size.value, 8ULL << 30);
 	CHECK_EQ(i->max_page_size.value, 512ULL << 20);
 	CHECK_EQ(i->numa_node.reason, NVRM_R_NO_NUMA);
-	CHECK_STR(i->family.value, "blackwell-b");
 	CHECK_EQ(i->classes.count, 3);
 	CHECK(i->caps[0].value == 1 && NVRM_HAVE(i->caps[0]));
 	CHECK(i->caps[1].value == 0 && NVRM_HAVE(i->caps[1]));
@@ -160,6 +154,315 @@ test_happy(void)
 	nvrm_close(ctx);
 	CHECK_EQ(K.nlive, 0);
 	CHECK_EQ(K.bad, 0);
+}
+
+static void
+test_device_versions(void)
+{
+	static const uint32_t vbios[] = { 0x96, 0x06, 0x1e, 0x00, 0x4a };
+	static const uint32_t gsp[] = { 580, 178, 4 };
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_version_field(info0(ctx), "vbios", "96.06.1e.00.4a", vbios, 5);
+	t_check_version_field(info0(ctx), "gsp_firmware", "580.178.04", gsp, 3);
+	CHECK_EQ(K.saw_vbios_revision, 1);
+	CHECK_EQ(K.saw_vbios_oem_revision, 1);
+	CHECK_EQ(K.saw_gsp, 1);
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	/* Each control failure is an RM failure on only its own value. */
+	reset_kernel();
+	K.fail_ctl_cmd = NV2080_CTRL_CMD_BIOS_GET_INFO_V2;
+	K.fail_ctl_status = NV_ERR_GENERIC;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version_field(info0(ctx), "vbios", "", "rm_control_failed");
+	t_check_version_field(info0(ctx), "gsp_firmware", "580.178.04", gsp, 3);
+	nvrm_close(ctx);
+
+	/* The second BIOS request can fail after the revision succeeded. */
+	reset_kernel();
+	K.fail_vbios_oem = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version_field(info0(ctx), "vbios", "", "rm_control_failed");
+	t_check_version_field(info0(ctx), "gsp_firmware", "580.178.04", gsp, 3);
+	CHECK_EQ(K.saw_vbios_revision, 1);
+	CHECK_EQ(K.saw_vbios_oem_revision, 1);
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.fail_ctl_cmd = NV2080_CTRL_CMD_GSP_GET_FEATURES;
+	K.fail_ctl_status = NV_ERR_GENERIC;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_version_field(info0(ctx), "vbios", "96.06.1e.00.4a", vbios, 5);
+	t_check_unavailable_version_field(info0(ctx), "gsp_firmware", "", "rm_control_failed");
+	nvrm_close(ctx);
+
+	/* bValid is authoritative; its firmware buffer is meaningless without it. */
+	reset_kernel();
+	K.gsp_valid = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version_field(info0(ctx), "gsp_firmware", "", "rm_not_supported");
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.gsp_firmware = "";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version_field(info0(ctx), "gsp_firmware", "", "version_unparsed");
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+}
+
+static void
+check_sysctl_mismatch(const char *string, int major, int minor, int patch,
+    const char *suffix)
+{
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	K.version_parts = 1;
+	K.version_string = string;
+	K.version_major = major;
+	K.version_minor = minor;
+	K.version_patch = patch;
+	K.version_suffix = suffix;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), string,
+	    "version_inconsistent");
+	CHECK_STR(nvrm_reason_id(nvrm_rm_running_version(ctx)->reason),
+	    "version_inconsistent");
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, string);
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+}
+
+static void test_banner_lengths(void);
+static void test_rm_api_versions(void);
+
+static void
+test_versions(void)
+{
+	nvrm_ctx *ctx;
+	char err[300], small[8];
+	size_t len;
+	int rc;
+
+	/* The real banner is longer than nvrm_str.  The old short-string sysctl
+	 * read fails with ENOMEM; the bounded fallback still finds its version. */
+	reset_kernel();
+	len = sizeof(small);
+	errno = 0;
+	CHECK_EQ(k_sysctl("hw.nvidia.version", small, &len), -1);
+	CHECK_EQ(errno, ENOMEM);
+	CHECK(len > sizeof(small));
+	len = 0;
+	CHECK_EQ(k_sysctl("hw.nvidia.version", NULL, &len), 0);
+	CHECK_EQ(len, strlen(K.banner) + 1);
+	K.saw_version_probe = 0;
+	K.banner_reads = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	CHECK_EQ(K.saw_version_query, 1);
+	CHECK_EQ(K.saw_version_probe, 1);
+	CHECK_EQ(K.banner_reads, 1);
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, "580.178.04");
+	CHECK(strstr(nvrm_rm_running_version(ctx)->value, "NVIDIA") == NULL);
+	t_check_version3(nvrm_driver_version(ctx), "580.178.04", 580, 178, 4, "");
+	t_check_version3(nvrm_rm_api_version(ctx), "580.178.04", 580, 178, 4, "");
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	/* Matching integer sysctls corroborate the parsed source string. */
+	reset_kernel();
+	K.version_parts = 1;
+	K.version_string = "580.178.04-rc1";
+	K.version_suffix = "-rc1";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_version3(nvrm_driver_version(ctx), "580.178.04-rc1", 580, 178, 4,
+	    "-rc1");
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, "580.178.04-rc1");
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	/* An absent numeric part reads 0; the original two-part string remains. */
+	reset_kernel();
+	K.version_parts = 1;
+	K.version_string = "580.178";
+	K.version_patch = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	{
+		const uint32_t parts[] = { 580, 178 };
+
+		t_check_version(nvrm_driver_version(ctx), "580.178", parts, 2, "");
+	}
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, "580.178");
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	/* Integer or suffix disagreement has its own consistency reason. */
+	check_sysctl_mismatch("580.178.04", 579, 178, 4, "");
+	check_sysctl_mismatch("580.178.04", 580, 177, 4, "");
+	check_sysctl_mismatch("580.178.04", 580, 178, 3, "");
+	check_sysctl_mismatch("580.178.04-rc1", 580, 178, 4, "-other");
+
+	reset_kernel();
+	K.version_parts = 1;
+	K.version_available = 0;
+	K.version_string = "N/A";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "N/A",
+	    "version_unparsed");
+	CHECK_EQ(nvrm_rm_running_version(ctx)->reason, NVRM_R_VERSION_UNPARSED);
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, "N/A");
+	nvrm_close(ctx);
+
+	/* An available flag cannot make an unreadable source string numeric. */
+	reset_kernel();
+	K.version_parts = 1;
+	K.version_string = "N/A";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "N/A",
+	    "version_unparsed");
+	CHECK_EQ(nvrm_rm_running_version(ctx)->reason, NVRM_R_VERSION_UNPARSED);
+	CHECK_STR(nvrm_rm_running_version(ctx)->value, "N/A");
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.banner = "NVIDIA UNIX Open Kernel Module without a version";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "",
+	    "version_unparsed");
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.fn_ver = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "",
+	    "os_not_reported");
+	nvrm_close(ctx);
+
+	test_banner_lengths();
+	test_rm_api_versions();
+}
+
+static void
+test_banner_lengths(void)
+{
+	nvrm_ctx *ctx;
+	char err[300], banner[601];
+	static char too_long[64 * 1024 + 1];
+	int rc;
+
+	/* A real 600-byte banner needs a length probe and more than 512 bytes. */
+	reset_kernel();
+	memset(banner, 'x', sizeof(banner) - 1);
+	banner[sizeof(banner) - 1] = '\0';
+	memcpy(banner, "NVIDIA ", sizeof("NVIDIA ") - 1);
+	memcpy(banner + 580, " 580.178.04 ", sizeof(" 580.178.04 ") - 1);
+	K.banner = banner;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_version3(nvrm_driver_version(ctx), "580.178.04", 580, 178, 4,
+	    "");
+	CHECK_EQ(K.saw_version_probe, 1);
+	CHECK_EQ(K.banner_reads, 1);
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+
+	/* A failure after a successful probe is still an unavailable OS value. */
+	reset_kernel();
+	K.fail_banner_read = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "",
+	    "os_not_reported");
+	CHECK_EQ(K.saw_version_probe, 1);
+	CHECK_EQ(K.banner_reads, 1);
+	nvrm_close(ctx);
+
+	/* Beyond 64 KiB: do not read; call it unparsed, not OS absence. */
+	reset_kernel();
+	memset(too_long, 'x', sizeof(too_long) - 1);
+	too_long[sizeof(too_long) - 1] = '\0';
+	K.banner = too_long;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "",
+	    "version_unparsed");
+	CHECK_EQ(K.saw_version_probe, 1);
+	CHECK_EQ(K.banner_reads, 0);
+	nvrm_close(ctx);
+
+	/* A successful but empty probe is malformed, not an empty allocation. */
+	reset_kernel();
+	K.banner_probe_zero = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_driver_version(ctx), "",
+	    "version_unparsed");
+	CHECK_EQ(K.saw_version_probe, 1);
+	CHECK_EQ(K.banner_reads, 0);
+	nvrm_close(ctx);
+}
+
+static void
+test_rm_api_versions(void)
+{
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	K.rm_api_version = "580.178.04+rm-query";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_version3(nvrm_rm_api_version(ctx), "580.178.04+rm-query", 580, 178,
+	    4, "+rm-query");
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.rm_api_version = "??";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_rm_api_version(ctx), "??",
+	    "version_unparsed");
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.query_unrecognized = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_rm_api_version(ctx), "", "rm_not_supported");
+	nvrm_close(ctx);
+
+	reset_kernel();
+	K.fail_version_query = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	t_check_unavailable_version(nvrm_rm_api_version(ctx), "", "os_call_failed");
+	CHECK_EQ(K.saw_version_query, 1);
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
 }
 
 static pid_t parent_pid;
@@ -281,6 +584,7 @@ test_open_failures(void)
 	/* a kernel module of another RM version: refused, and says which */
 	reset_kernel();
 	K.version = "580.99.01";
+	K.banner = "NVIDIA UNIX Open Kernel Module for aarch64  580.99.01";
 	ctx = enum_rm(&rc, err, sizeof(err));
 	CHECK_EQ(rc, NVRM_E_VERSION);
 	CHECK(strstr(err, "580.99.01") != NULL);
@@ -675,7 +979,7 @@ test_misc(void)
 	nvrm_backend *be;
 	nvrm_gpu *g;
 	uint64_t v;
-	char err[200];
+	char err[200], buf[64];
 	uint32_t id;
 	unsigned n;
 
@@ -685,6 +989,8 @@ test_misc(void)
 	CHECK_EQ(o->list_gpus(be, &id, 1, &n, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(o->gpu_open(be, id, &g, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(o->gpu_u64(g, NVRM_P_COUNT, 0, &v), NVRM_R_BACKEND_NONE);
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_COUNT, buf, sizeof(buf)),
+	    NVRM_R_BACKEND_NONE);
 	o->gpu_close(g);
 	o->close(be);
 	CHECK_EQ(K.nlive, 0);
@@ -716,6 +1022,8 @@ main(void)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	nvrm_rm_set_sys(&scripted);
 	test_happy();
+	test_device_versions();
+	test_versions();
 	test_fork_close();
 	test_version_closes_fd();
 	test_open_failures();

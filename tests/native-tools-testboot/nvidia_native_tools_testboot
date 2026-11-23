@@ -1,0 +1,472 @@
+#!/bin/sh
+#
+# PROVIDE: nvidia_native_tools_testboot
+# REQUIRE: LOGIN kld
+# KEYWORD: nojail
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# One-shot test-boot recorder: measure the NVIDIA card with native FreeBSD tools only (Track #2362).  The boot
+# environment has linux_enable=NO, no Linux ABI module, no LinuxKPI module (make-be.sh strips amdgpu and drm from
+# kld_list and blocks them in devmatch) and no nvidia-drm.  make-be.sh installs this script; it runs once, in the
+# background, and:
+#   1. arms a dead-man timer (shutdown -r +N): nothing is loaded without one;
+#   2. sets and reads back kern.panic_reboot_wait_time=5 and debug.debugger_on_panic=0;
+#   3. env-before: the no-Linux guard (guard.sh) on kldstat -v and compat.linux, before anything is loaded;
+#   4. checks the staged files against the hash list, then loads, as root and by full path, the GSP firmware module,
+#      nvidia.ko and nvidia-modeset.ko of /boot/modules.nvnative-test (a build of main without the Linux dependency,
+#      see #2363);
+#   5. env-loaded: the guard again, with nvidia.ko as the positive control;
+#   6. finds the GPU with gpu-detect.sh (vendored from uvm-bsd: PCI class, vendor, the driver parent, never
+#      /dev/nvidia0), opens the chosen node once as root and verifies it is the chosen card;
+#   7. opens /dev/nvidiactl and /dev/nvidia-modeset as root (native device nodes, no Linux bridge);
+#   8. runs tests/libnvrm/boot_nvrm_info.sh (nvrm-info, the native RM-direct library, against the real driver) under
+#      ktrace; the guard checks every file it executed (FreeBSD-branded ELF or #! script) and that no kld was loaded;
+#   9. records the rows that cannot run natively yet, with their evidence (needs-linux, needs-linuxkpi,
+#      not-available): the uvm-bsd ioctl suite and the #2373 probe and race tests (nvidia-uvm.ko depends on the
+#      Linuxulator), PRIME import (nvidia-drm.ko depends on LinuxKPI), the render uAPI (no kernel part yet), the
+#      libnvrm S2 memory rows (not on main at assembly);
+#  10. env-after: the guard a last time, and a delta against env-loaded;
+#  11. summarize.py writes summary.json and summary.txt; the run is copied to the copy-out directory;
+#  12. ALWAYS ends with testboot-return NORMAL_BE (a panic excepted: it reboots in 5 seconds, the one-shot is used up).
+#
+# Rows go to results.jsonl: {"row","status","detail"}; status pass, fail, error, info, running, not-run, needs-linux,
+# needs-linuxkpi or not-available.  A "running" row is written and synced before each step that can panic.
+#
+# rc.conf variables (make-be.sh writes _enable, _normal_be, _copyout, _vram, _vram_reserve, _sm): nvidia_native_tools_testboot_enable,
+# _normal_be (cloudbsd-rx7600), _deadman (minutes, 30), _kit (/usr/local/share/nvidia-native-tools-test), _mods
+# (/boot/modules.nvnative-test), _work (/var/db/nvidia-native-tools-test), _fallback (/var/db/nvnt-testboot), _copyout,
+# _return (/usr/local/sbin/testboot-return), _devdir (/dev), _vram (the board's nominal VRAM in bytes), _vram_reserve
+# (the most the driver may reserve of it, in bytes) and _sm (the compute capability, major.minor), for
+# boot_nvrm_info.sh (values: tests/libnvrm/board-amp001.env), _lockfile, _version.  _foreground=YES runs the recorder in the foreground: only
+# tests/native_tools_kit_test.sh sets it, so that it can wait for the run; make-be.sh never writes it.
+
+. /etc/rc.subr
+
+name=nvidia_native_tools_testboot
+rcvar=nvidia_native_tools_testboot_enable
+start_cmd=nvidia_native_tools_testboot_start
+stop_cmd=:
+
+# rc.conf and rc.conf.d/nvidia_native_tools_testboot first, then the defaults, then the values derived from them
+load_rc_config $name
+
+: "${nvidia_native_tools_testboot_normal_be:=cloudbsd-rx7600}"
+: "${nvidia_native_tools_testboot_deadman:=30}"
+: "${nvidia_native_tools_testboot_kit:=/usr/local/share/nvidia-native-tools-test}"
+: "${nvidia_native_tools_testboot_mods:=/boot/modules.nvnative-test}"
+: "${nvidia_native_tools_testboot_work:=/var/db/nvidia-native-tools-test}"
+: "${nvidia_native_tools_testboot_fallback:=/var/db/nvnt-testboot}"
+: "${nvidia_native_tools_testboot_copyout:=}"
+: "${nvidia_native_tools_testboot_return:=/usr/local/sbin/testboot-return}"
+: "${nvidia_native_tools_testboot_devdir:=/dev}"
+: "${nvidia_native_tools_testboot_vram:=}"
+: "${nvidia_native_tools_testboot_vram_reserve:=}"
+: "${nvidia_native_tools_testboot_sm:=}"
+: "${nvidia_native_tools_testboot_lockfile:=/var/run/noshutdown}"
+: "${nvidia_native_tools_testboot_version:=/usr/local/etc/nvidia_native_tools_testboot.version}"
+nvidia_native_tools_testboot_real_shutdown=/sbin/shutdown
+: "${nvidia_native_tools_testboot_shutdown:=$nvidia_native_tools_testboot_real_shutdown}"
+: "${nvidia_native_tools_testboot_marker:=/usr/local/etc/nvidia_native_tools_testboot.marker}"
+: "${nvidia_native_tools_testboot_bectl:=bectl}"
+
+NORMAL=$nvidia_native_tools_testboot_normal_be
+KIT=$nvidia_native_tools_testboot_kit
+MODS=$nvidia_native_tools_testboot_mods
+WORKROOT=$nvidia_native_tools_testboot_work
+FALLBACK=$nvidia_native_tools_testboot_fallback
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT=$WORKROOT/$STAMP
+DM_OK=0
+DM_WHY="the dead-man timer was never armed"
+
+row()	# row <name> <status> <detail>
+{
+	printf '{"row":"%s","status":"%s","detail":"%s"}\n' "$1" "$2" \
+	    "$(printf '%s' "$3" | tr -c '[:print:]' ' ' | tr '"\\' "''")" >> "$OUT/results.jsonl"
+	echo "== row $1: $2: $3"
+}
+
+running()	# running <name> <detail>: written and synced before a step that can panic
+{
+	row "$1" running "$2"
+	sync
+}
+
+# guard_row <row> <line from a guard function> <its exit status>
+guard_row()
+{
+	case $3 in 0) _st=pass ;; 1) _st=fail ;; *) _st=error ;; esac
+	row "$1" "$_st" "${2#* }"
+}
+
+# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE: the real-case decision, no side effects.  Prints the
+# reason and returns 1 when the real shutdown must not be called, returns 0 (prints nothing) when every condition holds.
+# /etc/rc.subr strips the one/fast/force prefix, so rc_arg is "start" for onestart too and cannot tell a boot from a
+# hand run; only autoboot=yes (set by /etc/rc at boot) and rc_fast=yes (set by the faststart prefix /etc/rc uses) can.
+# A real boot therefore needs ALL of: autoboot=yes, rc_fast=yes, rc_arg=start.
+dm_decide()
+{
+	if [ "$1" != 0 ]; then echo "uid $1 is not 0"; return 1; fi
+	if [ "$2" != yes ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ "$3" != yes ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ "$4" != start ]; then echo "not an rc boot start (autoboot='$2', rc_fast='$3', rc_arg='$4')"; return 1; fi
+	if [ -z "$5" ]; then echo "the marker is missing or has an empty first line"; return 1; fi
+	if [ -z "$6" ] || [ "$6" != "$5" ]; then echo "current boot environment '${6:-none}' does not match marker '$5'"; return 1; fi
+	return 0
+}
+
+deadman_allowed()
+{
+	DM_REFUSE=
+	# at an rc boot (autoboot=yes) the override variable is ignored: the real conditions apply and the call goes to the
+	# real path, so a stray rc.conf line cannot swap in a stub
+	[ "${autoboot:-}" != yes ] || nvidia_native_tools_testboot_shutdown=$nvidia_native_tools_testboot_real_shutdown
+	if [ "$nvidia_native_tools_testboot_shutdown" != "$nvidia_native_tools_testboot_real_shutdown" ]; then
+		# not booting: an override that is an absolute path to an executable, non-setuid file is accepted (it cannot reboot)
+		# decided: a hand run (onestart, root or not) with such a stub override is allowed; a stub cannot reboot the machine
+		case $nvidia_native_tools_testboot_shutdown in
+		/*) if [ -f "$nvidia_native_tools_testboot_shutdown" ] && [ -x "$nvidia_native_tools_testboot_shutdown" ] && [ ! -u "$nvidia_native_tools_testboot_shutdown" ]; then return 0; fi ;;
+		esac
+	fi
+	_dm_want=
+	[ ! -f "$nvidia_native_tools_testboot_marker" ] || _dm_want=$(sed -n '1p' "$nvidia_native_tools_testboot_marker")
+	_dm_be=$("$nvidia_native_tools_testboot_bectl" list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}')
+	DM_REFUSE=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_want" "$_dm_be")
+	[ -z "$DM_REFUSE" ]
+}
+
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+{
+	case ${1:-} in '' | *[!0-9]*) return 1 ;; esac
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
+deadman_arm()
+{
+	DM_OK=0
+	DM_CHILD=
+	case $nvidia_native_tools_testboot_deadman in
+	'' | *[!0-9]* | 0*) DM_WHY="nvidia_native_tools_testboot_deadman is '$nvidia_native_tools_testboot_deadman', not a positive number of minutes"; row deadman fail "$DM_WHY"; return 0 ;;
+	esac
+	# the lock file is checked before anything is called, so a refusal here cannot leave a pending reboot behind
+	if [ -e "$nvidia_native_tools_testboot_lockfile" ]; then
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_native_tools_testboot_lockfile exists): shutdown was not called"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	if ! deadman_allowed; then
+		DM_WHY="REFUSED: not calling shutdown: $DM_REFUSE"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	"$nvidia_native_tools_testboot_shutdown" -r "+$nvidia_native_tools_testboot_deadman" "nvidia_native_tools_testboot dead-man: the machine restarts in $nvidia_native_tools_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
+	fi
+	if [ -n "$_dm_fail" ]; then
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_native_tools_testboot_lockfile, or the shutdown request failed): $_dm_fail"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+	else
+		DM_CHILD=$_dm_pid
+		if [ "$nvidia_native_tools_testboot_shutdown" != "$nvidia_native_tools_testboot_real_shutdown" ]; then
+			row deadman pass "a dead-man timer is pending for $nvidia_native_tools_testboot_deadman minutes as pid $DM_CHILD; stubbed shutdown $nvidia_native_tools_testboot_shutdown is used"
+		else
+			row deadman pass "a dead-man timer is pending for $nvidia_native_tools_testboot_deadman minutes as pid $DM_CHILD"
+		fi
+		DM_OK=1
+	fi
+	sync
+}
+
+deadman_cancel()
+{
+	if [ -z "${DM_CHILD:-}" ]; then
+		row deadman-cancel fail "no confirmed dead-man shutdown pid was recorded; killed nothing"
+	elif ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman-cancel fail "dead-man pid $DM_CHILD is no longer a shutdown owned by uid $(id -u); killed nothing"
+	elif kill "$DM_CHILD" > /dev/null 2>&1; then
+		row deadman-cancel pass "killed only the confirmed dead-man shutdown pid $DM_CHILD"
+	else
+		row deadman-cancel fail "could not kill confirmed dead-man shutdown pid $DM_CHILD"
+	fi
+}
+
+# env_snapshot <name> [<required kld file>...]: the guard on the system as it is now; the listing is kept as <name>.kldstat
+env_snapshot()
+{
+	_n=$1; shift
+	kldstat -v > "$OUT/$_n.kldstat" 2>&1; _ks=$?
+	sysctl compat.linux > "$OUT/$_n.compat-linux" 2>&1; _ss=$?
+	guard_env "$OUT/$_n.kldstat" "$_ks" "$OUT/$_n.compat-linux" "$_ss" "$@" > "$OUT/$_n.guard"; _gs=$?
+	guard_row "$_n" "$(head -1 "$OUT/$_n.guard")" "$_gs"
+	_kr=$(sed -n 's/^records //p' "$OUT/$_n.guard")
+	[ -z "$_kr" ] || row "$_n-kernel-records" info "Linux-layer module records compiled into the kernel file, not loaded files: $_kr"
+	return $_gs
+}
+
+# hash_ok <file>: the staged file has the single full sha256 the list gives it
+hash_ok()
+{
+	_got=$(sha256 -q "$MODS/$1" 2> /dev/null) || return 1
+	[ "$(awk -v n="($1)" -v h="$_got" '$1 == "SHA256" && $2 == n && $3 == "=" && $4 == h { c++ } END { print c + 0 }' "$KIT/SHA256.txt")" = 1 ]
+}
+
+# root_open <row> <node>: root opens and closes the node once
+root_open()
+{
+	running "$1" "root opens $2 once: a panic from here leaves this row last"
+	if [ ! -c "$2" ]; then row "$1" fail "$2 is not a character device"; return 1; fi
+	if ( exec 3<> "$2" ) > "$OUT/$1.txt" 2>&1; then row "$1" pass "root opened and closed $2"; return 0; fi
+	row "$1" fail "root could not open $2: $(head -c 200 "$OUT/$1.txt" | tr '\n' ' ')"
+	return 1
+}
+
+# static_row <row>: a row the kit cannot run natively; its status and evidence were written by make-be.sh
+static_row()
+{
+	_f=$KIT/static-rows/$1
+	if [ ! -f "$_f" ]; then row "$1" error "make-be.sh wrote no evidence file for this row ($_f)"; return; fi
+	_s=$(head -1 "$_f")
+	case $_s in
+	needs-linux | needs-linuxkpi | not-available) row "$1" "$_s" "$(sed -n '2,$p' "$_f" | tr '\n' ' ')" ;;
+	*) row "$1" error "the evidence file $_f says '$_s': a row that does not run can only be needs-linux, needs-linuxkpi or not-available" ;;
+	esac
+}
+
+run_body()
+{
+	deadman_arm	# check-be: deadman-arm
+	row kit-version info "kit commit $(cat "$nvidia_native_tools_testboot_version" 2> /dev/null || echo unknown), BE $(bectl list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}'), kernel $(sysctl -n kern.bootfile 2> /dev/null)"
+	# a dot of a missing file would end this shell and skip testboot-return: check first
+	if [ -r "$KIT/guard.sh" ]; then . "$KIT/guard.sh"; else row guard-lib error "$KIT/guard.sh cannot be read: nothing is loaded"; row done info "the run is over"; return; fi
+	sysctl kern.panic_reboot_wait_time=5 debug.debugger_on_panic=0 > "$OUT/sysctl-set.txt" 2>&1
+	_ps=$(sysctl -n kern.panic_reboot_wait_time debug.debugger_on_panic 2>&1 | tr '\n' ' ')
+	ok=1
+	# check-be: deadman-gate (the next line)
+	if [ "$DM_OK" != 1 ]; then ok=0; row load-skipped-no-deadman fail "nothing is loaded because $DM_WHY"; fi
+	if [ "$_ps" = "5 0 " ]; then row panic-settings pass "kern.panic_reboot_wait_time 5, debug.debugger_on_panic 0"; else row panic-settings fail "read back '$_ps', not '5 0'"; ok=0; fi
+	_le=$(sysrc -n linux_enable 2> /dev/null)
+	case $_le in [Nn][Oo]) row linux-enable pass "linux_enable is $_le" ;; *) row linux-enable fail "linux_enable is '${_le:-unset}', not NO"; ok=0 ;; esac
+	env_snapshot env-before || ok=0
+	if kldstat -q -m nvidia > /dev/null 2>&1; then row preloaded fail "nvidia is loaded before the kit loads it"; ok=0; fi
+	for _f in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1; do
+		if hash_ok "$_f"; then row "hash-$_f" pass "$(sha256 -q "$MODS/$_f")"; else row "hash-$_f" fail "$MODS/$_f is missing or not the hash of $KIT/SHA256.txt"; ok=0; fi
+	done
+	# the modules to load reference nothing of the Linuxulator or LinuxKPI: their declared dependencies (kldxref) and
+	# their undefined symbols (nm); a module that does is not loaded
+	# LinuxKPI as this boot has it: the modules beside the running kernel
+	_kd=$(dirname "$(sysctl -n kern.bootfile 2> /dev/null)")
+	_lk=; for _m in "$_kd"/linuxkpi*.ko "$_kd"/lindebugfs.ko; do [ -f "$_m" ] && _lk="$_lk $_m"; done
+	for _k in nvidia nvidia-modeset; do
+		_l=$(guard_ko_native "$MODS/$_k.ko" "$OUT/kodep" $_lk); _s=$?
+		guard_row "ko-native-$_k" "$_l" "$_s"
+		[ "$_s" = 0 ] || ok=0
+	done
+
+	if [ "$ok" = 1 ]; then
+		running load "kldload the GSP firmware, nvidia.ko, nvidia-modeset.ko: a panic from here leaves this row last"
+		for _k in nvidia_gsp_ga10x_fw nvidia nvidia-modeset; do	# check-be: load-order
+			if kldload "$MODS/$_k.ko" > "$OUT/kldload-$_k.txt" 2>&1; then
+				row "load-$_k" pass "loaded $MODS/$_k.ko"
+			else
+				row "load-$_k" fail "kldload $_k failed: $(cat "$OUT/kldload-$_k.txt")"
+				ok=0
+				break
+			fi
+			if [ "$_k" = nvidia_gsp_ga10x_fw ] && ! kldstat -q -n nvidia_gsp_ga10x_fw > /dev/null 2>&1; then
+				row firmware-loaded fail "nvidia_gsp_ga10x_fw is not loaded: nothing else is loaded"; ok=0; break
+			fi
+		done
+		dmesg > "$OUT/dmesg-loaded.txt" 2>&1
+		if [ "$ok" = 1 ]; then row load pass "the GSP firmware, nvidia.ko and nvidia-modeset.ko are loaded, no Linux layer"; else row load fail "a module did not load: see the rows above"; fi
+		env_snapshot env-loaded nvidia.ko nvidia-modeset.ko || ok=0
+	fi
+
+	GPUNODE=
+	if [ "$ok" = 1 ]; then
+		kldstat -v > "$OUT/gpu-detect.kldstat-before" 2>&1
+		ktrace -i -t cn -f "$OUT/gpu-detect.ktrace" /bin/sh "$KIT/gpu-detect.sh" -D "$nvidia_native_tools_testboot_devdir" > "$OUT/gpu-detect.json" 2> "$OUT/gpu-detect.err"
+		kldstat -v > "$OUT/gpu-detect.kldstat-after" 2>&1
+		kdump -f "$OUT/gpu-detect.ktrace" > "$OUT/gpu-detect.kdump" 2>&1
+		_tl=$(guard_trace "$OUT/gpu-detect.kdump" /bin/sh "$OUT/gpu-detect.execs"); _ts=$?
+		if [ "$_ts" = 0 ]; then
+			_dl=$(guard_env_delta "$OUT/gpu-detect.kldstat-before" "$OUT/gpu-detect.kldstat-after"); _ts=$?
+			[ "$_ts" = 0 ] || _tl=$_dl
+		fi
+		guard_row gpu-detect-native "$_tl" "$_ts"
+		gdj() { sed -n "s/^  \"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$OUT/gpu-detect.json" | head -1; }
+		GPUNODE=$(gdj selected_node); GPUBUS=$(gdj selected_bus_id); GPUVEN=$(gdj selected_vendor); GPUDEV=$(gdj selected_device)
+		if [ "$(gdj status)" = selected ] && [ -n "$GPUNODE" ]; then
+			row gpu-node pass "$GPUNODE (bus $GPUBUS, vendor $GPUVEN, device $GPUDEV), chosen by the rule in gpu-detect.json"
+			if root_open root-open "$GPUNODE"; then	# check-be: root-open
+				_u=${GPUNODE##*nvidia}
+				_par=$(sysctl -n "dev.nvidia.$_u.%parent" 2> /dev/null | head -1)
+				_vb=$(sysctl -n "dev.vgapci.${_par#vgapci}.%location" 2> /dev/null | sed -n 's/.*dbsf=\(pci[0-9]*:[0-9]*:[0-9]*:[0-9]*\).*/\1/p' | head -1)
+				_vl=$(pciconf -l "$_par" 2> /dev/null | head -1)
+				_vv=$(printf '%s\n' "$_vl" | sed -n 's/.*[[:space:]]vendor=\(0x[0-9a-fA-F]*\).*/\1/p')
+				_vd=$(printf '%s\n' "$_vl" | sed -n 's/.*[[:space:]]device=\(0x[0-9a-fA-F]*\).*/\1/p')
+				if [ -n "$_vb" ] && [ "$_vb" = "$GPUBUS" ] && [ "$_vv" = "$GPUVEN" ] && [ "$_vd" = "$GPUDEV" ] && [ "$_vv" = 0x10de ]; then
+					_gv=pass; row gpu-verify pass "$GPUNODE is bus $_vb, vendor $_vv, device $_vd, as chosen"
+				else
+					_gv=fail; ok=0; row gpu-verify fail "expected bus $GPUBUS vendor $GPUVEN device $GPUDEV, found bus ${_vb:-none} vendor ${_vv:-none} device ${_vd:-none}"
+				fi
+				printf '{"schema": "gpu-verify/1", "status": "%s", "node": "%s", "root_open": true, "expected": {"bus_id": "%s", "vendor": "%s", "device": "%s"}, "found": {"bus_id": "%s", "vendor": "%s", "device": "%s"}}\n' \
+				    "$_gv" "$GPUNODE" "$GPUBUS" "$GPUVEN" "$GPUDEV" "$_vb" "$_vv" "$_vd" > "$OUT/gpu-verify.json"
+			else
+				ok=0
+			fi
+		else
+			row gpu-node fail "no usable NVIDIA GPU node: status $(gdj status), $(gdj detail); see gpu-detect.json"
+			ok=0
+		fi
+		dmesg > "$OUT/dmesg-root-open.txt" 2>&1
+	fi
+
+	if [ "$ok" = 1 ]; then
+		root_open nvidiactl-open "$nvidia_native_tools_testboot_devdir/nvidiactl" || :
+		root_open modeset-open "$nvidia_native_tools_testboot_devdir/nvidia-modeset" || :
+		# nvrm-info: the native RM-direct library against the real driver, traced
+		_t=$KIT/repo/tests/libnvrm/boot_nvrm_info.sh
+		# check-be: nvrm-info (the next line)
+		running nvrm-info "boot_nvrm_info.sh runs nvrm-info against the driver: a panic from here leaves this row last"
+		kldstat -v > "$OUT/nvrm-info.kldstat-before" 2>&1
+		( cd "$OUT" && env LD_LIBRARY_PATH="$MODS" BOOT_EXPECT_VRAM_BYTES="$nvidia_native_tools_testboot_vram" \
+		    BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES="$nvidia_native_tools_testboot_vram_reserve" BOOT_EXPECT_SM="$nvidia_native_tools_testboot_sm" \
+		    ktrace -i -t cn -f "$OUT/nvrm-info.ktrace" /bin/sh "$_t" "$OUT/nvrm-info" "$MODS/nvrm-info" ) > "$OUT/nvrm-info.out" 2>&1
+		_nrc=$?
+		kldstat -v > "$OUT/nvrm-info.kldstat-after" 2>&1
+		kdump -f "$OUT/nvrm-info.ktrace" > "$OUT/nvrm-info.kdump" 2>&1
+		_tl=$(guard_trace "$OUT/nvrm-info.kdump" "$MODS/nvrm-info" "$OUT/nvrm-info.execs"); _ts=$?
+		guard_row nvrm-info-native "$_tl" "$_ts"
+		_dl=$(guard_env_delta "$OUT/nvrm-info.kldstat-before" "$OUT/nvrm-info.kldstat-after"); _ds=$?
+		guard_row nvrm-info-no-new-module "$_dl" "$_ds"
+		_np=$(grep -c '^PASS' "$OUT/nvrm-info/results.txt" 2> /dev/null); _nf=$(grep -c '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null)
+		if [ "$_nrc" = 0 ] && [ "${_nf:-0}" = 0 ] && [ "${_np:-0}" -gt 0 ]; then
+			row nvrm-info pass "boot_nvrm_info.sh: $_np checks passed, 0 failed (nvrm-info/results.txt, nvrm-info.json, nvrm-info.jsonl)"
+		else
+			row nvrm-info fail "boot_nvrm_info.sh exit $_nrc: ${_np:-0} passed, ${_nf:-unknown} failed: $(grep '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null | head -3 | tr '\n' ';')"
+		fi
+	else
+		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module; do
+			grep -q "^{\"row\":\"$_r\"," "$OUT/results.jsonl" || row "$_r" not-run "not reached: a step before it failed (see the rows above)"
+		done
+	fi
+
+	for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi nvrm-s2-memory; do static_row "$_r"; done
+
+	if [ -f "$OUT/env-loaded.kldstat" ]; then
+		env_snapshot env-after nvidia.ko || :
+		_dl=$(guard_env_delta "$OUT/env-loaded.kldstat" "$OUT/env-after.kldstat"); _ds=$?
+		guard_row env-after-delta "$_dl" "$_ds"
+	else
+		env_snapshot env-after || :
+		row env-after-delta not-available "no env-loaded listing to compare with: nothing was loaded"
+	fi
+	dmesg > "$OUT/dmesg-after.txt" 2>&1
+	row done info "the run is over; summarize.py gives the reading"
+}
+
+nvidia_native_tools_testboot_start()
+{
+	_made=0
+	if mkdir -p "$WORKROOT" 2> /dev/null && chmod 0700 "$WORKROOT" 2> /dev/null && mkdir -m 0700 "$OUT" 2> /dev/null; then
+		_made=1
+	else
+		OUT=$FALLBACK/$STAMP
+		if mkdir -p "$FALLBACK" 2> /dev/null && chmod 0700 "$FALLBACK" 2> /dev/null && [ "$(stat -f %u "$FALLBACK")" = "$(id -u)" ] && mkdir -m 0700 "$OUT" 2> /dev/null; then
+			_made=1
+		fi
+	fi
+	if [ "$_made" != 1 ]; then
+		echo "== no run directory could be made ($WORKROOT, $FALLBACK): nothing is loaded; returning to $NORMAL"
+		( "$nvidia_native_tools_testboot_return" "$NORMAL" ) > /dev/null 2>&1 &
+		return 0
+	fi
+	cd "$OUT" 2> /dev/null || cd /
+	: > "$OUT/results.jsonl"
+	# _foreground=YES is for tests/native_tools_kit_test.sh only (it waits for the run); a boot runs in the background
+	if [ "${nvidia_native_tools_testboot_foreground:-NO}" = YES ]; then
+		( run_all ) > "$OUT/rc.log" 2>&1
+	else
+		( run_all ) > "$OUT/rc.log" 2>&1 &
+	fi
+	return 0
+}
+
+# copy_out <run dir> <copy-out dir> <stamp>: copy the run into a new 0700 directory <copy-out>/<stamp>.  The copy-out
+# directory lies in a dataset an ordinary user can write, so root never follows a path the user could have changed:
+# no component of it may be a symbolic link, the new directory is entered and its physical path compared, and the
+# files are written relative to that working directory.  Prints the directory, or nothing when the copy is refused.
+copy_out()
+{
+	case $2 in /*) ;; *) echo "== COULD NOT copy: the copy-out directory '$2' is not an absolute path" >&2; return 1 ;; esac
+	_acc=
+	for _c in $(echo "$2" | tr / ' '); do
+		_acc=$_acc/$_c
+		if [ -L "$_acc" ]; then echo "== COULD NOT copy: $_acc is a symbolic link" >&2; return 1; fi
+	done
+	mkdir -p "$2" || return 1
+	_d=$2/$3
+	mkdir -m 0700 "$_d" || { echo "== COULD NOT copy: $_d could not be made (it exists?)" >&2; return 1; }
+	# the directory entered must be the one just made: ours (owner and mode), at the physical path; its device and
+	# inode are kept so that the copy after the return goes into the same directory, not one put in its place
+	_id=$( cd "$_d" && [ "$(pwd -P)" = "$_d" ] && [ "$(stat -f '%u %Lp' .)" = "$(id -u) 700" ] && stat -f '%d:%i' . ) || { echo "== COULD NOT copy into $_d: it is not the 0700 directory just made, or its path changed" >&2; return 1; }
+	( cd "$_d" && [ "$(stat -f '%d:%i' .)" = "$_id" ] && tar -C "$1" -cf - . | tar -xpf - ) || { echo "== COULD NOT copy into $_d (it changed, or tar failed)" >&2; return 1; }
+	echo "$_d $_id"
+}
+
+run_all()
+{
+	run_body
+	rm -f "$OUT/summary.json"
+	/usr/local/bin/python3 -I "$KIT/summarize.py" "$OUT" > "$OUT/summary.txt" 2>&1
+	_src=$?
+	# a verdict is exit 0, 1 or 3 AND a summary.json; anything else means the run could not be read
+	[ -s "$OUT/summary.json" ] || _src="$_src (no summary.json)"
+	case $_src in
+	0 | 1 | 3) ;;
+	*) printf 'summarize.py exit %s: the run could not be read (no python3 in this boot environment, or a damaged results.jsonl); read results.jsonl by hand\nFAIL\n' "$_src" >> "$OUT/summary.txt" ;;
+	esac
+	row summary info "summarize.py exit $_src: $(tail -1 "$OUT/summary.txt")"
+	sync
+	_dst=
+	if [ -z "$nvidia_native_tools_testboot_copyout" ]; then
+		echo "== COULD NOT copy: nvidia_native_tools_testboot_copyout is not set (make-be.sh writes it); the run stays in $OUT"
+	elif _dst=$(copy_out "$OUT" "$nvidia_native_tools_testboot_copyout" "$STAMP"); then
+		_dstid=${_dst##* }; _dst=${_dst% *}
+		echo "== copied the run to $_dst"
+	else
+		_dst=
+		echo "== COULD NOT copy the run: it stays in $OUT of this boot environment"
+	fi
+	sync
+	# the last step, always: back to the normal boot environment; the dead-man timer stays pending unless the return
+	# is deliberately held (exit 3), so a failed return still ends in a restart
+	"$nvidia_native_tools_testboot_return" "$NORMAL" > "$OUT/testboot-return.txt" 2>&1
+	_trc=$?
+	echo "== testboot-return exit $_trc"
+	cat "$OUT/testboot-return.txt"
+	# the record of the return goes out too (when the return reboots, the reboot may come first)
+	[ -z "$_dst" ] || ( cd "$_dst" && [ "$(stat -f '%d:%i' .)" = "$_dstid" ] && cp "$OUT/testboot-return.txt" "$OUT/rc.log" . ) || echo "== the return record was not copied out (the directory changed or is gone): it is in $OUT/testboot-return.txt of this boot environment"
+	sync
+	[ "$_trc" != 3 ] || deadman_cancel
+}
+
+run_rc_command "$1"

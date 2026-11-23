@@ -4,6 +4,16 @@
 #
 # console_owner_patch_test.sh - apply the NVKMS console-owner patches to the
 # pinned MIT sources and check the ownership hand-off contract (Track #2448).
+#
+# Besides the ownership contract it checks that SetConsoleOwner logs its
+# failure reasons through nvKmsKapiLogDevice and that the header patch
+# defines that macro once, unconditionally, as a warning-level log of the
+# GPU id taken from its own device argument, with the same prefix as the
+# pinned Debug macro. A missing macro would be an undefined symbol at module
+# load: in this build clang reports -Wimplicit-function-declaration only as a
+# warning for nvidia-modeset, so the object still links and the .ko ends up
+# with an undefined nvKmsKapiLogDevice; nothing but a check like these sees
+# it before kldload.
 
 set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
@@ -31,8 +41,9 @@ TYPES=src/nvidia-modeset/include/nvkms-types.h
 CORE=src/nvidia-modeset/src/nvkms.c
 KAPI_H=src/nvidia-modeset/kapi/interface/nvkms-kapi.h
 KAPI_C=src/nvidia-modeset/kapi/src/nvkms-kapi.c
+KAPI_I=src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
 
-for f in "$API" "$TYPES" "$CORE" "$KAPI_H" "$KAPI_C"; do
+for f in "$API" "$TYPES" "$CORE" "$KAPI_H" "$KAPI_C" "$KAPI_I"; do
 	[ -f "$OGKMSRC/$f" ] || { echo "FAIL: missing $OGKMSRC/$f"; exit 1; }
 	mkdir -p "$SRC/$(dirname "$f")"
 	cp "$OGKMSRC/$f" "$SRC/$f"
@@ -46,24 +57,23 @@ apply_one() {
 	patch -d "$2" -p0 -E -s -i "$1"
 }
 
-for p in \
-    patch-src_nvidia-modeset_interface_nvkms-api.h \
-    patch-src_nvidia-modeset_include_nvkms-types.h \
-    patch-src_nvidia-modeset_src_nvkms.c; do
+# Every OGKM patch this test applies, in lexical order; the one list for
+# both the presence check and the apply loop.
+OGKM_PATCHES="
+patch-src_nvidia-modeset_include_nvkms-types.h
+patch-src_nvidia-modeset_interface_nvkms-api.h
+patch-src_nvidia-modeset_kapi_include_nvkms-kapi-internal.h
+patch-src_nvidia-modeset_kapi_interface_nvkms-kapi.h
+patch-src_nvidia-modeset_kapi_src_nvkms-kapi.c
+patch-src_nvidia-modeset_src_nvkms.c
+"
+for p in $OGKM_PATCHES; do
 	[ -f "$repo/patches/ogkm/$p" ] || bad "the required patch $p is missing"
 done
 
 patched=1
-for p in "$repo"/patches/ogkm/patch-*; do
-	case ${p##*/} in
-	patch-src_nvidia-modeset_interface_nvkms-api.h|\
-	patch-src_nvidia-modeset_include_nvkms-types.h|\
-	patch-src_nvidia-modeset_src_nvkms.c|\
-	patch-src_nvidia-modeset_kapi_interface_nvkms-kapi.h|\
-	patch-src_nvidia-modeset_kapi_src_nvkms-kapi.c)
-		apply_one "$p" "$SRC" || patched=0
-		;;
-	esac
+for p in $OGKM_PATCHES; do
+	apply_one "$repo/patches/ogkm/$p" "$SRC" || patched=0
 done
 [ "$patched" -eq 1 ] && ok "the console-owner OGKM patches apply" \
     || bad "a console-owner OGKM patch does not apply"
@@ -219,6 +229,84 @@ check_setconsole_logging() {
 	! printf '%s\n' "$_t" | grep -q 'nvKmsKapiLogDeviceDebug'
 }
 
+# The text of the #define of the macro named $2 (a name followed by "("),
+# continuation lines joined and comments removed, tabs and runs of blanks
+# squeezed; empty when it is not defined.
+# Time: O(n) for the header's n bytes. Space: O(n).
+macro_define() {
+	strip_comments < "$1" | sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ba' -e '}' |
+	    grep -E "^[[:space:]]*#[[:space:]]*define[[:space:]]+$2\\(" | tr -s ' \t' '  '
+}
+
+logdevice_define() {
+	macro_define "$1" nvKmsKapiLogDevice
+}
+
+# The call is in SetConsoleOwner, which must log its failure reasons.
+check_logdevice_called() {
+	[ -f "$1/$KAPI_C" ] || return 2
+	function_text "$1/$KAPI_C" SetConsoleOwner |
+	    grep -Eq '(^|[^A-Za-z0-9_])nvKmsKapiLogDevice\('
+}
+
+# The header defines the name the .c file calls (the patched header only;
+# the pinned one defines just the Debug variants).
+check_logdevice_defined() {
+	[ -f "$1/$KAPI_I" ] || return 2
+	[ -n "$(logdevice_define "$1/$KAPI_I")" ]
+}
+
+# Release builds: the body calls nvEvoLog at exactly warning level (the docs
+# promise that level) and never a Debug logger, which a non-DEBUG build
+# compiles away.
+check_logdevice_macro() {
+	[ -f "$1/$KAPI_I" ] || return 2
+	_d=$(logdevice_define "$1/$KAPI_I")
+	[ -n "$_d" ] || return 1
+	printf '%s\n' "$_d" | grep -Eq '[^A-Za-z_]nvEvoLog\(EVO_LOG_WARN,' || return 1
+	! printf '%s\n' "$_d" | grep -Eq 'nvEvoLogDebug|nvEvoLogDevDebug'
+}
+
+# The parameter name __device is pinned here so that a capture of the
+# caller's outer variable "device" (what the pinned Debug macro does) can be
+# told apart from the macro's own parameter: the body must read
+# (__device)->gpuId and no other "device->gpuId".
+check_logdevice_own_arg() {
+	[ -f "$1/$KAPI_I" ] || return 2
+	_d=$(logdevice_define "$1/$KAPI_I")
+	[ -n "$_d" ] || return 1
+	printf '%s\n' "$_d" | grep -Eq 'define nvKmsKapiLogDevice\(__device, __format, \.\.\.\)' || return 1
+	printf '%s\n' "$_d" | grep -Fq '(__device)->gpuId' || return 1
+	! printf '%s\n' "$_d" | grep -Eq '[^_(]device->gpuId'
+}
+
+# One #define, no #undef, and the define sits at conditional depth 1: inside
+# only the include guard (#ifndef __NVKMS_KAPI_INTERNAL_H__, which the pinned
+# header has), so no #if DEBUG wraps it and no later define shadows it.
+check_logdevice_unconditional() {
+	[ -f "$1/$KAPI_I" ] || return 2
+	grep -q '^#ifndef __NVKMS_KAPI_INTERNAL_H__' "$1/$KAPI_I" || return 1
+	strip_comments < "$1/$KAPI_I" | awk '
+	BEGIN { d = 0; n = 0; u = 0; bad = 0 }
+	/^[ \t]*#[ \t]*(if|ifdef|ifndef)([ \t(]|$)/ { d++; next }
+	/^[ \t]*#[ \t]*endif/ { d--; next }
+	/^[ \t]*#[ \t]*define[ \t]+nvKmsKapiLogDevice\(/ { n++; if (d != 1) bad = 1 }
+	/^[ \t]*#[ \t]*undef[ \t]+nvKmsKapiLogDevice([ \t]|$)/ { u++ }
+	END { exit !(n == 1 && u == 0 && !bad) }'
+}
+
+# The string literal that precedes __format in a joined define.
+macro_prefix() {
+	sed -n 's/.*\("[^"]*"\)[[:space:]]*__format.*/\1/p'
+}
+
+check_logdevice_prefix() {
+	[ -f "$1/$KAPI_I" ] || return 2
+	_a=$(logdevice_define "$1/$KAPI_I" | macro_prefix)
+	_b=$(macro_define "$1/$KAPI_I" nvKmsKapiLogDeviceDebug | macro_prefix)
+	[ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" = "$_b" ]
+}
+
 run_check() {
 	if "$2" "$1"; then
 		ok "$3"
@@ -270,6 +358,12 @@ run_check "$SRC" check_free_clears "the per-open free path clears all console-ow
 run_check "$SRC" check_table_fill "the KAPI wrapper issues the ioctl and fills setConsoleOwner"
 run_check "$SRC" check_callback_contract "the KAPI and ioctl comments state the synchronous callback contract"
 run_check "$SRC" check_setconsole_logging "SetConsoleOwner logs normal-level failure reasons"
+run_check "$SRC" check_logdevice_called "nvkms-kapi.c (SetConsoleOwner) calls nvKmsKapiLogDevice"
+run_check "$SRC" check_logdevice_defined "the patched header defines nvKmsKapiLogDevice, which nvkms-kapi.c calls"
+run_check "$SRC" check_logdevice_macro "nvKmsKapiLogDevice logs at warning level in release builds"
+run_check "$SRC" check_logdevice_own_arg "nvKmsKapiLogDevice reads the GPU id from its own device argument"
+run_check "$SRC" check_logdevice_unconditional "nvKmsKapiLogDevice is defined once, unconditionally, and never undefined"
+run_check "$SRC" check_logdevice_prefix "nvKmsKapiLogDevice uses the same prefix as nvKmsKapiLogDeviceDebug"
 
 plant user-space-console-owner "$CORE" \
     's/pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE/0/' check_kernel_only
@@ -296,6 +390,39 @@ plant callback-contract-without-idempotence "$KAPI_H" \
     's/it must be idempotent/it must be repeatable/' check_callback_contract
 plant setconsole-debug-only-logging "$KAPI_C" \
     's/nvKmsKapiLogDevice(/nvKmsKapiLogDeviceDebug(/g' check_setconsole_logging
+plant logdevice-not-called "$KAPI_C" \
+    's/nvKmsKapiLogDevice(/nvKmsKapiLogX(/g' check_logdevice_called
+plant logdevice-macro-deleted "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/d' check_logdevice_defined
+plant logdevice-uses-debug-log "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/nvEvoLog(/nvEvoLogDebug(/' check_logdevice_macro
+plant logdevice-error-level "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/EVO_LOG_WARN/EVO_LOG_ERROR/' check_logdevice_macro
+plant logdevice-extra-debug-call "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/##__VA_ARGS__)/##__VA_ARGS__); nvEvoLogDebug(EVO_LOG_INFO, "x")/' check_logdevice_macro
+plant logdevice-uses-outer-device "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/(__device)->gpuId/device->gpuId/' check_logdevice_own_arg
+plant logdevice-reads-outer-device-too "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/(__device)->gpuId, ##/(__device)->gpuId, device->gpuId, ##/' check_logdevice_own_arg
+plant logdevice-under-ifdef-debug "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/i\
+#ifdef DEBUG
+/define nvKmsKapiLogDevice(/,/gpuId/{
+/gpuId/a\
+#endif
+}' check_logdevice_unconditional
+plant logdevice-undefined-after-define "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/{
+/gpuId/a\
+#undef nvKmsKapiLogDevice
+}' check_logdevice_unconditional
+plant logdevice-second-define "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/{
+/gpuId/a\
+#define nvKmsKapiLogDevice(__device, __format, ...)
+}' check_logdevice_unconditional
+plant logdevice-prefix-drift "$KAPI_I" \
+    '/define nvKmsKapiLogDevice(/,/gpuId/s/\[kapi\]\[GPU Id/[kapi][GPU/' check_logdevice_prefix
 plant_pass grab-yield-split-over-two-lines "$CORE" \
     's/pDevEvo->cbsdConsoleYield(pDevEvo->cbsdConsoleArg);/pDevEvo->cbsdConsoleYield(\
             pDevEvo->cbsdConsoleArg);/' check_grab_yield

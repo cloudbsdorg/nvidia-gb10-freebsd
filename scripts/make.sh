@@ -55,6 +55,25 @@
 # $DESTDIR/var/db/nvidia-gb10-freebsd/installed.manifest; deinstall removes
 # those and nothing else.  Nothing uses /tmp.
 #
+# Test hooks.  Each one needs GB10_TEST_HOOKS=1 and is refused (nothing in
+# use, a message on stderr) when the effective uid is 0, while installing
+# when there is no DESTDIR, and always in the package step (install-prereqs),
+# which runs as root on the live system whatever DESTDIR says: there
+# GB10_TEST_PKG_NEEDED stops the run.  A hook value is one word of
+# [A-Za-z0-9_./-].  An accepted hook says so on stderr, and so does a refused
+# one (pkgs_needed_list passes those notices on; they are never part of a
+# package list or a failure reason).  Only the tests set them:
+#   GB10_TEST_ROOT_METHOD   root, doas, sudo, su or none: the root method
+#   GB10_TEST_PKG_NEEDED    a package name added to the packages to install
+#   GB10_TEST_PKG_FAIL      one word: the package query fails with that reason
+#   GB10_TEST_INSTALL       the program that writes each file, instead of
+#                           /usr/bin/install
+#   GB10_TEST_KLDXREF       the program run instead of /usr/sbin/kldxref
+#   GB10_TEST_LN            the program that writes a staged link, instead of
+#                           /bin/ln
+#   GB10_TEST_MKTEMP        the program that names a temporary neighbour,
+#                           instead of /usr/bin/mktemp
+#
 # Exit status: 0 done, 1 failed or something is missing, 2 usage.
 
 set -eu
@@ -205,6 +224,35 @@ setup() {
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest
 }
 
+# mk_hook NAME FIXED [DEST]: the value of test hook NAME (see the header), or
+# FIXED when it is not set.  A set hook is refused (return 1) when this
+# process runs as root, or while installing (_installing=1) with an empty
+# DEST (default: DESTDIR): a hook never takes effect where it could run as
+# root or write the live system.
+_installing=0
+# licence_run: the command named in a licence fix.  make preflight shows what
+# install-prereqs needs; do_install sets it to make install, the command run.
+licence_run='make install-prereqs'
+mk_hook() {
+	_mh_name=$1
+	eval "_mh_val=\${$_mh_name:-}"
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ -n "$_mh_val" ]; then
+		if [ "$(id -u)" = 0 ]; then
+			echo "make.sh: refusing test hook $_mh_name: running as root" >&2
+			return 1
+		fi
+		if [ "${_root_steps:-0}" = 1 ]; then
+			echo "make.sh: refusing test hook $_mh_name: this step runs as root on the live system" >&2
+			return 1
+		fi
+		if [ "$_installing" = 1 ] && [ -z "${3-${DESTDIR:-}}" ]; then
+			echo "make.sh: refusing test hook $_mh_name: installing without a DESTDIR" >&2
+			return 1
+		fi
+	fi
+	test_hook make.sh "$_mh_name" "$2"
+}
+
 # --- root -----------------------------------------------------------------
 
 # root_method: how this user becomes root: root, doas (a doas.conf rule
@@ -212,7 +260,7 @@ setup() {
 # asks for the root password) or none.
 root_method() {
 	# test hook (GB10_TEST_HOOKS=1 only): pin the answer
-	_rm_hook=$(test_hook make.sh GB10_TEST_ROOT_METHOD "" 2>/dev/null) || _rm_hook=
+	_rm_hook=$(mk_hook GB10_TEST_ROOT_METHOD "") || _rm_hook=
 	case $_rm_hook in
 	root|doas|sudo|su|none) echo "$_rm_hook"; return 0 ;;
 	esac
@@ -271,13 +319,63 @@ tool_table() {
 }
 
 pkgs_needed() {
-	tool_table | while read -r _t _src; do
+	# The hook notices (accepted or refused) go to stderr as the header says.
+	_pk_hook=$(mk_hook GB10_TEST_PKG_NEEDED "") || _pk_hook=
+	_pk_fail=$(mk_hook GB10_TEST_PKG_FAIL "") || _pk_fail=
+	if [ -n "$_pk_fail" ]; then
+		printf 'pkg query failed: %s\n' "$_pk_fail" >&2
+		return 1
+	fi
+	# The table is read first, in its own substitution, so that its failure
+	# is seen: a table that cannot be read, is empty or has a line without a
+	# source is a failed query, never "nothing needed".
+	if ! _pk_tab=$(tool_table) || [ -z "$_pk_tab" ]; then
+		printf 'pkg query failed: the tool table could not be read\n' >&2
+		return 1
+	fi
+	_pk_list=
+	while read -r _t _src; do
+		if [ -z "$_t" ] || [ -z "$_src" ]; then
+			printf 'pkg query failed: a tool table line has no source\n' >&2
+			return 1
+		fi
 		[ "$_src" = base ] && continue
-		command -v "$_t" >/dev/null 2>&1 || printf '%s\n' "$_src"
-	done
-	# test hook (GB10_TEST_HOOKS=1 only): one more package to install
-	_pk_hook=$(test_hook make.sh GB10_TEST_PKG_NEEDED "" 2>/dev/null) || _pk_hook=
+		command -v "$_t" >/dev/null 2>&1 || _pk_list="$_pk_list$_src
+"
+	done <<EOT
+$_pk_tab
+EOT
+	[ -z "$_pk_list" ] || printf '%s' "$_pk_list"
 	[ -z "$_pk_hook" ] || printf '%s\n' "$_pk_hook"
+	return 0
+}
+
+# pkgs_needed_list: the packages pkgs_needed names, sorted, on one line.
+# The status says whether the query worked.  On failure (status 1) stdout is
+# the reason and not a list, so a caller must test the status before it uses
+# stdout.  Hook notices stay on stderr: they are passed on, and never become
+# part of a list or a reason.  The query is asked twice (a handful of
+# command -v probes) so that stderr can be read apart from stdout.
+pkgs_needed_list() {
+	_pnl_rc=0
+	_pnl=$(pkgs_needed 2>/dev/null) || _pnl_rc=1
+	_pnl_err=$(pkgs_needed 2>&1 >/dev/null) || :
+	printf '%s\n' "$_pnl_err" | grep 'test hook' >&2 || :
+	if [ "$_pnl_rc" = 1 ]; then
+		_pnl=$(printf '%s\n' "$_pnl_err" | grep -v 'test hook' | awk 'NF' | paste -sd ' ' -) || :
+		[ -n "$_pnl" ] || _pnl='the query failed'
+		printf '%s\n' "$_pnl"
+		return 1
+	fi
+	printf '%s\n' "$_pnl" | awk 'NF' | sort -u | paste -sd ' ' -
+}
+
+# One failure, one blocker: the name, reason and fix of "pkg could not say
+# which packages are missing" are written here and nowhere else.
+pkg_blocker_name=packages
+pkg_blocker_fix="fix pkg (pkg bootstrap), then run again"
+pkg_blocker_reason() {
+	printf 'could not ask pkg which packages are missing: %s' "$1"
 }
 
 # --- preflight ------------------------------------------------------------
@@ -289,8 +387,63 @@ add_item() {
 "
 }
 
+# esc_bytes MODE: stdin in, stdout out, one byte at a time (od(1) hands awk(1)
+# every byte as hex, so no byte value is special and no placeholder byte
+# exists).  This is the only byte decoder and the only escape table.  A byte
+# of 0x80 or more is never touched: valid UTF-8 stays as it is.
+#   MODE json  backslash, quote, and every control character 0x00-0x1f and
+#              0x7f as a JSON escape (\n \r \t \b \f, or \u00XX).
+#   MODE blk   backslash as \\, "|" as \p, newline as \n, carriage return as
+#              \r, every other control character 0x00-0x1f and 0x7f as \xHH.
+#   MODE unblk the inverse of blk: any byte round-trips.
+# The escapes the two encodings share (92 10 13) are written once, below.
+esc_bytes() {
+	LC_ALL=C od -An -v -tx1 | LC_ALL=C awk -v mode="$1" '
+	function hv(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+	BEGIN {
+		# the table: byte code and the letter after the backslash; the
+		# first three are shared by json and blk
+		ncode = split("92 10 13", code, " "); split("\\ n r", letter, " ")
+		if (mode == "json") {
+			split("34 9 8 12", xcode, " "); split("\" t b f", xletter, " ")
+		} else {
+			split("124", xcode, " "); split("p", xletter, " ")
+		}
+		for (k = 1; k in xcode; k++) { ncode++; code[ncode] = xcode[k]; letter[ncode] = xletter[k] }
+		for (k = 1; k <= ncode; k++) { enc[code[k]] = letter[k]; dec[letter[k]] = code[k] }
+		st = 0
+	}
+	{
+		for (i = 1; i <= NF; i++) {
+			h = $i
+			n = hv(substr(h, 1, 1)) * 16 + hv(substr(h, 2, 1))
+			if (mode == "unblk") {
+				if (st == 0) {
+					if (n == 92) st = 1
+					else printf "%c", n
+				} else if (st == 1) {
+					st = 0
+					c = sprintf("%c", n)
+					if (c == "x") st = 2
+					else if (c in dec) printf "%c", dec[c]
+					else printf "%c", n
+				} else if (st == 2) {
+					hi = hv(sprintf("%c", n)); st = 3
+				} else {
+					printf "%c", hi * 16 + hv(sprintf("%c", n))
+					st = 0
+				}
+			} else if (n in enc) printf "\\%s", enc[n]
+			else if (n < 32 || n == 127) {
+				if (mode == "json") printf "\\u00%s", h
+				else printf "\\x%s", h
+			} else printf "%c", n
+		}
+	}'
+}
+
 json_str() {
-	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+	printf '%s' "$1" | esc_bytes json
 }
 
 # nvidia_devices: one line "selector vendor device class" per NVIDIA display
@@ -372,8 +525,12 @@ collect_preflight() {
 	else
 		add_item platform missing "$_os $_arch: this repository builds the FreeBSD arm64 (aarch64) driver" "on amd64, NVIDIA's FreeBSD driver: pkg install nvidia-driver"
 	fi
-	_tt=$(tool_table)
+	if ! _tt=$(tool_table) || [ -z "$_tt" ]; then
+		add_item tools missing "the tool table could not be read" "fix scripts/make.sh: tool_table must name the tools this install needs"
+		_tt=
+	fi
 	while read -r _t _src; do
+		[ -n "$_t" ] || continue
 		if command -v "$_t" >/dev/null 2>&1; then
 			add_item "tool:$_t" ok "$(command -v "$_t")" ""
 		elif [ "$_src" = base ]; then
@@ -397,11 +554,11 @@ EOF
 	if licence_current; then
 		add_item licence ok "NVIDIA driver licence $(sed -n 2p "$licence_ok")" ""
 	elif [ -f "$licence_ok" ] && [ -f "$tarball" ]; then
-		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted" "make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run it on a terminal and answer"
+		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
 	elif [ -n "$(licence_setting)" ]; then
-		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; make install-prereqs records the acceptance" "make install-prereqs"
+		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; $licence_run records the acceptance" "$licence_run"
 	else
-		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it" "make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer"
+		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
 	fi
 	_have=$(os_version_of "$SYSDIR")
 	if tree_fits "$SYSDIR"; then
@@ -427,15 +584,29 @@ EOF
 		add_item drm.ko ok "make install installs drm.ko and dmabuf.ko built from $DRMKMODDIR (FreeBSD's drm-kmod packages are amd64-only)" ""
 	fi
 	kernel_patch_items
+	# A failed package query is a missing item whatever the root method.
+	_pkq_failed=0
+	if ! _rootpk=$(pkgs_needed_list); then
+		add_item "$pkg_blocker_name" missing "$(pkg_blocker_reason "$_rootpk")" "$pkg_blocker_fix"
+		_pkq_failed=1
+		_rootpk=
+	fi
 	_rm=$(root_method)
 	case $_rm in
 	none)
-		if destdir_user_owned; then
+		# Packages (and the pkg bootstrap) always install as root, whoever
+		# owns DESTDIR: a missing root method is then a blocker up front.
+		_root_fix="pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf"
+		if [ "$_pkq_failed" = 1 ]; then
+			: # the packages item above already says why
+		elif [ -n "$_rootpk" ] && [ "$(id -u)" != 0 ]; then
+			add_item root missing "packages must be installed as root ($_rootpk), and there is no doas rule or sudo for $(id -un)" "$_root_fix"
+		elif destdir_user_owned; then
 			add_item root ok "no root helper needed for a user-owned DESTDIR install" ""
 		elif [ -n "$DESTDIR" ]; then
-			add_item root missing "DESTDIR $DESTDIR is not owned by $(id -un): installing there needs root, and there is no doas rule or sudo for $(id -un)" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf, or use a DESTDIR you own"
+			add_item root missing "DESTDIR $DESTDIR is not owned by $(id -un): installing there needs root, and there is no doas rule or sudo for $(id -un)" "$_root_fix, or use a DESTDIR you own"
 		else
-			add_item root missing "no doas rule or sudo for $(id -un), and su needs a terminal and membership of wheel" "pkg install doas, then a permit line for $(id -un) in /usr/local/etc/doas.conf"
+			add_item root missing "no doas rule or sudo for $(id -un), and su needs a terminal and membership of wheel" "$_root_fix"
 		fi
 		;;
 	su) add_item root ok "su (asks for the root password)" "" ;;
@@ -615,8 +786,15 @@ licence_ask_terminal() {
 do_install_prereqs() {
 	_auto=${1:-}
 	setup
+	# The package step runs as root on the live system, whatever DESTDIR is:
+	# no test hook takes effect here, and the one that names a package stops
+	# the run before anything is asked or installed.
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ -n "${GB10_TEST_PKG_NEEDED:-}" ]; then
+		die "refusing test hook GB10_TEST_PKG_NEEDED: the package step runs as root on the live system"
+	fi
+	_root_steps=1
 	ensure_work
-	_need=$(pkgs_needed | sort -u | tr '\n' ' ')
+	_need=$(pkgs_needed_list) || die "$(pkg_blocker_reason "$_need")"
 	if [ -n "$_need" ]; then
 		note "packages to install: $_need"
 		# The one-command install has already asked for the installation by
@@ -1134,8 +1312,18 @@ EOF
 # explanations or file lists.
 install_blockers=
 install_records=
+# Blocker fields are joined with "|", so a field holding a path with "|" would
+# split the record, and a newline would start another one.  Fields are stored
+# escaped (esc_bytes blk: backslash, pipe, newline, carriage return and every
+# other control character) and unescaped when rendered; any byte round-trips.
+blk_esc() {
+	printf '%s' "$1" | esc_bytes blk
+}
+blk_unesc() {
+	printf '%s' "$1" | esc_bytes unblk
+}
 install_add_blocker() {
-	install_blockers="$install_blockers$1|$2|$3
+	install_blockers="$install_blockers$(blk_esc "$1")|$(blk_esc "$2")|$(blk_esc "$3")
 "
 }
 
@@ -1172,7 +1360,12 @@ install_progress() {
 		printf '{"schema_version":"1.0","tool":"install","kind":"progress","phase":"%s","message":"%s"}\n' \
 		    "$(json_str "$1")" "$(json_str "$2")"
 	elif [ "${MK_JSON:-0}" != 1 ]; then
-		printf 'install: %s: %s\n' "$1" "$2"
+		# the phase named install already carries the prefix: print it once
+		if [ "$1" = install ]; then
+			printf 'install: %s\n' "$2"
+		else
+			printf 'install: %s: %s\n' "$1" "$2"
+		fi
 	fi
 }
 
@@ -1210,29 +1403,45 @@ EOT
 	fi
 }
 
-# install_next_steps: what to do after a good install, one step per line.
-# With a DESTDIR the files are only staged: nothing is loaded from there.
-# Otherwise the module is loaded with the root tool this user has.
+# root_cmd COMMAND: COMMAND as the root tool this user has would run it: bare
+# as root, behind doas or sudo, inside su root -c, or with a note when this
+# user has no tool.
+root_cmd() {
+	case $(root_method) in
+	root) printf '%s\n' "$1" ;;
+	doas) printf 'doas %s\n' "$1" ;;
+	sudo) printf 'sudo %s\n' "$1" ;;
+	su) printf "su root -c '%s'\n" "$1" ;;
+	*) printf '%s (as root: this user has no doas, sudo or su)\n' "$1" ;;
+	esac
+}
+
+# install_next_steps: what to do after a good install, one command per line,
+# each one fit to paste.  With a DESTDIR the files are only staged: nothing is
+# loaded from there.  Otherwise the firmware setting comes first, then the
+# module is loaded, both with the root tool this user has.
 install_next_steps() {
 	if [ -n "$DESTDIR" ]; then
 		printf 'the files are staged under %s; nothing was loaded: install that tree on the target system to use it\n' "$DESTDIR"
 	else
-		case $(root_method) in
-		root) printf 'kldload nvidia-drm\n' ;;
-		doas) printf 'doas kldload nvidia-drm\n' ;;
-		sudo) printf 'sudo kldload nvidia-drm\n' ;;
-		su) printf "su root -c 'kldload nvidia-drm'\n" ;;
-		*) printf 'kldload nvidia-drm (as root: this user has no doas, sudo or su)\n' ;;
-		esac
+		root_cmd 'kenv hw.nvidia.registry.EnableGpuFirmware=1'
+		root_cmd 'kldload nvidia-drm'
 	fi
 	printf 'kldstat\nnvrm-info --json\n'
 }
 
-# install_root_plan: the steps this install runs as root, one per line;
-# nothing when it needs no root at all.
+# install_next_note: one English line, printed before the next steps of a live
+# install: the boot-time alternative to the first two of them.
+install_next_note() {
+	[ -n "$DESTDIR" ] || printf 'to load the driver at boot instead of the first two next steps, run make configure YES=1 once\n'
+}
+
+# install_root_plan PACKAGES: the steps this install runs as root, one per
+# line, on stdout and nothing else; nothing when it needs no root at all.
+# PACKAGES is the answer of a package query that worked (pkgs_needed_list);
+# the caller asks first and stops on a failed query, so this cannot fail.
 install_root_plan() {
-	_pn=$(pkgs_needed | sort -u | tr '\n' ' ')
-	_pn=${_pn% }
+	_pn=$1
 	[ -z "$_pn" ] || printf 'install these packages with pkg(8): %s\n' "$_pn"
 	if ! destdir_user_owned; then
 		printf 'install the driver, libraries and tools into %s as root (owner root:wheel)\n' "${DESTDIR:-/}"
@@ -1305,6 +1514,7 @@ install_summary() {
 		printf '{"schema_version":"1.0","tool":"install","outcome":"%s","blockers":[' "$_outcome"
 		_i=0
 		printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+			_n=$(blk_unesc "$_n"); _r=$(blk_unesc "$_r"); _f=$(blk_unesc "$_f")
 			[ "$_i" = 0 ] || printf ','
 			printf '{"index":%s,"name":"%s","reason":"%s","fix":"%s"}' \
 			    "$_i" "$(json_str "$_n")" "$(json_str "$_r")" "$(json_str "$_f")"
@@ -1331,6 +1541,7 @@ install_summary() {
 		return 0
 	fi
 	printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
+		_n=$(blk_unesc "$_n"); _r=$(blk_unesc "$_r"); _f=$(blk_unesc "$_f")
 		printf 'blocked %s: %s\n' "$_n" "$_r"
 		[ -z "$_f" ] || printf 'fix: %s\n' "$_f"
 	done
@@ -1338,6 +1549,7 @@ install_summary() {
 		printf '%s' "$install_records" | while IFS='|' read -r _p _m; do
 			[ -n "$_p" ] && printf 'installed %s %s\n' "$_p" "$_m"
 		done
+		install_next_note
 		install_next_steps | while read -r _ns; do
 			printf 'next: %s\n' "$_ns"
 		done
@@ -1346,6 +1558,8 @@ install_summary() {
 }
 
 do_install() {
+	_installing=1
+	licence_run='make install'
 	install_blockers=
 	install_records=
 	install_outcome=blocked
@@ -1364,7 +1578,12 @@ do_install() {
 	# One question, before any privileged step: everything that runs as root,
 	# in order.  YES=1 answers it; without a terminal and without YES=1 it
 	# is a blocker and nothing has been done.
-	_plan=$(install_root_plan)
+	if ! _plan_pkgs=$(pkgs_needed_list); then
+		install_add_blocker "$pkg_blocker_name" "$(pkg_blocker_reason "$_plan_pkgs")" "$pkg_blocker_fix"
+		install_summary blocked
+		return 1
+	fi
+	_plan=$(install_root_plan "$_plan_pkgs")
 	if [ -n "$_plan" ] && ! yes_set; then
 		if [ ! -t 0 ]; then
 			install_add_blocker confirm "this install runs steps as root ($(printf '%s' "$_plan" | tr '\n' ';')) and there is no terminal to ask on" "run with YES=1 or on a terminal"
@@ -1386,9 +1605,18 @@ do_install() {
 			install_summary blocked
 			return 1
 		fi
-		[ -d "$_lp" ] || mkdir -m 755 -- "$_lp"
+		if [ ! -d "$_lp" ] && ! mkdir -m 755 -- "$_lp" 2>/dev/null; then
+			install_add_blocker logs "cannot create the log directory $_lp" "make $WORK/logs writable by you"
+			install_summary blocked
+			return 1
+		fi
 	done
-	install_logdir=$(mktemp -d "$WORK/logs/make-install/run.XXXXXX") || die "cannot create a private log directory in $WORK/logs/make-install"
+	if ! install_logdir=$(mktemp -d "$WORK/logs/make-install/run.XXXXXX" 2>/dev/null); then
+		install_logdir=
+		install_add_blocker logs "cannot create a private log directory in $WORK/logs/make-install" "make $WORK/logs writable by you"
+		install_summary blocked
+		return 1
+	fi
 	if ! install_run_phase prereqs "rerun make install after correcting the prerequisite error" \
 	    sh "$repo/scripts/make.sh" _install-prereqs-auto; then
 		install_summary blocked
@@ -1540,12 +1768,22 @@ txn_backup() {
 }
 
 # txn_state PATH: what PATH holds now, as one line: "A" nothing, "F:SHA256" a
-# file, "L:TARGET" a symbolic link, "O" anything else.
+# file, "L:TARGET" a symbolic link, "O" anything else, "U" unknown.  A failed
+# read is never an empty hash or target: unknown must not compare as a match.
 txn_state() {
+	_ts=
 	if [ -L "$1" ]; then
-		printf 'L:%s\n' "$(readlink "$1")"
+		if _ts=$(readlink "$1") && [ -n "$_ts" ]; then
+			printf 'L:%s\n' "$_ts"
+		else
+			printf 'U\n'
+		fi
 	elif [ -f "$1" ]; then
-		printf 'F:%s\n' "$(sha256 -q "$1")"
+		if _ts=$(sha256 -q "$1") && [ -n "$_ts" ]; then
+			printf 'F:%s\n' "$_ts"
+		else
+			printf 'U\n'
+		fi
 	elif [ -e "$1" ]; then
 		printf 'O\n'
 	else
@@ -1561,12 +1799,27 @@ txn_intend() {
 	printf '%s %s\n' "$1" "$2" >> "$_txn_intents"
 }
 
-# txn_orig_state N KIND: the state txn_backup saved as backup N.
+# txn_orig_state N KIND: the state txn_backup saved as backup N, or U when
+# the saved bytes or target cannot be read.  Only the explicit absent kind is A.
 txn_orig_state() {
+	_tos=
 	case $2 in
-	file) printf 'F:%s\n' "$(sha256 -q "$_txn_dir/$1.file")" ;;
-	link) printf 'L:%s\n' "$(cat "$_txn_dir/$1.target")" ;;
-	*) printf 'A\n' ;;
+	file)
+		if _tos=$(sha256 -q "$_txn_dir/$1.file") && [ -n "$_tos" ]; then
+			printf 'F:%s\n' "$_tos"
+		else
+			printf 'U\n'
+		fi
+		;;
+	link)
+		if _tos=$(cat "$_txn_dir/$1.target") && [ -n "$_tos" ]; then
+			printf 'L:%s\n' "$_tos"
+		else
+			printf 'U\n'
+		fi
+		;;
+	absent) printf 'A\n' ;;
+	*) printf 'U\n' ;;
 	esac
 }
 
@@ -1574,21 +1827,109 @@ txn_orig_state() {
 # the number) is how make install learns it was interrupted; the EXIT trap
 # then rolls back.
 txn_signal() {
+	# While a temporary name is being created and recorded (_txn_defer=1) the
+	# signal is only noted; the install step acts on it once the record is
+	# written, so a rollback always knows the file this run created.
+	if [ "${_txn_defer:-0}" = 1 ]; then
+		_txn_pending=$((128 + $1))
+		return 0
+	fi
 	exit $((128 + $1))
 }
 
-# txn_rollback_fail PATH WHY: a path the rollback left as it found it.
+# txn_created PATH: record PATH as a path this run has just created (backup
+# kind "absent"), without looking at it: txn_backup would see the file this
+# run made and save it as an original.  Called only after the exclusive create
+# of PATH succeeded.
+txn_created() {
+	printf '%s absent %s\n' "$_txn_n" "$1" >> "$_txn_records"
+	_txn_n=$((_txn_n + 1))
+}
+
+# txn_rollback_fail PATH WHY [HINT]: a path the rollback left as it found it.
+# The reason is never replaced: under a DESTDIR the kldxref advice for
+# linker.hints names the staged boot/modules (_txn_root is empty for a live
+# install), and is added to the real cause.
 txn_rollback_fail() {
-	printf 'rollback-failed %s: %s\n' "$1" "$2"
+	_trf_why=$2
+	if [ "$1" = /boot/modules/linker.hints ] && [ "${_txn_hints:-0}" = 1 ]; then
+		_trf_why="$_trf_why; kldxref $_txn_root/boot/modules needs to run"
+	fi
+	[ -z "${3:-}" ] || _trf_why="$_trf_why; $3"
+	printf 'rollback-failed %s: %s\n' "$1" "$_trf_why"
 	_txn_failed=1
+}
+
+# sh_quote WORD: WORD as one single-quoted shell word, whatever it holds.
+sh_quote() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# txn_keep_hint N KIND DEST: where the original of backup N is kept and how to
+# put it back by hand; every path is quoted so the command can be pasted.
+# Nothing for a path that did not exist.
+txn_keep_hint() {
+	_kh_q=$(sh_quote "$_txn_dir/$1.file")
+	_kh_t=$(sh_quote "$_txn_dir/$1.target")
+	_kh_d=$(sh_quote "$3")
+	case $2 in
+	file) printf 'the original is kept at %s; restore it by hand with: cp -p %s %s' "$_kh_q" "$_kh_q" "$_kh_d" ;;
+	link) printf 'the original link target is kept in %s; restore it by hand with: ln -sfh "$(cat %s)" %s' "$_kh_t" "$_kh_t" "$_kh_d" ;;
+	esac
+}
+
+# txn_put_back N KIND ORIG DEST: put the original of backup N at DEST without
+# following a link at DEST and without touching DEST until the private copy of
+# the original has been verified.  Prints the reason and fails when it cannot;
+# a private restore file it cannot remove is named in that reason.
+txn_put_back() {
+	_tpb_n=$1
+	_tpb_kind=$2
+	_tpb_orig=$3
+	_tpb_dest=$4
+	if [ -d "$_tpb_dest" ] && [ ! -L "$_tpb_dest" ]; then
+		printf 'the path is a directory now'
+		return 1
+	fi
+	_tpb_tmp=$(mktemp "$_tpb_dest.rollback.XXXXXX" 2>/dev/null) || {
+		printf 'could not create a private restore file'
+		return 1
+	}
+	case $_tpb_kind in
+	file) cp -p -- "$_txn_dir/$_tpb_n.file" "$_tpb_tmp" 2>/dev/null ;;
+	link)
+		_tpb_target=$(cat "$_txn_dir/$_tpb_n.target" 2>/dev/null) && [ -n "$_tpb_target" ] \
+		    && ln -sf -- "$_tpb_target" "$_tpb_tmp" 2>/dev/null
+		;;
+	esac
+	_tpb_rc=$?
+	if [ "$_tpb_rc" != 0 ] || [ "$(txn_state "$_tpb_tmp")" != "$_tpb_orig" ]; then
+		printf 'the private copy of the original did not verify'
+		txn_put_back_clean
+		return 1
+	fi
+	# -h: a link at DEST is replaced, never followed into its target.
+	if ! mv -f -h -- "$_tpb_tmp" "$_tpb_dest" 2>/dev/null; then
+		printf 'could not put the original back'
+		txn_put_back_clean
+		return 1
+	fi
+}
+# txn_put_back_clean: remove the private restore file; say so when it stays.
+txn_put_back_clean() {
+	rm -f -- "$_tpb_tmp" 2>/dev/null && [ ! -e "$_tpb_tmp" ] && [ ! -L "$_tpb_tmp" ] \
+	    || printf '; the private restore file %s is left' "$_tpb_tmp"
 }
 
 # EXIT is deliberate: die, an interrupted copy, a failed install(1), and a
 # failed kldxref all take the same restoration path.  Restoration is best
 # effort after an I/O error, but every path is attempted and the original
 # failure status is retained.  A path is removed or restored only while it
-# still holds what this run wrote (or its original); otherwise it is left
-# and printed as "rollback-failed PATH: WHY".  The last line says
+# still holds what this run wrote (or its original, or a partial write of one
+# of this run's own temporary files); otherwise it is left and printed as
+# "rollback-failed PATH: WHY".  An original or its backup is never deleted
+# before its restore is verified: when any path fails, the backups are kept,
+# named, and the way to restore by hand is printed.  The last line says
 # "rollback: restored" only when every path was put back.
 txn_exit() {
 	_txn_rc=$?
@@ -1598,56 +1939,100 @@ txn_exit() {
 		[ "$_txn_rc" != 0 ] || _txn_rc=1
 		_txn_failed=0
 		note "install: failed; restoring every replaced file and removing new files"
-		if [ "${_txn_hints:-0}" = 1 ]; then
-			# kldxref ran (or was cut short) under this install
-			txn_intend /boot/modules/linker.hints "$(txn_state "$_txn_root/boot/modules/linker.hints")"
-		fi
 		if [ -n "$_txn_records" ] && [ -f "$_txn_records" ]; then
 			while read -r _tb_n _tb_kind _tb_path; do
 				[ -n "$_tb_path" ] || continue
 				_tb_dest=$_txn_root$_tb_path
-				rm -f -- "$_tb_dest.new" "$_tb_dest.rollback" 2>/dev/null || true
+				_tb_hint=$(txn_keep_hint "$_tb_n" "$_tb_kind" "$_tb_dest")
+				case $_tb_kind in
+				file|link|absent) ;;
+				*)
+					txn_rollback_fail "$_tb_path" "not restored: the backup record has an unknown kind: $_tb_kind"
+					continue
+					;;
+				esac
 				_tb_cur=$(txn_state "$_tb_dest")
 				_tb_orig=$(txn_orig_state "$_tb_n" "$_tb_kind")
+				if [ "$_tb_cur" = U ] || [ "$_tb_orig" = U ]; then
+					txn_rollback_fail "$_tb_path" "not restored: its current or original state is unknown" "$_tb_hint"
+					continue
+				fi
 				if [ "$_tb_cur" = "$_tb_orig" ]; then
 					continue
 				fi
-				if ! grep -qxF -- "$_tb_path $_tb_cur" "$_txn_intents" 2>/dev/null; then
-					txn_rollback_fail "$_tb_path" "not restored: changed by another process since this install wrote it"
+				# Only a state this run recorded as its own write is ours.  An
+				# unknown or unrecorded state, including a missing link, is
+				# another process's change: never restored over.
+				_tb_may_restore=0
+				if grep -qxF -- "$_tb_path $_tb_cur" "$_txn_intents" 2>/dev/null; then
+					_tb_may_restore=1
+				elif [ "$_tb_kind" = absent ] && [ "${_tb_cur%%:*}" = F ] \
+				    && grep -qxF -- "$_tb_path W" "$_txn_intents" 2>/dev/null; then
+					# A temporary file this run created; an interrupted or failed
+					# install(1) left it partly written.
+					_tb_may_restore=1
+				fi
+				if [ "$_tb_may_restore" = 0 ]; then
+					txn_rollback_fail "$_tb_path" "not restored: changed by another process since this install wrote it" "$_tb_hint"
 					continue
 				fi
+				_tb_why=
 				case $_tb_kind in
 				absent)
-					rm -f -- "$_tb_dest" 2>/dev/null || txn_rollback_fail "$_tb_path" "not restored: could not remove it"
+					rm -f -- "$_tb_dest" 2>/dev/null || _tb_why="could not remove it"
 					;;
-				file)
-					if cp -p -- "$_txn_dir/$_tb_n.file" "$_tb_dest.rollback" 2>/dev/null \
-					    && mv -f -- "$_tb_dest.rollback" "$_tb_dest" 2>/dev/null; then :
-					else
-						txn_rollback_fail "$_tb_path" "not restored: could not put the original back"
-					fi
-					;;
-				link)
-					rm -f -- "$_tb_dest" 2>/dev/null || true
-					ln -s "$(cat "$_txn_dir/$_tb_n.target")" "$_tb_dest" 2>/dev/null \
-					    || txn_rollback_fail "$_tb_path" "not restored: could not put the original link back"
+				*)
+					_tb_why=$(txn_put_back "$_tb_n" "$_tb_kind" "$_tb_orig" "$_tb_dest") || :
 					;;
 				esac
+				if [ -n "$_tb_why" ]; then
+					txn_rollback_fail "$_tb_path" "not restored: $_tb_why" "$_tb_hint"
+					continue
+				fi
+				_tb_after=$(txn_state "$_tb_dest")
+				if [ "$_tb_after" = U ]; then
+					txn_rollback_fail "$_tb_path" "not restored: its state is unknown after the restore" "$_tb_hint"
+				elif [ "$_tb_after" != "$_tb_orig" ]; then
+					txn_rollback_fail "$_tb_path" "not restored: verification after the restore failed" "$_tb_hint"
+				fi
 			done < "$_txn_records"
 		fi
 		# The transaction lives below STATEDIR.  Remove it after the backups
 		# have been used but before the new directories, or STATEDIR and its
-		# new parents cannot be empty when their turn comes.
-		[ -z "$_w" ] || rm -rf -- "$_w" 2>/dev/null || true
-		printf '%s\n' "$_newdirs" | awk 'NF' | sort -r | while read -r _dir; do
-			rmdir -- "$_txn_root$_dir" 2>/dev/null || true
-		done
+		# new parents cannot be empty when their turn comes.  When any path
+		# was not restored the backups are the only copy of its original:
+		# keep them.  A failed removal is reported, never hidden by "restored".
+		_txn_kept=0
+		if [ "$_txn_failed" = 1 ]; then
+			[ -z "$_w" ] || _txn_kept=1
+			[ -z "$_w" ] || printf 'rollback: the original copies are kept in %s (one per path above); nothing in it is deleted\n' "$_txn_dir"
+		elif [ -n "$_w" ] && { [ -e "$_w" ] || [ -L "$_w" ]; }; then
+			if ! rm -rf -- "$_w" 2>/dev/null || [ -e "$_w" ] || [ -L "$_w" ]; then
+				txn_rollback_fail "$_w" "could not remove the private transaction directory"
+			fi
+		fi
+		_sorted_dirs=$(printf '%s\n' "$_newdirs" | awk 'NF' | sort -ru)
+		while read -r _dir; do
+			[ -n "$_dir" ] || continue
+			[ -e "$_txn_root$_dir" ] || [ -L "$_txn_root$_dir" ] || continue
+			# a directory holding the kept backups stays
+			if [ "$_txn_kept" = 1 ]; then
+				case $_w/ in
+				"$_txn_root$_dir"/*) continue ;;
+				esac
+			fi
+			rmdir -- "$_txn_root$_dir" 2>/dev/null \
+			    || txn_rollback_fail "$_dir" "not removed: could not remove the directory this install created"
+		done <<EOF
+$_sorted_dirs
+EOF
 		[ "$_txn_failed" = 1 ] || printf 'rollback: restored\n'
 	fi
 	exit "$_txn_rc"
 }
 
 install_stage() {
+	_installing=1
 	_src=$1
 	_d=$2
 	_pfx=$3
@@ -1682,6 +2067,8 @@ $_newdirs"
 	_txn_records=
 	_txn_intents=
 	_txn_hints=0
+	_txn_defer=0
+	_txn_pending=0
 	_txn_n=0
 	_txn_active=1
 	trap txn_exit EXIT
@@ -1767,16 +2154,59 @@ $_dir"
 	} | awk '!seen[$0]++' > "$_man.new"
 	txn_intend "$STATEDIR/installed.manifest" "$(txn_state "$_man.new")"
 	mv -f -- "$_man.new" "$_man"
+	_install=$(mk_hook GB10_TEST_INSTALL /usr/bin/install "$_d") || die "install: refused the install test hook"
+	_ln=$(mk_hook GB10_TEST_LN /bin/ln "$_d") || die "install: refused the ln test hook"
+	_mktemp=$(mk_hook GB10_TEST_MKTEMP /usr/bin/mktemp "$_d") || die "install: refused the mktemp test hook"
 	while read -r _f; do
-		txn_intend "$_f" "$(txn_state "$_s$_f")"
-		if [ -L "$_s$_f" ]; then
-			ln -sfh "$(readlink "$_s$_f")" "$_d$_f" || die "install: cannot replace the link $_d$_f"
-		else
+		# Every file is written to a temporary neighbour and moved into place,
+		# so the path itself is replaced atomically and is never absent.  The
+		# name is chosen first (mktemp -u, which creates nothing), then
+		# created exclusively (set -C for a file, ln -s for a link).  Only
+		# after this run's own create succeeded is the neighbour recorded as
+		# this run's write: "W" (any content found there at rollback is this
+		# run's partial write) for a file, the exact link state for a link.
+		# A create that fails because another file holds the name leaves that
+		# file untouched, unrecorded, and another name is tried.  A signal
+		# between the create and the record is held until the record is
+		# written (txn_signal).
+		_tries=0
+		_tmp=
+		_lt=
+		[ ! -L "$_s$_f" ] || _lt=$(readlink "$_s$_f")
+		while [ -z "$_tmp" ]; do
+			_tries=$((_tries + 1))
+			[ "$_tries" -le 10 ] || die "install: no free temporary name next to $_d$_f after 10 tries"
+			_cand=$("$_mktemp" -u "$_d$_f.new.XXXXXX") || die "install: cannot choose a temporary name next to $_d$_f"
+			_txn_defer=1
+			if [ -n "$_lt" ]; then
+				"$_ln" -s -- "$_lt" "$_cand" 2>/dev/null && _created=1 || _created=0
+			else
+				( set -C; : > "$_cand" ) 2>/dev/null && _created=1 || _created=0
+			fi
+			if [ "$_created" = 1 ]; then
+				txn_created "${_cand#"$_d"}"
+				if [ -n "$_lt" ]; then
+					txn_intend "${_cand#"$_d"}" "L:$_lt"
+				else
+					txn_intend "${_cand#"$_d"}" W
+				fi
+				_tmp=$_cand
+			fi
+			_txn_defer=0
+			[ "$_txn_pending" = 0 ] || exit "$_txn_pending"
+			if [ "$_created" = 0 ]; then
+				# a taken name is tried again; any other failure is final
+				[ -e "$_cand" ] || [ -L "$_cand" ] \
+				    || die "install: cannot create a temporary file next to $_d$_f"
+			fi
+		done
+		if [ -z "$_lt" ]; then
 			# shellcheck disable=SC2086
-			install $_own -m "$(stat -f '%Lp' "$_s$_f")" -- "$_s$_f" "$_d$_f.new" \
+			"$_install" $_own -m "$(stat -f '%Lp' "$_s$_f")" -- "$_s$_f" "$_tmp" \
 			    || die "install: cannot write $_d$_f"
-			mv -f -- "$_d$_f.new" "$_d$_f" || die "install: cannot replace $_d$_f"
 		fi
+		txn_intend "$_f" "$(txn_state "$_s$_f")"
+		mv -f -h -- "$_tmp" "$_d$_f" || die "install: cannot replace $_d$_f"
 	done < "$_w/list"
 	# Files of the previous install that this stage no longer has.
 	while read -r _f; do
@@ -1792,7 +2222,6 @@ $_dir"
 			continue
 		fi
 		safe_parents "$_d" "$_f" "$_mode" || continue
-		rm -f -- "$_d$_f.new"
 		if still_ours "$_d" "$_prev" "$_f"; then
 			txn_intend "$_f" A
 			rm -f -- "$_d$_f" || die "install: cannot remove the obsolete $_d$_f"
@@ -1815,12 +2244,22 @@ EOF
 	# kldxref refreshes linker.hints; in a DESTDIR its failure (for example
 	# a staging tree without other modules) is reported, not fatal.  A live
 	# kldxref failure is an install failure and therefore rolls back too.
-	_kldxref=$(test_hook make.sh GB10_TEST_KLDXREF /usr/sbin/kldxref) || die "install: refused the kldxref test hook"
+	_kldxref=$(mk_hook GB10_TEST_KLDXREF /usr/sbin/kldxref "$_d") || die "install: refused the kldxref test hook"
 	_txn_hints=1
 	if [ -z "$_d" ]; then
-		"$_kldxref" /boot/modules || die "install: kldxref /boot/modules failed"
+		if "$_kldxref" /boot/modules; then
+			# Only a state observed after a successful kldxref is a write of
+			# this run.  A failure or interrupt never adopts whatever it finds.
+			txn_intend /boot/modules/linker.hints "$(txn_state "$_d/boot/modules/linker.hints")"
+		else
+			die "install: kldxref /boot/modules failed"
+		fi
 	else
-		"$_kldxref" "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
+		if "$_kldxref" "$_d/boot/modules"; then
+			txn_intend /boot/modules/linker.hints "$(txn_state "$_d/boot/modules/linker.hints")"
+		else
+			note "kldxref $_d/boot/modules failed (DESTDIR staging)"
+		fi
 	fi
 	_txn_hints=0
 	_txn_active=0
@@ -2028,6 +2467,10 @@ _module-list) module_list ;;
 _next-steps)
 	setup
 	install_next_steps
+	;;
+_next-note)
+	setup
+	install_next_note
 	;;
 _licence)
 	setup

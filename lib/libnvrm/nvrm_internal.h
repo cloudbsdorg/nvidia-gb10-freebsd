@@ -9,7 +9,14 @@
 
 #include <sys/types.h>
 
+#include <pthread.h>
+
 #include <nvrm/nvrm.h>
+#include <nvrm/nvrm_chan.h>
+
+#include "nvrm_methods.h"
+
+#include "nvrm_fake.h"
 
 /*
  * Properties a backend can report.  A backend returns 0 and sets *out, or a
@@ -49,6 +56,8 @@ enum nvrm_prop {
 
 enum nvrm_sprop {
 	NVRM_SP_UUID,
+	NVRM_SP_VBIOS,
+	NVRM_SP_GSP_FIRMWARE,
 	NVRM_SP_COUNT
 };
 
@@ -71,8 +80,10 @@ typedef struct nvrm_backend_ops {
 	/* Open, check the version, attach.  Returns enum nvrm_error. */
 	int	(*open)(nvrm_backend **be, char *err, size_t errlen);
 	void	(*close)(nvrm_backend *be);
-	/* The running kernel module's version, as it reports it. */
+	/* The running kernel module's legacy short version and parsed versions. */
 	void	(*running_version)(nvrm_backend *be, nvrm_str *out);
+	void	(*driver_version)(nvrm_backend *be, nvrm_version *out);
+	void	(*rm_api_version)(nvrm_backend *be, nvrm_version *out);
 	/* Probed GPU ids, attached.  Returns enum nvrm_error. */
 	int	(*list_gpus)(nvrm_backend *be, uint32_t *ids, unsigned max,
 		    unsigned *n, char *err, size_t errlen);
@@ -90,6 +101,8 @@ typedef struct nvrm_backend_ops {
 	int	(*limit)(nvrm_backend *be, int allow_alloc);
 	/* Memory and VA (S2); NULL when the backend has none. */
 	const struct nvrm_mem_ops *mem;
+	/* GPFIFO channels (S3); NULL when the backend has none. */
+	const struct nvrm_chan_ops *chan;
 } nvrm_backend_ops;
 
 /* Registry. */
@@ -105,9 +118,19 @@ uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
-/* Test seam: stands in for getpid() where the RM backend asks who owns a
- * descriptor; NULL = the real one. */
+/* Translate a stored reason id; -1 means the id is not in the reason table. */
+int	nvrm_reason_from_id(const char *id);
+/* The process and fork generation that own backend objects. */
+typedef struct nvrm_owner {
+	pid_t		pid;
+	unsigned long	generation;
+} nvrm_owner;
+void	nvrm_owner_set(nvrm_owner *o);
+int	nvrm_owner_is_me(const nvrm_owner *o);
+/* Test seam: stands in for getpid(); NULL = the real one. */
 extern pid_t (*nvrm_getpid_hook)(void);
+/* Test seam: runs the pthread_atfork(3) child handler. */
+void	nvrm_owner_fork_seam(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
@@ -119,6 +142,8 @@ typedef struct nvrm_family {
 } nvrm_family;
 extern const nvrm_family nvrm_family_table[];
 extern const unsigned nvrm_family_count;
+int	nvrm_compute_capability_for(uint64_t architecture,
+	    uint64_t implementation, uint32_t *major, uint32_t *minor);
 
 /* Board decorators: add or override options, never decide support. */
 typedef struct nvrm_decorator {
@@ -151,6 +176,7 @@ struct nvrm_ctx {
 	nvrm_backend	*be;
 	unsigned	ndev;
 	nvrm_str	running;
+	nvrm_version	driver, rm_api;
 	nvrm_device	dev[NVRM_MAX_GPUS];
 };
 
@@ -196,8 +222,9 @@ typedef struct nvrm_bmem_info {
  * its own, says why in err.  The core owns the bookkeeping (VA allocator,
  * lists, argument rules); a backend only talks to the GPU.  A release (unmap,
  * free) that the GPU side refuses returns an error too, so the core can keep
- * what is still held out of reuse; a release a backend skips on purpose (a
- * fork child, which does not own the RM client) is a success.
+ * what is still held out of reuse.  A release gets owner == 0 in a fork
+ * child: the backend releases its own records and does process-local work,
+ * but does not act on the parent's RM client or fake GPU.
  */
 typedef struct nvrm_mem_ops {
 	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
@@ -208,24 +235,24 @@ typedef struct nvrm_mem_ops {
 		    size_t errlen);
 	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
 		    int sparse, nvrm_bres **r, char *err, size_t errlen);
-	int	(*va_release)(nvrm_bres *r, char *err, size_t errlen);
+	int	(*va_release)(nvrm_bres *r, int owner, char *err, size_t errlen);
 	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
 	int	(*mem_register)(nvrm_bclient *bc, void *addr, uint64_t bytes,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
 		    size_t errlen);
-	int	(*mem_free)(nvrm_bmem *m, char *err, size_t errlen);
+	int	(*mem_free)(nvrm_bmem *m, int owner, char *err, size_t errlen);
 	int	(*map_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
 		    uint64_t offset, uint64_t length, int read_only, char *err,
 		    size_t errlen);
 	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
-		    uint64_t length, char *err, size_t errlen);
+		    uint64_t length, int owner, char *err, size_t errlen);
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
 	 * descriptor carry one mapping); the core closes it on unmap. */
 	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
 		    char *err, size_t errlen);
-	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, char *err,
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, int owner, char *err,
 		    size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
@@ -237,8 +264,95 @@ typedef struct nvrm_mem_ops {
 		    int write);
 } nvrm_mem_ops;
 
+/*
+ * The layout of a channel's memory object, named once.  The ring and the
+ * release segments come first and are mapped read-only for the GPU; the
+ * progress semaphore has a page of its own, mapped read-write, so the GPU
+ * can write nothing but the semaphore.  e is the entry count.
+ */
+#define NVRM_CHAN_PAGE		4096ULL
+#define NVRM_CHAN_RING_OFF(e)	0ULL
+#define NVRM_CHAN_RELEASE_OFF(e) ((uint64_t)(e) * 8)
+#define NVRM_CHAN_SEG_BYTES	(NVRM_RELEASE_SEG_DWORDS * 4ULL)
+#define NVRM_CHAN_SEG_OFF(e, i)	(NVRM_CHAN_RELEASE_OFF(e) + \
+				    (uint64_t)(i) * NVRM_CHAN_SEG_BYTES)
+#define NVRM_CHAN_SEM_OFF(e)	((NVRM_CHAN_SEG_OFF(e, e) + \
+				    NVRM_CHAN_PAGE - 1) & ~(NVRM_CHAN_PAGE - 1))
+#define NVRM_CHAN_BYTES(e)	(NVRM_CHAN_SEM_OFF(e) + NVRM_CHAN_PAGE)
+
+/* The default sleep slice of a waiter, in nanoseconds. */
+#define NVRM_CHAN_SLICE_DEFAULT_NS	100000000ULL
+
+/* Trace and barrier event codes: the barrier hook reports the first two, the
+ * fake backend the others (tests). */
+enum nvrm_chan_event {
+	NVRM_CHAN_EV_BARRIER_NORMAL = 1,
+	NVRM_CHAN_EV_BARRIER_DEVICE,
+	NVRM_CHAN_EV_GP_PUT,
+	NVRM_CHAN_EV_DOORBELL
+};
+
+/* A backend channel owns only the GPU-side operations; the core owns every
+ * ring, ordering, validation and lifetime rule.  core is opaque to ordinary
+ * backends and lets the fake find the client whose software GPU it runs. */
+typedef struct nvrm_bchan nvrm_bchan;
+typedef struct nvrm_bchan_cfg {
+	uint32_t	engines, entries, runlist;
+	uint64_t	ring_va;	/* GPU VA of the ring (entries*8 bytes) */
+	nvrm_chan	*core;
+} nvrm_bchan_cfg;
+typedef struct nvrm_bchan_info {
+	uint32_t	cls_gpfifo;
+	uint32_t	subch_class[8];
+} nvrm_bchan_info;
+typedef struct nvrm_chan_ops {
+	int	copy_on_graphics;
+	int	(*create)(nvrm_bclient *bc, const nvrm_bchan_cfg *cfg,
+		    nvrm_bchan **b, nvrm_bchan_info *out, char *err,
+		    size_t errlen);
+	int	(*destroy)(nvrm_bchan *b, char *err, size_t errlen);
+	uint32_t (*gp_get)(nvrm_bchan *b);
+	void	(*gp_put)(nvrm_bchan *b, uint32_t put);
+	void	(*doorbell)(nvrm_bchan *b);
+	uint32_t (*error)(nvrm_bchan *b);
+	/* A count that changes whenever any channel of the client makes
+	 * progress.  The core reads it before it checks, and wait() sleeps
+	 * only while it still has that value, so progress between the check
+	 * and the sleep is never lost. */
+	uint64_t (*progress_gen)(nvrm_bclient *bc);
+	int	(*wait)(nvrm_bclient *bc, uint64_t slice_ns, uint64_t gen);
+} nvrm_chan_ops;
+
+/* One queued submitter; the queue is a FIFO under the channel lock. */
+typedef struct nvrm_chan_waiter {
+	struct nvrm_chan_waiter *next;
+} nvrm_chan_waiter;
+
+struct nvrm_chan {
+	nvrm_client	*cl;
+	struct nvrm_chan *next;
+	nvrm_bchan	*b;
+	nvrm_mem	*mem;
+	void		*cpu;
+	uint64_t	ring_va, sem_va;
+	uint32_t	engines, entries, runlist;
+	nvrm_bchan_info	info;
+	pthread_mutex_t	lock;
+	pthread_cond_t	turn;		/* the queue head changed or a waiter left */
+	nvrm_chan_waiter *q_head, *q_tail;
+	uint32_t	gp_put;
+	uint32_t	gp_get;		/* atomic: waiters refresh peer channels */
+	uint32_t	state, error;	/* atomic for the same reason */
+	uint64_t	submitted, completed;
+	int		kick_pending;
+};
+
 extern const nvrm_mem_ops nvrm_fake_mem_ops;
 extern const nvrm_mem_ops nvrm_rm_mem_ops;
+extern nvrm_chan_ops nvrm_fake_chan_ops;
+extern uint64_t nvrm_chan_slice_ns;
+/* Test seam: runs between the unlock and the sleep of a waiter. */
+extern void (*nvrm_chan_presleep_hook)(void);
 
 /* The VA range allocator (nvrm_va.c). */
 typedef struct nvrm_va nvrm_va;
@@ -296,14 +410,19 @@ struct nvrm_client {
 	nvrm_reserve	*reserves;
 	nvrm_gmap	*gmaps;
 	nvrm_mem	*mems;
+	nvrm_chan	*channels;
 	nvrm_u64	vram_size;	/* from the device, as enumerated */
 	nvrm_u64	wc_cap;
 	nvrm_list	page_sizes;
 	nvrm_u64	max_page_size;
 	int		host_arm64;
 	int		allow_map;
+	nvrm_owner	owner;
 	nvrm_pool	pool[NVRM_DESC__COUNT];	/* indexed by NVRM_DESC_* */
 	nvrm_client_stats st;
+	/* Guards every clear and write of errmsg that a channel call makes:
+	 * channel calls may run on several threads of one client. */
+	pthread_mutex_t	errlock;
 	char		errmsg[160];
 };
 
@@ -320,12 +439,40 @@ extern int (*nvrm_capmode_hook)(void);
 int	nvrm_fake_gpu_access(nvrm_client *cl, uint64_t va, void *buf,
 	    size_t len, int write);
 
+/* Fake channel faults and its test controls. */
+#define NVRM_FAKE_CHAN_ERR_UNSUPPORTED	13
+#define NVRM_FAKE_CHAN_ERR_MMU		31
+void	nvrm_fake_chan_manual(int on);
+int	nvrm_fake_chan_step(nvrm_chan *ch, unsigned max_entries);
+void	nvrm_fake_chan_fault(nvrm_chan *ch, uint32_t code);
+typedef struct nvrm_fake_chan_counts {
+	uint64_t	entries, methods, nops, releases, acquires;
+	uint64_t	copies, bytes_copied, ignored, doorbells;
+} nvrm_fake_chan_counts_t;
+nvrm_fake_chan_counts_t nvrm_fake_chan_counts(nvrm_chan *ch);
+/* Test trace: gp_put and doorbell report their enum nvrm_chan_event codes. */
+extern void (*nvrm_fake_chan_event_hook)(int);
+
+/* The fake memory test seam: the public counters plus the objects the
+ * last-close sweep found leaked (more references held than the wrappers a
+ * fork child released). */
+typedef struct nvrm_fake_mem_test_stats {
+	nvrm_fake_mem_stats	base;
+	unsigned		leaked_objects;
+} nvrm_fake_mem_test_stats;
+void	nvrm_fake_mem_test_stats_get(nvrm_fake_mem_test_stats *st);
+/* Plant a leak: hold a reference on the object of a wrapper that nothing
+ * releases (tests). */
+void	nvrm_fake_mem_test_leak_ref(nvrm_bmem *m);
+
 /* Capsicum helper shared by the backends (nvrm_cap.c). */
 int	nvrm_cap_limit_fd(int fd, const unsigned long *cmds, unsigned ncmds);
 /* Limit a spare descriptor (mapping or export) to what it is for. */
 int	nvrm_cap_limit_desc(int fd, int kind);
 
 /* Field and capability descriptors (nvrm_fields.c); one definition. */
+#define NVRM_STRINGIFY_(x)	#x
+#define NVRM_STRINGIFY(x)	NVRM_STRINGIFY_(x)
 /* Most GPCs an enabled-unit mask can describe (the masks are 32 bits). */
 #define NVRM_MAX_GPCS	32
 

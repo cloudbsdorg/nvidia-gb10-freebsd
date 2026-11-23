@@ -1,0 +1,15 @@
+Vendored copies; make-be.sh and check-be.sh refuse a copy that differs from its pin.
+
+file = gpu-detect.sh
+repository = cloudbsdorg/uvm-bsd
+commit = 18f680386f50ff468f93e949cd0bb1bab5d91c4b (main; the file was last changed in e3b07d9f04f9287c00747586872bfd9dd0acfabd)
+path = tests/ioctl/testboot/gpu-detect.sh
+sha256 = e5c50f50a1dcb6adb92584407ad092bef4914fd4bc180976a40e0a56c4f65633
+
+file = testboot-return
+repository = skills (cloudbsd skills), via cloudbsdorg/uvm-bsd 18f680386f50ff468f93e949cd0bb1bab5d91c4b
+branch = agent/2398-amp001-crash-hardening, commit 963715f6937e8bdeeb5e96e3ebf33901f4fd36f9
+path = skills/bectl-safe-deploy/scripts/testboot-return
+sha256 = 3a88d17547c013ce93631d5aa4a414bcae6ccadb6e6653f641553f6df77f4d9d
+
+When the skill's testboot-return is merged, install the skill's script instead of this copy.

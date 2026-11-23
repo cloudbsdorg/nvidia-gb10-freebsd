@@ -65,6 +65,11 @@ stop_cmd=:
 : "${linux_bridge_testboot_cudarun:=}"	# a Linux CUDA runner (run-linux-cuda.sh); unset: row B4 is a skip
 : "${linux_bridge_testboot_user:=}"	# the user that runs the CUDA runner; unset: row B4 is a skip
 : "${linux_bridge_testboot_deadman:=45}"
+linux_bridge_testboot_real_shutdown=/sbin/shutdown
+: "${linux_bridge_testboot_shutdown:=$linux_bridge_testboot_real_shutdown}"
+: "${linux_bridge_testboot_lockfile:=/var/run/noshutdown}"
+: "${linux_bridge_testboot_marker:=/usr/local/etc/linux_bridge_testboot.marker}"
+: "${linux_bridge_testboot_bectl:=bectl}"
 : "${linux_bridge_testboot_owner:=0}"	# the uid that must own the log root (the tests use their own)
 : "${linux_bridge_testboot_version:=/usr/local/etc/linux_bridge_testboot.version}"
 : "${linux_bridge_testboot_hashes:=/usr/local/etc/linux_bridge_testboot.sha256}"	# "<sha256> <file>" of the staged modules, written by make-be.sh
@@ -77,6 +82,7 @@ stop_cmd=:
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=
+DM_CHILD=
 
 row()	# row <name> <pass|fail|info|skip|running|done> <detail>
 {
@@ -143,15 +149,145 @@ linux_kmods()	# the Linuxulator modules in kldstat, one per line
 	kldstat | awk 'NR > 1 { print $5 }' | grep -E '^(linux|linux64|linux_common)(\.ko)?$' || true
 }
 
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+dm_confirm()
+{
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
+# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE
+# The pure decision for the REAL shutdown path: no side effects, no files, no commands.  It
+# prints the reason and returns 1 when the real shutdown(8) must not be called, and returns 0
+# only when all of these hold: uid 0; a real rc boot; a marker whose first line is non-empty;
+# a current BE that equals it.  /etc/rc.subr strips the one/fast/force prefix, so rc_arg is
+# "start" for onestart too and cannot tell a boot from a hand run.  Only autoboot=yes (set by
+# /etc/rc autoboot) and rc_fast=yes (set by the faststart prefix /etc/rc uses) can, so a real
+# boot needs autoboot=yes, rc_fast=yes and rc_arg=start together.
+dm_decide()
+{
+	if [ "$1" != 0 ]; then
+		echo "uid $1 is not 0"
+		return 1
+	fi
+	if [ "$2" != yes ] || [ "$3" != yes ] || [ "$4" != start ]; then
+		echo "not an rc boot start (needs autoboot=yes, rc_fast=yes, rc_arg=start; have autoboot=${2:-unset}, rc_fast=${3:-unset}, rc_arg=${4:-unset})"
+		return 1
+	fi
+	if [ -z "$5" ]; then
+		echo "the marker is missing or its first line is empty"
+		return 1
+	fi
+	if [ -z "$6" ]; then
+		echo "bectl list shows no BE has the N flag"
+		return 1
+	fi
+	if [ "$6" != "$5" ]; then
+		echo "running BE $6 does not match marker $5"
+		return 1
+	fi
+	return 0
+}
+
+# deadman_allowed returns 0 only when it is safe to call the shutdown program.  Outside an rc
+# boot (autoboot is not yes) an override of linux_bridge_testboot_shutdown is honoured when it
+# is an absolute path to an executable file that is not setuid (a file that is not setuid cannot
+# restart the host).  At an rc boot (autoboot=yes) the override is ignored: the real conditions
+# of dm_decide apply and the call goes through linux_bridge_testboot_real_shutdown.
+# Decided: a hand run (onestart, not an rc boot) as root with a stub override is allowed, because
+# a stub that is a non-setuid file cannot reboot; the host test pins it with "control: same stub
+# on a hand run is used".
+deadman_allowed()
+{
+	DM_REFUSE=
+	DM_STUB=0
+	if [ "${autoboot:-}" != yes ]; then
+		if [ "$linux_bridge_testboot_shutdown" != "$linux_bridge_testboot_real_shutdown" ]; then
+			case $linux_bridge_testboot_shutdown in
+			/*)
+				if [ -f "$linux_bridge_testboot_shutdown" ] && [ -x "$linux_bridge_testboot_shutdown" ] && [ ! -u "$linux_bridge_testboot_shutdown" ]; then
+					DM_STUB=1
+					return 0
+				fi
+				;;
+			esac
+		fi
+	else
+		linux_bridge_testboot_shutdown=$linux_bridge_testboot_real_shutdown
+	fi
+	_dm_marker=
+	[ ! -f "$linux_bridge_testboot_marker" ] || _dm_marker=$(sed -n '1p' "$linux_bridge_testboot_marker" 2> /dev/null)
+	_dm_current=$("$linux_bridge_testboot_bectl" list -H 2> /dev/null | awk '$2 ~ /N/ {print $1}')
+	if ! DM_REFUSE=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_marker" "$_dm_current"); then
+		return 1
+	fi
+	return 0
+}
+
 deadman_arm()
 {
 	[ "$linux_bridge_testboot_deadman" -gt 0 ] 2>/dev/null || return 0
-	( sleep $((linux_bridge_testboot_deadman * 60)); \
-	    row deadman fail "the run did not finish in ${linux_bridge_testboot_deadman} minutes"; \
-	    [ -e /var/run/noshutdown ] || shutdown -r now "linux_bridge_testboot dead-man" ) > /dev/null 2>&1 &
-	DEADMAN_PID=$!
+	DM_CHILD=
+	if ! deadman_allowed; then
+		row deadman fail "REFUSED: not calling shutdown: $DM_REFUSE; this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	if [ -e "$linux_bridge_testboot_lockfile" ]; then
+		row deadman fail "$linux_bridge_testboot_lockfile exists; not calling shutdown; this boot is NOT protected against a hang"
+		sync
+		return 0
+	fi
+	"$linux_bridge_testboot_shutdown" -r "+$linux_bridge_testboot_deadman" "linux_bridge_testboot dead-man: restart in $linux_bridge_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
+	fi
+	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
+	if [ -n "$_dm_fail" ]; then
+		row deadman fail "$_dm_fail; first line of deadman.txt: ${_dm_first:-<empty>}"
+	elif [ "$DM_STUB" = 1 ]; then
+		DM_CHILD=$_dm_pid
+		row deadman pass "stubbed shutdown $linux_bridge_testboot_shutdown is used: shutdown -r +$linux_bridge_testboot_deadman is pending as pid $DM_CHILD"
+	else
+		DM_CHILD=$_dm_pid
+		row deadman pass "shutdown -r +$linux_bridge_testboot_deadman is pending as pid $DM_CHILD"
+	fi
+	sync
 }
-deadman_cancel() { [ -n "${DEADMAN_PID:-}" ] && kill "$DEADMAN_PID" > /dev/null 2>&1; return 0; }
+
+deadman_cancel()
+{
+	case ${DM_CHILD:-} in
+	''|*[!0-9]*)
+		row deadman fail "cannot cancel dead-man: no confirmed shutdown pid; kill nothing"
+		return 0
+		;;
+	esac
+	if ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman fail "cannot cancel dead-man: pid $DM_CHILD is not a shutdown owned by uid $(id -u); kill nothing"
+		DM_CHILD=
+		return 0
+	fi
+	if kill "$DM_CHILD" > /dev/null 2>&1; then
+		row deadman pass "cancelled dead-man shutdown pid $DM_CHILD"
+	else
+		row deadman fail "could not kill dead-man shutdown pid $DM_CHILD"
+	fi
+	DM_CHILD=
+	return 0
+}
 
 linux_bridge_testboot_start()
 {
@@ -378,9 +514,9 @@ linux_bridge_testboot_start()
 	0) ;;
 	3)
 		row return info "testboot-return is held (exit 3): the return is still owed"
+		deadman_cancel
 		row done info "after a held return"
 		[ -z "$_dst" ] || cp "$OUT/results.jsonl" "$_dst/" 2> /dev/null
-		deadman_cancel
 		;;
 	*)
 		row return fail "testboot-return exited $_trc: $(tail -1 "$OUT/testboot-return.txt")"
