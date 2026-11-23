@@ -6,7 +6,7 @@
 # (Track #2362): no Linuxulator, no LinuxKPI, no Linux binary.
 #
 # Usage: make-be.sh [-N NORMAL_BE] [-b BASE_BE] [-D YYYYMMDD] [-n SEQ] [-m STAGEDIR] [-s SHA256FILE] [-o COPYOUT]
-#                   [-V VRAM_BYTES] [-S SM] [-u UVM_KO] [-d DRM_KO] [--dry-run] [--activate]      (run as root)
+#                   [-V VRAM_BYTES] [-R RESERVE_BYTES] [-S SM] [-u UVM_KO] [-d DRM_KO] [--dry-run] [--activate]      (run as root)
 #   -N NORMAL_BE  the boot environment the host returns to (default cloudbsd-rx7600)
 #   -b BASE_BE    the boot environment to clone (default NORMAL_BE)
 #   -D, -n        the name is nvidia-native-tools-test-<DATE>-<SEQ> (today, 1); an existing name is refused with the
@@ -16,8 +16,13 @@
 #   -s FILE       the hash list (default STAGEDIR/SHA256.txt): five lines SHA256 (name) = <64 hex>
 #   -o COPYOUT    where the one-shot copies its run (default $GB10_WORK/logs/native-tools-testboot);
 #                 an absolute path on a dataset outside the boot environments
-#   -V, -S        the board's VRAM in bytes and SM version, for boot_nvrm_info.sh (default 17179869184 and 12.0: the
-#                 16 GiB RTX 5060 Ti of amp001)
+#   -V, -R, -S    what the board is, for boot_nvrm_info.sh (defaults: the amp001 board, in
+#                 tests/libnvrm/board-amp001.env):
+#                 -V the NOMINAL VRAM in bytes (0 for a unified-memory part);
+#                 -R the most the driver may reserve of it, in bytes, below -V unless -V is 0 (refused otherwise,
+#                 as the boot would); the reported VRAM must lie in [nominal - reserve, nominal];
+#                 -S the COMPUTE CAPABILITY major.minor, compared with compute_capability_major/minor, not
+#                 with the RM's own SM numbering
 #   -u UVM_KO     the nvidia-uvm.ko whose dependencies decide the uvm rows; without it they are not-available;
 #                 the module is read, never installed
 #   -d DRM_KO     the nvidia-drm.ko whose dependencies decide the PRIME row; without it that row is not-available;
@@ -73,8 +78,10 @@ SHAFILE=
 SHAFILE_GIVEN=0
 COPYOUT=$WORK/logs/native-tools-testboot
 COPYOUT_GIVEN=0
-VRAM=17179869184
-SM=12.0
+. "$REPO/tests/libnvrm/board-amp001.env"
+VRAM=$BOARD_VRAM_BYTES
+RESERVE=$BOARD_VRAM_RESERVE_MAX_BYTES
+SM=$BOARD_SM
 UVMKO=
 DRMKO=
 ACTIVATE=0
@@ -96,6 +103,7 @@ while [ $# -gt 0 ]; do
 	-s) need "$1" "$#"; SHAFILE=$2; SHAFILE_GIVEN=1; shift 2 ;;
 	-o) need "$1" "$#"; COPYOUT=$2; COPYOUT_GIVEN=1; shift 2 ;;
 	-V) need "$1" "$#"; VRAM=$2; shift 2 ;;
+	-R) need "$1" "$#"; RESERVE=$2; shift 2 ;;
 	-S) need "$1" "$#"; SM=$2; shift 2 ;;
 	-u) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; UVMKO=$2; shift 2 ;;
 	-d) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; DRMKO=$2; shift 2 ;;
@@ -115,6 +123,9 @@ if [ -n "$_root_opts" ]; then guard_work_default "$(id -u)" make-be.sh "${_root_
 case $DATE in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "make-be.sh: -D must be YYYYMMDD" >&2; exit 2 ;; esac
 case $SEQ in '' | *[!0-9]* | 0*) echo "make-be.sh: -n must be a positive number" >&2; exit 2 ;; esac
 case $VRAM in '' | *[!0-9]*) echo "make-be.sh: -V must be a number of bytes" >&2; exit 2 ;; esac
+case $RESERVE in '' | *[!0-9]*) echo "make-be.sh: -R must be a number of bytes" >&2; exit 2 ;; esac
+# the rule boot_compare.py applies at boot: a reserve below the nominal VRAM, unless that is 0
+[ "$VRAM" -eq 0 ] || [ "$RESERVE" -lt "$VRAM" ] || { echo "make-be.sh: -R $RESERVE must be below -V $VRAM (unless -V is 0): the boot would reject it" >&2; exit 2; }
 case $SM in [0-9]*.[0-9]*) ;; *) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 case $SM in *[!0-9.]* | *.*.*) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 _l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit 2; }
@@ -169,7 +180,7 @@ A=$SCRATCH/kit/tests/native-tools-testboot
 for _f in nvidia_native_tools_testboot guard.sh summarize.py gpu-detect.sh testboot-return VENDOR check-be.sh native-tools-summary.schema.json; do
 	[ -f "$A/$_f" ] || { echo "make-be.sh: commit $COMMIT has no tests/native-tools-testboot/$_f" >&2; exit 1; }
 done
-[ -f "$SCRATCH/kit/tests/libnvrm/boot_nvrm_info.sh" ] && [ -f "$SCRATCH/kit/tests/libnvrm/schema_validate.py" ] || { echo "make-be.sh: commit $COMMIT lacks tests/libnvrm/boot_nvrm_info.sh or schema_validate.py" >&2; exit 1; }
+[ -f "$SCRATCH/kit/tests/libnvrm/boot_nvrm_info.sh" ] && [ -f "$SCRATCH/kit/tests/libnvrm/boot_compare.py" ] && [ -f "$SCRATCH/kit/tests/libnvrm/schema_validate.py" ] || { echo "make-be.sh: commit $COMMIT lacks tests/libnvrm/boot_nvrm_info.sh, boot_compare.py or schema_validate.py" >&2; exit 1; }
 pin() { awk -v f="$1" '$1 == "file" && $3 == f { on = 1; next } $1 == "file" { on = 0 } on && $1 == "sha256" { print $3; exit }' "$A/VENDOR"; }
 for _f in gpu-detect.sh testboot-return; do
 	_w=$(pin "$_f"); _g=$(sha256 -q "$A/$_f")
@@ -348,8 +359,8 @@ run install $ROOTOWN -m 0555 "$A/nvidia_native_tools_testboot" "$MNT/usr/local/e
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.version"
 printf '%s\n' "$BE" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
 chmod 0444 "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
-printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_sm="%s"\n' \
-    "$NORMAL" "$COPYOUT" "$VRAM" "$SM" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
+printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_vram_reserve="%s"\nnvidia_native_tools_testboot_sm="%s"\n' \
+    "$NORMAL" "$COPYOUT" "$VRAM" "$RESERVE" "$SM" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
 
 # 7. done
 run $BECTL umount "$BE"

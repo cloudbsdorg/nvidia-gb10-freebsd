@@ -313,6 +313,7 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
   2. run.sh vmm: vm.create with cloud-init user data, and the result read-back, are not wired.
   3. The guest clones from a read-only mirror amp001 serves on the VM network (Mark: no keys, no GitHub in the VM).
   4. uvm-bsd: install and deinstall targets, the stock source fetch, a harness run.
+
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
 # Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain
@@ -598,6 +599,7 @@ STATUS, hand back.
   (guard_layer_name) for files, records and dependencies, now with drm, dmabuf, ttm, amdgpu, radeonkms and i915kms;
   guard_env prints the kernel records on a records line (no globals); kldxref positive control is the module
   record; the record-inside-another-file branch is tested. Kit test 174/0.
+
 ## 2026-11-22T11:45Z libnvrm S3 (Track 2437, branch agent/2437-libnvrm-s3)
 - Main sync: fast-forwarded to origin/main 4a745c7. A --no-ff merge was refused by merge-proof (MERGE_HEAD brings the GitHub merge commit 4a745c7 with no per-commit receipt); b98157c is an ancestor of main, so the fast-forward carries no branch content.
 - Baseline tests/libnvrm_test.sh: 478 ok, 0 failed.
@@ -609,6 +611,7 @@ STATUS, hand back.
 - 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
 - Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
 - 2026-11-22T21:40Z A6 on main 44617da (PR 15 merged): the three DEFECTs left open on 297e307 (fake leak sweep, dangling fake_map pointer, DEFAULT write-back advice) and three DEBTs (give_back helper, munmap delta, second session asserted). Started by Kimi k3.1-pro (round A6, stopped), finished by Sonnet (Kimi quota out); mem_test main() runs a test table (CPD, the copy-paste detector of PMD). Suite 490 ok. Next: gate 2 rounds, commit, push, PR. Answers: tmp/libnvrm-s3/answers/answers-A6.txt.
+
 ## 2026-11-22 (nvrm-info boot fixes and version sysctls, #2378 libnvrm, #2362 kit): PAUSED for a test boot
 Worktree /home/mlapointe/work/gb10/wt-2378-versions, branch agent/2378-version-numbers, cut from origin/main 8702134.
 No code is written yet, and no opencode round has started. Baseline: tests/libnvrm_test.sh 412 ok, 0 FAILED on 8702134.
@@ -737,6 +740,16 @@ Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
   layer, full-coverage path, the #2457 Ampere floor as the first provider-record rule.
 - Next: full suite, gate 2 rounds, commit, push, PR; hand back for Mark's go. Phase 2 waits for that go.
 
+## 2026-11-22T21:30Z libnvrm S3 slice 1 (Track 2437, branch agent/2437-libnvrm-s3-chan, on main 44617da)
+- nvrm_chan API (nvrm_chan.h), core ring rules (nvrm_chan.c: E-2 per batch, splitting, INCOMPLETE runs, a FIFO of submit waiters with a turn condvar, flush order with two barriers), fake GPFIFO (nvrm_fake_chan.c: NOP, semaphore release and acquire 32/64-bit, ACQ_CIRC_GEQ, copy class), encoders in nvrm_methods.h, barriers in nvrm_barrier.h, nvrm_chan(3).
+- Written by opencode Kimi k3.1-pro (round B), finished by Sonnet (B2, B3: queued submit timeout and handoff, ring-wrap space fix; lint exemption for the fake channel data) after the Kimi quota ran out.
+- tests/libnvrm_test.sh 505 ok, 0 failed. chan_test about 200961 checks; nvrm_chan.c and nvrm_fake_chan.c at 100 percent lines and branches; 11 chan mutants killed.
+- Next: gate rounds 1 and 2, commit, push, PR.
+- Slice 1 round 2 had two complete gate runs on the same diff: run 87573 (receipt a119169e, the one used) and a duplicate run 33965.
+- The mutant script now holds 26 chan mutants (the slice 1 entry of 2026-11-22 21:30Z said 11; that count was stale).
+- 2026-11-23T04:00Z B5 (the four slice 1 DEFECT fixes) on branch agent/2437-libnvrm-s3-defects, on main 0163eda: gate round 1 receipt 4f490fa3 (5 voices, Claude fallbacks because every Kimi voice was over quota); the nine findings fixed by a MiniMax round (B6-review1): size 0 returns the full stats structure again, the fake fetch failure leaves GP_GET alone, one ownership check in run_entries, forget required and never called in a fork child. Suite 608 ok. Answers for round 2: tmp/libnvrm-s3/answers/answers-B5.txt.
+- Resume: gate round 2 with REVIEW_ANSWERS waits until a non-Claude voice answers (Mark: no Claude fallback while the Claude quota is low; wait for the next 5 hour MiniMax window); then commit, push, PR.
+
 ## 2026-11-22T23:25Z #2448 zz-2448 enumerate-gpus patch: fuzz 0 on main after d1752ad
 - patches/patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c regenerated with diff -U2 against the tree after every earlier patch (incl. the nv_version_sysctl.h include from d1752ad). Hunk 2 now anchors on that include; the NVRM include block still sits before nv-retpoline.h. Added (+) lines are byte-identical; hunks apply with no fuzz and no offset.
 - Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.
@@ -764,3 +777,31 @@ Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
 - 2026-11-23T05:30Z part b finished as a continuation (tmp/2455/task-r4c.md, MiniMax, rc 0): P1-P4 (several of our
   backends at once, one per card; per-instance names through the alias layer; many devices per class) and P5 (phase 2
   builds RTX 30 and later only; other generations and vendors designed, not built). Next: gate round 1 (MiniMax-first).
+
+## 2026-11-22 (UTC) libnvrm review follow-up (#2378, agent/2378-libnvrm-review-followup)
+- The alias/raw fallback plan of the PAUSED entry (nvrm-info boot fixes and version sysctls) was dropped: with
+  architecture and implementation available but no table row, compute capability is family_unknown, whatever
+  the raw SM code is (nvrm(3), nvrm(7), nvrm-info(8) say the same).
+- This follow-up fixes the Review-open items of c0102d7:
+  - security.3: an NVRM_1.0 caller of nvrm_info_nfields()/nvrm_info_field() gets only the 30 rows of 8702134,
+    in 1.0 order (nvrm_compat.c, .symver); the rows added later (rm_sm_version, compute capability, the versions
+    group) are last in the table, and the NVRM_1.2 versions return all of it. dlvsym test and a mutant.
+  - reason ids: nvrm_reason_from_id (now public, NVRM_1.2) is the one mapping, used by the running version and by
+    the nvrm-info text; rm_test plants os_call_failed.
+  - compute capability reason is family_unknown independent of raw_sm; text output prints
+    "unavailable: <reason text>" for a per-GPU version; fake profile "alias" is now "untabled"; fake_gpu_str
+    switches with a default; core_test counts the appended rows instead of "rows + 5"; nvrm-info(8) says the
+    vbios_* and firmware_* sysctls come with the kernel module of PR 33.
+- Left for the owner: security.2 (host names and home paths in this journal).
+
+## 2026-11-23 01:30Z checkpoint before the native-tools test boot (#2378)
+- aba0014 pushed (agent/2378-libnvrm-review-followup). A --no-ff merge of main cbe6ca3 is staged, not committed
+  (JOURNAL.md conflict resolved; this entry is unstaged on top of it).
+- Full suite stopped at a clean point after make_contract_test (29 of 54; reds so far match main).
+- Resume: rerun the suite from make_install_flow_test, overlap gate round, commit the merge, push, open the PR.
+- BE nvidia-native-tools-test-20261123-1 (main 937f89f, check-be 65 ok) is queued with the orchestrator; after the
+  boot, read logs/native-tools-testboot/<stamp>/ and report the nvrm-info rows.
+
+## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
+- The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
+  b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.

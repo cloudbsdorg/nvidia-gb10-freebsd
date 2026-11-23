@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -231,6 +232,13 @@ free_pools(nvrm_client *cl)
 	}
 }
 
+static void
+client_free(nvrm_client *cl)
+{
+	(void)pthread_mutex_destroy(&cl->errlock);
+	free(cl);
+}
+
 int
 nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
     nvrm_client **clp, char *err, size_t errlen)
@@ -258,6 +266,7 @@ nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
 		return (NVRM_E_NOMEM);
 	}
 	nvrm_owner_set(&cl->owner);
+	(void)pthread_mutex_init(&cl->errlock, NULL);
 	info = &dev->info;
 	cl->ops = dev->ctx->ops;
 	cl->mops = mops;
@@ -269,7 +278,7 @@ nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
 	rc = mops->client_open(dev->ctx->be, dev->gpu, &cfg, &cl->bc, &vi, err,
 	    errlen);
 	if (rc != NVRM_OK) {
-		free(cl);
+		client_free(cl);
 		return (rc);
 	}
 	cl->va = vi.base < vi.end ? nvrm_va_new(vi.base, vi.end) : NULL;
@@ -278,7 +287,7 @@ nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
 		set_err(err, errlen, rc == NVRM_E_NOMEM ? "out of memory" :
 		    "the backend reported an empty VA space");
 		mops->client_close(cl->bc);
-		free(cl);
+		client_free(cl);
 		return (rc);
 	}
 	cl->va_base = vi.base;
@@ -311,6 +320,9 @@ nvrm_client_close(nvrm_client *cl)
 
 	if (cl == NULL)
 		return;
+	while (cl->channels != NULL)
+		nvrm_chan_destroy(cl->channels);
+	nvrm_chan_release_held(cl);
 	while (cl->mems != NULL)
 		nvrm_mem_free(cl->mems);
 	/* Mappings whose unmap was refused while their object was freed: the
@@ -329,7 +341,7 @@ nvrm_client_close(nvrm_client *cl)
 	free_pools(cl);
 	nvrm_va_destroy(cl->va);
 	cl->mops->client_close(cl->bc);
-	free(cl);
+	client_free(cl);
 }
 
 const char *
@@ -338,17 +350,27 @@ nvrm_client_errmsg(const nvrm_client *cl)
 	return (cl->errmsg);
 }
 
+/* The structure grew after NVRM_1.1 (live_channels, channels_created): a
+ * caller built against NVRM_1.1 passes the size up to live_channels and gets
+ * only that much back.  A size of 0 means this version's structure, so a
+ * caller that zero-inits the structure and asks for the stats gets every
+ * member. */
 int
 nvrm_client_stats_get(nvrm_client *cl, nvrm_client_stats *st)
 {
-	if (!size_ok(st->size, sizeof(*st)))
+	const size_t v11 = offsetof(nvrm_client_stats, live_channels);
+	nvrm_client_stats full = cl->st;
+	size_t want = st->size == 0 ? sizeof(full) : st->size;
+
+	if (want != sizeof(full) && want != v11)
 		return (fail(cl, NVRM_E_INVAL, "nvrm_client_stats.size must "
-		    "be 0 or sizeof(nvrm_client_stats)"));
+		    "be 0 (the full size), sizeof(nvrm_client_stats) or the "
+		    "NVRM_1.1 size (offsetof live_channels)"));
 	cl->errmsg[0] = '\0';
-	*st = cl->st;
-	st->size = sizeof(*st);
-	st->spare_descriptors = cl->pool[NVRM_DESC_MAP].n +
+	full.size = (uint32_t)want;
+	full.spare_descriptors = cl->pool[NVRM_DESC_MAP].n +
 	    cl->pool[NVRM_DESC_EXPORT].n;
+	memcpy(st, &full, want);
 	return (NVRM_OK);
 }
 

@@ -1,0 +1,323 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 22, 2026
+.Dt NVRM_CHAN 3
+.Os
+.Sh NAME
+.Nm nvrm_chan_create ,
+.Nm nvrm_chan_submit ,
+.Nm nvrm_chan_kick ,
+.Nm nvrm_chan_gp_space ,
+.Nm nvrm_chan_wait ,
+.Nm nvrm_chan_status_get ,
+.Nm nvrm_chan_info_get ,
+.Nm nvrm_chan_destroy
+.Nd ordered GPFIFO submission and channel progress
+.Sh LIBRARY
+libnvrm
+.Sh SYNOPSIS
+.In nvrm/nvrm_chan.h
+.Vt "typedef struct nvrm_chan nvrm_chan;"
+.Vt nvrm_chan_params ;
+.Vt nvrm_gp_entry ;
+.Vt nvrm_submit_opts ;
+.Vt nvrm_submit_result ;
+.Vt nvrm_chan_status ;
+.Vt nvrm_chan_info ;
+.Ft int
+.Fn nvrm_chan_create "nvrm_client *cl" "const nvrm_chan_params *p" "nvrm_chan **chp"
+.Ft int
+.Fn nvrm_chan_submit "nvrm_chan *ch" "const nvrm_gp_entry *e" "unsigned n" "const nvrm_submit_opts *o" "nvrm_submit_result *r"
+.Ft int
+.Fn nvrm_chan_kick "nvrm_chan *ch"
+.Ft int
+.Fn nvrm_chan_gp_space "nvrm_chan *ch" "unsigned *n"
+.Ft int
+.Fn nvrm_chan_wait "nvrm_chan *ch" "uint64_t point" "uint64_t timeout_ns"
+.Ft int
+.Fn nvrm_chan_status_get "nvrm_chan *ch" "nvrm_chan_status *st"
+.Ft int
+.Fn nvrm_chan_info_get "const nvrm_chan *ch" "nvrm_chan_info *info"
+.Ft void
+.Fn nvrm_chan_destroy "nvrm_chan *ch"
+.Sh DESCRIPTION
+A channel submits pushbuffer segments to a GPU engine through a GPFIFO ring.
+The core owns the ring, submission order and progress semaphore; the backend
+only publishes the ring pointer, rings the doorbell and reports execution and
+errors.
+.Ss Creation and information
+.Fn nvrm_chan_create
+requires a client opened with
+.Dv NVRM_OPEN_ALLOW_MAP .
+In
+.Vt nvrm_chan_params ,
+.Va engines
+is a nonzero combination of
+.Dv NVRM_ENG_3D ,
+.Dv NVRM_ENG_COMPUTE ,
+.Dv NVRM_ENG_I2M ,
+.Dv NVRM_ENG_2D
+and
+.Dv NVRM_ENG_COPY .
+The first four select
+.Dv NVRM_RUNLIST_GRAPHICS ;
+copy alone selects
+.Dv NVRM_RUNLIST_COPY .
+A graphics channel may include copy when the backend supports that pairing.
+.Va entries
+is a power of two from
+.Dv NVRM_CHAN_ENTRIES_MIN
+through
+.Dv NVRM_CHAN_ENTRIES_MAX ;
+zero selects
+.Dv NVRM_CHAN_ENTRIES_DEFAULT .
+.Va flags
+must be zero.
+On success,
+.Fa *chp
+receives the channel; on failure it is
+.Dv NULL .
+.Pp
+.Fn nvrm_chan_info_get
+fills
+.Vt nvrm_chan_info
+with the requested engines, ring size and runlist, the GPFIFO class, the class
+bound on each of eight subchannels, and
+.Va sem_va ,
+the GPU address of the 64-bit progress semaphore.
+The ring and the host release segments are mapped read-only for the GPU, so a
+pushbuffer that writes them faults its channel; the semaphore has a page of its
+own, mapped read-write, so the GPU can write nothing else.
+Subchannels 0 through 4 are respectively 3D, compute, inline-to-memory, 2D and
+copy.
+.Fn nvrm_chan_status_get
+fills
+.Vt nvrm_chan_status
+with
+.Dv NVRM_CHAN_ALIVE
+or
+.Dv NVRM_CHAN_DEAD ,
+the error notifier, GP_GET and GP_PUT, and the submitted and completed progress
+points.
+.Ss Submission and capacity
+Each
+.Vt nvrm_gp_entry
+names a pushbuffer segment by GPU address
+.Va va
+and length in
+.Va dwords .
+Addresses are nonzero, four-byte aligned and below 2^40; lengths are from 1
+through 2^21-1.
+.Dv NVRM_GP_NO_PREFETCH
+requests a fetch only after prior work finishes.
+.Dv NVRM_GP_INCOMPLETE
+joins an element to the next one.
+The final element cannot be incomplete.
+.Pp
+A ring of E entries holds at most E-1 pending entries because equal GP_GET and
+GP_PUT means empty.
+Every batch also needs one core entry that releases the progress semaphore, so
+a batch carries at most E-2 caller elements.
+That core release is the semaphore release the library appends to every batch:
+one extra ring entry that writes the progress point of the batch to the
+semaphore.
+.Fn nvrm_chan_gp_space
+reports free caller-element capacity after reserving that release entry.
+The GPU may move GP_GET past a ring slot before it has read the release
+segment the slot names, so a slot that holds a core release counts as free
+only once the progress semaphore has reached that release: a batch never
+rewrites a segment whose release has not run.
+.Pp
+A caller therefore sees less room than the slots GP_GET has passed: a slot
+whose core release has not run yet is not free.
+A submit with a zero timeout can return
+.Er NVRM_E_TIMEOUT
+after accepting part of its elements; the accepted count and the point of the
+last accepted batch are in the result.
+.Fn nvrm_chan_wait
+on that point frees the slots those batches held.
+.Fn nvrm_chan_submit
+splits a larger request into ordered batches.
+An incomplete run and its terminator are indivisible and never straddle batches.
+If the next unit does not fit, submission waits for GP_GET to advance.
+.Vt nvrm_submit_opts
+may be
+.Dv NULL
+for an unlimited wait and an immediate doorbell.
+Its
+.Va timeout_ns
+is zero for no wait or
+.Dv UINT64_MAX
+for no limit.
+.Dv NVRM_SUBMIT_NO_KICK
+publishes GP_PUT without ringing the doorbell; a submit that must then wait for
+ring space rings the doorbell for the work it has published first, because
+that work is what holds the ring.
+.Vt nvrm_submit_result
+returns the number of caller elements accepted and the last batch's point.
+A refused validation writes no ring entries; a timeout can follow earlier
+accepted batches, which the result reports.
+.Pp
+Submitters queue on the channel and are served strictly in arrival order.
+A later small submission cannot pass an earlier waiter.
+A queued submit still honours its own
+.Va timeout_ns :
+once its deadline passes while earlier submits are ahead of it, it leaves the
+queue without placing anything and the order of the others is unchanged.
+When the submit at the head finishes or leaves, the next one is woken at once.
+Each batch stores its entries, applies the normal-memory store barrier,
+publishes GP_PUT, applies the device barrier, then rings the doorbell unless
+.Dv NVRM_SUBMIT_NO_KICK
+was given.
+.Fn nvrm_chan_kick
+applies the device barrier and rings once for published work still awaiting a
+doorbell; with none pending it does nothing.
+.Ss Progress and failure
+.Fn nvrm_chan_wait
+waits for the progress semaphore to reach
+.Fa point .
+Point zero and an already completed point return immediately.
+The checks of a wait that is not yet satisfied run in this order: a
+.Xr fork 2
+child is refused, then a dead channel is lost, and only then is a point above
+the submitted count invalid.
+A zero
+.Fa timeout_ns
+does not sleep;
+.Dv UINT64_MAX
+means no limit.
+.Pp
+An execution fault kills only its channel.
+A dead channel stays dead: submission and kicking fail, while status,
+information and destruction remain available.
+.Va error
+in
+.Vt nvrm_chan_status
+is the channel's error notifier and belongs to the backend: the fake backend
+reports 13 for an unsupported method or class and 31 for a GPU address fault,
+and the RM backend reports the RM notifier code.
+The core reports one value itself,
+.Dv NVRM_CHAN_ERR_SEMAPHORE :
+the progress semaphore, which the GPU can write, held a value above the
+submitted point or below the completed point, and the channel is dead because
+that value cannot be progress.
+The message of a call that fails for a dead channel names the notifier and says
+to destroy the channel and create a new one.
+Waiting for an already completed point still succeeds; waiting for later work
+on a dead channel fails.
+.Fn nvrm_chan_destroy
+releases the backend channel, its maps, memory and VA reservation.
+When the backend refuses to destroy its channel, the ring memory and VA stay
+held, because the backend may still use them: the refusal is counted in
+.Va failed_releases
+of
+.Xr nvrm_mem 3
+and its message kept, and
+.Fn nvrm_client_close
+makes the backend drop its record of the channel, without touching the
+device, before it frees them.
+.Fn nvrm_client_close
+destroys every channel still live on the client first.
+.Pp
+Submission, kicking, capacity queries, waits and status queries may run
+concurrently on one channel.
+Creation and destruction must not run concurrently with any call on the same
+client.
+In a
+.Xr fork 2
+child, creation, submission and kicking are refused, and a wait for a point
+not yet completed is refused; capacity, status and completed-point waits answer
+from the state the child inherited and make no backend call.
+Destruction drops only the child's records and makes no backend call.
+.Pp
+The message of
+.Fn nvrm_client_errmsg
+belongs to the most recent call on the client.
+Every call of this page, including
+.Fn nvrm_chan_info_get ,
+clears it and writes it under one lock of the client, so concurrent calls do not
+race on it; but it is only meaningful when no other thread calls into the same
+client meanwhile, because another call replaces it.
+.Ss Structure sizes
+The first member of every public options, result, status and information
+structure is
+.Va size .
+Zero or the structure's current
+.Li sizeof
+selects this version; another value is invalid.
+.Sh RETURN VALUES
+The calls returning
+.Vt int
+return
+.Dv NVRM_OK
+on success or an error code below.
+.Fn nvrm_client_errmsg
+returns a one-line explanation for the channel's client.
+.Fn nvrm_chan_destroy
+returns no value and accepts
+.Dv NULL .
+.Sh ERRORS
+.Bl -tag -width ".Fn nvrm_chan_status_get"
+.It Fn nvrm_chan_create
+returns
+.Er NVRM_E_DENIED
+for a fork child or a client without
+.Dv NVRM_OPEN_ALLOW_MAP ,
+.Er NVRM_E_INVAL
+for invalid parameters,
+.Er NVRM_E_NOTSUP
+when channels or the requested graphics/copy pairing are unsupported,
+.Er NVRM_E_NOMEM
+when allocation fails, and
+.Er NVRM_E_NOSLOT ,
+.Er NVRM_E_RANGE ,
+.Er NVRM_E_RM
+or
+.Er NVRM_E_IO
+when the underlying reservation, allocation or mapping operation reports that
+failure.
+.It Fn nvrm_chan_submit
+returns
+.Er NVRM_E_DENIED
+in a fork child,
+.Er NVRM_E_INVAL
+for invalid options, result size or elements (an INCOMPLETE run needs one ring
+slot per element and at most E-2 fit in a batch, so a longer run is invalid),
+.Er NVRM_E_TIMEOUT
+when ring space does not become available by the deadline, or when earlier
+submits on the channel still hold the queue at the deadline (nothing is
+accepted in that case), and
+.Er NVRM_E_LOST
+when the channel is dead.
+.It Fn nvrm_chan_kick
+returns
+.Er NVRM_E_DENIED
+in a fork child and
+.Er NVRM_E_LOST
+when the channel is dead.
+.It Fn nvrm_chan_gp_space
+returns
+.Er NVRM_E_LOST
+when the channel is dead.
+.It Fn nvrm_chan_wait
+returns
+.Er NVRM_E_DENIED
+in a fork child when the point is not yet completed,
+.Er NVRM_E_INVAL
+when the point exceeds the submitted count,
+.Er NVRM_E_TIMEOUT
+when the point is not completed by the deadline, and
+.Er NVRM_E_LOST
+when unfinished work belongs to a dead channel.
+.It Fn nvrm_chan_status_get
+and
+.Fn nvrm_chan_info_get
+return
+.Er NVRM_E_INVAL
+for an unsupported structure size.
+.El
+.Sh SEE ALSO
+.Xr fork 2 ,
+.Xr nvrm 3 ,
+.Xr nvrm_mem 3 ,
+.Xr nvrm 7

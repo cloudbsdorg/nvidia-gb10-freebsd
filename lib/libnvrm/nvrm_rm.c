@@ -204,22 +204,21 @@ read_text_sysctl(const char *name, char *value, size_t size)
 	return (0);
 }
 
-static void
-sync_running_version(nvrm_backend *be)
+void
+nvrm_rm_sync_running_version(nvrm_backend *be)
 {
+	int reason;
+
 	be->running.source = NVRM_S_OS;
 	snprintf(be->running.value, sizeof(be->running.value), "%s",
 	    be->driver.string);
-	if (be->driver.available)
+	if (be->driver.available) {
 		be->running.reason = NVRM_R_NONE;
-	else if (strcmp(be->driver.reason,
-	    nvrm_reason_id(NVRM_R_VERSION_UNPARSED)) == 0)
-		be->running.reason = NVRM_R_VERSION_UNPARSED;
-	else if (strcmp(be->driver.reason,
-	    nvrm_reason_id(NVRM_R_VERSION_INCONSISTENT)) == 0)
-		be->running.reason = NVRM_R_VERSION_INCONSISTENT;
-	else
-		be->running.reason = NVRM_R_OS_NOT_REPORTED;
+		return;
+	}
+	/* the driver version carries its reason as an id; the one helper maps it */
+	reason = nvrm_reason_from_id(be->driver.reason);
+	be->running.reason = reason > 0 ? reason : NVRM_R_OS_NOT_REPORTED;
 }
 
 /* Return 1 when the complete set of numeric version sysctls was read. */
@@ -295,10 +294,10 @@ read_sysctls(nvrm_backend *be)
 	int wc;
 
 	if (read_version_sysctls(be)) {
-		sync_running_version(be);
+		nvrm_rm_sync_running_version(be);
 	} else {
 		read_banner_version(be);
-		sync_running_version(be);
+		nvrm_rm_sync_running_version(be);
 	}
 	if (read_int_sysctl(NVRM_SYSCTL_WC, &wc) == 0) {
 		be->wc = wc != 0;

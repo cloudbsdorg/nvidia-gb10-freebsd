@@ -11,19 +11,50 @@
 # module.
 #
 # What the board is, stated by the kit and not read back from the library
-# (a value compared with itself proves nothing):
-#   BOOT_EXPECT_VRAM_BYTES  the video memory the board has, in bytes, exactly
-#                           as the RM reports it (0 for a unified-memory part);
-#                           e.g. 17179869184 for a 16 GiB card
-#   BOOT_EXPECT_SM          the SM version, major.minor (12.0 for the RTX 5060
-#                           Ti)
-# Both are required, and both apply to every GPU the run reports (the test
-# boards have one).  A missing or different value is a FAIL.  The kernel log of
-# FreeBSD does not report VRAM, so there is no log line to compare it with.
-# bar1_size is compared with BAR1 of the same device in `pciconf -lvb`, a
-# source that does not go through the RM: BAR1 is the memory BAR at config
-# offset 0x14 (BAR0, the registers, is at 0x10; BAR3 at 0x1c).  No GPU at all
-# is a FAIL here: the board has one.
+# (a value compared with itself proves nothing); all three are required, a
+# missing or malformed one is a FAIL with an example, and each applies to every
+# GPU the run reports (the test boards have one):
+#   BOOT_EXPECT_VRAM_BYTES  the NOMINAL video memory of the board, in bytes
+#                           (0 for a unified-memory part)
+#   BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES
+#                           the most the driver may reserve of it, in bytes,
+#                           below the nominal size (the RM reports the usable
+#                           size); the reported vram_size must be nominal
+#                           minus reserve or more and at most nominal; nominal
+#                           0 wants exactly 0
+#   BOOT_EXPECT_SM          the board's COMPUTE CAPABILITY, major.minor,
+#                           compared with the integers
+#                           compute_capability_major/minor; the RM's own SM
+#                           numbering (sm_version_*) and the raw rm_sm_version
+#                           are printed as INFO only.  A JSON without
+#                           compute_capability_* is a FAIL
+# The values of the amp001 board (RTX 5060 Ti) are in board-amp001.env next to
+# this script; boot_compare.py describes the comparison.
+# The comparison is boot_compare.py (python3 -I, arguments OUTDIR and the repo
+# root).  What it checks beside the expectations, each from a source that does
+# not go through libnvrm:
+#   - GPU uuid: the sysctl unit is the one whose dev.nvidia.<unit>.pci_bus_id
+#     (dddd:bb:ss.f, lowercase hex, e.g. 000d:01:00.0 on amp001; a present but
+#     malformed one is its own FAIL and the dbsf of dev.nvidia.<unit>.%location
+#     is tried) equals the device's domain/bus/slot/function (function 0, said
+#     in the line, when nvrm-info has it unavailable); hw.nvidia.gpus.<unit>
+#     is numbered by device unit, not by nvrm-info's index.  A unit found
+#     through pci_bus_id (a module with the new sysctls) PASSes only when both
+#     hw.nvidia.gpus.<unit>.uuid and dev.nvidia.<unit>.uuid equal the nvrm-info
+#     uuid; a unit found only through %location (an older module) needs only
+#     hw.nvidia.gpus.<unit>.uuid (dev.nvidia.<unit>.uuid, if present, must
+#     still equal); no unit at that location is a FAIL
+#   - versions.driver is available, its integers major/minor/patch equal
+#     hw.nvidia.version_major/_minor/_patch, hw.nvidia.version_available is 1,
+#     and its string equals the SOURCES ogkm_tag; running_rm_version is
+#     available and equals versions.driver.string; the banner
+#     hw.nvidia.version carries the tag as a whole version
+#   - bar1_size is compared with BAR1 of the same device in `pciconf -lvb`:
+#     BAR1 is the memory BAR at config offset 0x14 (BAR0, the registers, is at
+#     0x10; BAR3 at 0x1c)
+# sysctl.txt holds the whole hw.nvidia and dev.nvidia nodes.  The kernel log of
+# FreeBSD does not report VRAM, so there is no log line to compare it with.  No
+# GPU at all is a FAIL here: the board has one.
 #
 # The proof is that nvrm-info needs no Linux layer, so the test BE must not
 # have one: set linux_enable="NO" in the test BE's rc.conf and keep the Linux
@@ -46,8 +77,8 @@
 # probe is a FAIL; only BOOT_S1_ONLY=1 (a discovery-only kit) turns that into
 # an INFO line, and the run records that it was set.
 #
-# usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] \
-#            boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
+# usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R \
+#            BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
 # Writes OUTDIR/results.txt (one PASS/FAIL/INFO line per check, last line
 # "== done rc=N"), OUTDIR/nvrm-info.json, nvrm-info.jsonl, sysctl.txt,
 # pciconf.txt, dmesg-nvrm.txt, kldstat.txt, kldstat-after.txt.  Exit status:
@@ -62,7 +93,7 @@ ALLOW_FAKE_NOTE=
 [ -n "$BOOT_ALLOW_FAKE" ] || unset NVRM_BACKEND NVRM_FAKE_PROFILE NVRM_FAKE_FAIL BOOT_KLDSTAT BOOT_PCICONF BOOT_SYSCTL
 [ -z "$BOOT_ALLOW_FAKE" ] || ALLOW_FAKE_NOTE=1
 
-OUT=${1:?usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_SM=M.m boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]}
+OUT=${1:?usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R BOOT_EXPECT_SM=M.m boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]}
 INFO=${2:-nvrm-info}
 SCHEMA=${3:-}
 mkdir -p "$OUT" || exit 99
@@ -118,9 +149,8 @@ info "linuxkpi modules loaded (not a Linux layer): $(awk '{print $5}' "$OUT/klds
 
 # what the driver says by itself
 {
-	$SYSCTL hw.nvidia.version
-	$SYSCTL hw.nvidia.altra_device_wc_active
-	$SYSCTL hw.nvidia.gpus
+	$SYSCTL hw.nvidia
+	$SYSCTL dev.nvidia
 } >"$OUT/sysctl.txt" 2>&1
 $PCICONF -lvb >"$OUT/pciconf.txt" 2>&1
 dmesg | grep -iE 'nvrm|nvidia' >"$OUT/dmesg-nvrm.txt" 2>&1
@@ -173,122 +203,8 @@ fi
 $KLD >"$OUT/kldstat-after.txt" 2>&1
 linux_check "after nvrm-info ran" "$OUT/kldstat-after.txt"
 
-# compare with the driver, GPU by GPU, using python only to read the JSON
-python3 -I - "$OUT" "$HERE/../.." "${BOOT_EXPECT_VRAM_BYTES:-}" "${BOOT_EXPECT_SM:-}" >>"$R" 2>&1 <<'PY'
-import json, os, re, subprocess, sys
-out = sys.argv[1]
-doc = json.load(open(out + "/nvrm-info.json"))
-def say(ok, msg):
-    print(("PASS " if ok else "FAIL ") + msg)
-def val(f):
-    return f["value"] if f["available"] else None
-exp_vram, exp_sm = sys.argv[3], sys.argv[4]
-sysctl = open(out + "/sysctl.txt").read()
-pci = open(out + "/pciconf.txt").read()
-built = doc["built_for_rm_version"]
-tag = ""
-try:
-    for line in open(os.path.join(sys.argv[2], "SOURCES")):
-        f = line.split()
-        if len(f) == 2 and f[0] == "ogkm_tag":
-            tag = f[1]
-except OSError:
-    pass
-whole = r"(?<![0-9.])%s(?![0-9.])"
-say(bool(tag) and built == tag,
-    "nvrm-info was built for the SOURCES ogkm_tag (built=%r, SOURCES=%r)" % (built, tag))
-say(bool(tag) and re.search(whole % re.escape(tag), sysctl) is not None,
-    "hw.nvidia.version carries %s as a whole version" % tag)
-run = doc["running_rm_version"]
-say(run["available"] and bool(tag) and
-    re.search(whole % re.escape(tag), run["value"]) is not None,
-    "nvrm-info running_rm_version matches the sysctl: %s" % run)
-say(doc["backend"] == "rm",
-    "nvrm-info used the rm backend (the real driver), backend=%s" % doc["backend"])
-devs = doc["devices"]
-print("INFO nvrm-info reports %d GPU(s)" % len(devs))
-say(len(devs) > 0, "nvrm-info reports %d GPU(s) (the board has one)" % len(devs) if devs else
-    "nvrm-info reports at least one GPU: none reported; check hw.nvidia.gpus in sysctl.txt and dmesg-nvrm.txt, and that nvidia.ko attached to the board")
-vram_ok = exp_vram.isdigit()
-say(vram_ok, "BOOT_EXPECT_VRAM_BYTES is %s" % exp_vram if vram_ok else
-    "BOOT_EXPECT_VRAM_BYTES must be the board's VRAM in bytes (e.g. 17179869184 for 16 GiB, 0 for a unified-memory part); got %r" % exp_vram)
-sm_ok = re.fullmatch(r"[0-9]+\.[0-9]+", exp_sm) is not None
-say(sm_ok, "BOOT_EXPECT_SM is %s" % exp_sm if sm_ok else
-    "BOOT_EXPECT_SM must be the board's SM version as major.minor (e.g. 12.0); got %r" % exp_sm)
-
-
-def bars(pci, header):
-    """The memory BARs listed under a pciconf -lvb header line: {offset: size}."""
-    lines = pci.splitlines()
-    found = {}
-    if header not in lines:
-        return found
-    for l in lines[lines.index(header) + 1:]:
-        if not l[:1].isspace():
-            break
-        m = re.match(r"\s+bar\s+\[([0-9a-f]+)\] = type (Prefetchable Memory|Memory), .*size (\d+)", l)
-        if m:
-            found[m.group(1)] = int(m.group(3))
-    return found
-
-for d in devs:
-    i = d["index"]
-    ident, gpu, mem = d["identity"], d["gpu"], d["memory"]
-    # UUID: the sysctl of GPU i carries the same string
-    m = re.search(r"hw\.nvidia\.gpus\.%d\.uuid: (\S+)" % i, sysctl)
-    u = val(ident["uuid"])
-    say(m is not None and u is not None and m.group(1) == u,
-        "GPU %d uuid nvrm-info=%s sysctl=%s" % (i, u, m.group(1) if m else None))
-    # PCI ids against pciconf: vendor and device
-    ven, dev = val(ident["pci_vendor"]), val(ident["pci_device"])
-    sub_v, sub_d = val(ident["pci_subsystem_vendor"]), val(ident["pci_subsystem_device"])
-    want = "vendor=0x%04x device=0x%04x" % (ven or 0, dev or 0)
-    hit = [l for l in pci.splitlines() if want in l]
-    say(bool(hit), "GPU %d pci %s found in pciconf" % (i, want))
-    say(sub_v is not None and sub_d is not None and bool(hit) and
-        "subvendor=0x%04x subdevice=0x%04x" % (sub_v, sub_d) in hit[0],
-        "GPU %d subsystem %s:%s is available and matches pciconf (checks the pciSubSystemId layout)" % (i, sub_v, sub_d))
-    # bus location: pciconf line starts with name@pciD:B:S:F
-    dom, b, s = val(ident["pci_domain"]), val(ident["pci_bus"]), val(ident["pci_slot"])
-    # pciconf names a device name@pci<domain>:<bus>:<slot>:<function>
-    say(bool(hit) and None not in (dom, b, s) and
-        ("@pci%s:%s:%s:" % (dom, b, s)) in hit[0].split()[0],
-        "GPU %d domain/bus/slot %s:%s:%s are available and match pciconf %s" % (i, dom, b, s, hit[0].split()[0] if hit else None))
-    # model name of the sysctl names the chip; show it next to the family
-    m = re.search(r"hw\.nvidia\.gpus\.%d\.model: (.*)" % i, sysctl)
-    print("INFO GPU %d model (sysctl) %s; family (libnvrm) %s; chip_id %s; SM %s.%s" % (
-        i, m.group(1) if m else None, val(d["gpu"]["family"]), val(gpu["chip_id"]),
-        val(gpu["sm_version_major"]), val(gpu["sm_version_minor"])))
-    sm = (val(gpu["sm_version_major"]), val(gpu["sm_version_minor"]))
-    say(None not in sm and sm_ok and "%d.%d" % sm == exp_sm,
-        "GPU %d SM version nvrm-info=%s expected BOOT_EXPECT_SM=%s" % (
-            i, "%s.%s" % sm if None not in sm else None, exp_sm))
-    say(val(gpu["sm_count"]) is not None and val(gpu["sm_count"]) > 0,
-        "GPU %d sm_count available and nonzero: %s" % (i, val(gpu["sm_count"])))
-    # VRAM against the board's stated size; BAR1 against a memory BAR of the
-    # same device in pciconf -lvb (neither goes back through the RM)
-    vram = val(mem["vram_size"])
-    say(vram is not None and vram_ok and vram == int(exp_vram),
-        "GPU %d vram_size nvrm-info=%s expected BOOT_EXPECT_VRAM_BYTES=%s" % (i, vram, exp_vram))
-    bar1 = val(mem["bar1_size"])
-    found = bars(pci, hit[0]) if hit else {}
-    if not hit:
-        say(False, "GPU %d bar1_size cannot be checked: no pciconf -lvb line has %s" % (i, want))
-    elif not found:
-        say(False, "GPU %d bar1_size cannot be checked: no memory BAR is listed under %s" % (i, hit[0].split()[0]))
-    elif "14" not in found:
-        say(False, "GPU %d bar1_size cannot be checked: %s has no memory BAR at config offset 0x14 (BAR1); it lists %s" % (i, hit[0].split()[0], sorted(found)))
-    else:
-        say(bar1 is not None and bar1 == found["14"],
-            "GPU %d bar1_size nvrm-info=%s, BAR1 (config offset 0x14) in pciconf -lvb is %s" % (i, bar1, found["14"]))
-    print("INFO GPU %d max_page_size %s numa %s" % (i, mem["max_page_size"], mem["numa_node"]))
-    caps = {c["name"]: c for c in d["capabilities"]}
-    wc = re.search(r"hw\.nvidia\.altra_device_wc_active: (\d+)", sysctl)
-    if wc:
-        c = caps["os_device_wc_active"]
-        say(c["available"] and int(wc.group(1)) == int(c["value"]),
-            "GPU %d os_device_wc_active is available and matches hw.nvidia.altra_device_wc_active=%s" % (i, wc.group(1)))
-PY
+# compare with the driver, GPU by GPU (boot_compare.py)
+python3 -I "$HERE/boot_compare.py" "$OUT" "$HERE/../.." >>"$R" 2>&1
 rc=$?
 [ $rc -eq 0 ] || fail "the comparison script exited $rc"
 FAILS=$(grep -c '^FAIL' "$R")
