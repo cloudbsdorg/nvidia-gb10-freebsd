@@ -231,6 +231,10 @@ firmware already registered. The kernel names the module after the file with `_f
 module is not installed or the index is stale: run `make install` again, which runs `kldxref`.
 See `man/nvidia.4`.
 
+Today `nvidia.ko` loads both GSP firmware modules on every machine (amd64; arm64 loads the one it builds).
+[`docs/DEVICE-DECISION.md`](docs/DEVICE-DECISION.md) designs a step that decides, per card and before
+anything loads, which firmware and driver it gets. Design only; nothing changes yet (Track #2455).
+
 ## Diagnostics
 
 The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN`. If that first

@@ -724,3 +724,15 @@ then kit round C; then the staged build, make-be dry run and check-be.
 ## 2026-11-22T22:22Z #2448 kapi logdevice round 2
 - Review-gate fixes: checks split so each failure names one cause (called, defined, warning level, own device argument, unconditional and never undefined, same prefix as the Debug macro); 11 new plant controls; one OGKM_PATCHES list for the required check and the apply loop; patch comment says operator and kernel log; test header states the missing macro is a clang implicit-declaration warning and an undefined symbol in the .ko.
 - console_owner_patch_test 42 passed 0 failed; kapi_table_test 30/0; build-rmcore_test 23/0. All ogkm patches apply in lexical order, fuzz 0.
+
+## 2026-11-22T23:25Z #2455 device decision phase 1 (design)
+Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
+- Survey (MIT open-gpu-kernel-modules 580.178.04 src/ and kernel-open/; zlib supported-gpus.json of the FreeBSD 580.178.04
+  package; BSD fwget tables): the PCI-time check accepts every 0x10de display device; the generation check needs BOOT_42
+  after BAR0 is mapped; 0x1e02+ open-RM capable, 0x1340..0x1df6 closed RM only, older ids in legacy branches.
+- Code writers: MiniMax (token plan) and kimi-k3.1-pro (monthly limit) over quota at 23:25Z; kimi-k3 and kimi-k2.7-code
+  gave no answer in 150 s. docs/DEVICE-DECISION.md written by a Sonnet sub-agent from the brief tmp/2455/brief-doc.md,
+  reviewed by the orchestrating agent (10 fixes, applied by the same Sonnet agent).
+- Mark's additions folded in: one driver and package for every card, branch as data, backends per generation, alias
+  layer, full-coverage path, the #2457 Ampere floor as the first provider-record rule.
+- Next: full suite, gate 2 rounds, commit, push, PR; hand back for Mark's go. Phase 2 waits for that go.
