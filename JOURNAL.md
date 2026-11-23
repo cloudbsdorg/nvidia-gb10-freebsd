@@ -739,3 +739,31 @@ then kit round C; then the staged build, make-be dry run and check-be.
 - The mutant script now holds 26 chan mutants (the slice 1 entry of 2026-11-22 21:30Z said 11; that count was stale).
 - 2026-11-23T04:00Z B5 (the four slice 1 DEFECT fixes) on branch agent/2437-libnvrm-s3-defects, on main 0163eda: gate round 1 receipt 4f490fa3 (5 voices, Claude fallbacks because every Kimi voice was over quota); the nine findings fixed by a MiniMax round (B6-review1): size 0 returns the full stats structure again, the fake fetch failure leaves GP_GET alone, one ownership check in run_entries, forget required and never called in a fork child. Suite 608 ok. Answers for round 2: tmp/libnvrm-s3/answers/answers-B5.txt.
 - Resume: gate round 2 with REVIEW_ANSWERS waits until a non-Claude voice answers (Mark: no Claude fallback while the Claude quota is low; wait for the next 5 hour MiniMax window); then commit, push, PR.
+
+## 2026-11-22 (UTC) libnvrm review follow-up (#2378, agent/2378-libnvrm-review-followup)
+- The alias/raw fallback plan of the PAUSED entry (nvrm-info boot fixes and version sysctls) was dropped: with
+  architecture and implementation available but no table row, compute capability is family_unknown, whatever
+  the raw SM code is (nvrm(3), nvrm(7), nvrm-info(8) say the same).
+- This follow-up fixes the Review-open items of c0102d7:
+  - security.3: an NVRM_1.0 caller of nvrm_info_nfields()/nvrm_info_field() gets only the 30 rows of 8702134,
+    in 1.0 order (nvrm_compat.c, .symver); the rows added later (rm_sm_version, compute capability, the versions
+    group) are last in the table, and the NVRM_1.2 versions return all of it. dlvsym test and a mutant.
+  - reason ids: nvrm_reason_from_id (now public, NVRM_1.2) is the one mapping, used by the running version and by
+    the nvrm-info text; rm_test plants os_call_failed.
+  - compute capability reason is family_unknown independent of raw_sm; text output prints
+    "unavailable: <reason text>" for a per-GPU version; fake profile "alias" is now "untabled"; fake_gpu_str
+    switches with a default; core_test counts the appended rows instead of "rows + 5"; nvrm-info(8) says the
+    vbios_* and firmware_* sysctls come with the kernel module of PR 33.
+- Left for the owner: security.2 (host names and home paths in this journal).
+
+## 2026-11-23 01:30Z checkpoint before the native-tools test boot (#2378)
+- aba0014 pushed (agent/2378-libnvrm-review-followup). A --no-ff merge of main cbe6ca3 is staged, not committed
+  (JOURNAL.md conflict resolved; this entry is unstaged on top of it).
+- Full suite stopped at a clean point after make_contract_test (29 of 54; reds so far match main).
+- Resume: rerun the suite from make_install_flow_test, overlap gate round, commit the merge, push, open the PR.
+- BE nvidia-native-tools-test-20261123-1 (main 937f89f, check-be 65 ok) is queued with the orchestrator; after the
+  boot, read logs/native-tools-testboot/<stamp>/ and report the nvrm-info rows.
+
+## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
+- The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
+  b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.

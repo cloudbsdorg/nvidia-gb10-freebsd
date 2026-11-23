@@ -426,6 +426,7 @@ const char	*nvrm_strerror(int error);
 const char	*nvrm_error_id(int error);	/* stable machine id */
 const char	*nvrm_reason_id(int reason);
 const char	*nvrm_reason_text(int reason);
+int		nvrm_reason_from_id(const char *id);
 const char	*nvrm_source_name(int source);
 /* Capability flag name for a stable index, NULL when out of range. */
 const char	*nvrm_cap_name(unsigned index);
