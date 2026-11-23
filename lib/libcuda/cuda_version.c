@@ -11,14 +11,6 @@
 
 #include "cuda_internal.h"
 
-const char *
-cuda_default_backend(void)
-{
-	const char *backend = getenv("CUDA_NATIVE_BACKEND");
-
-	return (backend != NULL ? backend : "nvrm");
-}
-
 static int
 version_invalid(cuda_native_version *version, const char *reason)
 {

@@ -10,7 +10,12 @@
 
 #include <cuda.h>
 
+/* The number of devices the library exposes at once. */
 #define CUDA_NATIVE_MAX_DEVICES 64
+/* The number of provider devices the registry can hold; a provider may
+ * report more devices than the library exposes, and a visibility list may
+ * then name more distinct devices than the library exposes. */
+#define CUDA_NATIVE_MAX_PHYSICAL_DEVICES 128
 #define CUDA_NATIVE_VERSION_TEXT_MAX 255
 #define CUDA_NATIVE_CONTEXT_MAGIC 0x43545831U
 
@@ -37,7 +42,6 @@ struct CUctx_st {
 struct cuda_device {
 	const cuda_provider *provider;
 	unsigned physical_index;
-	struct CUctx_st *primary;
 	struct CUctx_st primary_state;
 };
 
@@ -65,7 +69,6 @@ CUresult cuda_registry_primary_retain(CUcontext *context,
     cuda_device *device);
 CUresult cuda_registry_primary_release(cuda_device *device);
 
-const char *cuda_default_backend(void);
 int cuda_version_parse(cuda_native_version *version, const char *raw);
 int cuda_version_make(cuda_native_version *version, uint32_t major,
     uint32_t minor, uint32_t patch, unsigned parts);

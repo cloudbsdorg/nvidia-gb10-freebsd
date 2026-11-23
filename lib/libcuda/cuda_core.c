@@ -202,40 +202,21 @@ cuCtxGetDevice(CUdevice *device)
 typedef struct proc_export {
 	const char *name;
 	void *address;
-	int introduced;
 	void *legacy_address;
 	int legacy_until;
 } proc_export;
 
-#define PROC_ENTRY(function, version) \
-	{ #function, (void *)&function, version, NULL, 0 }
+#define PROC_ENTRY(function) \
+	{ #function, (void *)&function, NULL, 0 }
 
-/* One lookup table; the test suite compares it with the dynamic ABI. */
+/* This table describes the CUDA 13.0 subset, not historical introductions. */
 static const proc_export proc_exports[] = {
-	PROC_ENTRY(cuInit, 2000),
-	PROC_ENTRY(cuDriverGetVersion, 2000),
-	PROC_ENTRY(cuDeviceGetCount, 2000),
-	PROC_ENTRY(cuDeviceGet, 2000),
-	PROC_ENTRY(cuDeviceGetName, 2000),
-	PROC_ENTRY(cuDeviceGetUuid, 9020),
-	PROC_ENTRY(cuDeviceTotalMem, 2000),
-	PROC_ENTRY(cuDeviceGetAttribute, 2000),
-	PROC_ENTRY(cuDevicePrimaryCtxRetain, 2000),
-	PROC_ENTRY(cuDevicePrimaryCtxRelease, 2000),
-	PROC_ENTRY(cuCtxGetCurrent, 2000),
-	PROC_ENTRY(cuCtxSetCurrent, 2000),
-	PROC_ENTRY(cuCtxGetDevice, 2000),
-	PROC_ENTRY(cuGetErrorName, 2000),
-	PROC_ENTRY(cuGetErrorString, 2000),
-	{ "cuGetProcAddress", (void *)&cuGetProcAddress_v2, 11030,
-	    (void *)&cuGetProcAddress, 12000 },
-	PROC_ENTRY(cuGetProcAddress_v2, 12000)
+#include "cuda_exports.inc"
 };
 
 static CUresult
 proc_lookup(const char *symbol, void **pfn, int cudaVersion,
-    cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus,
-    int legacy_query)
+    cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus)
 {
 	size_t i;
 
@@ -256,10 +237,6 @@ proc_lookup(const char *symbol, void **pfn, int cudaVersion,
 	for (i = 0; i < sizeof(proc_exports) / sizeof(proc_exports[0]); i++) {
 		if (strcmp(symbol, proc_exports[i].name) != 0)
 			continue;
-		if (cudaVersion < proc_exports[i].introduced) {
-			*symbolStatus = CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT;
-			return (legacy_query ? CUDA_ERROR_NOT_FOUND : CUDA_SUCCESS);
-		}
 		if (proc_exports[i].legacy_address != NULL &&
 		    cudaVersion < proc_exports[i].legacy_until)
 			*pfn = proc_exports[i].legacy_address;
@@ -277,12 +254,16 @@ cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
 {
 	CUdriverProcAddressQueryResult status;
 
-	return (proc_lookup(symbol, pfn, cudaVersion, flags, &status, 1));
+	return (proc_lookup(symbol, pfn, cudaVersion, flags, &status));
 }
 
 CUresult
 cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus)
 {
-	return (proc_lookup(symbol, pfn, cudaVersion, flags, symbolStatus, 0));
+	CUdriverProcAddressQueryResult status;
+
+	if (symbolStatus == NULL)
+		symbolStatus = &status;
+	return (proc_lookup(symbol, pfn, cudaVersion, flags, symbolStatus));
 }

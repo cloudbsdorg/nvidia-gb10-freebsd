@@ -109,34 +109,39 @@ check_error_api(void)
 	CHECK_EQ(cuGetErrorString(CUDA_SUCCESS, NULL), CUDA_ERROR_INVALID_VALUE);
 }
 
+static const char *const proc_names[] = {
+#include "cuda_test_exports.inc"
+};
+
+static void
+check_proc_name(const char *name)
+{
+	CUdriverProcAddressQueryResult status;
+	void *expected, *actual;
+
+	actual = NULL;
+	status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+	CHECK_EQ(cuGetProcAddress(name, &actual, CUDA_VERSION, 0, &status),
+	    CUDA_SUCCESS);
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	expected = dlsym(RTLD_DEFAULT, strcmp(name, "cuGetProcAddress") == 0 ?
+	    "cuGetProcAddress_v2" : name);
+	CHECK(expected != NULL);
+	CHECK(actual == expected);
+}
+
 static void
 check_proc_api(void)
 {
-	static const char *const names[] = {
-		"cuInit", "cuDriverGetVersion", "cuDeviceGetCount",
-		"cuDeviceGet", "cuDeviceGetName", "cuDeviceGetUuid",
-		"cuDeviceTotalMem", "cuDeviceGetAttribute",
-		"cuDevicePrimaryCtxRetain", "cuDevicePrimaryCtxRelease",
-		"cuCtxGetCurrent", "cuCtxSetCurrent", "cuCtxGetDevice",
-		"cuGetErrorName", "cuGetErrorString", "cuGetProcAddress_v2"
-	};
 	CUdriverProcAddressQueryResult status;
 	typedef CUresult (*legacy_proc)(const char *, void **, int, cuuint64_t);
 	legacy_proc legacy;
-	void *expected, *pfn, *v2;
+	void *pfn, *v2;
 	size_t i;
 
 	/* Time: O(exports * registry entries); Space: O(1). */
-	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-		pfn = NULL;
-		status = CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT;
-		CHECK_EQ(cuGetProcAddress(names[i], &pfn, CUDA_VERSION,
-		    CU_GET_PROC_ADDRESS_DEFAULT, &status), CUDA_SUCCESS);
-		CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
-		expected = dlsym(RTLD_DEFAULT, names[i]);
-		CHECK(expected != NULL);
-		CHECK(pfn == expected);
-	}
+	for (i = 0; i < sizeof(proc_names) / sizeof(proc_names[0]); i++)
+		check_proc_name(proc_names[i]);
 	pfn = (void *)&status;
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, CUDA_VERSION,
 	    CU_GET_PROC_ADDRESS_LEGACY_STREAM, &status), CUDA_SUCCESS);
@@ -163,11 +168,12 @@ check_proc_api(void)
 	    &status), CUDA_ERROR_INVALID_VALUE);
 	CHECK(pfn == NULL);
 	CHECK_EQ(status, CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT);
-	pfn = (void *)&status;
+	pfn = NULL;
+	status = CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT;
 	CHECK_EQ(cuGetProcAddress("cuGetProcAddress", &pfn, 11020, 0,
 	    &status), CUDA_SUCCESS);
-	CHECK(pfn == NULL);
-	CHECK_EQ(status, CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT);
+	CHECK(pfn == dlsym(RTLD_DEFAULT, "cuGetProcAddress"));
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, -1, 0, &status),
 	    CUDA_ERROR_INVALID_VALUE);
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, CUDA_VERSION, 4, &status),
@@ -176,8 +182,10 @@ check_proc_api(void)
 	    CUDA_ERROR_INVALID_VALUE);
 	CHECK_EQ(cuGetProcAddress("cuInit", NULL, CUDA_VERSION, 0, &status),
 	    CUDA_ERROR_INVALID_VALUE);
+	pfn = NULL;
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, CUDA_VERSION, 0, NULL),
-	    CUDA_ERROR_INVALID_VALUE);
+	    CUDA_SUCCESS);
+	CHECK(pfn == dlsym(RTLD_DEFAULT, "cuInit"));
 
 	v2 = dlsym(RTLD_DEFAULT, "cuGetProcAddress_v2");
 	CHECK(v2 != NULL);
@@ -206,8 +214,6 @@ proc_from_stdin_test(void)
 {
 	char name[256];
 	size_t length;
-	void *expected, *actual;
-	CUdriverProcAddressQueryResult status;
 	unsigned count = 0;
 
 	/* Time: O(input bytes * registry entries); Space: O(name length). */
@@ -216,19 +222,11 @@ proc_from_stdin_test(void)
 		if (length != 0 && name[length - 1] == '\n')
 			name[--length] = '\0';
 		CHECK(length != 0 && length + 1 < sizeof(name));
-		expected = dlsym(RTLD_DEFAULT, strcmp(name, "cuGetProcAddress") == 0 ?
-		    "cuGetProcAddress_v2" : name);
-		CHECK(expected != NULL);
-		actual = NULL;
-		status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
-		CHECK_EQ(cuGetProcAddress(name, &actual, CUDA_VERSION, 0,
-		    &status), CUDA_SUCCESS);
-		CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
-		CHECK(actual == expected);
+		check_proc_name(name);
 		count++;
 	}
 	CHECK(!ferror(stdin));
-	CHECK_EQ(count, 17);
+	CHECK_EQ(count, sizeof(proc_names) / sizeof(proc_names[0]));
 	return (t_done("proc exports match the dynamic ABI"));
 }
 
@@ -459,7 +457,6 @@ order_test(int argc, char **argv, int uuids)
 struct thread_case {
 	CUdevice dev;
 	CUcontext expected;
-	CUresult init_result;
 	CUresult retain_result;
 	CUresult set_result;
 	CUresult get_result;
@@ -467,7 +464,6 @@ struct thread_case {
 	CUcontext retained;
 	CUdevice from_ctx;
 	int initial_was_null;
-	int count;
 };
 
 static void *
@@ -723,6 +719,25 @@ nvrm_test(void)
 	return (t_done("api nvrm stub"));
 }
 
+/* The backend name follows the calling process's environment, so the manual
+ * cannot describe it as process-independent. */
+static int
+backend_name_test(void)
+{
+	const char *name;
+
+	CHECK_EQ(unsetenv("CUDA_NATIVE_BACKEND"), 0);
+	name = cudaNativeGetBackendName();
+	CHECK_STR(name, "nvrm");
+	CHECK_EQ(setenv("CUDA_NATIVE_BACKEND", "fake", 1), 0);
+	name = cudaNativeGetBackendName();
+	CHECK_STR(name, "fake");
+	CHECK_EQ(setenv("CUDA_NATIVE_BACKEND", "nvrm", 1), 0);
+	name = cudaNativeGetBackendName();
+	CHECK_STR(name, "nvrm");
+	return (t_done("api backend name follows the calling environment"));
+}
+
 static int
 failed_init_test(CUresult expected, const char *name)
 {
@@ -744,7 +759,7 @@ mode_usage(void)
 {
 	fprintf(stderr, "usage: api_test core|profiles|threads|init-race|"
 	    "init-observer|proc-preinit|proc-from-stdin|attribute-error|"
-	    "visibility-cap|nvrm|"
+	    "visibility-cap|nvrm|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
 	    "order [NAME ...]|uuid-order [UUID ...]\n");
 	return (2);
@@ -770,6 +785,7 @@ DEFINE_SIMPLE_MODE(proc_from_stdin_mode, proc_from_stdin_test)
 DEFINE_SIMPLE_MODE(attribute_error_mode, attribute_error_test)
 DEFINE_SIMPLE_MODE(visibility_cap_mode, visibility_cap_test)
 DEFINE_SIMPLE_MODE(nvrm_mode, nvrm_test)
+DEFINE_SIMPLE_MODE(backend_name_mode, backend_name_test)
 
 static int
 failed_init_mode(int argc, char **argv)
@@ -815,6 +831,7 @@ main(int argc, char **argv)
 		{ "attribute-error", attribute_error_mode },
 		{ "visibility-cap", visibility_cap_mode },
 		{ "nvrm", nvrm_mode },
+		{ "backend-name", backend_name_mode },
 		{ "bad-backend", failed_init_mode },
 		{ "bad-profile", failed_init_mode },
 		{ "bad-visibility", failed_init_mode },

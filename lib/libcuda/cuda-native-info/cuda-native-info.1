@@ -10,7 +10,7 @@
 .Nm
 .Op Fl -json | Fl -jsonl | Fl -schema
 .Nm
-.Fl -help
+.Op Fl h | Fl -help
 .Sh DESCRIPTION
 The
 .Nm
@@ -26,7 +26,7 @@ The default nvrm provider is a stub in this release and reports an error.
 Select the fake provider for a deterministic, hardware-free report.
 Fake device properties are synthetic test values.
 .Sh OPTIONS
-.Bl -tag -width ".Fl -schema"
+.Bl -tag -width ".Fl h , Fl -help"
 .It Fl -json
 Write one JSON document on one line.
 The document contains a device array and its count.
@@ -38,7 +38,7 @@ Write the JSON Schema shared by both JSON modes without initializing the
 provider.
 The schema identifier in each output record is
 .Dq cuda-native-info/1 .
-.It Fl -help
+.It Fl h , Fl -help
 Print usage and exit successfully.
 .El
 .Pp
@@ -81,6 +81,13 @@ and
 parts, so consumers do not need to parse the string for comparisons.
 Device records contain the ordinal, name, GPU UUID, total memory in bytes, and
 the attribute object.
+When
+.Ev CUDA_VISIBLE_DEVICES
+is set, the report carries the raw value of that variable in a
+.Dv visibility_filter
+field, which explains a list that parsing truncated.
+That value is escaped, so no control byte from the environment reaches the
+terminal.
 A query failure produces a JSON error record in either JSON mode and a diagnostic
 on standard error in text mode.
 The committed schema is installed as
@@ -93,14 +100,15 @@ a usage error.
 .Sh EXAMPLES
 Print two synthetic devices as text:
 .Bd -literal -offset indent
-env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 cuda-native-info
+env CUDA_NATIVE_BACKEND=fake \e
+    CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 cuda-native-info
 .Ed
 .Pp
 From a source checkout, validate a JSON Lines stream using the project's
 supported-keyword validator:
 .Bd -literal -offset indent
 env CUDA_NATIVE_BACKEND=fake cuda-native-info --jsonl |
-    python3 tests/libnvrm/schema_validate.py \
+    python3 tests/libnvrm/schema_validate.py \e
     lib/libcuda/schema/cuda-native-info-1.schema.json
 .Ed
 .Sh SEE ALSO

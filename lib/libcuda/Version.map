@@ -23,6 +23,15 @@ CUDA_1.0 {
 		cuGetErrorString;
 		cuGetProcAddress;
 		cuGetProcAddress_v2;
+		cudaNativeGetBackendName;
+		cudaNativeDefaultBackend;
+		cudaNativeProviderKnown;
+		cudaNativeProviderCount;
+		cudaNativeProviderName;
+		cudaNativeFakeProfileKnown;
+		cudaNativeFakeProfileCount;
+		cudaNativeFakeProfileName;
+		cudaNativeFakeProfileDefault;
 	local:
 		*;
 };

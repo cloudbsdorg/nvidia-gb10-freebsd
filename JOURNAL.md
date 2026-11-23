@@ -456,3 +456,43 @@ Work in this commit:
 - Usage and man page fixes.
 - The README status row for native CUDA.
 Test: 219 passed. Next: rebase onto main, then gate rounds 1 and 2.
+## 2026-11-22T17:05Z C1.4a round 2 (Kimi k3.1-pro; the run hit its time limit right after it finished)
+All 12 items of the round are done.
+- cuGetProcAddress_v2 accepts a NULL symbolStatus.
+- A repeated device in CUDA_VISIBLE_DEVICES ends the list.
+- The cudaNative* queries make the library the only place that decides backend and profile defaults.
+- The per-entry introduction versions are removed; everything exported is documented as available at 13000.
+- Version.map is the only export list.
+- No process labels remain in sources or in cuda.h.
+- An empty system keeps success, because the public cuInit reference lists no NO_DEVICE return.
+- CLI messages are clearer, and -h is documented.
+Test: 151 checks green.
+pgrep -l shutdown showed a stub process from another agent's prime-kit test, not from this work (see the handback).
+Next: rebase onto main, then gate round 1.
+
+## 2026-11-22T17:25Z STOPPED: no opencode model left
+dgx-mlapointe/kimi-k3.1-pro has hit its monthly usage limit at Ollama (the gateway says "reached your monthly usage limit"). kimi-k3 and kimi-k2.7-code close the socket. Pass 2 of round 2 made no change.
+The review panel also runs on Kimi, so the gate cannot run either.
+State:
+- The C1.4a round 2 work is staged on main ea70019 and uncommitted.
+- Gate round 1 is receipt 5ad4fa69. Its findings are in obj/tmp/REVIEW-R2-1.md.
+- The brief for the next pass is ~/work/gb10/briefs/2428-c1.4a-r2b-fixes.md.
+Resume:
+1. Run that pass on any available opencode model (or Sonnet/Haiku if the orchestrator allows).
+2. Gate round 2 with answers to 5ad4fa69.
+3. Commit with the Gate line, open a PR and merge it.
+
+## 2026-11-23T01:00Z checkpoint for the amp001 test boot (manager agent)
+Pass 3 of round 2 (brief ~/work/gb10/briefs/2428-c1.4a-r2c-fixes.md, opencode MiniMax, own XDG_DATA_HOME obj/xdg-c14a-r2c) was STOPPED about 30 minutes in, for the queued test boot. Its edits so far are in the working tree, unstaged (cuda.h, Version.map, cuda-native-info.c, cuda_backend.c, cuda_fake.c, cuda_internal.h, cuda_registry.c, the schema). No report was written yet. Snapshot: /home/mlapointe/work/gb10/cuda-mgr/snap-20261123T0100Z/c14a-staged.patch and c14a-unstaged.patch.
+Gate: round 1 5ad4fa69 spent; round 2 not run.
+Resume: rerun the pass with a resume note (keep the edits; finish the six findings; write ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md), review every line, full tests/ suite with main merged, answers file to 5ad4fa69, gate round 2, commit, push, PR.
+
+## 2026-11-23T02:45Z round 2 pass 3 finished (opencode MiniMax): the gate review's findings
+Finished the six findings of REVIEW-R2-1.md on top of the interrupted run's edits. Those edits did not compile: `visible_append()` took a `const cuda_device *` while the visible array holds `cuda_device *`; the parameter is now non-const.
+What changed: the 65-entry test now asks for 65 fake devices and 65 valid visible indices, so it reaches the visible-list overflow return again, and a mutant that deletes that return is killed; the CLI takes the provider and profile lists from the library's `cudaNative*` queries only; the help prints a copyable profile list and the repeated-device rule; the visibility value is reported as `visibility_filter`, escaped in the text report and in JSON; one Version.map parser (`lib/libcuda/version_map.awk`) feeds both the man links and the proc table; the manual no longer calls the native queries process-independent.
+Suite: `sh tests/libcuda_test.sh` -> 176 checks passed, 0 failed (151 before this round).
+Report: ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
+
+## 2026-11-23T02:30Z round 2 pass 3 done (MiniMax; attempts r2d-r2f died with SseEventTooLarge from 22 GB of opencode state in obj/, r2g ran clean)
+All findings of gate round 1 (5ad4fa69) are addressed: one Version.map parser (lib/libcuda/version_map.awk, two modes), the CLI lists from the cudaNative* queries, visibility_filter named for what it holds and escaped in text, JSON and the empty-set diagnostic, the manual wording on the backend query, the 65-device overflow test, the help profile list and the duplicate rule. Test: 176 passed, 0 failed (was 151). Report ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
+Next: gate round 2 with answers to 5ad4fa69, commit, merge main, full tests/, PR.

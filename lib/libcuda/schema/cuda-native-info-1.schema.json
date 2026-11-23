@@ -92,6 +92,7 @@
         "cuda_version": { "$ref": "#/$defs/version" },
         "cuda_native_version": { "$ref": "#/$defs/version" },
         "device_count": { "type": "integer", "minimum": 0 },
+        "visibility_filter": { "type": "string" },
         "devices": {
           "type": "array",
           "minItems": 0,
@@ -110,7 +111,8 @@
         "backend": { "enum": ["fake", "nvrm"] },
         "cuda_version": { "$ref": "#/$defs/version" },
         "cuda_native_version": { "$ref": "#/$defs/version" },
-        "device_count": { "type": "integer", "minimum": 0 }
+        "device_count": { "type": "integer", "minimum": 0 },
+        "visibility_filter": { "type": "string" }
       }
     },
     "end": {

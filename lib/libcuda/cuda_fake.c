@@ -24,7 +24,13 @@ typedef struct fake_profile {
 	int pci_domain;
 	int pci_bus;
 	int pci_device;
+	/* Listed profiles are the ones the library advertises; a profile
+	 * reserved for the library's own tests is accepted but not listed. */
+	unsigned listed;
 } fake_profile;
+
+/* The profile the fake provider uses when the environment names none. */
+static const char *const default_profile = "gb206";
 
 static const fake_profile profiles[] = {
 	{
@@ -39,7 +45,8 @@ static const fake_profile profiles[] = {
 		.integrated = 0,
 		.pci_domain = 0,
 		.pci_bus = 1,
-		.pci_device = 0
+		.pci_device = 0,
+		.listed = 1
 	},
 	{
 		.profile = "gb10",
@@ -53,7 +60,8 @@ static const fake_profile profiles[] = {
 		.integrated = 1,
 		.pci_domain = 15,
 		.pci_bus = 1,
-		.pci_device = 0
+		.pci_device = 0,
+		.listed = 1
 	},
 #ifdef CUDA_NATIVE_TESTING
 	{
@@ -69,12 +77,13 @@ static const fake_profile profiles[] = {
 		.integrated = 0,
 		.pci_domain = 0,
 		.pci_bus = 1,
-		.pci_device = 0
+		.pci_device = 0,
+		.listed = 0
 	}
 #endif
 };
 
-static const fake_profile *selected[CUDA_NATIVE_MAX_DEVICES];
+static const fake_profile *selected[CUDA_NATIVE_MAX_PHYSICAL_DEVICES];
 static unsigned selected_count;
 
 static const fake_profile *
@@ -88,6 +97,50 @@ profile_find(const char *name, size_t length)
 		    memcmp(profiles[i].profile, name, length) == 0)
 			return (&profiles[i]);
 	return (NULL);
+}
+
+int
+cudaNativeFakeProfileKnown(const char *name, size_t length)
+{
+	if (name == NULL)
+		return (0);
+	return (profile_find(name, length) != NULL);
+}
+
+unsigned
+cudaNativeFakeProfileCount(void)
+{
+	unsigned count = 0;
+	size_t i;
+
+	/* Time: O(profiles); Space: O(1). */
+	for (i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
+		if (profiles[i].listed)
+			count++;
+	return (count);
+}
+
+const char *
+cudaNativeFakeProfileName(unsigned index)
+{
+	unsigned seen = 0;
+	size_t i;
+
+	/* Time: O(profiles); Space: O(1). */
+	for (i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++) {
+		if (!profiles[i].listed)
+			continue;
+		if (seen == index)
+			return (profiles[i].profile);
+		seen++;
+	}
+	return (NULL);
+}
+
+const char *
+cudaNativeFakeProfileDefault(void)
+{
+	return (default_profile);
 }
 
 static CUresult
@@ -104,7 +157,7 @@ fake_enumerate(unsigned *count)
 		return (CUDA_ERROR_INVALID_VALUE);
 	list = getenv("CUDA_NATIVE_FAKE_PROFILE");
 	if (list == NULL)
-		list = "gb206";
+		list = default_profile;
 	if (*list == '\0')
 		return (CUDA_ERROR_INVALID_VALUE);
 	selected_count = 0;
@@ -126,7 +179,7 @@ fake_enumerate(unsigned *count)
 		comma = strchr(cursor, ',');
 		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
 		profile = profile_find(cursor, length);
-		if (profile == NULL || selected_count == CUDA_NATIVE_MAX_DEVICES)
+		if (profile == NULL || selected_count == CUDA_NATIVE_MAX_PHYSICAL_DEVICES)
 			return (CUDA_ERROR_INVALID_VALUE);
 		selected[selected_count++] = profile;
 		if (comma == NULL)

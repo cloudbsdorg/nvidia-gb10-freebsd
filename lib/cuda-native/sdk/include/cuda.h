@@ -2,9 +2,9 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * <cuda.h> - cuda-native SDK (Track #2380).  This is the clean-room Driver
- * API surface implemented by libcuda (Track #2428).  Numeric ABI values come
- * from NVIDIA's public Driver API reference, not from a CUDA toolkit header.
+ * <cuda.h> - cuda-native SDK: the clean-room Driver API subset implemented by
+ * libcuda(3).  Numeric ABI values come from NVIDIA's public Driver API
+ * reference, not from a CUDA toolkit header.
  */
 #ifndef CUDA_NATIVE_CUDA_H_
 #define CUDA_NATIVE_CUDA_H_
@@ -98,6 +98,17 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus);
 #define cuGetProcAddress cuGetProcAddress_v2
+
+/* cuda-native extensions; these queries do not initialize a provider. */
+const char *cudaNativeGetBackendName(void);
+const char *cudaNativeDefaultBackend(void);
+int cudaNativeProviderKnown(const char *name);
+unsigned cudaNativeProviderCount(void);
+const char *cudaNativeProviderName(unsigned index);
+int cudaNativeFakeProfileKnown(const char *name, size_t length);
+unsigned cudaNativeFakeProfileCount(void);
+const char *cudaNativeFakeProfileName(unsigned index);
+const char *cudaNativeFakeProfileDefault(void);
 
 #ifdef __cplusplus
 }

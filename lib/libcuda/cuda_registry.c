@@ -13,8 +13,7 @@
 
 enum registry_init_state {
 	REGISTRY_NOT_STARTED,
-	REGISTRY_RUNNING,
-	REGISTRY_DONE
+	REGISTRY_STARTED
 };
 
 static pthread_once_t registry_once = PTHREAD_ONCE_INIT;
@@ -25,9 +24,11 @@ static __thread CUcontext current_context;
 static struct {
 	CUresult result;
 	const cuda_provider *provider;
-	cuda_device physical[CUDA_NATIVE_MAX_DEVICES];
+	cuda_device physical[CUDA_NATIVE_MAX_PHYSICAL_DEVICES];
 	unsigned physical_count;
-	cuda_device *visible[CUDA_NATIVE_MAX_DEVICES];
+	/* The visible list holds more pointers than the library exposes, so the
+	 * exposed-device limit is a policy limit and not a buffer bound. */
+	cuda_device *visible[CUDA_NATIVE_MAX_PHYSICAL_DEVICES];
 	unsigned visible_count;
 } registry;
 
@@ -35,6 +36,40 @@ static const cuda_provider *const providers[] = {
 	&cuda_fake_provider,
 	&cuda_nvrm_provider
 };
+
+static const cuda_provider *
+provider_find(const char *backend)
+{
+	size_t i;
+
+	if (backend == NULL)
+		return (NULL);
+	/* Time: O(providers * backend length); Space: O(1). */
+	for (i = 0; i < sizeof(providers) / sizeof(providers[0]); i++)
+		if (strcmp(backend, providers[i]->backend) == 0)
+			return (providers[i]);
+	return (NULL);
+}
+
+int
+cudaNativeProviderKnown(const char *name)
+{
+	return (provider_find(name) != NULL);
+}
+
+unsigned
+cudaNativeProviderCount(void)
+{
+	return (sizeof(providers) / sizeof(providers[0]));
+}
+
+const char *
+cudaNativeProviderName(unsigned index)
+{
+	if (index >= sizeof(providers) / sizeof(providers[0]))
+		return (NULL);
+	return (providers[index]->backend);
+}
 
 static CUresult
 visible_index(const char *token, size_t length, unsigned *physical_index,
@@ -89,12 +124,23 @@ visible_index(const char *token, size_t length, unsigned *physical_index,
 	return (CUDA_SUCCESS);
 }
 
+/* The library exposes at most CUDA_NATIVE_MAX_DEVICES devices; a further
+ * device is an invalid value rather than a silently dropped one. */
+static CUresult
+visible_append(cuda_device *device)
+{
+	if (registry.visible_count == CUDA_NATIVE_MAX_DEVICES)
+		return (CUDA_ERROR_INVALID_VALUE);
+	registry.visible[registry.visible_count++] = device;
+	return (CUDA_SUCCESS);
+}
+
 static CUresult
 apply_visibility(void)
 {
 	const char *list, *cursor, *comma;
 	size_t length;
-	unsigned index;
+	unsigned i, index;
 	CUresult result;
 	int matched;
 
@@ -102,9 +148,11 @@ apply_visibility(void)
 	list = getenv("CUDA_VISIBLE_DEVICES");
 	if (list == NULL) {
 		/* Time: O(physical devices); Space: O(1) besides visible[]. */
-		for (index = 0; index < registry.physical_count; index++)
-			registry.visible[registry.visible_count++] =
-			    &registry.physical[index];
+		for (index = 0; index < registry.physical_count; index++) {
+			result = visible_append(&registry.physical[index]);
+			if (result != CUDA_SUCCESS)
+				return (result);
+		}
 		return (CUDA_SUCCESS);
 	}
 	if (*list == '\0')
@@ -120,10 +168,15 @@ apply_visibility(void)
 			return (result);
 		if (!matched)
 			break;
-		if (registry.visible_count == CUDA_NATIVE_MAX_DEVICES)
-			return (CUDA_ERROR_INVALID_VALUE);
-		registry.visible[registry.visible_count++] =
-		    &registry.physical[index];
+		/* Aliases would make a primary context's visible ordinal ambiguous. */
+		for (i = 0; i < registry.visible_count; i++)
+			if (registry.visible[i] == &registry.physical[index])
+				break;
+		if (i != registry.visible_count)
+			break;
+		result = visible_append(&registry.physical[index]);
+		if (result != CUDA_SUCCESS)
+			return (result);
 		cursor = comma == NULL ? NULL : comma + 1;
 	}
 	/* The CUDA visibility contract stops at the first invalid entry. */
@@ -135,16 +188,10 @@ registry_initialize_once(void)
 {
 	const char *backend;
 	unsigned i, count;
-	size_t p;
 	CUresult result;
 
-	backend = cuda_default_backend();
-	/* Time: O(providers * backend length); Space: O(1). */
-	for (p = 0; p < sizeof(providers) / sizeof(providers[0]); p++)
-		if (strcmp(backend, providers[p]->backend) == 0) {
-			registry.provider = providers[p];
-			break;
-		}
+	backend = cudaNativeGetBackendName();
+	registry.provider = provider_find(backend);
 	if (registry.provider == NULL) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
 		goto out;
@@ -155,7 +202,7 @@ registry_initialize_once(void)
 		registry.result = result;
 		goto out;
 	}
-	if (count > CUDA_NATIVE_MAX_DEVICES) {
+	if (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
 		goto out;
 	}
@@ -163,12 +210,11 @@ registry_initialize_once(void)
 	for (i = 0; i < count; i++) {
 		registry.physical[i].provider = registry.provider;
 		registry.physical[i].physical_index = i;
-		registry.physical[i].primary = &registry.physical[i].primary_state;
 		registry.physical[i].primary_state.device = &registry.physical[i];
 	}
 	registry.result = apply_visibility();
 out:
-	atomic_store_explicit(&registry_state, REGISTRY_DONE, memory_order_release);
+	atomic_store_explicit(&registry_state, REGISTRY_STARTED, memory_order_release);
 }
 
 CUresult
@@ -178,7 +224,7 @@ cuda_registry_initialize(void)
 
 	/* Only cuInit marks initialization started; pthread_once runs it once. */
 	(void)atomic_compare_exchange_strong_explicit(&registry_state, &expected,
-	    REGISTRY_RUNNING, memory_order_acq_rel, memory_order_acquire);
+	    REGISTRY_STARTED, memory_order_acq_rel, memory_order_acquire);
 	return (cuda_registry_result());
 }
 
@@ -221,18 +267,17 @@ cuda_registry_ordinal(const cuda_device *device)
 }
 
 static cuda_device *
-context_lookup(const void *context, int active_only)
+context_lookup(const void *context)
 {
 	unsigned i;
 	cuda_device *device;
 
 	for (i = 0; i < registry.physical_count; i++) {
 		device = &registry.physical[i];
-		if (device->primary != context)
+		if (&device->primary_state != context)
 			continue;
-		if (!active_only ||
-		    (device->primary->magic == CUDA_NATIVE_CONTEXT_MAGIC &&
-		    device->primary->references != 0))
+		if (device->primary_state.magic == CUDA_NATIVE_CONTEXT_MAGIC &&
+		    device->primary_state.references != 0)
 			return (device);
 		return (NULL);
 	}
@@ -246,7 +291,7 @@ cuda_registry_current_get(void)
 
 	if (context != NULL) {
 		pthread_mutex_lock(&context_lock);
-		if (context_lookup(context, 1) == NULL) {
+		if (context_lookup(context) == NULL) {
 			current_context = NULL;
 			context = NULL;
 		}
@@ -265,7 +310,7 @@ cuda_registry_current_set(void *context)
 		return (CUDA_SUCCESS);
 	}
 	pthread_mutex_lock(&context_lock);
-	if (context_lookup(context, 1) == NULL)
+	if (context_lookup(context) == NULL)
 		result = CUDA_ERROR_INVALID_CONTEXT;
 	else
 		current_context = context;
@@ -279,15 +324,15 @@ cuda_registry_primary_retain(CUcontext *context, cuda_device *device)
 	CUresult result = CUDA_SUCCESS;
 
 	pthread_mutex_lock(&context_lock);
-	if (device->primary->references == UINT_MAX) {
+	if (device->primary_state.references == UINT_MAX) {
 		result = CUDA_ERROR_OUT_OF_MEMORY;
 	} else {
-		if (device->primary->references == 0) {
-			device->primary->magic = CUDA_NATIVE_CONTEXT_MAGIC;
-			device->primary->device = device;
+		if (device->primary_state.references == 0) {
+			device->primary_state.magic = CUDA_NATIVE_CONTEXT_MAGIC;
+			device->primary_state.device = device;
 		}
-		device->primary->references++;
-		*context = device->primary;
+		device->primary_state.references++;
+		*context = &device->primary_state;
 	}
 	pthread_mutex_unlock(&context_lock);
 	return (result);
@@ -299,13 +344,13 @@ cuda_registry_primary_release(cuda_device *device)
 	CUresult result = CUDA_SUCCESS;
 
 	pthread_mutex_lock(&context_lock);
-	if (device->primary->references == 0) {
+	if (device->primary_state.references == 0) {
 		result = CUDA_ERROR_INVALID_CONTEXT;
 	} else {
-		device->primary->references--;
-		if (device->primary->references == 0) {
-			device->primary->magic = 0;
-			if (current_context == device->primary)
+		device->primary_state.references--;
+		if (device->primary_state.references == 0) {
+			device->primary_state.magic = 0;
+			if (current_context == &device->primary_state)
 				current_context = NULL;
 		}
 	}

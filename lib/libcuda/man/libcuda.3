@@ -44,6 +44,12 @@ libcuda
 .Fn cuGetProcAddress "const char *symbol" "void **pfn" "int cudaVersion" "cuuint64_t flags"
 .Ft CUresult
 .Fn cuGetProcAddress_v2 "const char *symbol" "void **pfn" "int cudaVersion" "cuuint64_t flags" "CUdriverProcAddressQueryResult *symbolStatus"
+.Ft const char *
+.Fn cudaNativeGetBackendName void
+.Ft int
+.Fn cudaNativeProviderKnown "const char *name"
+.Ft int
+.Fn cudaNativeFakeProfileKnown "const char *name" "size_t length"
 .Sh DESCRIPTION
 The
 .Nm
@@ -96,6 +102,24 @@ provides GB206 followed by GB10.
 An unknown or empty profile is an invalid value.
 Fake names, UUIDs, memory sizes, and attributes are test data, not hardware
 measurements.
+.Ss Native extension queries
+.Fn cudaNativeGetBackendName
+returns the value of
+.Ev CUDA_NATIVE_BACKEND
+when set, or the library's default provider name otherwise.
+.Fn cudaNativeProviderKnown
+returns nonzero only when its argument names a registered provider.
+.Fn cudaNativeFakeProfileKnown
+returns nonzero only when the specified byte string names a fake profile in the
+library's profile table.
+These cuda-native extensions do not initialize a provider.
+.Fn cudaNativeGetBackendName
+reads the calling process's environment when it is called, so its answer
+follows
+.Ev CUDA_NATIVE_BACKEND
+and can change inside one process.
+Provider and profile table membership is fixed by the loaded library and does
+not depend on the environment.
 .Ss Devices
 Device ordinals are contiguous in their visible enumeration order.
 Invalid ordinals return
@@ -119,11 +143,20 @@ Otherwise it is a comma-separated sequence of zero-based physical indices or
 UUID selectors of the form
 .Dq GPU-<uuid> .
 Entries filter and reorder the visible list.
-An invalid index ends parsing, so only entries before it are visible, matching
-the public CUDA environment-variable contract.
+An invalid index ends parsing, so only entries before it are visible.
 UUID selectors may be unambiguous prefixes of the canonical UUID text.
 An invalid or ambiguous UUID selector also ends parsing in this implementation.
-Repeated entries are retained.
+A repeated physical device is an invalid entry and ends parsing, so each visible
+ordinal has a distinct device identity.
+When no devices remain visible,
+.Fn cuInit
+returns
+.Dv CUDA_SUCCESS
+and
+.Fn cuDeviceGetCount
+reports zero.
+.Dv CUDA_ERROR_NO_DEVICE
+is not returned for an empty device set.
 MIG selectors are not implemented.
 .Ss Context state
 .Fn cuDevicePrimaryCtxRetain
@@ -174,12 +207,12 @@ returns
 .Dv CUDA_ERROR_INVALID_VALUE
 and sets a supplied query status to
 .Dv CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT .
-When the requested version predates an entry point, the current form returns
-.Dv CUDA_SUCCESS ,
-sets the function pointer to null, and sets the query status to
-.Dv CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT ;
-the legacy form returns
-.Dv CUDA_ERROR_NOT_FOUND .
+Every listed entry point is available when querying
+.Dv CUDA_VERSION
+(13000).
+This implementation does not assign historical introduction versions to
+individual entry points; a lower requested version does not by itself suppress
+a table entry.
 An unknown name returns
 .Dv CUDA_ERROR_NOT_FOUND ,
 sets the function pointer to null, and sets a supplied status to
@@ -190,6 +223,9 @@ Every failed entry-point query sets
 .Va *pfn
 to null when that pointer is supplied; the current form also updates a supplied
 .Va symbolStatus .
+The current form accepts a null
+.Va symbolStatus
+when the caller does not need the query result.
 These writes are exceptions to the general unchanged-output rule below.
 .Sh RETURN VALUES
 Functions return

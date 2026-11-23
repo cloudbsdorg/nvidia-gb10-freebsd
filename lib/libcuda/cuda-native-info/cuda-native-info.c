@@ -4,7 +4,7 @@
  *
  * Print the small native Driver API surface.  The fake provider makes every
  * output mode testable without a GPU; the default nvrm provider is deliberately
- * unsupported in this round.
+ * unsupported in cuda-native 0.1.0.
  */
 #include <errno.h>
 #include <getopt.h>
@@ -66,6 +66,7 @@ typedef struct device_info {
 
 typedef struct native_info {
 	const char *backend;
+	const char *visibility;
 	cuda_native_version cuda;
 	cuda_native_version native;
 	int count;
@@ -73,20 +74,60 @@ typedef struct native_info {
 } native_info;
 
 static void
+join_names(char *buffer, size_t size, const char *separator, unsigned count,
+    const char *(*name)(unsigned index))
+{
+	unsigned i;
+	const char *text;
+	size_t used;
+	int written;
+
+	buffer[0] = '\0';
+	/* Time: O(names * name length); Space: O(1) besides the buffer. */
+	for (i = 0; i < count; i++) {
+		text = name(i);
+		if (text == NULL)
+			continue;
+		used = strlen(buffer);
+		if (used + 1 >= size)
+			break;
+		written = snprintf(buffer + used, size - used, "%s%s",
+		    used == 0 ? "" : separator, text);
+		if (written < 0 || (size_t)written >= size - used)
+			break;
+	}
+}
+
+static void
 usage(FILE *stream)
 {
+	char list[512];
+
 	fprintf(stream,
 	    "usage: cuda-native-info [--json | --jsonl | --schema]\n"
-	    "       cuda-native-info --help\n"
+	    "       cuda-native-info [-h | --help]\n"
 	    "\n"
 	    "  --json    write one JSON document on one line\n"
 	    "  --jsonl   write a header, one record per device, and an end record\n"
 	    "  --schema  write the JSON Schema shared by both JSON modes\n"
-	    "  --help    show this help\n"
-	    "\n"
-	    "CUDA_NATIVE_BACKEND selects fake or nvrm (default nvrm).\n"
-	    "CUDA_NATIVE_FAKE_PROFILE is a comma-separated list of gb206 and gb10 (default gb206).\n"
-	    "CUDA_VISIBLE_DEVICES filters and reorders devices by index or GPU UUID.\n"
+	    "  -h, --help show this help\n"
+	    "\n");
+	join_names(list, sizeof(list), ", ", cudaNativeProviderCount(),
+	    cudaNativeProviderName);
+	fprintf(stream,
+	    "CUDA_NATIVE_BACKEND selects a provider: %s (default %s).\n", list,
+	    cudaNativeDefaultBackend());
+	join_names(list, sizeof(list), ",", cudaNativeFakeProfileCount(),
+	    cudaNativeFakeProfileName);
+	fprintf(stream,
+	    "CUDA_NATIVE_FAKE_PROFILE takes a comma-separated list of fake"
+	    " profiles:\n  %s (default %s).\n", list,
+	    cudaNativeFakeProfileDefault());
+	fprintf(stream,
+	    "CUDA_VISIBLE_DEVICES: comma-separated indices or GPU-<uuid>"
+	    " prefixes;\n"
+	    "  stops at the first invalid entry (libcuda(3)).\n"
+	    "  Repeated devices also stop parsing.\n"
 	    "Exit status: 0 success, 1 query or output failure, 2 usage error.\n");
 }
 
@@ -135,34 +176,23 @@ parse_args(int argc, char **argv, enum output_mode *mode)
 }
 
 static int
-fake_profile_known(const char *profile, size_t length)
-{
-	if ((length == 5 && memcmp(profile, "gb206", 5) == 0) ||
-	    (length == 4 && memcmp(profile, "gb10", 4) == 0))
-		return (1);
-#ifdef CUDA_NATIVE_TESTING
-	if (length == 4 && memcmp(profile, "utf8", 4) == 0)
-		return (1);
-#endif
-	return (0);
-}
-
-static int
 validate_environment(char *detail, size_t detail_size)
 {
-	const char *backend = getenv("CUDA_NATIVE_BACKEND");
+	const char *backend = cudaNativeGetBackendName();
 	const char *profiles, *start, *comma;
 	size_t length;
 	int shown;
+	char list[512];
 
-	if (backend != NULL && strcmp(backend, "fake") != 0 &&
-	    strcmp(backend, "nvrm") != 0) {
+	if (!cudaNativeProviderKnown(backend)) {
+		join_names(list, sizeof(list), ", ",
+		    cudaNativeProviderCount(), cudaNativeProviderName);
 		snprintf(detail, detail_size,
-		    "CUDA_NATIVE_BACKEND=%s is not a provider; use fake or nvrm",
-		    backend);
+		    "CUDA_NATIVE_BACKEND=%s is not a provider; use one of: %s",
+		    backend, list);
 		return (-1);
 	}
-	if (backend == NULL || strcmp(backend, "fake") != 0)
+	if (strcmp(backend, "fake") != 0)
 		return (0);
 	profiles = getenv("CUDA_NATIVE_FAKE_PROFILE");
 	if (profiles == NULL)
@@ -172,12 +202,15 @@ validate_environment(char *detail, size_t detail_size)
 	for (;;) {
 		comma = strchr(start, ',');
 		length = comma != NULL ? (size_t)(comma - start) : strlen(start);
-		if (!fake_profile_known(start, length)) {
+		if (!cudaNativeFakeProfileKnown(start, length)) {
 			shown = length > 80 ? 80 : (int)length;
+			join_names(list, sizeof(list), ",",
+			    cudaNativeFakeProfileCount(),
+			    cudaNativeFakeProfileName);
 			snprintf(detail, detail_size,
 			    "CUDA_NATIVE_FAKE_PROFILE: unknown profile '%.*s%s'; "
-			    "use gb206, gb10 or a comma-separated list", shown,
-			    start, length > 80 ? "..." : "");
+			    "use %s or a comma-separated list", shown,
+			    start, length > 80 ? "..." : "", list);
 			return (-1);
 		}
 		if (comma == NULL)
@@ -208,7 +241,8 @@ query(native_info *info)
 	    cuda_version_make(&info->native, CUDA_NATIVE_VERSION / 10000,
 	    (CUDA_NATIVE_VERSION / 100) % 100, CUDA_NATIVE_VERSION % 100, 3) != 0)
 		return (CUDA_ERROR_UNKNOWN);
-	info->backend = cuda_default_backend();
+	info->backend = cudaNativeGetBackendName();
+	info->visibility = getenv("CUDA_VISIBLE_DEVICES");
 	result = cuDeviceGetCount(&count);
 	if (result != CUDA_SUCCESS)
 		return (result);
@@ -279,8 +313,10 @@ utf8_length(const unsigned char *p)
 	return (length);
 }
 
+/* The one escaping helper: quotes, backslashes, control bytes and invalid
+ * UTF-8 are escaped the same way in the text report and in the JSON records. */
 static void
-json_string(const char *text)
+escaped_string(const char *text)
 {
 	const unsigned char *p = (const unsigned char *)text;
 	size_t length;
@@ -326,7 +362,7 @@ json_version(const cuda_native_version *version)
 	if (cuda_version_format(version, text, sizeof(text)) != 0)
 		text[0] = '\0';
 	printf("{\"string\":");
-	json_string(text);
+	escaped_string(text);
 	printf(",\"major\":%" PRIu32 ",\"minor\":%" PRIu32
 	    ",\"patch\":%" PRIu32 "}", version->major, version->minor,
 	    version->patch);
@@ -336,14 +372,19 @@ static void
 json_common(const native_info *info, const char *kind)
 {
 	printf("{\"schema\":\"cuda-native-info/1\",\"kind\":");
-	json_string(kind);
+	escaped_string(kind);
 	printf(",\"backend\":");
-	json_string(info->backend);
+	escaped_string(info->backend);
 	printf(",\"cuda_version\":");
 	json_version(&info->cuda);
 	printf(",\"cuda_native_version\":");
 	json_version(&info->native);
 	printf(",\"device_count\":%d", info->count);
+	/* The raw filter is reported so a truncated list can be explained. */
+	if (info->visibility != NULL) {
+		printf(",\"visibility_filter\":");
+		escaped_string(info->visibility);
+	}
 }
 
 static void
@@ -353,15 +394,15 @@ json_device(const device_info *device)
 
 	printf("{\"schema\":\"cuda-native-info/1\",\"kind\":\"device\","
 	    "\"ordinal\":%d,\"name\":", device->ordinal);
-	json_string(device->name);
+	escaped_string(device->name);
 	printf(",\"uuid\":");
-	json_string(device->uuid);
+	escaped_string(device->uuid);
 	printf(",\"total_memory_bytes\":%zu,\"attributes\":{", device->memory);
 	/* Time: O(attributes); Space: O(1). */
 	for (a = 0; a < NATTRIBUTES; a++) {
 		if (a != 0)
 			putchar(',');
-		json_string(attribute_specs[a].name);
+		escaped_string(attribute_specs[a].name);
 		if (device->attribute_supported[a])
 			printf(":%d", device->attributes[a]);
 		else
@@ -403,6 +444,7 @@ emit_jsonl(const native_info *info)
 static void
 emit_text(const native_info *info)
 {
+	const char *visibility = info->visibility;
 	int i;
 	size_t a;
 
@@ -414,14 +456,21 @@ emit_text(const native_info *info)
 	    ")\n", info->native.string, info->native.major, info->native.minor,
 	    info->native.patch);
 	printf("device_count %d\n", info->count);
+	/* The filter names the devices the library was asked to expose, not the
+	 * devices it exposes; it is escaped so no control byte reaches the
+	 * terminal. */
+	if (visibility != NULL) {
+		printf("visibility_filter ");
+		escaped_string(visibility);
+		printf("\n");
+	}
 	if (info->count == 0) {
-		const char *visibility = getenv("CUDA_VISIBLE_DEVICES");
-
-		if (visibility != NULL)
+		if (visibility != NULL) {
 			printf("no CUDA devices are visible (filtered by "
-			    "CUDA_VISIBLE_DEVICES=\"%s\"; see libcuda(3))\n",
-			    visibility);
-		else
+			    "CUDA_VISIBLE_DEVICES=");
+			escaped_string(visibility);
+			printf("; see libcuda(3))\n");
+		} else
 			printf("no CUDA devices are visible\n");
 	}
 	for (i = 0; i < info->count; i++) {
@@ -444,7 +493,7 @@ emit_text(const native_info *info)
 static int
 report_error(enum output_mode mode, CUresult result, const char *detail)
 {
-	const char *backend = cuda_default_backend();
+	const char *backend = cudaNativeGetBackendName();
 	const char *name = NULL, *message = NULL, *hint = NULL;
 
 	if (cuGetErrorName(result, &name) != CUDA_SUCCESS)
@@ -457,21 +506,24 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 		hint = "native NVRM discovery is not implemented yet; set "
 		    "CUDA_NATIVE_BACKEND=fake for synthetic devices";
 	if (mode == MODE_TEXT) {
-		fprintf(stderr, "cuda-native-info: %s provider: %s: %s\n",
-		    backend, name, message);
+		if (detail != NULL)
+			fprintf(stderr, "cuda-native-info: %s\n", message);
+		else
+			fprintf(stderr, "cuda-native-info: %s provider: %s: %s\n",
+			    backend, name, message);
 		if (hint != NULL)
 			fprintf(stderr, "cuda-native-info: %s\n", hint);
 	} else {
 		printf("{\"schema\":\"cuda-native-info/1\",\"kind\":\"error\","
 		    "\"backend\":");
-		json_string(backend);
+		escaped_string(backend);
 		printf(",\"error\":{\"code\":%d,\"name\":", (int)result);
-		json_string(name);
+		escaped_string(name);
 		fputs(",\"message\":", stdout);
-		json_string(message);
+		escaped_string(message);
 		if (hint != NULL) {
 			fputs(",\"hint\":", stdout);
-			json_string(hint);
+			escaped_string(hint);
 		}
 		fputs("}}\n", stdout);
 	}

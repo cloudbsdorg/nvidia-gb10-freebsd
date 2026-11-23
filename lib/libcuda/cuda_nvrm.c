@@ -2,8 +2,8 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The NVRM provider is a deliberate boundary in this round.  It opens no
- * device and makes no ioctl: enumeration reports that native NVRM discovery
+ * The NVRM provider is a deliberate boundary in cuda-native 0.1.0.  It opens
+ * no device and makes no ioctl: enumeration reports that native NVRM discovery
  * is not implemented yet.
  */
 #include "cuda_internal.h"
