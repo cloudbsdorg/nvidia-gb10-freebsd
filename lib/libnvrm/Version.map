@@ -77,3 +77,16 @@ NVRM_1.2 {
 		nvrm_info_nfields;
 		nvrm_info_field;
 } NVRM_1.1;
+
+/* API minor 3: GPFIFO channels and ordered submission (nvrm_chan(3)). */
+NVRM_1.3 {
+	global:
+		nvrm_chan_create;
+		nvrm_chan_submit;
+		nvrm_chan_kick;
+		nvrm_chan_gp_space;
+		nvrm_chan_wait;
+		nvrm_chan_status_get;
+		nvrm_chan_info_get;
+		nvrm_chan_destroy;
+} NVRM_1.2;
