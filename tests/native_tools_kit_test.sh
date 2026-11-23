@@ -633,8 +633,9 @@ else
 		mkdir -p "$1/usr/local/bin"; printf '#!/bin/sh\n' > "$1/usr/local/bin/python3"; chmod 0755 "$1/usr/local/bin/python3"
 		# the users of the clone: the owner of the run directory must be one of them (the one-shot gives the run to
 		# it with chown(8)), and the one the tests name
-		printf 'root:*:0:0:root:/root:/bin/sh\n%s:*:%s:%s:%s:/home/%s:/bin/sh\nkitowner:*:1002:1002:kitowner:/home/kitowner:/bin/sh\n' \
-		    "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" "$(id -un)" > "$1/etc/master.passwd"
+		# the home directories are the one FreeBSD gives system users: no home of a person, so no personal path
+		printf 'root:*:0:0:root:/root:/bin/sh\n%s:*:%s:%s:%s:/nonexistent:/bin/sh\nkitowner:*:1002:1002:kitowner:/nonexistent:/bin/sh\n' \
+		    "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$1/etc/master.passwd"
 		# the two services of the base BE that load a driver by themselves: drm_ready through its required_modules
 		# entry, the hwprobe through the probe it runs
 		cat > "$1/usr/local/etc/rc.d/drm_ready" <<'EOF'
