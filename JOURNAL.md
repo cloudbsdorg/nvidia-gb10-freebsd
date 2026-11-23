@@ -754,3 +754,13 @@ Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
   findings (tmp/2455/task-r3.md); the first attempt died on a transport error, the continuation finished. Orchestrator
   review fixed one slip by hand (the sample Ampere generation claimed arm64 testing on 0x2d04, which is Blackwell).
 - Next: gate round 3, commit, push; PR #40 stays draft until Mark answers the 11 questions.
+
+## 2026-11-23T04:10Z #2455 round 4: Mark's answers applied; part b cut by MiniMax quota
+- Part a (tmp/2455/task-r4.md, MiniMax): Mark's answers of comment 17247 and the round-3 items B1-B11 applied; rc 0.
+- Part b (tmp/2455/task-r4b.md: pluralistic backends P1-P4, RTX 30+ focus P5) stopped at 04:05Z on "Token Plan usage
+  limit reached"; partial edits are in the working tree (4 table rows over 160 characters remain).
+- Per the orchestrator: no Claude fallback; wait for the next 5-hour MiniMax window, then rerun part b as a
+  continuation, then gate rounds (only if the voices do not fall through to Claude), commit, PR #40 out of draft.
+- 2026-11-23T05:30Z part b finished as a continuation (tmp/2455/task-r4c.md, MiniMax, rc 0): P1-P4 (several of our
+  backends at once, one per card; per-instance names through the alias layer; many devices per class) and P5 (phase 2
+  builds RTX 30 and later only; other generations and vendors designed, not built). Next: gate round 1 (MiniMax-first).
