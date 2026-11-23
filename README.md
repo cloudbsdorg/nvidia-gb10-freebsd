@@ -77,16 +77,24 @@ sysrc nvidia_linux_mode=AUTO     # rc.d/nvidia_linux loads the providers at boot
 
 ### Installed
 
-A successful install exits 0. Example output (from `scripts/make.sh`; the `kldload` line
-names the root tool you have, so yours may start with `sudo`, with `su root -c`, or have no
-tool):
+A successful install exits 0. Example output (from `scripts/make.sh`), an excerpt of a
+planted install:
 
 ```text
-install: install: done
+install: done
+install: installed
+```
+
+A live install, without a DESTDIR, also lists its next steps, one command per line. Example
+output (from `scripts/make.sh`) for a user who has doas; yours names the root tool you have:
+`sudo`, `su root -c`, no prefix as root, or a note when you have no tool:
+
+```text
+to load the driver at boot instead of the first two next steps, run make configure YES=1 once
+next: doas kenv hw.nvidia.registry.EnableGpuFirmware=1
 next: doas kldload nvidia-drm
 next: kldstat
 next: nvrm-info --json
-install: installed
 ```
 
 The summary lists every installed file and mode. Kernel modules go into `/boot/modules`;
@@ -114,12 +122,13 @@ lines follow it):
 
 ```text
 blocked licence: NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it
-fix: make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer
+fix: make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question
 install: blocked
 ```
 
-Follow the `fix:` line for each blocker. The licence setting in it also works on the command
-you ran, as in `make install ACCEPT_NVIDIA_LICENSE=1`. For a missing kernel change, see
+Follow the `fix:` line for each blocker. For the licence, the line names the command you
+ran, so under `make install` it says `make install`, as above; `make preflight` shows the
+same check with `make install-prereqs` in its fix. For a missing kernel change, see
 [`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
 without installing.
 
