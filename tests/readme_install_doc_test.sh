@@ -263,8 +263,16 @@ needles=$repo/tests/lib/personal-paths.txt
 pp_pat=$(mktemp "$S/personal-patterns.XXXXXX") || { echo "cannot make a scratch file under $S" >&2; exit 1; }
 pp_allow=$(mktemp "$S/personal-allows.XXXXXX") || { echo "cannot make a scratch file under $S" >&2; exit 1; }
 scan_bad=
-if pp_load "$needles" "$pp_pat" "$pp_allow"; then :; else
-	scan_bad=" tests/lib/personal-paths.txt(missing, empty, unreadable or a mistyped line)"
+if pp_load "$needles" "$pp_pat" "$pp_allow"; then
+	# The list must pass its own self-test: a list that does not is not a
+	# scan, it is a guess.
+	if pp_selftest "$needles" "$pp_pat" "$pp_allow"; then
+		ok "the needle list passes its own self-test"
+	else
+		bad "the needle list fails its own self-test"
+	fi
+else
+	scan_bad=" tests/lib/personal-paths.txt(missing, empty, unreadable, has a mistyped line or holds an unsound allow literal)"
 	: > "$pp_pat"
 fi
 # Documents also may not use "~/" at all: it is one more needle here.
@@ -670,6 +678,52 @@ while IFS= read -r mp; do
 	*) bad "MANUAL-BUILD names a path the build does not produce: $mp" ;;
 	esac
 done < "$S/manual-paths"
+
+# The root rule of the test-boot kits is stated the way it is enforced: root
+# must set GB10_WORK when a path comes from the work root (the checkout's work
+# directory), and a root build copies its run under $GB10_WORK.
+nt_kit=$repo/tests/native-tools-testboot
+check "check-be.sh states that root must set GB10_WORK when -s is omitted" has 'when -s is omitted' "$nt_kit/check-be.sh"
+check "make-be.sh states that root must set GB10_WORK when a path comes from the work root" has 'GB10_WORK when a path is taken from the work root' "$nt_kit/make-be.sh"
+check "the guard speaks of the checkout's work directory" has "checkout's work directory" "$nt_kit/guard.sh"
+check "the guard no longer speaks of root's home" no_match "root's home" "$nt_kit/guard.sh"
+check "the guard no longer keeps the old default" no_match 'the old default' "$nt_kit/guard.sh"
+check "ROWS.md states the copy-out of a root build" has '$GB10_WORK/logs/native-tools-testboot' "$nt_kit/ROWS.md"
+check "ROWS.md states the copy-out of a default build" has '<repo>/work/logs/native-tools-testboot' "$nt_kit/ROWS.md"
+# The host side of a run: the per-run directory, not only the base it is copied into.
+check "ROWS.md states where a run of the host ends" has '<repo>/work/logs/native-tools-testboot/<stamp>/' "$nt_kit/ROWS.md"
+check "ROWS.md states where a root run of the host ends" has '$GB10_WORK/logs/native-tools-testboot/<stamp>/' "$nt_kit/ROWS.md"
+check "ROWS.md says the copy lands in a directory of the stamp" has '<copy-out>/<stamp>/' "$nt_kit/ROWS.md"
+# The firmware dependency kit: the destination is computed at build time and
+# written into the rc configuration, never expanded at boot.
+fw_rows=$repo/tests/nvidia-fw-depend-testboot/ROWS.md
+check "the firmware dependency kit states that the build kit computes the destination" has 'the absolute directory the build kit' "$fw_rows"
+check "the firmware dependency kit states that the one-shot does not read GB10_WORK at boot" has 'does not read' "$fw_rows"
+check "the firmware dependency kit does not expand GB10_WORK at boot" no_match 'GB10_WORK:-' "$fw_rows"
+check "the firmware dependency kit states the copy-out base of a root build" has '$GB10_WORK/logs/nvidia-fw-depend-testboot' "$fw_rows"
+check "prime-import states the mount point of the work root" has '$WORK/tmp/<BE name>.mnt' "$repo/tests/prime-import-testboot/make-be.sh"
+check "no kit speaks of the old home work root" no_match 'HOME/work/gb10' "$repo/tests/native-tools-testboot/make-be.sh"
+# The archive procedure of the prime-import kit can be run as written: the
+# archive carries the shared guard and only that file of the native-tools kit
+# (one make-be.sh in the extraction), the script is named by its full path, and
+# GB10_WORK is set (an extracted archive is not a checkout).  The kit's own
+# header and its refusal say the same.
+prime_doc=$repo/docs/PRIME-IMPORT.md
+prime_kit=$repo/tests/prime-import-testboot/make-be.sh
+check "PRIME-IMPORT.md archives the guard file and the kit, not the whole native-tools kit" has 'git archive <reviewed commit> -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot' "$prime_doc"
+check "PRIME-IMPORT.md does not archive the whole native-tools kit (two make-be.sh would be ambiguous)" no_match 'tests/native-tools-testboot tests/prime-import-testboot' "$prime_doc"
+check "PRIME-IMPORT.md runs the archived kit with GB10_WORK and its full path" has 'GB10_WORK=/absolute/path <new directory>/tests/prime-import-testboot/make-be.sh -V <commit>' "$prime_doc"
+check "PRIME-IMPORT.md says why GB10_WORK is needed for an archive" has 'an extracted archive is not a checkout' "$prime_doc"
+check "the prime-import kit's header gives the same archive invocation" has 'GB10_WORK=/absolute/path <new directory>/tests/prime-import-testboot/make-be.sh -V <commit>' "$prime_kit"
+check "the prime-import kit's archive refusal gives the same archive pathspec" has 'git archive <commit> -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot | tar -x -C <new directory>' "$prime_kit"
+check "the prime-import kit's archive refusal names the script by its full path with GB10_WORK" has 'then GB10_WORK=/absolute/path <new directory>/tests/prime-import-testboot/make-be.sh -V <commit>' "$prime_kit"
+check "the prime-import kit does not archive the whole native-tools kit" no_match 'tests/native-tools-testboot tests/prime-import-testboot' "$prime_kit"
+# The native-tools kit documents its archive mode on both sides (make-be.sh and
+# check-be.sh), with the hooks it needs and the work root it cannot default.
+check "native-tools make-be.sh documents its archive mode" has 'runs from an extracted archive of the repository' "$nt_kit/make-be.sh"
+check "native-tools make-be.sh says an archive has no default work root" has 'an archive is not a' "$nt_kit/make-be.sh"
+check "native-tools check-be.sh documents its archive mode" has 'an extracted archive of the repository' "$nt_kit/check-be.sh"
+check "native-tools check-be.sh says an archive has no default work root" has 'an archive is not a checkout' "$nt_kit/check-be.sh"
 
 if [ "$fail" = 0 ]; then
 	echo "readme_install_doc_test: PASS"

@@ -22,13 +22,219 @@
 #     execve, which covers a #! script's interpreter and the ELF run-time linker) is a FreeBSD-branded ELF, or a #!
 #     script; a row that calls kldload or kldunload fails (the trace names a file id for kldunload, not a module).
 
-# guard_work_default <effective uid> <program> <defaulted options>: root must not silently use root's home for these
-# paths; the caller exits with this function's status.  Non-root and an explicitly set GB10_WORK keep the old default.
+# The work-root rule of the test-boot kits (one design, in this file, for every kit; the kits source
+# this file by path and call it, they do not copy it):
+#   - the kits run as root (bectl), and every path they write lies under one WORK ROOT: GB10_WORK when
+#     it is set, the work directory of the checkout the kit lies in (<repo>/work) otherwise;
+#   - the checkout belongs to the account that cloned it, so root must name the work root (GB10_WORK)
+#     and may not name one inside the checkout (guard_work_default, guard_work_root);
+#   - GB10_WORK is an absolute path in plain form, and the work root the kit uses is its canonical
+#     spelling: the symbolic links of the part that exists are resolved (guard_work_canon), so the
+#     place root writes into is the place that is named, whatever directory the kit was started in;
+#   - the checkout is checked, never assumed from the depth of the kit directory: it is a git work tree
+#     whose top level is the computed root and whose tests directory holds the kit (guard_repo_root);
+#     an extracted archive (no git metadata) is recognised as such (guard_archive_root), and the kit
+#     decides whether it may run from one (the native-tools kit does, under its test hooks);
+#   - a kit checks this file before it sources it (a regular file, no symbolic link, owned by root or
+#     by the account that runs the kit, not writable by the group or by everyone, at its expected place
+#     and, in a checkout, equal to the committed one): a guard that is not trusted is not run.  The
+#     check is in the kit, before the source line, because a sourced file runs; guard_trusted_file is
+#     the same rule for the other files a kit sources after this one.
+# Every function prints the reason of a refusal on standard error and returns 2 (1 where the caller
+# falls back, which is said in its comment); a refusal is never silent and never falls through.
+
+# guard_work_abs <what> <value>: the value must be an absolute path that holds no newline.  The work
+# root is the root of every path a kit writes, and a relative one depends on the directory the kit
+# was started in: the same kit started in two directories writes in two places, and root writes into
+# whichever of them happens to hold the name.  A value with a newline is cut by the command
+# substitution that carries it (an empty work root would name "/logs" and "/build").  Prints "<what>
+# must be an absolute path: <value>" and returns 2 when the value is not one.
+guard_work_abs()
+{
+	case $2 in
+	*'
+'*) echo "$1 must be an absolute path without a newline" >&2; return 2 ;;
+	/*) return 0 ;;
+	esac
+	echo "$1 must be an absolute path: $2" >&2
+	return 2
+}
+
+# guard_work_canon <what> <value>: prints the canonical spelling of an absolute path a kit writes
+# into, or refuses (2).  The value must be absolute (guard_work_abs), must not be the root of the
+# filesystem, and must be in plain form: no trailing /, no //, no . or .. component (a path with a ..
+# component names a place its text does not show).  The part of the path that exists is resolved
+# through its symbolic links (pwd -P of the nearest existing ancestor); the part that does not exist
+# yet is kept as written.  A nearest ancestor that cannot be entered is a refusal: the place cannot be
+# told.
+guard_work_canon()
+{
+	guard_work_abs "$1" "$2" || return 2
+	case $2 in
+	/) echo "$1 must not be the root of the filesystem: $2" >&2; return 2 ;;
+	*/ | *//* | */./* | */../* | */. | */..)
+		echo "$1 must be a plain absolute path (no trailing /, no //, no . or .. component): $2" >&2
+		return 2 ;;
+	esac
+	_gc_p=$2
+	_gc_rest=
+	while [ ! -d "$_gc_p" ]; do
+		_gc_rest=${_gc_p##*/}${_gc_rest:+/$_gc_rest}
+		_gc_p=${_gc_p%/*}
+		[ -n "$_gc_p" ] || _gc_p=/
+	done
+	_gc_r=$(CDPATH= cd -- "$_gc_p" 2> /dev/null && pwd -P) || {
+		echo "$1 cannot be resolved: $2 ($_gc_p cannot be entered)" >&2
+		return 2
+	}
+	[ -n "$_gc_r" ] || { echo "$1 cannot be resolved: $2" >&2; return 2; }
+	case $_gc_r in /) _gc_r= ;; esac
+	if [ -n "$_gc_rest" ]; then
+		printf '%s/%s\n' "$_gc_r" "$_gc_rest"
+	else
+		printf '%s\n' "$_gc_r"
+	fi
+}
+
+# guard_work_default <effective uid> <program> <defaulted options>: root must not silently use the
+# checkout's work directory for these paths: it belongs to the developer account that cloned the
+# repository, and root must not write into it.  The caller exits with this function's status.  A
+# non-root caller and a caller that set GB10_WORK keep the default of guard_work_root.  The third
+# argument names the options whose default the work root holds, each with the value it needs
+# ("-m DIR and -o DIR"): the refusal must tell the operator what to write, not only which letters
+# to pass.  When it is empty the work root is used whatever the options say, and the message only
+# says to set GB10_WORK.
+#
+# A GB10_WORK that is not an absolute path is refused for every caller, root or not: the value is
+# the root of every path the kit writes, and a relative one names a different directory in every
+# directory the kit is started in.  The refusal names the variable and says what it must be.
 guard_work_default()
 {
-	[ "$1" = 0 ] && [ -z "${GB10_WORK:-}" ] || return 0
-	echo "$2: running as root without GB10_WORK; set GB10_WORK or pass $3" >&2
+	if [ -n "${GB10_WORK:-}" ]; then
+		guard_work_abs "$2: GB10_WORK" "$GB10_WORK" || return 2
+		return 0
+	fi
+	[ "$1" = 0 ] || return 0
+	if [ -n "$3" ]; then
+		echo "$2: running as root without GB10_WORK; set GB10_WORK=/absolute/path or pass $3 (see $2 -h)" >&2
+	else
+		echo "$2: running as root without GB10_WORK; set GB10_WORK=/absolute/path (see $2 -h)" >&2
+	fi
 	return 2
+}
+
+# guard_work_options <stage given> <copy-out given>: the options whose default the work root
+# holds, with the value each needs: "-m DIR and -o DIR".  The hash list (-s) is never named: it is
+# derived from the stage ($STAGE/SHA256.txt), so a stage that is given takes the hash list with it
+# and naming -s would only make the operator invent a file he does not need.  One function for every
+# kit, so the refusal names the same options everywhere.
+guard_work_options()
+{
+	_o=
+	[ "$1" = 1 ] || _o="-m DIR"
+	[ "$2" = 1 ] || _o="${_o:+$_o and }-o DIR"
+	printf '%s\n' "$_o"
+}
+
+# guard_work_root <effective uid> <repository root or empty> <kit directory>: prints the work root
+# of a test-boot kit, canonical: GB10_WORK (guard_work_canon) when it is set, the work directory of
+# the checkout otherwise.  It is one function for every kit, so the default is one rule and not four
+# copies of it, and the work root a kit uses never comes from anywhere else.  Refusals, each with its
+# reason on standard error:
+#   - a GB10_WORK that is not a plain absolute path (2): it would name a different directory in
+#     every directory the kit is started in;
+#   - root with a GB10_WORK inside the checkout (2): the checkout belongs to the account that cloned
+#     it, and root must not write into it, whichever spelling names it;
+#   - no GB10_WORK and no checkout (1): a kit that lies in no checkout has no work root to take from
+#     one, and the depth of its directory says nothing (it would name "/work" for a kit one directory
+#     below the root of the filesystem).  The kit directory is named so the operator knows which kit.
+guard_work_root()
+{
+	if [ -n "${GB10_WORK:-}" ]; then
+		_gr_w=$(guard_work_canon GB10_WORK "$GB10_WORK") || return 2
+		if [ "$1" = 0 ] && [ -n "$2" ]; then
+			case $_gr_w in
+			"$2" | "$2"/*)
+				echo "GB10_WORK must not lie inside the checkout when the kit runs as root: $_gr_w is under $2, which belongs to the account that cloned it; set GB10_WORK to a directory outside the checkout" >&2
+				return 2 ;;
+			esac
+		fi
+		printf '%s\n' "$_gr_w"
+	elif [ -n "$2" ]; then
+		printf '%s/work\n' "$2"
+	else
+		echo "this kit lies in no checkout (${3:-its directory} is not under the tests directory of a git work tree): the work directory of a checkout is the only default; set GB10_WORK=/absolute/path" >&2
+		return 1
+	fi
+}
+
+# guard_repo_root <candidate root> <kit directory>: succeeds when the candidate is the root of the
+# checkout the kit lies in: a git work tree whose top level is the candidate itself and whose tests
+# directory holds the kit.  The depth of the kit directory is not the proof: the same arithmetic
+# names "/" for a kit that was extracted on its own one directory below the root of the filesystem,
+# and the work root of the checkout would then be "/work".  A ".git" entry is not the proof either:
+# an empty file called .git, or a nested directory with a .git of its own inside a larger repository,
+# is not a work tree whose top level is the candidate, and git says so (rev-parse --show-toplevel,
+# compared with the candidate in canonical form).  Returns 1 when the candidate is not that root (the
+# caller decides what a kit outside a checkout may do); it prints nothing.
+guard_repo_root()
+{
+	_r=$1
+	_kd=$2
+	[ -n "$_r" ] && [ -n "$_kd" ] || return 1
+	[ -e "$_r/.git" ] || return 1
+	[ -d "$_r/tests" ] || return 1
+	case $_kd in
+	"$_r"/tests/*) ;;
+	*) return 1 ;;
+	esac
+	_t=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+	    git -c safe.directory="$_r" --no-optional-locks -C "$_r" rev-parse --show-toplevel 2> /dev/null) || return 1
+	[ -n "$_t" ] || return 1
+	_t=$(CDPATH= cd -- "$_t" 2> /dev/null && pwd -P) || return 1
+	[ "$_t" = "$_r" ] || return 1
+	return 0
+}
+
+# guard_archive_root <candidate root> <kit directory>: succeeds when the candidate is the root of an
+# extracted archive of the repository (git archive <commit> -- tests/...): no git metadata at the
+# candidate, a tests directory, and the kit under it.  It says what the directory is, not whether the
+# kit may run from it: that is the kit's decision (the native-tools kit installs an archive only
+# under its documented test hooks, and no kit takes a work root from an archive).  Returns 1 when the
+# candidate is not an archive root; it prints nothing.
+guard_archive_root()
+{
+	_r=$1
+	_kd=$2
+	[ -n "$_r" ] && [ -n "$_kd" ] || return 1
+	[ ! -e "$_r/.git" ] || return 1
+	[ -d "$_r/tests" ] || return 1
+	case $_kd in
+	"$_r"/tests/*) ;;
+	*) return 1 ;;
+	esac
+	return 0
+}
+
+# guard_trusted_file <effective uid> <path>: the file a kit is about to source (or read as its
+# configuration) is a regular file, not a symbolic link, owned by root or by the account that runs
+# the kit, and not writable by the group or by everyone.  A file that fails this is not run: it could
+# have been put there, or changed, by another account.  Prints the reason and returns 2.  The kits
+# apply the same rule to guard.sh itself before they source it (inline: nothing of this file runs
+# before that check).
+guard_trusted_file()
+{
+	_tf=$2
+	[ -e "$_tf" ] || { echo "$_tf is missing" >&2; return 2; }
+	[ ! -L "$_tf" ] || { echo "$_tf is a symbolic link" >&2; return 2; }
+	[ -f "$_tf" ] || { echo "$_tf is not a regular file" >&2; return 2; }
+	_ts=$(stat -f '%u %Lp' "$_tf" 2> /dev/null) || { echo "$_tf cannot be examined (stat failed)" >&2; return 2; }
+	_to=${_ts%% *}
+	_tm=${_ts##* }
+	case $_to$_tm in '' | *[!0-9]*) echo "$_tf cannot be examined (stat printed [$_ts])" >&2; return 2 ;; esac
+	[ "$_to" = 0 ] || [ "$_to" = "$1" ] || { echo "$_tf belongs to another account (uid $_to)" >&2; return 2; }
+	[ $(( 0$_tm & 022 )) -eq 0 ] || { echo "$_tf is writable by the group or by everyone (mode $_tm)" >&2; return 2; }
+	return 0
 }
 
 # guard_kld_names <kldstat -v file>: every file and module name of the listing, one per line

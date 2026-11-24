@@ -7,7 +7,7 @@
    "path": "native",
    "path_status": "bogus",
    "model": "m",
-   "source": "~/work/gb10/llm/history/runs/20261122T0537Z-native-radv-b12627/radv.json:1"
+   "source": "work/llm/history/runs/20261122T0537Z-native-radv-b12627/radv.json:1"
   }
  ]
 }

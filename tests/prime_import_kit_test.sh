@@ -38,6 +38,14 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KIT=$repo/tests/prime-import-testboot
 # the one shared bare-shutdown detector (also used by check-be.sh in kits that have one)
 . "$KIT/bare-shutdown-check.sh"
+# stage_guard <kit directory>: the shared guard the kit sources by path
+# (../native-tools-testboot/guard.sh).  The kit refuses without it: the guard
+# is the rule, not a copy of it, and a kit that cannot find it says so.
+stage_guard() {
+	_gp=$(dirname -- "$1")
+	mkdir -p "$_gp/native-tools-testboot"
+	cp "$repo/tests/native-tools-testboot/guard.sh" "$_gp/native-tools-testboot/guard.sh"
+}
 WORK=${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}
 mkdir -p "$WORK/tmp"
 TMPD=$(mktemp -d "$WORK/tmp/prime-kit-test.XXXXXXXX") || exit 1
@@ -382,7 +390,7 @@ out=$(FAKE_BECTL_FAIL=umount run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -
 if [ "$rc" -ne 0 ] && grep -q 'destroy -F nvidia-prime-import-test-20261120-6' "$TMPD/bectl.log"; then ok "(d) a failing final umount removes the half-built BE"; else bad "(d) a failing final umount: rc=$rc log: $(tr '\n' '|' < "$TMPD/bectl.log")"; fi
 out=$(run_be "$KIT/make-be.sh" -b base -D 20261120 -n 6 -m "$TMPD/mods"); rc=$?
 if [ "$rc" -eq 0 ] && ! grep -q 'destroy' "$TMPD/bectl.log"; then ok "(d) a successful run removes nothing"; else bad "(d) a successful run destroyed something: $(cat "$TMPD/bectl.log" | tr '\n' '|')"; fi
-mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"
+mkdir -p "$TMPD/ctl2"; cp "$KIT"/* "$TMPD/ctl2/"; stage_guard "$TMPD/ctl2"
 # bases for the two path guards: a symbolic link INSIDE the clone (only the -L guard stops it), and a
 # directory of the clone that is a symbolic link to a directory outside it (only the realpath guard stops it)
 mkdir -p "$TMPD/base5/etc" "$TMPD/outside-etc/rc.conf.d" "$TMPD/base5/usr/local"
@@ -451,7 +459,7 @@ fi
 # archive carries its commit in KIT-COMMIT (git archive expands it), and -V is checked against it, never trusted
 # a copy of the kit with the literal KIT-COMMIT of the work tree (when the suite itself runs from an archive,
 # $KIT/KIT-COMMIT is the expanded commit, which must not leak into the fake repositories)
-kitcopy() { rm -rf "$1"; mkdir -p "$1"; cp "$KIT"/* "$1/"; printf '%s\n' '$Format:%H$' > "$1/KIT-COMMIT"; }
+kitcopy() { rm -rf "$1"; mkdir -p "$1"; cp "$KIT"/* "$1/"; printf '%s\n' '$Format:%H$' > "$1/KIT-COMMIT"; stage_guard "$1"; }
 kitcopy "$TMPD/gitkit"
 printf 'KIT-COMMIT export-subst\n' > "$TMPD/gitkit/.gitattributes"
 # the order checker that sits in the kit: a stand-in that accepts (the staged module of these tests is not an ELF file)
@@ -504,6 +512,7 @@ out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 PRIME_KO_TOOL_OVERRIDE="$TMPD/ko-tool-bad" ru
 [ "$rc" -eq 0 ] && [ "$(bev)" = "$gsha" ] && ok "(d) a replaced order tool is ignored outside the dirty-tree hook (the kit's own checker ran)" || bad "(d) a replaced order tool was honoured outside the hook: rc=$rc version='$(bev)'"
 rm -rf "$TMPD/archkit"; mkdir -p "$TMPD/archkit"
 git -C "$TMPD/gitkit" archive HEAD | tar -x -C "$TMPD/archkit"
+stage_guard "$TMPD/archkit"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 [ "$rc" -eq 0 ] && [ "$(bev)" = "$gsha" ] && ok "(d) a kit from git archive records the commit its KIT-COMMIT carries (no -V needed)" || bad "(d) archive kit: rc=$rc version='$(bev)' $out"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$(echo "$gsha" | cut -c1-8)"); rc=$?
@@ -514,10 +523,40 @@ out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 
 [ "$rc" -eq 2 ] && ok "(d) a one-digit -V is refused (at least 7 hex digits)" || bad "(d) one-digit -V: rc=$rc"
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$(echo "$gsha" | cut -c1-8 | tr a-f A-F)"); rc=$?
 [ "$rc" -eq 0 ] && ok "(d) an upper-case -V that is the commit is accepted" || bad "(d) upper-case -V refused: rc=$rc $out"
-rm -rf "$TMPD/outer2"; mkdir -p "$TMPD/outer2/inner"; cp -R "$TMPD/archkit/." "$TMPD/outer2/inner/"
+rm -rf "$TMPD/outer2"; mkdir -p "$TMPD/outer2/inner"; cp -R "$TMPD/archkit/." "$TMPD/outer2/inner/"; stage_guard "$TMPD/outer2/inner"
 ( cd "$TMPD/outer2" && git init -q . && printf 'junk\n' > junk && git add junk && git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t commit -q --no-verify -m x ) > /dev/null 2>&1
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/outer2/inner/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods"); rc=$?
 [ "$rc" -eq 0 ] && ok "(d) a git archive extracted inside some other git work tree is accepted (its KIT-COMMIT decides)" || bad "(d) an archive inside a git tree refused: rc=$rc $out"
+# The documented archive (docs/PRIME-IMPORT.md): a repository that holds the kit at tests/prime-import-testboot and
+# the shared guard at tests/native-tools-testboot/guard.sh (beside a native-tools make-be.sh the pathspec must leave
+# out), archived with the documented pathspec and extracted into a fresh directory, with NOTHING copied in afterwards.
+# The extraction holds exactly one make-be.sh and the guard, and the kit runs from it (run_be sets GB10_WORK, as the
+# documentation says an archive needs).  An archive of the kit alone has no guard: the kit refuses and names it.
+rm -rf "$TMPD/archrepo" "$TMPD/archfresh" "$TMPD/archbare"
+mkdir -p "$TMPD/archrepo/tests/prime-import-testboot" "$TMPD/archrepo/tests/native-tools-testboot" "$TMPD/archfresh" "$TMPD/archbare"
+cp "$TMPD/gitkit"/* "$TMPD/archrepo/tests/prime-import-testboot/"
+printf '%s\n' '$Format:%H$' > "$TMPD/archrepo/tests/prime-import-testboot/KIT-COMMIT"
+printf 'KIT-COMMIT export-subst\n' > "$TMPD/archrepo/tests/prime-import-testboot/.gitattributes"
+cp "$repo/tests/native-tools-testboot/guard.sh" "$repo/tests/native-tools-testboot/make-be.sh" "$TMPD/archrepo/tests/native-tools-testboot/"
+( cd "$TMPD/archrepo" && git init -q . && git add -A . && _t=$(git write-tree) &&
+  _c=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.org GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.org git commit-tree "$_t" -m kit) &&
+  git update-ref HEAD "$_c" ) > /dev/null 2>&1
+asha=$(git -C "$TMPD/archrepo" rev-parse --verify HEAD 2>/dev/null)
+git -C "$TMPD/archrepo" archive HEAD -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot | tar -x -C "$TMPD/archfresh"
+n_mb=$(find "$TMPD/archfresh" -name make-be.sh | wc -l | tr -d ' ')
+if [ "$n_mb" = 1 ] && [ -f "$TMPD/archfresh/tests/native-tools-testboot/guard.sh" ] && [ -f "$TMPD/archfresh/tests/prime-import-testboot/make-be.sh" ]; then
+	ok "(d) the documented archive pathspec yields the kit, the shared guard and one make-be.sh"
+else
+	bad "(d) the documented archive pathspec yields $n_mb make-be.sh and guard=$([ -f "$TMPD/archfresh/tests/native-tools-testboot/guard.sh" ] && echo yes || echo no)"
+fi
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archfresh/tests/prime-import-testboot/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$asha"); rc=$?
+[ "$rc" -eq 0 ] && [ "$(bev)" = "$asha" ] && ok "(d) the kit runs from the documented archive as extracted (nothing copied in) and records the archive's commit" || bad "(d) the kit from the documented archive: rc=$rc version='$(bev)' $out"
+git -C "$TMPD/archrepo" archive HEAD -- tests/prime-import-testboot | tar -x -C "$TMPD/archbare"
+out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archbare/tests/prime-import-testboot/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V "$asha"); rc=$?
+case $out in
+*"work-root guard is missing"*"tests/native-tools-testboot/guard.sh"*) [ "$rc" -eq 2 ] && ! grep -q 'create' "$TMPD/bectl.log" && ok "(d) an archive of the kit alone refuses: the shared guard is missing, the refusal names it, nothing is built" || bad "(d) archive without the guard: rc=$rc bectl=[$(tr '\n' '|' < "$TMPD/bectl.log")]" ;;
+*) bad "(d) an archive without the shared guard did not refuse for the guard: rc=$rc $out" ;;
+esac
 out=$(PRIME_ALLOW_DIRTY_OVERRIDE=0 run_be "$TMPD/archkit/make-be.sh" -b base -D 20261120 -n 2 -m "$TMPD/mods" -V 'not hex'); rc=$?
 [ "$rc" -eq 2 ] && ok "(d) a -V that is not hex is refused" || bad "(d) -V not hex rc=$rc"
 kitcopy "$TMPD/plaink"
@@ -1339,6 +1378,7 @@ fi
 _g6kit=$TMPD/g6kit
 mkdir -p "$_g6kit"
 cp "$KIT"/* "$_g6kit/"
+stage_guard "$_g6kit"
 _g6mark=$_g6kit/make-be.sh
 sed 's/"\$BE" > "\$MNT\/usr\/local\/etc\/prime_import_testboot.marker"/"\$BASE" > "\$MNT\/usr\/local\/etc\/prime_import_testboot.marker"/' "$KIT/make-be.sh" > "$_g6mark"
 if cmp -s "$KIT/make-be.sh" "$_g6mark"; then
@@ -1355,6 +1395,7 @@ fi
 # (g) controls
 mkdir -p "$TMPD/ctl"
 cp "$KIT"/* "$TMPD/ctl/"
+stage_guard "$TMPD/ctl"
 printf 'kldunload nvidia\n' >> "$TMPD/ctl/prime_import_testboot"
 h=$(scan "$TMPD/ctl/prime_import_testboot")
 [ -n "$h" ] && ok "(g) control: a planted kldunload is flagged" || bad "(g) control: a planted kldunload passed"

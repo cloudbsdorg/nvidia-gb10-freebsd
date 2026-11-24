@@ -1,5 +1,5 @@
 testboot-return is a vendored copy, not yet merged:
-repository = skills (cloudbsd skills), worktree ~/work/amp001/skills-wt
+repository = skills (cloudbsd skills)
 branch = agent/2398-amp001-crash-hardening
 commit = 963715f6937e8bdeeb5e96e3ebf33901f4fd36f9
 path = skills/bectl-safe-deploy/scripts/testboot-return

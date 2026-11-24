@@ -53,9 +53,21 @@
 # after its sha256 matched the pin in VENDOR. The running system is not touched; no
 # module is loaded and nothing is rebooted.
 #
-# Environment: GB10_WORK (default $HOME/work/gb10), BECTL (default bectl). Test hooks of the
-# kit test (they change what is checked or where the clone is): LB_MNT (the clone's mount point is
-# this plain directory) and LB_NO_GIT_CHECK (no git check of the kit commit).
+# Root must set GB10_WORK: the default work root is the work directory of the checkout, which belongs
+# to the developer account that cloned the repository, and root must not write into it (a GB10_WORK
+# inside the checkout is refused for root too).  This kit writes into the work root (the mount point
+# of the clone, the probe scratch and the logs), so a root build always needs it.  The kit must lie in
+# a checkout (a git work tree whose tests directory holds it) unless the test hook LB_NO_GIT_CHECK says
+# the kit commit is not checked: outside a checkout there is no commit to check it against, and no
+# work directory to take a default from.  The shared work-root guard
+# (tests/native-tools-testboot/guard.sh, beside this kit's directory) is checked before it is sourced:
+# a regular file, owned by root or by the account that runs the kit, not writable by others, and, in a
+# checkout, equal to the committed one.  Every path option and every path the kit writes is absolute.
+#
+# Environment: GB10_WORK (default <repo>/work; the canonical spelling is used), BECTL (default bectl).
+# Test hooks of the kit test (they change what is checked or where the clone is): LB_MNT (the clone's
+# mount point is this plain directory, an absolute path) and LB_NO_GIT_CHECK (no git check of the kit
+# commit; the version recorded in the clone says +unverified).
 
 set -eu
 
@@ -63,12 +75,14 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 2
+[ -n "$KITDIR" ] || { echo "make-be.sh: the kit directory could not be found" >&2; exit 2; }
+ME=$(id -u) || exit 2
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 STAGED=/boot/modules.nvtest
-WORK=${GB10_WORK:-$HOME/work/gb10}
 BECTL=${BECTL:-bectl}
 BASE=
-TREE=$WORK/build/tree
+TREE=
 DATE=$(date -u +%Y%m%d)
 SEQ=1
 KLD="nvidia_gsp_ga10x_fw nvidia nvidia-modeset"
@@ -83,6 +97,7 @@ COMMIT=
 DRY=0
 ACTIVATE=0
 
+# The options are read first, so -h and a usage error need no checkout and no guard.
 usage() {
 	sed -n '5,/^# Environment/p' "$0" | sed 's/^# \{0,1\}//' >&2
 	exit 2
@@ -93,7 +108,7 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	-b) need "$1" "$#"; BASE=$2; shift 2 ;;
 	-N) need "$1" "$#"; NORMAL=$2; shift 2 ;;
-	-t) need "$1" "$#"; TREE=$2; shift 2 ;;
+	-t) need "$1" "$#"; [ -n "$2" ] || { echo "make-be.sh: -t must not be empty" >&2; usage; }; TREE=$2; shift 2 ;;
 	-D) need "$1" "$#"; DATE=$2; shift 2 ;;
 	-n) need "$1" "$#"; SEQ=$2; shift 2 ;;
 	-k) need "$1" "$#"; KLD=$2; shift 2 ;;
@@ -122,25 +137,99 @@ for _m in $KLD; do
 		exit 2 ;;
 	esac
 done
-REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
-if [ -z "$COMMIT" ]; then
-	COMMIT=$(git -C "$REPO" rev-parse HEAD 2> /dev/null) || COMMIT=
+
+# The work-root guard is one file for every kit: the native-tools one, beside this kit's directory,
+# sourced by path and never copied (a copy of the rule drifts from the rule).  It is checked before it
+# is sourced, because a sourced file runs: a regular file (no symbolic link), owned by root or by the
+# account that runs the kit, not writable by the group or by everyone, and, in a checkout, equal to
+# the committed one (unless the kit commit is not checked at all: LB_NO_GIT_CHECK or a dry run).  A
+# guard that is not trusted is not run, and the kit says what to do.
+GUARD=${KITDIR%/*}/native-tools-testboot/guard.sh
+guard_refuse() {
+	echo "make-be.sh: the shared work-root guard $1: $GUARD; copy tests/native-tools-testboot/guard.sh of the reviewed commit there (from a complete checkout, or archive it with the kit) and run again" >&2
+	exit 2
+}
+[ -e "$GUARD" ] || guard_refuse "is missing"
+[ ! -L "$GUARD" ] || guard_refuse "is a symbolic link"
+[ -f "$GUARD" ] || guard_refuse "is not a regular file"
+_gst=$(stat -f '%u %Lp' "$GUARD" 2> /dev/null) || guard_refuse "cannot be examined"
+_gown=${_gst%% *}
+_gmode=${_gst##* }
+case $_gown$_gmode in '' | *[!0-9]*) guard_refuse "cannot be examined (stat printed [$_gst])" ;; esac
+[ "$_gown" = 0 ] || [ "$_gown" = "$ME" ] || guard_refuse "belongs to another account (uid $_gown)"
+[ $(( 0$_gmode & 022 )) -eq 0 ] || guard_refuse "is writable by the group or by everyone (mode $_gmode)"
+# The root of the tree the kit lies in: computed with a checked cd, in canonical form, and checked
+# below (guard_repo_root), never assumed from the depth of the kit directory (a kit extracted on its
+# own, one directory below the root of the filesystem, names "/" with the same arithmetic).
+ROOT=$(CDPATH= cd -- "$KITDIR/../.." && pwd -P) || exit 2
+[ -n "$ROOT" ] || { echo "make-be.sh: the root of the tree could not be found" >&2; exit 2; }
+if [ -e "$ROOT/.git" ]; then
+	# a .git entry is not believed: git must name ROOT as the top level of a work tree (an empty .git
+	# file, or a nested directory inside a larger repository, is not one)
+	_gtop=$(git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" rev-parse --show-toplevel 2> /dev/null) && _gtop=$(CDPATH= cd -- "$_gtop" 2> /dev/null && pwd -P) || _gtop=
+	[ "$_gtop" = "$ROOT" ] || { echo "make-be.sh: $ROOT has a .git entry but is not the top level of a git work tree (git names '${_gtop:-nothing}'): it is not the root of a checkout the kit lies in; run the kit from the checkout" >&2; exit 2; }
+	if [ -z "${LB_NO_GIT_CHECK:-}" ] && [ "$DRY" -eq 0 ]; then
+		git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" show HEAD:tests/native-tools-testboot/guard.sh 2> /dev/null | cmp -s - "$GUARD" ||
+			guard_refuse "differs from the one committed at HEAD of $ROOT: the commit is what gets installed, so commit the guard"
+	fi
+fi
+# A guard that does not parse, or that fails while it is read, is refused with the same message:
+# under set -e a failure inside the sourced file would end the kit without a word.
+sh -n "$GUARD" 2> /dev/null || guard_refuse "does not parse as a shell file (sh -n)"
+set +e
+. "$GUARD"
+_grc=$?
+set -e
+[ "$_grc" = 0 ] || guard_refuse "could not be loaded (it returned $_grc)"
+
+# The kit lies in a checkout (a git work tree whose top level is ROOT and whose tests directory holds
+# the kit), or it does not: then there is no repository to check its commit against (git is not asked
+# at all: a repository further up would be an unrelated one) and no work directory to take a default
+# from.
+REPO=
+if guard_repo_root "$ROOT" "$KITDIR"; then REPO=$ROOT; fi
+
+# The work root: decided by the shared guard, before any path is taken from it.  Root without
+# GB10_WORK is refused (guard_work_default); the work root is GB10_WORK in canonical form, or the
+# checkout's work directory, or nothing (guard_work_root refuses and says what to set).
+guard_work_default "$ME" make-be.sh "" || exit $?
+WORK=$(guard_work_root "$ME" "$REPO" "$KITDIR") || { echo "make-be.sh: no work root (see above): set GB10_WORK=/absolute/path" >&2; exit 2; }
+[ -n "$TREE" ] || TREE=$WORK/build/tree
+# every path option is an absolute path: a relative one names a different place in every directory
+# the kit is started in
+guard_work_abs "make-be.sh: -t" "$TREE" || exit 2
+[ -z "$NVINFO" ] || guard_work_abs "make-be.sh: -i" "$NVINFO" || exit 2
+[ -z "$NVPROOF" ] || guard_work_abs "make-be.sh: -p" "$NVPROOF" || exit 2
+[ -z "$UVMKO" ] || guard_work_abs "make-be.sh: -u" "$UVMKO" || exit 2
+[ -z "$CUDARUN" ] || guard_work_abs "make-be.sh: -C" "$CUDARUN" || exit 2
+case $LOGROOT in /*) ;; *) echo "make-be.sh: -L takes an absolute path" >&2; exit 2 ;; esac
+
+# The kit that is installed must be the kit that is named: its files (this directory, rc.d/nvidia_linux
+# and the shared guard) are committed and clean, and -V is that commit.  Outside a checkout nothing can
+# be checked: the commit must be given, and only the test hook (or a dry run) lets the kit go on.
+if [ -n "$REPO" ]; then
+	if [ -z "$COMMIT" ]; then
+		COMMIT=$(git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" rev-parse HEAD 2> /dev/null) || COMMIT=
+	fi
+elif [ -z "$COMMIT" ] && [ "$DRY" -eq 0 ]; then
+	echo "make-be.sh: this kit lies in no checkout ($KITDIR is not under the tests directory of a git work tree): the kit commit cannot be read; give -V, or run the kit from the checkout" >&2
+	exit 2
 fi
 if [ -z "$COMMIT" ]; then
 	[ "$DRY" -eq 1 ] || { echo "make-be.sh: no kit commit: give -V or run from the repository" >&2; exit 2; }
 	COMMIT=dry-run
 fi
-# the kit that is installed must be the kit that is named: its files are committed and clean
 if [ -z "${LB_NO_GIT_CHECK:-}" ] && [ "$DRY" -eq 0 ]; then
-	_head=$(git -C "$REPO" rev-parse HEAD 2> /dev/null) || { echo "make-be.sh: cannot read the git state of $REPO: the kit commit cannot be checked" >&2; exit 1; }
-	_named=$(git -C "$REPO" rev-parse "$COMMIT^{commit}" 2> /dev/null) || _named=
+	[ -n "$REPO" ] || { echo "make-be.sh: this kit lies in no checkout ($KITDIR is not under the tests directory of a git work tree): -V $COMMIT cannot be checked against anything; run the kit from the checkout" >&2; exit 2; }
+	git_() { git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" "$@"; }
+	_head=$(git_ rev-parse HEAD 2> /dev/null) || { echo "make-be.sh: cannot read the git state of $REPO: the kit commit cannot be checked" >&2; exit 1; }
+	_named=$(git_ rev-parse "$COMMIT^{commit}" 2> /dev/null) || _named=
 	[ "$_named" = "$_head" ] || { echo "make-be.sh: -V $COMMIT is not the commit of the kit that would be installed (HEAD is $_head)" >&2; exit 1; }
-	_dirty=$(git -C "$REPO" status --porcelain -- tests/linux-bridge-testboot rc.d/nvidia_linux) || { echo "make-be.sh: git status failed in $REPO" >&2; exit 1; }
+	_dirty=$(git_ status --porcelain -- tests/linux-bridge-testboot rc.d/nvidia_linux tests/native-tools-testboot/guard.sh) || { echo "make-be.sh: git status failed in $REPO" >&2; exit 1; }
 	[ -z "$_dirty" ] || { echo "make-be.sh: the kit has uncommitted changes (commit them, the results name the kit commit):" >&2; echo "$_dirty" >&2; exit 1; }
 fi
 case $COMMIT in *[!A-Za-z0-9._-]*) echo "make-be.sh: -V holds a character outside letters, digits, . _ -" >&2; exit 2 ;; esac
 case $NORMAL in '' | *[!A-Za-z0-9_.-]*) echo "make-be.sh: -N takes a boot environment name" >&2; exit 2 ;; esac
-case $LOGROOT in /*) ;; *) echo "make-be.sh: -L takes an absolute path" >&2; exit 2 ;; esac
 case $LOGROOT$CUDAUSER$CUDARUN in *[!A-Za-z0-9_./-]*) echo "make-be.sh: -L, -U and -C take letters, digits and _ . / - only" >&2; exit 2 ;; esac
 if [ -n "$CUDAUSER$CUDARUN" ] && { [ -z "$CUDAUSER" ] || [ -z "$CUDARUN" ]; }; then
 	echo "make-be.sh: -U and -C go together" >&2
@@ -168,7 +257,13 @@ if [ -z "$VWANT" ] || [ ! -f "$KITDIR/testboot-return" ] || [ "$(sha256 -q "$KIT
 fi
 
 BE=nvidia-linux-bridge-test-$DATE-$SEQ
-MNT=${LB_MNT:-$WORK/tmp/$BE.mnt}
+# the mount point of the clone is written into: an absolute path in canonical form, under the work
+# root unless the test hook names another one
+if [ -n "${LB_MNT:-}" ]; then
+	MNT=$(guard_work_canon "make-be.sh: LB_MNT" "$LB_MNT") || exit 2
+else
+	MNT=$WORK/tmp/$BE.mnt
+fi
 
 MODS="nvidia/nvidia.ko nvidia-modeset/nvidia-modeset.ko nvidia-linux/nvidia_linux.ko nvidia-modeset-linux/nvidia_modeset_linux.ko firmware/gsp_ga10x/nvidia_gsp_ga10x_fw.ko"
 if [ "$DRY" -eq 0 ]; then

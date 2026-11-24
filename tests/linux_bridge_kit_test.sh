@@ -979,6 +979,9 @@ if (cd "$FK" && env -u MAKEFLAGS make SYSDIR="$SYSDIR" LD=/usr/bin/ld OBJCOPY=/u
 	GR=$TMPD/gitrepo
 	mkdir -p "$GR/tests" "$GR/rc.d"
 	cp -R "$KIT" "$GR/tests/linux-bridge-testboot"
+	# the shared guard the kit sources by path: the kit refuses without it
+	mkdir -p "$GR/tests/native-tools-testboot"
+	cp "$HERE/native-tools-testboot/guard.sh" "$GR/tests/native-tools-testboot/guard.sh"
 	cp "$HERE/../rc.d/nvidia_linux" "$GR/rc.d/"
 	git -C "$GR" init -q 2> /dev/null && git -C "$GR" add -A && _t=$(git -C "$GR" write-tree) && _c=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.org GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.org git -C "$GR" commit-tree "$_t" -m kit) && git -C "$GR" update-ref HEAD "$_c"
 	mb_setup vh
@@ -995,6 +998,9 @@ if (cd "$FK" && env -u MAKEFLAGS make SYSDIR="$SYSDIR" LD=/usr/bin/ld OBJCOPY=/u
 	mkdir -p "$TMPD/tests"
 	rm -rf "$TMPD/tests/linux-bridge-testboot"
 	mv "$MBKIT" "$TMPD/tests/linux-bridge-testboot"
+	# the shared guard the kit sources by path: the kit refuses without it
+	mkdir -p "$TMPD/tests/native-tools-testboot"
+	cp "$HERE/native-tools-testboot/guard.sh" "$TMPD/tests/native-tools-testboot/guard.sh"
 	MBKIT=$TMPD/tests/linux-bridge-testboot
 	echo '# tampered' >> "$MBKIT/testboot-return"
 	mb_setup pin

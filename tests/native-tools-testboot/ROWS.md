@@ -66,9 +66,18 @@ planned row with its status. It carries two verdicts:
 
 ## Files of a run
 
-The run is written to `/var/db/nvidia-native-tools-test/<stamp>/` in the boot environment. It is
-then copied to the copy-out directory, by default
-`${GB10_WORK:-$HOME/work/gb10}/logs/native-tools-testboot/<stamp>/`. A run holds:
+The run is written to `/var/db/nvidia-native-tools-test/<stamp>/` in the boot environment: that is
+the log root the rc one-shot has at boot (`nvidia_native_tools_testboot_work`). It is then copied
+to the copy-out directory that `make-be.sh` wrote into the boot environment's
+`/etc/rc.conf.d/nvidia_native_tools_testboot` when the environment was built
+(`nvidia_native_tools_testboot_copyout`), and the copy lands in a new directory `<copy-out>/<stamp>/`
+under it. That copy-out base is `<repo>/work/logs/native-tools-testboot` for a build that took the
+default (the work root of the checkout, a non-root build), and `$GB10_WORK/logs/native-tools-testboot`
+for a root build that set `GB10_WORK`. So a run is on the host in
+`<repo>/work/logs/native-tools-testboot/<stamp>/`, or in `$GB10_WORK/logs/native-tools-testboot/<stamp>/`
+for a root build: the run of the stamp `20261122T0537Z` is in
+`<repo>/work/logs/native-tools-testboot/20261122T0537Z/`. The boot-time job does
+not read `GB10_WORK`: it copies to the absolute path the build wrote. A run holds:
 
 - `results.jsonl`: one `{"row","status","detail"}` per line.
 - `summary.json` and `summary.txt`: the reading. The last line of `summary.txt` is PASS, FAIL or

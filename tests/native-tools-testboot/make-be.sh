@@ -49,39 +49,52 @@
 #   7. unmounts; with --activate arms the one-shot boot.
 # The running system is not touched: nothing is loaded, unloaded or rebooted.
 #
-# Environment: GB10_WORK (default $HOME/work/gb10).  Test hooks, honoured only with GB10_TEST_HOOKS=1 and
-# when not root: NVNT_BECTL (the bectl to run), NVNT_MNT (the clone's mount point), NVNT_NOT_ROOT (no root
-# ownership), NVNT_NO_GIT_CHECK (the work tree is installed), NVNT_TEST_PATH (stub tools first on PATH).
+# Environment: GB10_WORK (default <repo>/work, the work directory of the checkout; the kit uses the
+# canonical spelling of GB10_WORK, with its symbolic links resolved).
+# Root must set GB10_WORK when a path is taken from the work root: that is, when -m or -o is omitted,
+# or when -s is omitted and -m is not given.  The work directory belongs to the developer account that
+# cloned the repository, and root must not write into it (guard_work_default refuses; a GB10_WORK
+# inside the checkout is refused for root too).  The kit must lie in a checkout: a git work tree whose
+# tests directory holds it.  The work-root guard beside this script (guard.sh) is checked before it is
+# sourced: a regular file, owned by root or by the account that runs the kit, not writable by others,
+# and equal to the committed one.
+# Test hooks, honoured only with GB10_TEST_HOOKS=1 and
+# when not root: NVNT_BECTL (the bectl to run), NVNT_MNT (the clone's mount point, an absolute path),
+# NVNT_NOT_ROOT (no root ownership), NVNT_NO_GIT_CHECK (the work tree is installed), NVNT_TEST_PATH (stub
+# tools first on PATH).
+# With NVNT_NO_GIT_CHECK the kit also runs from an extracted archive of the repository
+# (tests/native-tools-testboot under a root without git metadata); an archive is not a checkout, so
+# the work root must then be GB10_WORK, or -m and -o must both be given.
 
 set -eu
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
-. "$KITDIR/guard.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
-BECTL=bectl
+KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 2
+[ -n "$KITDIR" ] || { echo "make-be.sh: the kit directory could not be found" >&2; exit 2; }
+ME=$(id -u) || exit 2
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 HOOKS=0
-if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ]; then
-	HOOKS=1; BECTL=${NVNT_BECTL:-bectl}
-	[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
+NOGIT=0
+if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$ME" != 0 ]; then
+	HOOKS=1
+	[ -z "${NVNT_NO_GIT_CHECK:-}" ] || NOGIT=1
 fi
 NORMAL=cloudbsd-rx7600
 BASE=
 DATE=$(date -u +%Y%m%d)
 SEQ=1
-STAGE=$WORK/logs/native-tools/stage
+STAGE=
 STAGE_GIVEN=0
 SHAFILE=
-SHAFILE_GIVEN=0
-COPYOUT=$WORK/logs/native-tools-testboot
+COPYOUT=
 COPYOUT_GIVEN=0
-. "$REPO/tests/libnvrm/board-amp001.env"
-VRAM=$BOARD_VRAM_BYTES
-RESERVE=$BOARD_VRAM_RESERVE_MAX_BYTES
-SM=$BOARD_SM
+# the board defaults (tests/libnvrm/board-amp001.env) are read once the checkout is known: an option
+# that was given keeps its value
+VRAM=
+RESERVE=
+SM=
 UVMKO=
 DRMKO=
 ACTIVATE=0
@@ -90,6 +103,7 @@ FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1
 FORBID_RE='(linux|^amdgpu|^radeonkms|^i915kms|^drm|^dmabuf|^nvidia|^lindebugfs)'
 BLOCK="amdgpu radeonkms i915kms drm dmabuf linuxkpi linuxkpi_video lindebugfs linux linux64 linux_common nvidia nvidia-modeset nvidia-drm nvidia_linux nvidia_modeset_linux"
 
+# The options are read first, so -h and a usage error need no checkout and no guard.
 help() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0"; exit 0; }
 usage() { echo "make-be.sh: $1 (make-be.sh -h shows every option)" >&2; exit 2; }
 need() { [ "$2" -ge 2 ] || usage "$1 needs a value"; }
@@ -99,9 +113,9 @@ while [ $# -gt 0 ]; do
 	-b) need "$1" "$#"; BASE=$2; shift 2 ;;
 	-D) need "$1" "$#"; DATE=$2; shift 2 ;;
 	-n) need "$1" "$#"; SEQ=$2; shift 2 ;;
-	-m) need "$1" "$#"; STAGE=$2; STAGE_GIVEN=1; shift 2 ;;
-	-s) need "$1" "$#"; SHAFILE=$2; SHAFILE_GIVEN=1; shift 2 ;;
-	-o) need "$1" "$#"; COPYOUT=$2; COPYOUT_GIVEN=1; shift 2 ;;
+	-m) need "$1" "$#"; [ -n "$2" ] || usage "-m must not be empty"; STAGE=$2; STAGE_GIVEN=1; shift 2 ;;
+	-s) need "$1" "$#"; [ -n "$2" ] || usage "-s must not be empty"; SHAFILE=$2; shift 2 ;;
+	-o) need "$1" "$#"; [ -n "$2" ] || usage "-o must not be empty"; COPYOUT=$2; COPYOUT_GIVEN=1; shift 2 ;;
 	-V) need "$1" "$#"; VRAM=$2; shift 2 ;;
 	-R) need "$1" "$#"; RESERVE=$2; shift 2 ;;
 	-S) need "$1" "$#"; SM=$2; shift 2 ;;
@@ -113,13 +127,99 @@ while [ $# -gt 0 ]; do
 	*) usage "unknown argument: $1" ;;
 	esac
 done
-_root_opts=
-[ "$STAGE_GIVEN" = 1 ] || _root_opts="$_root_opts -m"
-[ "$SHAFILE_GIVEN" = 1 ] || _root_opts="$_root_opts -s"
-[ "$COPYOUT_GIVEN" = 1 ] || _root_opts="$_root_opts -o"
-if [ -n "$_root_opts" ]; then guard_work_default "$(id -u)" make-be.sh "${_root_opts# }" || exit $?; fi
+
+# The work-root guard is the file beside this script.  It is checked before it is sourced, because a
+# sourced file runs: it must be a regular file (no symbolic link), owned by root or by the account
+# that runs the kit, not writable by the group or by everyone, at its expected place, and, in a
+# checkout, equal to the committed one (unless the work tree is installed as it is: NVNT_NO_GIT_CHECK).
+# A guard that is not trusted is not run, and the kit says what to do.
+GUARD=$KITDIR/guard.sh
+guard_refuse() {
+	echo "make-be.sh: the work-root guard $1: $GUARD; copy tests/native-tools-testboot/guard.sh of the reviewed commit beside this script (from a complete checkout) and run again" >&2
+	exit 2
+}
+[ -e "$GUARD" ] || guard_refuse "is missing"
+[ ! -L "$GUARD" ] || guard_refuse "is a symbolic link"
+[ -f "$GUARD" ] || guard_refuse "is not a regular file"
+_gst=$(stat -f '%u %Lp' "$GUARD" 2> /dev/null) || guard_refuse "cannot be examined"
+_gown=${_gst%% *}
+_gmode=${_gst##* }
+case $_gown$_gmode in '' | *[!0-9]*) guard_refuse "cannot be examined (stat printed [$_gst])" ;; esac
+[ "$_gown" = 0 ] || [ "$_gown" = "$ME" ] || guard_refuse "belongs to another account (uid $_gown)"
+[ $(( 0$_gmode & 022 )) -eq 0 ] || guard_refuse "is writable by the group or by everyone (mode $_gmode)"
+# The root of the tree the kit lies in: computed with a checked cd, in canonical form, and checked
+# below (guard_repo_root), never assumed from the depth of the kit directory.
+ROOT=$(CDPATH= cd -- "$KITDIR/../.." && pwd -P) || exit 2
+[ -n "$ROOT" ] || { echo "make-be.sh: the root of the tree could not be found" >&2; exit 2; }
+if [ -e "$ROOT/.git" ]; then
+	# a .git entry is not believed: git must name ROOT as the top level of a work tree (an empty .git
+	# file, or a nested directory inside a larger repository, is not one)
+	_gtop=$(git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" rev-parse --show-toplevel 2> /dev/null) && _gtop=$(CDPATH= cd -- "$_gtop" 2> /dev/null && pwd -P) || _gtop=
+	[ "$_gtop" = "$ROOT" ] || { echo "make-be.sh: $ROOT has a .git entry but is not the top level of a git work tree (git names '${_gtop:-nothing}'): it is not the root of a checkout the kit lies in; run the kit from the checkout" >&2; exit 2; }
+	if [ "$NOGIT" = 0 ]; then
+		git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" show HEAD:tests/native-tools-testboot/guard.sh 2> /dev/null | cmp -s - "$GUARD" ||
+			guard_refuse "differs from the one committed at HEAD of $ROOT: the commit is what gets installed, so commit the guard"
+	fi
+fi
+# A guard that does not parse, or that fails while it is read, is refused with the same message:
+# under set -e a failure inside the sourced file would end the kit without a word.
+sh -n "$GUARD" 2> /dev/null || guard_refuse "does not parse as a shell file (sh -n)"
+set +e
+. "$GUARD"
+_grc=$?
+set -e
+[ "$_grc" = 0 ] || guard_refuse "could not be loaded (it returned $_grc)"
+
+# The kit lies in a checkout (a git work tree whose top level is ROOT and whose tests directory holds
+# the kit), or, under the test hook that installs the tree as it is, in an extracted archive of the
+# repository (no git metadata).  Anything else is refused: the depth of the kit directory says
+# nothing, and a kit extracted on its own would name "/" here.
+ARCHIVE=0
+if guard_repo_root "$ROOT" "$KITDIR"; then
+	REPO=$ROOT
+elif [ "$NOGIT" = 1 ] && guard_archive_root "$ROOT" "$KITDIR"; then
+	REPO=$ROOT
+	ARCHIVE=1
+else
+	echo "make-be.sh: $ROOT is not the root of a checkout the kit lies in (a git work tree whose tests directory holds $KITDIR): the depth of the kit directory says nothing; run the kit from the checkout (an extracted archive is accepted only with GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1, not as root)" >&2
+	exit 2
+fi
+# An archive is not a checkout: it has no work directory to take a default from.
+WORKREPO=$REPO
+[ "$ARCHIVE" = 0 ] || WORKREPO=
+# the board of this host: the defaults of -V, -R and -S
+BOARD=$REPO/tests/libnvrm/board-amp001.env
+guard_trusted_file "$ME" "$BOARD" || { echo "make-be.sh: the board file is not trusted (see above): $BOARD" >&2; exit 2; }
+. "$BOARD"
+[ -n "$VRAM" ] || VRAM=$BOARD_VRAM_BYTES
+[ -n "$RESERVE" ] || RESERVE=$BOARD_VRAM_RESERVE_MAX_BYTES
+[ -n "$SM" ] || SM=$BOARD_SM
+BECTL=bectl
+if [ "$HOOKS" = 1 ]; then
+	BECTL=${NVNT_BECTL:-bectl}
+	[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
+fi
+
+# The work root: decided by the shared guard, before any path is taken from it.  The guard decides on
+# the paths that are really used: the stage and the copy-out come from the work root when they are not
+# given, and the hash list is the staged list unless it is given (it follows the stage, so it is not
+# named).  A GB10_WORK that is set is checked even when no path needs it: a value that is not a plain
+# absolute path is a mistake whatever the options say.
+_root_opts=$(guard_work_options "$STAGE_GIVEN" "$COPYOUT_GIVEN")
+WORK=
+if [ -n "$_root_opts" ] || [ -n "${GB10_WORK:-}" ]; then
+	guard_work_default "$ME" make-be.sh "$_root_opts" || exit $?
+	WORK=$(guard_work_root "$ME" "$WORKREPO" "$KITDIR") || { echo "make-be.sh: no work root (see above): pass ${_root_opts:-the paths}, or set GB10_WORK=/absolute/path" >&2; exit 2; }
+fi
+# The defaults of the work root are taken after the guard: the guard has said whether root may use
+# them at all.  Every path option is an absolute path: a relative one names a different place in
+# every directory the kit is started in.
+[ "$STAGE_GIVEN" = 1 ] || STAGE=$WORK/logs/native-tools/stage
+[ "$COPYOUT_GIVEN" = 1 ] || COPYOUT=$WORK/logs/native-tools-testboot
 [ -n "$BASE" ] || BASE=$NORMAL
 [ -n "$SHAFILE" ] || SHAFILE=$STAGE/SHA256.txt
+guard_work_abs "make-be.sh: -m" "$STAGE" || exit 2
+guard_work_abs "make-be.sh: -s" "$SHAFILE" || exit 2
 case $DATE in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "make-be.sh: -D must be YYYYMMDD" >&2; exit 2 ;; esac
 case $SEQ in '' | *[!0-9]* | 0*) echo "make-be.sh: -n must be a positive number" >&2; exit 2 ;; esac
 case $VRAM in '' | *[!0-9]*) echo "make-be.sh: -V must be a number of bytes" >&2; exit 2 ;; esac
@@ -132,7 +232,7 @@ _l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit
 for _n in "$NORMAL" "$BASE"; do
 	case $_n in *[!A-Za-z0-9._-]* | -* | '') echo "make-be.sh: unusable boot environment name: $_n" >&2; exit 2 ;; esac
 done
-if [ "$HOOKS" = 0 ] && [ "$(id -u)" != 0 ]; then echo "make-be.sh: run as root (bectl and the root-owned installs need it)" >&2; exit 2; fi
+if [ "$HOOKS" = 0 ] && [ "$ME" != 0 ]; then echo "make-be.sh: run as root (bectl and the root-owned installs need it)" >&2; exit 2; fi
 if [ "$HOOKS" = 1 ] && [ -n "${NVNT_NOT_ROOT:-}" ]; then ROOTOWN=; else ROOTOWN="-o root -g wheel"; fi
 
 BE=nvidia-native-tools-test-$DATE-$SEQ
@@ -147,7 +247,8 @@ if printf '%s\n' "$_list" | grep -qx "$BE"; then
 fi
 
 if [ "$HOOKS" = 1 ] && [ -n "${NVNT_MNT:-}" ]; then
-	MNT=$NVNT_MNT
+	# the mount point is written into: an absolute path in canonical form, like every path the kit writes
+	MNT=$(guard_work_canon "make-be.sh: NVNT_MNT" "$NVNT_MNT") || exit 2
 	MNTBASE=
 else
 	MNTBASE=$(mktemp -d /var/run/nvnt.XXXXXXXX)

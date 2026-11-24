@@ -10,11 +10,17 @@
 #   BE         a boot environment to mount with bectl (run as root)
 #   -m ROOT    check the tree already mounted at ROOT instead
 #   -s FILE    the hash list it was built from (default $GB10_WORK/logs/native-tools/stage/SHA256.txt,
-#              GB10_WORK defaulting to $HOME/work/gb10)
+#              GB10_WORK defaulting to <repo>/work); root must set GB10_WORK when the list is taken
+#              from the work root (that is, when -s is omitted): the work directory belongs to the
+#              developer account and root must not write into it
 #   -c COMMIT  the commit the kit must record (default HEAD of this repository)
 #   -U         do not check root ownership (the host test installs without root; only with -m)
-# Environment: with GB10_TEST_HOOKS=1, not root and NVNT_NO_GIT_CHECK=1, an archive without git metadata is still
-# checked; the commit comparisons fail, as the host test already expects, instead of hiding every later check.
+# The script must lie in a checkout (a git work tree whose tests directory holds it); the work-root guard beside it
+# (guard.sh) is checked before it is sourced and must be the committed one.
+# Environment: with GB10_TEST_HOOKS=1, not root and NVNT_NO_GIT_CHECK=1, an extracted archive of the repository
+# (tests/native-tools-testboot under a root without git metadata) is still checked; the commit comparisons fail,
+# as the host test already expects, instead of hiding every later check, and the hash list must then be given with
+# -s or GB10_WORK must be set (an archive is not a checkout and has no work directory to take the default from).
 #
 # Checks, each printed "ok" or "FAIL"; exit 0 when all are ok, 1 when one failed, 2 on a usage error:
 #   - staged files: the five files of the list equal their full hashes, are root-owned (0444, nvrm-info 0555), are
@@ -39,20 +45,22 @@ set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
-KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
-. "$KITDIR/guard.sh"
-WORK=${GB10_WORK:-$HOME/work/gb10}
-SHAFILE=$WORK/logs/native-tools/stage/SHA256.txt
-SHAFILE_GIVEN=0
+KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 2
+[ -n "$KITDIR" ] || { echo "check-be.sh: the kit directory could not be found" >&2; exit 2; }
+ME=$(id -u) || exit 2
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+NOGIT=0
+if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$ME" != 0 ] && [ "${NVNT_NO_GIT_CHECK:-0}" = 1 ]; then NOGIT=1; fi
+SHAFILE=
 COMMIT=
 MNT=
 NOOWNER=0
+# The options are read first, so -h and a usage error need no checkout and no guard.
 help() { awk 'NR >= 5 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 5 { exit }' "$0"; exit 0; }
 usage() { echo "check-be.sh: ${1:-give a boot environment or -m ROOT} (check-be.sh -h shows every option)" >&2; exit 2; }
 while [ $# -gt 0 ]; do
 	case $1 in
-	-s) [ $# -ge 2 ] || usage "-s needs a value"; SHAFILE=$2; SHAFILE_GIVEN=1; shift 2 ;;
+	-s) [ $# -ge 2 ] || usage "-s needs a value"; [ -n "$2" ] || usage "-s must not be empty"; SHAFILE=$2; shift 2 ;;
 	-c) [ $# -ge 2 ] || usage "-c needs a value"; COMMIT=$2; shift 2 ;;
 	-m) [ $# -ge 2 ] || usage "-m needs a value"; MNT=$2; shift 2 ;;
 	-U) NOOWNER=1; shift ;;
@@ -65,15 +73,75 @@ BE=${1:-}
 [ -n "$MNT" ] || [ -n "$BE" ] || usage
 [ -z "$MNT" ] || [ -z "$BE" ] || { echo "check-be.sh: give a boot environment or -m ROOT, not both" >&2; exit 2; }
 [ "$NOOWNER" = 0 ] || [ -n "$MNT" ] || { echo "check-be.sh: -U is only for a tree given with -m" >&2; exit 2; }
-if [ "$SHAFILE_GIVEN" = 0 ]; then guard_work_default "$(id -u)" check-be.sh -s || exit $?; fi
+
+# The work-root guard is the file beside this script.  It is checked before it is sourced, because a
+# sourced file runs: a regular file (no symbolic link), owned by root or by the account that runs the
+# script, not writable by the group or by everyone, and, in a checkout, equal to the committed one
+# (unless the test hook NVNT_NO_GIT_CHECK says the work tree is what is checked).
+GUARD=$KITDIR/guard.sh
+guard_refuse() {
+	echo "check-be.sh: the work-root guard $1: $GUARD; copy tests/native-tools-testboot/guard.sh of the reviewed commit beside this script (from a complete checkout) and run again" >&2
+	exit 2
+}
+[ -e "$GUARD" ] || guard_refuse "is missing"
+[ ! -L "$GUARD" ] || guard_refuse "is a symbolic link"
+[ -f "$GUARD" ] || guard_refuse "is not a regular file"
+_gst=$(stat -f '%u %Lp' "$GUARD" 2> /dev/null) || guard_refuse "cannot be examined"
+_gown=${_gst%% *}
+_gmode=${_gst##* }
+case $_gown$_gmode in '' | *[!0-9]*) guard_refuse "cannot be examined (stat printed [$_gst])" ;; esac
+[ "$_gown" = 0 ] || [ "$_gown" = "$ME" ] || guard_refuse "belongs to another account (uid $_gown)"
+[ $(( 0$_gmode & 022 )) -eq 0 ] || guard_refuse "is writable by the group or by everyone (mode $_gmode)"
+ROOT=$(CDPATH= cd -- "$KITDIR/../.." && pwd -P) || exit 2
+[ -n "$ROOT" ] || { echo "check-be.sh: the root of the tree could not be found" >&2; exit 2; }
+if [ -e "$ROOT/.git" ]; then
+	# a .git entry is not believed: git must name ROOT as the top level of a work tree (an empty .git
+	# file, or a nested directory inside a larger repository, is not one)
+	_gtop=$(git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" rev-parse --show-toplevel 2> /dev/null) && _gtop=$(CDPATH= cd -- "$_gtop" 2> /dev/null && pwd -P) || _gtop=
+	[ "$_gtop" = "$ROOT" ] || { echo "check-be.sh: $ROOT has a .git entry but is not the top level of a git work tree (git names '${_gtop:-nothing}'): it is not the root of a checkout the script lies in; run the script from the checkout" >&2; exit 2; }
+	if [ "$NOGIT" = 0 ]; then
+		git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" show HEAD:tests/native-tools-testboot/guard.sh 2> /dev/null | cmp -s - "$GUARD" ||
+			guard_refuse "differs from the one committed at HEAD of $ROOT"
+	fi
+fi
+# A guard that does not parse, or that fails while it is read, is refused with the same message.
+sh -n "$GUARD" 2> /dev/null || guard_refuse "does not parse as a shell file (sh -n)"
+. "$GUARD"
+_grc=$?
+[ "$_grc" = 0 ] || guard_refuse "could not be loaded (it returned $_grc)"
+
+# The script lies in a checkout (a git work tree whose top level is ROOT and whose tests directory
+# holds it), or, under the test hook, in an extracted archive of the repository (no git metadata: the
+# commit comparisons then FAIL, as the host test expects, instead of hiding every later check).
+# Anything else is refused: the depth of the kit directory says nothing.
+NO_GIT=0
+if guard_repo_root "$ROOT" "$KITDIR"; then
+	REPO=$ROOT
+elif [ "$NOGIT" = 1 ] && guard_archive_root "$ROOT" "$KITDIR"; then
+	REPO=$ROOT
+	NO_GIT=1
+else
+	echo "check-be.sh: $ROOT is not the root of a checkout the script lies in (a git work tree whose tests directory holds $KITDIR): the depth of the kit directory says nothing; run the script from the checkout (an extracted archive is accepted only with GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1, not as root)" >&2
+	exit 2
+fi
+# The hash list is taken from the work root when it is not given: the guard decides on that (an empty
+# -s is refused above, so a given list is never the work-root default), and an archive has no work
+# root to take it from (GB10_WORK must name one).  A GB10_WORK that is set is checked even when -s is
+# given: a value that is not a plain absolute path is a mistake whatever the options say.
+if [ -z "$SHAFILE" ] || [ -n "${GB10_WORK:-}" ]; then
+	guard_work_default "$ME" check-be.sh "-s FILE" || exit $?
+	WORKREPO=$REPO
+	[ "$NO_GIT" = 0 ] || WORKREPO=
+	WORK=$(guard_work_root "$ME" "$WORKREPO" "$KITDIR") || { echo "check-be.sh: no work root (see above): pass -s FILE, or set GB10_WORK=/absolute/path" >&2; exit 2; }
+	[ -n "$SHAFILE" ] || SHAFILE=$WORK/logs/native-tools/stage/SHA256.txt
+fi
+guard_work_abs "check-be.sh: -s" "$SHAFILE" || exit 2
 [ -f "$SHAFILE" ] || { echo "check-be.sh: no hash list $SHAFILE (give -s FILE)" >&2; exit 2; }
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 git_() { git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" "$@"; }
 case ${COMMIT:-HEAD} in -*) echo "check-be.sh: the commit must not start with a dash" >&2; exit 2 ;; esac
-NO_GIT=0
-if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ] && [ "${NVNT_NO_GIT_CHECK:-0}" = 1 ] && ! git_ rev-parse --git-dir > /dev/null 2>&1; then
-	# An archive has no commit id: keep COMMIT empty and use NO_GIT to record the deliberate rev-parse bypass.
-	NO_GIT=1; COMMIT=${COMMIT:-}
+if [ "$NO_GIT" = 1 ]; then
+	# An archive has no commit id: keep COMMIT as given (or empty); NO_GIT records the deliberate bypass.
+	COMMIT=${COMMIT:-}
 else
 	COMMIT=$(git_ rev-parse --verify --end-of-options "${COMMIT:-HEAD}^{commit}" 2> /dev/null) || { echo "check-be.sh: -c names no commit of $REPO" >&2; exit 2; }
 fi
@@ -90,7 +158,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ -z "$MNT" ]; then
-	[ "$(id -u)" = 0 ] || { echo "check-be.sh: run as root to mount $BE (or use -m ROOT)" >&2; exit 2; }
+	[ "$ME" = 0 ] || { echo "check-be.sh: run as root to mount $BE (or use -m ROOT)" >&2; exit 2; }
 	MNTBASE=$(mktemp -d /var/run/nvnt-check.XXXXXXXX) || exit 2
 	MNT=$MNTBASE/root
 	mkdir "$MNT" || exit 2
@@ -99,8 +167,10 @@ if [ -z "$MNT" ]; then
 fi
 SCR=$(mktemp -d "${TMPDIR:-/var/run}/nvnt-check-scr.XXXXXXXX") || exit 2
 
-# the one bare-shutdown detector (shared with tests/native_tools_kit_test.sh)
-. "$(dirname "$0")/bare-shutdown-check.sh" || { echo "check-be.sh: cannot read bare-shutdown-check.sh" >&2; exit 2; }
+# the one bare-shutdown detector (shared with tests/native_tools_kit_test.sh): a file this script sources, so it is
+# held to the rule of the guard (a regular file of root or of this account, not writable by others) before it runs
+guard_trusted_file "$ME" "$KITDIR/bare-shutdown-check.sh" || { echo "check-be.sh: bare-shutdown-check.sh is not trusted (see above); restore it from the reviewed commit" >&2; exit 2; }
+. "$KITDIR/bare-shutdown-check.sh" || { echo "check-be.sh: cannot read bare-shutdown-check.sh" >&2; exit 2; }
 
 rc=0
 ok() { echo "ok   $*"; }

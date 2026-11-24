@@ -1,0 +1,20 @@
+# Files the personal-path scan skips, one per line:
+#   <path relative to the repo> <count> <sha256> <ticket> <reason>
+# The count is the number of personal-path occurrences the file holds today: one
+# occurrence is one needle found in the file, so two paths on one line are two
+# occurrences.  The count must be exactly what the file holds: the scan fails
+# when the file holds more paths than the count (a path was added: remove it,
+# or record the count the file holds now), when it holds fewer (a path was
+# removed: record the count the file holds now) and when it holds none (the
+# file is clean: remove the entry), so an exemption cannot outlive the problem
+# it excuses and cannot cover a path that was added later.
+# The sha256 binds the exemption to the content that was approved: it is the
+# sha256 of the exempt file (sha256 -q <file>).  Any change to that file (a
+# path replaced by another one, a line added, a line removed) makes the
+# exemption stale, and the scan refuses it until the entry records the sha256
+# and the count the file holds now.
+# The path must lie inside the repository: an absolute path and a path with a
+# ".." component are refused.  The fields are separated by spaces, so a path
+# that holds a space cannot be exempted (the repository holds no such path).
+# Every entry is printed on every run.
+tests/prime-import-testboot/prime_import_testboot 5 c9eecbd61d5df194a53a3809ab5cd6552a1f88a0e755b376721c1f8a03c533af #2451 home-path defaults in the reboot kit.

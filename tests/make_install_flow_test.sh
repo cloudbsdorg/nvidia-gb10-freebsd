@@ -1419,71 +1419,838 @@ fi
 # same list tests/readme_install_doc_test.sh reads.  README.md, docs/ and man/
 # are covered too.
 needles=$repo/tests/lib/personal-paths.txt
-scan=$S/no-user-paths
 # The list and its samples are read by tests/lib/personal-paths.sh, shared with
 # tests/readme_install_doc_test.sh.  A missing, empty or unreadable list is one
 # failure, never also a pass.
 . "$repo/tests/lib/personal-paths.sh"
-pp_ok=0
 pp_pat=$S/personal-patterns
 pp_allow=$S/personal-allows
-if pp_load "$needles" "$pp_pat" "$pp_allow"; then pp_ok=1; fi
+# The real list, loaded for the check below.  The library's own cases use their
+# own fixture, so a missing real list is one failure (the scan of the tree)
+# and not many.  The scan of the tree loads the real list again and reports a
+# failure of its own (pp_scan_tree).
+pp_load "$needles" "$pp_pat" "$pp_allow" 2>/dev/null || true
 # The library's failure paths: each bad list must fail, never pass.
 pp_t=$S/pp-lists
 mkdir -p "$pp_t"
+# The library's own fixture: a needle the real list does not hold, so a case
+# below can only pass with the fixture and not by accident with the real list.
+pp_lib_n=$pp_t/lib-n
+pp_lib_a=$pp_t/lib-a
+pp_lib_root='/fixture-root/'
+printf '%s\n# sample+: cd %sanyone/x\n' "$pp_lib_root" "$pp_lib_root" > "$pp_lib_n"
+: > "$pp_lib_a"
+if [ -s "$pp_pat" ]; then
+	if [ -z "$(pp_line "$pp_pat" "$pp_allow" "cd $pp_lib_root/anyone/x")" ]; then
+		ok "the library fixture needle is not a needle of the real list"
+	else
+		bad "the library fixture needle is also a needle of the real list: the library cases would depend on the real list"
+	fi
+else
+	ok "the real needle list is missing: the library cases use their own fixture"
+fi
+# pp_file_list ROOT NEEDLELIST OUT is one function, in the shared library
+# (tests/lib/personal-paths.sh): a second copy here would let the fixture and
+# the real scan drift apart.
+pp_defs_lib=$(grep -c '^pp_file_list() {' "$repo/tests/lib/personal-paths.sh" 2> /dev/null || true)
+pp_defs_test=$(grep -c '^pp_file_list() {' "$repo/tests/make_install_flow_test.sh" 2> /dev/null || true)
+if [ "$pp_defs_lib" = 1 ] && [ "$pp_defs_test" = 0 ]; then
+	ok "pp_file_list is defined once, in the shared library"
+else
+	bad "pp_file_list is defined $pp_defs_lib time(s) in the library and $pp_defs_test time(s) in this test"
+fi
+# The needle list is excluded by its exact path: a file called
+# personal-paths.txt anywhere else is scanned like any other file, and its
+# needle is reported.
+pp_tree=$S/pp-tree
+mkdir -p "$pp_tree/lib" "$pp_tree/sub"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_tree/sub/personal-paths.txt"
+: > "$pp_tree/lib/personal-paths.txt"
+: > "$pp_tree/files"
+pp_file_list "$pp_tree" "$pp_tree/lib/personal-paths.txt" "$pp_tree/files"
+if grep -qxF "$pp_tree/sub/personal-paths.txt" "$pp_tree/files" && ! grep -qxF "$pp_tree/lib/personal-paths.txt" "$pp_tree/files"; then
+	ok "the needle list is excluded by its exact path, not by its name"
+else
+	bad "the file list holds: $(tr '\n' ' ' < "$pp_tree/files")"
+fi
+# The exclusion is by exact path, not by a glob pattern: a checkout whose own
+# name holds a glob character does not widen it.
+pp_glob=$S/pp-glob[1]
+mkdir -p "$pp_glob/lib"
+: > "$pp_glob/lib/personal-paths.txt"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_glob/sub-personal-paths.txt"
+: > "$pp_glob/files"
+pp_file_list "$pp_glob" "$pp_glob/lib/personal-paths.txt" "$pp_glob/files"
+if ! grep -qxF "$pp_glob/lib/personal-paths.txt" "$pp_glob/files" && grep -qxF "$pp_glob/sub-personal-paths.txt" "$pp_glob/files"; then
+	ok "the exclusion of the needle list is an exact path, not a glob pattern"
+else
+	bad "the file list of a checkout whose name holds a glob character: $(tr '\n' ' ' < "$pp_glob/files")"
+fi
+# A file name that holds a newline cannot be listed one name per line: the
+# listing refuses it, so the scan fails closed instead of leaving the file
+# unscanned.
+pp_nl=$S/pp-newline
+mkdir -p "$pp_nl"
+nl_file="$pp_nl/clean
+Makefile"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$nl_file"
+: > "$pp_nl/files"
+pp_r=0
+pp_out=$(pp_file_list "$pp_nl" "$pp_nl/none" "$pp_nl/files" 2>&1) || pp_r=$?
+if [ "$pp_r" != 0 ] && printf '%s\n' "$pp_out" | grep -q 'newline'; then
+	ok "a file name that holds a newline is refused: the scan fails closed"
+else
+	bad "a file name that holds a newline: rc=$pp_r out=[$pp_out]"
+fi
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_tree/files" > "$pp_tree/out" 2>&1 || pp_r=$?
+if [ "$pp_r" = 1 ] && grep -q 'sub/personal-paths\.txt' "$pp_tree/out"; then
+	ok "a file called personal-paths.txt outside the needle list is scanned"
+else
+	bad "a file called personal-paths.txt outside the needle list: rc=$pp_r out=[$(cat "$pp_tree/out")]"
+fi
+# The needles of the real list are built in pieces, so this file holds no
+# needle itself: the scan reads this file too.
+pp_dollar='$'
+pp_users='Us''ers/'
 : > "$pp_t/empty"
 printf '# only a comment\n\n' > "$pp_t/comments"
 printf '# sample: x\nfoo\n# sample+: foo\n' > "$pp_t/badkind-sample"
 printf 'foo\n# sample+: foo\n# allow x-literal-long\n' > "$pp_t/badkind-allow"
 printf 'foo\n# sample+:\n' > "$pp_t/badkind-empty"
 printf 'foo\n# sample+: foo\n# the samples below\n' > "$pp_t/badkind-typo-ok"
-pp_load "$pp_t/missing" "$pp_t/n" "$pp_t/a" && bad "pp_load accepts a missing list" || ok "pp_load refuses a missing list"
-for pp_c in empty comments badkind-sample badkind-allow badkind-empty; do
-	if pp_load "$pp_t/$pp_c" "$pp_t/n" "$pp_t/a"; then bad "pp_load accepts the list $pp_c"; else ok "pp_load refuses the list $pp_c"; fi
+# The allow literals: a malformed one makes pp_load fail, because the allows
+# are what the scan removes before it looks for a needle.  An allow that is a
+# needle, or that is contained in one, would remove the needle itself.
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: foo\n' > "$pp_t/allow-short"
+printf '/foo/\n# sample+: /foo/x\n# allow: /foo/bar-long\n' > "$pp_t/allow-slash"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: unrelated-literal\n' > "$pp_t/allow-noneedle"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: \n' > "$pp_t/allow-empty"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: x\n' > "$pp_t/allow-onechar"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: foo/\n' > "$pp_t/allow-needle"
+printf 'abcdefgh/\n# sample+: cd abcdefgh/x\nxabcdefgh/y/\n# sample+: cd xabcdefgh/y/z\n# allow: xabcdefgh/y\n' > "$pp_t/allow-in-needle"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: foo/ bar\n' > "$pp_t/allow-space"
+# The length rule of an allow literal: eight characters are enough, seven are
+# not, and the refusal names the rule it is.  This fixture breaks only that
+# rule: it holds the needle, it is not contained in one, it does not start
+# with "/" and it holds no whitespace.
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: zfoo/txy\n' > "$pp_t/allow-eight"
+printf 'foo/\n# sample+: -Lfoo/x\n# allow: zfoo/tx\n' > "$pp_t/allow-seven"
+# An allow that is a needle of the real list removes that needle: refused.
+printf '%sHOME/work\n# sample+: cd %sHOME/work/x\n# allow: %sHOME/work\n' "$pp_dollar" "$pp_dollar" "$pp_dollar" > "$pp_t/allow-hides-home"
+if pp_load "$pp_t/missing" "$pp_t/n" "$pp_t/a"; then
+	bad "pp_load accepts a missing list"
+else
+	ok "pp_load refuses a missing list"
+fi
+for pp_c in empty comments badkind-sample badkind-allow badkind-empty allow-short allow-slash allow-noneedle allow-empty allow-onechar allow-needle allow-in-needle allow-space allow-hides-home; do
+	if pp_load "$pp_t/$pp_c" "$pp_t/n" "$pp_t/a"; then
+		bad "pp_load accepts the list $pp_c"
+	else
+		ok "pp_load refuses the list $pp_c"
+	fi
 done
 # A comment that merely mentions another word is a comment.
 if pp_load "$pp_t/badkind-typo-ok" "$pp_t/n" "$pp_t/a"; then ok "pp_load keeps a comment whose first word is not sample or allow"; else bad "pp_load refuses a plain comment"; fi
+# The length rule of an allow literal, at its boundary: eight characters are
+# accepted, seven are refused and the refusal says which rule it is.
+if pp_load "$pp_t/allow-eight" "$pp_t/n" "$pp_t/a" 2> "$S/pp-allow-eight.err"; then
+	ok "pp_load accepts an allow literal of eight characters"
+else
+	bad "pp_load refuses an allow literal of eight characters: $(cat "$S/pp-allow-eight.err")"
+fi
+if pp_load "$pp_t/allow-seven" "$pp_t/n" "$pp_t/a" 2> "$S/pp-allow-seven.err"; then
+	bad "pp_load accepts an allow literal of seven characters"
+else
+	if grep -q 'shorter than 8' "$S/pp-allow-seven.err"; then
+		ok "pp_load refuses an allow literal of seven characters, and says it is shorter than 8"
+	else
+		bad "the refusal of a short allow literal does not say 'shorter than 8': $(cat "$S/pp-allow-seven.err")"
+	fi
+fi
 # pp_selftest branches: sample before a needle (both kinds), a needle without a positive sample, a positive
-# sample that misses, a negative sample that is flagged, and each bad allow literal.
+# sample that misses, a negative sample that is flagged, and an allow that hides the path of a positive sample.
 printf '# sample+: x\nfoo\n# sample+: foo\n' > "$pp_t/st-first-pos"
 printf '# sample-: x\nfoo\n# sample+: foo\n' > "$pp_t/st-first-neg"
 printf 'foo\n# sample+: foo\nbar\n' > "$pp_t/st-no-sample"
 printf 'foo\n# sample+: nomatch\n' > "$pp_t/st-misses"
 printf 'foo\n# sample+: foo\n# sample-: a foo b\n' > "$pp_t/st-flagged"
-printf 'foo\n# sample+: foo\n# allow: foo\n' > "$pp_t/st-allow-short"
-printf '/foo/\n# sample+: /foo/x\n# allow: /foo/bar-long\n' > "$pp_t/st-allow-slash"
-printf 'foo\n# sample+: foo\n# allow: unrelated-literal\n' > "$pp_t/st-allow-noneedle"
 printf 'foo\n' > "$pp_t/st-no-samples"
-pp_selftest_refuses() {	# a subshell with silent ok and bad, so only the return status counts
-	pp_load "$pp_t/$1" "$pp_t/n" "$pp_t/a" || return 0
-	(ok() { :; }; bad() { :; }; pp_selftest "$pp_t/$1" "$pp_t/n" "$pp_t/a") && return 1
+# An allow that hides the path of a positive sample is sound by itself (it is
+# no needle and holds none), but the self-test refuses the list: the sample
+# goes through the same matcher as the real scan, and the allow blinds it.
+printf '%s\n# sample+: cd ../../%sanyone/x\n# allow: ../%s\n' "$pp_users" "$pp_users" "$pp_users" > "$pp_t/allow-hides-users"
+pp_selftest_refuses() {	# 0 when the self-test refuses the list, 1 when it accepts it,
+				# 2 when the list did not load: a load failure is not a refusal
+	if ! pp_load "$pp_t/$1" "$pp_t/n" "$pp_t/a"; then
+		return 2
+	fi
+	if (ok() { :; }; bad() { :; }; pp_selftest "$pp_t/$1" "$pp_t/n" "$pp_t/a"); then
+		return 1
+	fi
 	return 0
 }
-for pp_c in st-first-pos st-first-neg st-no-sample st-misses st-flagged st-allow-short st-allow-slash st-allow-noneedle st-no-samples; do
-	if pp_selftest_refuses "$pp_c"; then ok "pp_selftest refuses the list $pp_c"; else bad "pp_selftest accepts the list $pp_c"; fi
+for pp_c in st-first-pos st-first-neg st-no-sample st-misses st-flagged st-no-samples allow-hides-users; do
+	pp_r=0
+	pp_selftest_refuses "$pp_c" || pp_r=$?
+	if [ "$pp_r" = 0 ]; then
+		ok "pp_selftest refuses the list $pp_c"
+	elif [ "$pp_r" = 1 ]; then
+		bad "pp_selftest accepts the list $pp_c"
+	else
+		bad "the list $pp_c did not load: the self-test could not be run"
+	fi
 done
 # a good list, with allow, negative sample and no newline at the end, passes
 printf 'foo/\n# sample+: -Lfoo/x\n# sample-: a zfoo/test\n# allow: zfoo/test\n# sample+: ../foo/x' > "$pp_t/st-good"
-pp_load "$pp_t/st-good" "$pp_t/n" "$pp_t/a" && (ok() { :; }; bad() { :; }; pp_selftest "$pp_t/st-good" "$pp_t/n" "$pp_t/a") && ok "pp_selftest passes a good list that has no final newline" || bad "pp_selftest refuses a good list"
-if [ "$pp_ok" = 1 ]; then
-	pp_selftest "$needles" "$pp_pat" "$pp_allow" || true
-	: > "$S/pp-files"
-	for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
-		find "$repo/$p" -type f >> "$S/pp-files" 2>/dev/null || true
-	done
-	for p in "$repo"/tests/*.sh "$repo"/tests/fixtures/*; do
-		[ ! -f "$p" ] || printf '%s\n' "$p" >> "$S/pp-files"
-	done
-	pp_hits "$pp_pat" "$pp_allow" $(cat "$S/pp-files") > "$scan" 2>/dev/null || bad "personal-path scan could not run"
-	if [ -s "$scan" ]; then
-		sed "s|$repo|<repo>|g" "$scan"
-		bad "personal paths remain"
+if pp_load "$pp_t/st-good" "$pp_t/n" "$pp_t/a"; then
+	if (ok() { :; }; bad() { :; }; pp_selftest "$pp_t/st-good" "$pp_t/n" "$pp_t/a"); then
+		ok "pp_selftest passes a good list that has no final newline"
 	else
-		ok "no personal paths in code, tests, README.md, docs or man"
+		bad "pp_selftest refuses a good list"
 	fi
 else
-	bad "tests/lib/personal-paths.txt is missing, empty, unreadable or has a mistyped line"
+	bad "pp_load refuses a good list"
 fi
+# pp_hits with no file looks at nothing: it must not read stdin, because "could
+# not look" is not "found nothing".
+pp_out=$(printf '%sanyone/x\n' "$pp_lib_root" | pp_hits "$pp_lib_n" "$pp_lib_a" 2>/dev/null)
+pp_rc=$?
+if [ "$pp_rc" = 2 ] && [ -z "$pp_out" ]; then
+	ok "pp_hits with no file looks at nothing (it does not read stdin)"
+else
+	bad "pp_hits with no file: rc=$pp_rc output=[$pp_out]"
+fi
+# A needle list that holds no needle is a failure, never a clean scan: the
+# matcher would load nothing and find nothing, which is not the same thing.
+: > "$pp_t/empty-needles"
+mkdir -p "$pp_t/needle-dir"
+for pp_c in empty-needles needle-dir; do
+	pp_r=0
+	pp_out=$(pp_hits "$pp_t/$pp_c" "$pp_lib_a" "$pp_tree/sub/personal-paths.txt" 2>&1) || pp_r=$?
+	if [ "$pp_r" != 0 ]; then
+		ok "a needle list the matcher cannot read, or one that holds no needle, is refused ($pp_c): it is not a clean scan"
+	else
+		bad "a needle list that holds no needle is accepted ($pp_c): rc=$pp_r out=[$pp_out]"
+	fi
+done
+# A needle list that holds a blank line holds no needle: the matcher would
+# build an empty regexp, which matches every line (and, in count mode, never
+# advances).  It is refused, not used.
+printf '\n' > "$pp_t/blank-needle"
+pp_r=0
+pp_out=$(pp_hits "$pp_t/blank-needle" "$pp_lib_a" "$pp_tree/sub/personal-paths.txt" 2> /dev/null) || pp_r=$?
+if [ "$pp_r" = 2 ] && [ -z "$pp_out" ]; then
+	ok "a needle list that holds a blank line is refused, and reports no hit"
+else
+	bad "a needle list that holds a blank line: rc=$pp_r out=[$pp_out]"
+fi
+pp_r=0
+pp_out=$(pp_count "$pp_t/blank-needle" "$pp_lib_a" "$pp_tree/sub/personal-paths.txt" 2> /dev/null) || pp_r=$?
+if [ "$pp_r" = 2 ] && [ -z "$pp_out" ]; then
+	ok "pp_count refuses a needle list that holds a blank line (it does not hang)"
+else
+	bad "pp_count with a needle list that holds a blank line: rc=$pp_r out=[$pp_out]"
+fi
+# An allow list that holds a blank line holds an empty literal: it would
+# remove the empty string from every line, and it never ends.  It is refused.
+printf '\n' > "$pp_t/blank-allow"
+pp_r=0
+pp_out=$(pp_hits "$pp_lib_n" "$pp_t/blank-allow" "$pp_tree/sub/personal-paths.txt" 2> /dev/null) || pp_r=$?
+if [ "$pp_r" = 2 ] && [ -z "$pp_out" ]; then
+	ok "an allow list that holds a blank line is refused, and reports no hit"
+else
+	bad "an allow list that holds a blank line: rc=$pp_r out=[$pp_out]"
+fi
+pp_r=0
+pp_out=$(pp_count "$pp_lib_n" "$pp_t/blank-allow" "$pp_tree/sub/personal-paths.txt" 2> /dev/null) || pp_r=$?
+if [ "$pp_r" = 2 ] && [ -z "$pp_out" ]; then
+	ok "pp_count refuses an allow list that holds a blank line (it does not hang)"
+else
+	bad "pp_count with an allow list that holds a blank line: rc=$pp_r out=[$pp_out]"
+fi
+# An allow literal that holds two needles removes both of them from every
+# line: one broad allow hides what the scan is there to find.  It is refused.
+printf 'home/\n# sample+: cd home/x\nsecret/\n# sample+: cd secret/y\n# allow: home/secret/token\n' > "$pp_t/allow-two-needles"
+if pp_load "$pp_t/allow-two-needles" "$pp_t/n" "$pp_t/a" 2> "$S/pp-allow-two.err"; then
+	bad "pp_load accepts an allow literal that holds two needles"
+else
+	if grep -q 'more than one needle' "$S/pp-allow-two.err"; then
+		ok "pp_load refuses an allow literal that holds two needles, and says so"
+	else
+		bad "the refusal of an allow literal with two needles does not say why: $(cat "$S/pp-allow-two.err")"
+	fi
+fi
+# The file list is not an input of the scan: it does not hold itself.  The
+# scratch path holds the fixture needle, so a list that held itself would be
+# reported as a hit.
+pp_self=$S/fixture-root/tree
+mkdir -p "$pp_self/sub"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_self/sub/hit.txt"
+: > "$pp_self/files"
+pp_file_list "$pp_self" "$pp_self/lib/personal-paths.txt" "$pp_self/files"
+if grep -qxF "$pp_self/files" "$pp_self/files"; then
+	bad "the file list holds itself: $(tr '\n' ' ' < "$pp_self/files")"
+else
+	ok "the file list does not hold itself"
+fi
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_self/files" 2>&1) || pp_r=$?
+if [ "$pp_r" = 1 ] && ! printf '%s\n' "$pp_out" | grep -qF "$pp_self/files:"; then
+	ok "the file list is not scanned as an input of the scan"
+else
+	bad "the file list is scanned as an input: rc=$pp_r out=[$pp_out]"
+fi
+# An empty file list is an error, never a clean scan.
+: > "$pp_t/empty-list"
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_t/empty-list" > /dev/null 2>&1 || pp_r=$?
+if [ "$pp_r" = 2 ]; then
+	ok "pp_scan refuses an empty file list (could not look, not clean)"
+else
+	bad "pp_scan with an empty file list returned $pp_r"
+fi
+# The exemptions: a file listed in tests/lib/personal-paths.exempt is skipped
+# by the scan, the entry is printed on every run, and the exemption fails when
+# the file is gone, changed, holds no personal path any more or holds a number
+# of personal paths other than the one the entry records: an exemption cannot
+# outlive the problem it excuses and cannot cover a path that was added later.
+pp_x=$S/pp-exempt
+mkdir -p "$pp_x"
+# A file that holds a needle, one that holds none, and one that holds two.
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_x/hit.txt"
+printf 'cd %sanyone/x\ncd %sanyone/y\n' "$pp_lib_root" "$pp_lib_root" > "$pp_x/hit2.txt"
+printf 'nothing personal here\n' > "$pp_x/clean.txt"
+# The sha256 of a file: an exemption is bound to the content it approved.
+pp_sha_hit=$(sha256 -q "$pp_x/hit.txt")
+pp_sha_hit2=$(sha256 -q "$pp_x/hit2.txt")
+pp_sha_clean=$(sha256 -q "$pp_x/clean.txt")
+# The count of a file: the number of personal-path occurrences, not the number
+# of lines that hold one.  Two paths on one line are two occurrences.
+pp_c1=$(pp_count "$pp_lib_n" "$pp_lib_a" "$pp_x/hit.txt")
+printf 'cd %sanyone/x cd %sanyone/y\n' "$pp_lib_root" "$pp_lib_root" > "$pp_x/two-on-one-line.txt"
+pp_c2=$(pp_count "$pp_lib_n" "$pp_lib_a" "$pp_x/two-on-one-line.txt")
+pp_sha_two=$(sha256 -q "$pp_x/two-on-one-line.txt")
+if [ "$pp_c1" = 1 ] && [ "$pp_c2" = 2 ]; then
+	ok "the count of a file is the number of personal-path occurrences, not the number of lines"
+else
+	bad "the count of the fixtures: one path=$pp_c1 two paths on one line=$pp_c2 (want 1 and 2)"
+fi
+printf '%s\n%s\n' "$pp_x/hit.txt" "$pp_x/clean.txt" > "$pp_x/files"
+printf '%s\n' "$pp_x/hit.txt" > "$pp_x/files-hit"
+: > "$pp_x/skip-none"
+# A skip entry is "<path> <sha256>": the scan skips a file only while it still
+# holds the content the exemption approved.
+printf '%s %s\n' "$pp_x/hit.txt" "$pp_sha_hit" > "$pp_x/skip-hit"
+# Without a skip list the scan reports the hit; with it, the scan is clean.
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files" > "$pp_x/out" 2>&1 || pp_r=$?
+if [ "$pp_r" = 1 ] && grep -q 'hit\.txt' "$pp_x/out"; then
+	ok "the scan reports a hit in a file it was not told to skip"
+else
+	bad "the scan without a skip list returned $pp_r: $(cat "$pp_x/out")"
+fi
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files" "$pp_x/skip-hit" > "$pp_x/out" 2>&1 || pp_r=$?
+if [ "$pp_r" = 0 ] && [ ! -s "$pp_x/out" ]; then
+	ok "the scan skips exactly the files in the skip list"
+else
+	bad "the scan with a skip list returned $pp_r: $(cat "$pp_x/out")"
+fi
+# A skip list that holds a path without its sha256 is refused: a skip that is
+# not bound to a content is a skip that can hide anything.
+printf '%s\n' "$pp_x/hit.txt" > "$pp_x/skip-nocount"
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-hit" "$pp_x/skip-nocount" > "$pp_x/out" 2>&1 || pp_r=$?
+if [ "$pp_r" = 2 ] && grep -q 'holds no sha256' "$pp_x/out"; then
+	ok "a skip list entry without a sha256 is refused"
+else
+	bad "a skip list entry without a sha256: rc=$pp_r out=[$(cat "$pp_x/out")]"
+fi
+# A list whose every file is skipped is a scan that looked at nothing: it is
+# "could not look", never a clean result.
+pp_r=0
+pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-hit" "$pp_x/skip-hit" > "$pp_x/out" 2>&1 || pp_r=$?
+if [ "$pp_r" = 2 ] && grep -q 'was skipped' "$pp_x/out"; then
+	ok "a list whose every file is skipped is could not look, not clean"
+else
+	bad "a list whose every file is skipped returned $pp_r: $(cat "$pp_x/out")"
+fi
+# A scan that could not look names the file and the reason, and the hits it
+# found before the failure are still printed.
+printf '%s\n%s\n' "$pp_x/hit.txt" "$pp_x/nosuchfile" > "$pp_x/files-missing"
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-missing" 2> "$pp_x/err")
+pp_r=$?
+if [ "$pp_r" = 2 ] && grep -qF "cannot read: $pp_x/nosuchfile" "$pp_x/err" && printf '%s\n' "$pp_out" | grep -q 'hit\.txt'; then
+	ok "a scan that could not look names the file, gives the reason and prints the hits it found"
+else
+	bad "a scan that could not look: rc=$pp_r err=[$(cat "$pp_x/err")] out=[$pp_out]"
+fi
+# pp_xscan: the report of an exemption file and its check, as one output.  The
+# report comes first: every entry is printed on every run, even when the check
+# of the entries fails.
+pp_xscan() {
+	pp_exempt_report "$1" 2>&1
+	pp_exempt_scan "$1" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1
+}
+# An exemption of a file that holds a needle: the entry is printed and the
+# file is skipped.
+printf 'hit.txt 1 %s #T1 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-good"
+: > "$pp_x/skip"
+pp_xout=$(pp_xscan "$pp_x/exempt-good")
+pp_xrc=$?
+if [ "$pp_xrc" = 0 ] && printf '%s\n' "$pp_xout" | grep -q "^exempt: hit\.txt 1 $pp_sha_hit (#T1: the reason)\$" && grep -qx "$pp_x/hit.txt $pp_sha_hit" "$pp_x/skip"; then
+	ok "an exemption is printed on every run and its file is skipped"
+else
+	bad "the exemption of a file that holds a needle: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+# An exemption that records the count of the file: a file that holds more (a
+# path was added) is refused, so the exemption cannot cover a later path.
+printf 'hit2.txt 1 %s #T5 the reason\n' "$pp_sha_hit2" > "$pp_x/exempt-more"
+pp_xout=$(pp_xscan "$pp_x/exempt-more")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'holds more personal paths than the exemption records: hit2\.txt'; then
+	ok "an exemption that holds more personal paths than it records is refused"
+else
+	bad "an exemption that holds more personal paths than it records: rc=$pp_xrc out=[$pp_xout]"
+fi
+# The same file with the count it really holds: accepted.
+printf 'hit2.txt 2 %s #T6 the reason\n' "$pp_sha_hit2" > "$pp_x/exempt-count"
+pp_xout=$(pp_xscan "$pp_x/exempt-count")
+pp_xrc=$?
+if [ "$pp_xrc" = 0 ] && printf '%s\n' "$pp_xout" | grep -q "^exempt: hit2\.txt 2 $pp_sha_hit2 (#T6: the reason)\$"; then
+	ok "an exemption that records the count the file holds is accepted"
+else
+	bad "an exemption that records the count the file holds: rc=$pp_xrc out=[$pp_xout]"
+fi
+# An exemption of a file that is gone: the exemption has outlived its problem.
+printf 'gone.txt 1 %s #T2 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-gone"
+pp_xout=$(pp_xscan "$pp_x/exempt-gone")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'does not exist: gone\.txt' && printf '%s\n' "$pp_xout" | grep -q 'remove its line'; then
+	ok "an exemption of a file that is gone is refused, and says what to do"
+else
+	bad "the exemption of a file that is gone: rc=$pp_xrc out=[$pp_xout]"
+fi
+# An exemption of a file that no longer holds a personal path: refused too.
+printf 'clean.txt 1 %s #T3 the reason\n' "$pp_sha_clean" > "$pp_x/exempt-clean"
+pp_xout=$(pp_xscan "$pp_x/exempt-clean")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'no longer holds a personal path: clean\.txt' && printf '%s\n' "$pp_xout" | grep -q 'remove its line'; then
+	ok "an exemption of a file that no longer holds a personal path is refused, and says what to do"
+else
+	bad "the exemption of a file that no longer holds a personal path: rc=$pp_xrc out=[$pp_xout]"
+fi
+# A malformed exemption entry: refused, and the message says what an entry
+# looks like (it does not say the exemption outlived its problem: the entry
+# was never usable).
+printf 'onlyonefield\n' > "$pp_x/exempt-bad"
+pp_xout=$(pp_xscan "$pp_x/exempt-bad")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'malformed' && printf '%s\n' "$pp_xout" | grep -q 'expected:' && ! printf '%s\n' "$pp_xout" | grep -q 'outlived'; then
+	ok "a malformed exemption entry is refused, and the message says what an entry looks like"
+else
+	bad "a malformed exemption entry: rc=$pp_xrc out=[$pp_xout]"
+fi
+# An exemption file that cannot be read is not an exemption.
+pp_xout=$(pp_exempt_scan "$pp_x/exempt-missing" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 2 ]; then
+	ok "an unreadable exemption file is refused"
+else
+	bad "an unreadable exemption file: rc=$pp_xrc out=[$pp_xout]"
+fi
+# The count of an exemption is exact: a file that holds fewer personal paths
+# than the entry records is refused too, so a stale count cannot cover the
+# paths that are added later.
+printf 'hit.txt 2 %s #T7 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-few"
+pp_xout=$(pp_xscan "$pp_x/exempt-few")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'holds fewer personal paths than the exemption records: hit\.txt'; then
+	ok "an exemption that records more personal paths than the file holds is refused"
+else
+	bad "an exemption that records more personal paths than the file holds: rc=$pp_xrc out=[$pp_xout]"
+fi
+# Two personal paths on one line are two occurrences: an exemption that
+# records one of them is refused, and the place of the hit is named.
+printf 'two-on-one-line.txt 1 %s #T8 the reason\n' "$pp_sha_two" > "$pp_x/exempt-oneline"
+pp_xout=$(pp_xscan "$pp_x/exempt-oneline")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'holds more personal paths than the exemption records: two-on-one-line\.txt'; then
+	ok "an exemption that records one path for a file that holds two on one line is refused"
+else
+	bad "an exemption of a file with two paths on one line: rc=$pp_xrc out=[$pp_xout]"
+fi
+# The refusal names where the paths are, so the operator can act on it.
+printf '%s\n' "$pp_xout" | grep -q 'two-on-one-line\.txt:1' && ok "the refusal names the place of the personal path" || bad "the refusal does not name the place of the personal path: [$pp_xout]"
+# An exemption path outside the repository is refused: it would exempt a file
+# the scan never looks at, and it is not the file the entry names.
+mkdir -p "$pp_x/sub"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_x/outside.txt"
+printf '../outside.txt 1 %s #T9 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-outside"
+: > "$pp_x/skip"
+pp_xout=$(pp_exempt_scan "$pp_x/exempt-outside" "$pp_x/sub" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q '\.\. component: \.\./outside\.txt' && [ ! -s "$pp_x/skip" ]; then
+	ok "an exemption path that holds a .. component is refused, and nothing is skipped"
+else
+	bad "an exemption path outside the repository: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+printf '/etc/hosts 1 %s #T10 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-absolute"
+pp_xout=$(pp_exempt_scan "$pp_x/exempt-absolute" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'is absolute: /etc/hosts' && [ ! -s "$pp_x/skip" ]; then
+	ok "an exemption path that is absolute is refused, and nothing is skipped"
+else
+	bad "an absolute exemption path: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+# The exemption is bound to the content it approved: a path that is replaced by
+# another one leaves the count the same, and the exemption is refused all the
+# same.  The file that changed is not skipped.
+printf 'cd %sanyone/z\n' "$pp_lib_root" > "$pp_x/changed.txt"
+printf 'changed.txt 1 %s #T11 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-changed"
+: > "$pp_x/skip"
+pp_xout=$(pp_xscan "$pp_x/exempt-changed")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'changed since the exemption was recorded: changed\.txt' && [ ! -s "$pp_x/skip" ]; then
+	ok "an exemption whose file changed is refused: the count alone does not bind it"
+else
+	bad "an exemption whose file changed: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+# A count that does not fit the shell integer is compared all the same, as a
+# decimal string, and it is simply a count the file does not hold: the
+# comparison of an oversized number with test(1) would be an error, and an
+# error must never read as "equal".  Nothing is skipped.  There is no other
+# bound on a count: a count is exactly what the file holds, however large.
+printf 'hit.txt 9223372036854775808 %s #T12 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-huge"
+: > "$pp_x/skip"
+pp_xout=$(pp_xscan "$pp_x/exempt-huge")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'holds fewer personal paths than the exemption records: hit\.txt (1 found, 9223372036854775808 recorded)' && [ ! -s "$pp_x/skip" ]; then
+	ok "an exemption with a count beyond the shell integer is compared exactly and refused, and nothing is skipped"
+else
+	bad "an exemption with an oversized count: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+if grep -q '100000' "$repo/tests/lib/personal-paths.sh"; then
+	bad "the exemption count has a fixed bound in the library: the count must be exactly what the file holds, however large"
+else
+	ok "the exemption count has no fixed bound in the library"
+fi
+# A path that holds a space cannot be exempted: the fields are separated by
+# spaces.  The refusal says so, instead of only "the count is not a number".
+printf 'tests/a b/file 1 %s #T16 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-space"
+pp_xout=$(pp_xscan "$pp_x/exempt-space")
+pp_xrc=$?
+if [ "$pp_xrc" = 1 ] && printf '%s\n' "$pp_xout" | grep -q 'a path that holds a space cannot be exempted'; then
+	ok "an exemption path with a space is refused, and the refusal says a path with a space cannot be exempted"
+else
+	bad "an exemption path with a space: rc=$pp_xrc out=[$pp_xout]"
+fi
+# The exemption path is canonical: "./hit.txt" and "sub//hit.txt" name the
+# file the scan lists, and the file is skipped.
+printf './hit.txt 1 %s #T13 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-dot"
+: > "$pp_x/skip"
+printf '%s\n%s\n' "$pp_x/hit.txt" "$pp_x/clean.txt" > "$pp_x/files-dot"
+pp_xout=$(pp_xscan "$pp_x/exempt-dot")
+pp_xrc=$?
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-dot" "$pp_x/skip" 2>&1) || pp_r=$?
+if [ "$pp_xrc" = 0 ] && [ "$pp_r" = 0 ]; then
+	ok "an exemption path with a . component names the file the scan lists: it is skipped"
+else
+	bad "an exemption path with a . component: rc=$pp_xrc out=[$pp_xout] scan=$pp_r scanout=[$pp_out]"
+fi
+mkdir -p "$pp_x/sub"
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_x/sub/hit.txt"
+pp_sha_sub=$(sha256 -q "$pp_x/sub/hit.txt")
+printf 'sub//hit.txt 1 %s #T14 the reason\n' "$pp_sha_sub" > "$pp_x/exempt-slashes"
+: > "$pp_x/skip"
+printf '%s\n%s\n' "$pp_x/sub/hit.txt" "$pp_x/clean.txt" > "$pp_x/files-sub"
+pp_xout=$(pp_xscan "$pp_x/exempt-slashes")
+pp_xrc=$?
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-sub" "$pp_x/skip" 2>&1) || pp_r=$?
+if [ "$pp_xrc" = 0 ] && [ "$pp_r" = 0 ]; then
+	ok "an exemption path with a doubled slash names the file the scan lists: it is skipped"
+else
+	bad "an exemption path with a doubled slash: rc=$pp_xrc out=[$pp_xout] scan=$pp_r scanout=[$pp_out]"
+fi
+# The exempt file that changed between the check and the scan is not skipped:
+# the scan fails closed instead of skipping a file it cannot vouch for.
+: > "$pp_x/skip"
+printf 'hit.txt 1 %s #T15 the reason\n' "$pp_sha_hit" > "$pp_x/exempt-toctou"
+pp_exempt_scan "$pp_x/exempt-toctou" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" > /dev/null 2>&1
+printf 'cd %sanyone/changed\n' "$pp_lib_root" > "$pp_x/hit.txt"
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-hit" "$pp_x/skip" 2>&1) || pp_r=$?
+if [ "$pp_r" = 2 ] && printf '%s\n' "$pp_out" | grep -q 'changed since its exemption was checked'; then
+	ok "an exempt file that changed after the check is not skipped: the scan fails closed"
+else
+	bad "an exempt file that changed after the check: rc=$pp_r out=[$pp_out]"
+fi
+# Every decision about an exempt file is made on one snapshot of it: the sha256
+# that binds the exemption and the count that justifies it come from the same
+# bytes.  The seam: the hash function is replaced by one that hashes, then
+# rewrites the live file with a second personal path, so a check that counts
+# the live file after hashing it counts two paths against a sha256 of one.
+# With the snapshot the count is 1, from the bytes that were hashed, and the
+# exemption is accepted; the scan that follows then sees the changed live file
+# (its sha256 differs from the approved one) and fails closed instead of
+# skipping it.
+printf 'cd %sanyone/x\n' "$pp_lib_root" > "$pp_x/race.txt"
+pp_sha_race=$(sha256 -q "$pp_x/race.txt")
+printf 'race.txt 1 %s #T17 the reason\n' "$pp_sha_race" > "$pp_x/exempt-race"
+: > "$pp_x/skip"
+pp_xout=$(
+	_pp_sha256() {
+		_r_h=$(/sbin/sha256 -q "$1" 2> /dev/null) || return 1
+		printf 'cd %sanyone/x\ncd %sanyone/second\n' "$pp_lib_root" "$pp_lib_root" > "$pp_x/race.txt"
+		printf '%s\n' "$_r_h"
+	}
+	pp_exempt_scan "$pp_x/exempt-race" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1
+)
+pp_xrc=$?
+if [ "$pp_xrc" = 0 ] && grep -qx "$pp_x/race.txt $pp_sha_race" "$pp_x/skip"; then
+	ok "the exemption check hashes and counts one snapshot: a file rewritten after the hash is judged on the bytes that were hashed"
+else
+	bad "the exemption check with a file rewritten after the hash: rc=$pp_xrc out=[$pp_xout] skip=[$(cat "$pp_x/skip")]"
+fi
+printf '%s\n%s\n' "$pp_x/race.txt" "$pp_x/clean.txt" > "$pp_x/files-race"
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files-race" "$pp_x/skip" 2>&1) || pp_r=$?
+if [ "$pp_r" = 2 ] && printf '%s\n' "$pp_out" | grep -q 'changed since its exemption was checked: .*race\.txt'; then
+	ok "the scan does not skip the rewritten file: its content is not the approved one"
+else
+	bad "the scan of the rewritten exempt file: rc=$pp_r out=[$pp_out]"
+fi
+# The snapshots are made under TMPDIR (mktemp, with the pid of this run in the
+# name) and removed again: the check and the scan leave nothing behind.
+pp_snap_left=
+for pp_f in "${TMPDIR:-/tmp}"/pp-snap.$$.*; do
+	[ -e "$pp_f" ] && pp_snap_left="$pp_snap_left $pp_f"
+done
+if [ -z "$pp_snap_left" ]; then
+	ok "the exemption check and the scan remove their snapshots"
+else
+	bad "a snapshot was left behind:$pp_snap_left"
+fi
+# An allow literal that holds the same needle twice (the needle repeated, built
+# here in pieces so this file holds no needle) hides two occurrences: refused,
+# like one that holds two different needles.
+printf '%s\n# sample+: cd /%sanyone/x\n# allow: %s%s\n' "$pp_users" "$pp_users" "$pp_users" "$pp_users" > "$pp_t/allow-twice"
+if pp_load "$pp_t/allow-twice" "$pp_t/n" "$pp_t/a" 2> "$S/pp-allow-twice.err"; then
+	bad "pp_load accepts an allow literal that holds the same needle twice"
+else
+	if grep -q 'more than one needle occurrence (2)' "$S/pp-allow-twice.err"; then
+		ok "pp_load refuses an allow literal that holds the same needle twice, and counts the occurrences"
+	else
+		bad "the refusal of an allow literal with a doubled needle does not count the occurrences: $(cat "$S/pp-allow-twice.err")"
+	fi
+fi
+# A mistyped entry is named: the list, the line and what was expected.
+printf 'foo/\n# sample+: -Lfoo/x\n# sample: x\n' > "$pp_t/badkind-named"
+if pp_load "$pp_t/badkind-named" "$pp_t/n" "$pp_t/a" 2> "$S/pp-badkind.err"; then
+	bad "pp_load accepts a mistyped entry"
+else
+	if grep -q "badkind-named:3: unknown entry type: # sample: x; expected" "$S/pp-badkind.err"; then
+		ok "pp_load names the list, the line and the expected forms of a mistyped entry"
+	else
+		bad "the refusal of a mistyped entry does not name the line: $(cat "$S/pp-badkind.err")"
+	fi
+fi
+if pp_load "$pp_t/missing" "$pp_t/n" "$pp_t/a" 2> "$S/pp-missing.err"; then
+	bad "pp_load accepts a missing list (diagnostic case)"
+else
+	if grep -q "missing or cannot be read: $pp_t/missing" "$S/pp-missing.err"; then
+		ok "pp_load names the list it could not read"
+	else
+		bad "the refusal of a missing list does not name it: $(cat "$S/pp-missing.err")"
+	fi
+fi
+# The self-test compares the needle the matcher printed with the current needle
+# as exact strings: a needle "foo[ab]" is not a character class, so a sample
+# that holds only "fooa" misses it.
+printf 'foo[ab]\n# sample+: fooa\nfooa\n# sample+: x fooa\n' > "$pp_t/st-glob"
+pp_r=0
+pp_selftest_refuses st-glob || pp_r=$?
+if [ "$pp_r" = 0 ]; then
+	ok "pp_selftest compares needles as exact strings, not as patterns (foo[ab] is not matched by fooa)"
+elif [ "$pp_r" = 1 ]; then
+	bad "pp_selftest accepts fooa as a match of the needle foo[ab]: it compares needles as patterns"
+else
+	bad "the list st-glob did not load: the self-test could not be run"
+fi
+# The skip list is written as the exemptions are checked: a write that fails is
+# an error, never a success with a list that holds fewer entries than the
+# exemptions.  A short skip list would let the scan look at a file an
+# exemption approved.
+pp_xout=$(pp_exempt_scan "$pp_x/exempt-count" "$pp_x" "$pp_lib_n" "$pp_lib_a" /dev/full 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 2 ] && printf '%s\n' "$pp_xout" | grep -q 'cannot write the skip list'; then
+	ok "a skip list that cannot be written is an error, not a success"
+else
+	bad "a skip list that cannot be written: rc=$pp_xrc out=[$pp_xout]"
+fi
+# A directory is readable, but it holds no list of names: the exemption file
+# must be a regular file, or the report and the check read nothing and look
+# like they read every entry.
+pp_xout=$(pp_exempt_report "$pp_x/sub" 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 2 ] && printf '%s\n' "$pp_xout" | grep -q 'cannot read the exemption file'; then
+	ok "an exemption file that is a directory is refused by the report"
+else
+	bad "an exemption file that is a directory (report): rc=$pp_xrc out=[$pp_xout]"
+fi
+pp_xout=$(pp_exempt_scan "$pp_x/sub" "$pp_x" "$pp_lib_n" "$pp_lib_a" "$pp_x/skip" 2>&1)
+pp_xrc=$?
+if [ "$pp_xrc" = 2 ] && printf '%s\n' "$pp_xout" | grep -q 'cannot read the exemption file'; then
+	ok "an exemption file that is a directory is refused by the check"
+else
+	bad "an exemption file that is a directory (check): rc=$pp_xrc out=[$pp_xout]"
+fi
+# The skip list of a scan must be a regular file too: a directory read as a
+# skip list is an empty one, and the scan would look at a file an exemption
+# approved.
+pp_r=0
+pp_out=$(pp_scan "$pp_lib_n" "$pp_lib_a" "$pp_x/files" "$pp_x/sub" 2>&1) || pp_r=$?
+if [ "$pp_r" = 2 ] && printf '%s\n' "$pp_out" | grep -q 'cannot read the skip list'; then
+	ok "a skip list that is a directory is refused: the scan fails closed"
+else
+	bad "a skip list that is a directory: rc=$pp_r out=[$pp_out]"
+fi
+# pp_redact <repository path>: the text on standard input, with the repository
+# path replaced by <repo>.  The path is data: it is never written into a sed
+# program, so a checkout whose name holds a sed delimiter ("|;e touch MARKER;#")
+# cannot run a command with the account that runs the test.
+pp_redact() {
+	REPO="$1" awk '{
+		l = $0
+		r = ENVIRON["REPO"]
+		if (r != "") {
+			i = index(l, r)
+			while (i > 0) {
+				l = substr(l, 1, i - 1) "<repo>" substr(l, i + length(r))
+				i = index(l, r)
+			}
+		}
+		print l
+	}'
+}
+# pp_report NEEDLES ALLOWS LISTFILE [SKIPFILE]: scan the files in LISTFILE and
+# report the result: one ok when the scan is clean, one bad when a file holds a
+# personal path, one bad when the scan could not look.  A scan that could not
+# look is never reported as a clean scan, and the hits it found before it
+# failed are still printed.  The status of the call is the status of the scan:
+# 0 when the scan is clean, 1 when it found a path, 2 when it could not look.
+pp_report() {
+	pp_r=0
+	pp_out=$(pp_scan "$1" "$2" "$3" "${4:-}") || pp_r=$?
+	case $pp_r in
+	0) ok "no personal paths in code, tests, README.md, docs or man" ;;
+	1) printf '%s\n' "$pp_out" | pp_redact "$repo"; bad "personal paths remain" ;;
+	*)
+		if [ -n "$pp_out" ]; then printf '%s\n' "$pp_out" | pp_redact "$repo"; fi
+		bad "the personal-path scan could not look (that is not a clean result; the reason is on the line above)" ;;
+	esac
+	return $pp_r
+}
+# The redaction of the repository path runs nothing: the path is data.
+pp_mark=$S/pp-sed-mark
+rm -f "$pp_mark"
+pp_evil="|;e touch $pp_mark;#"
+printf 'x %s/y\n' "$pp_evil" | pp_redact "$pp_evil" > "$S/pp-redact.out" 2>&1
+if [ ! -e "$pp_mark" ] && grep -q '<repo>/y' "$S/pp-redact.out"; then
+	ok "the repository path is redacted as data: a path that holds a sed delimiter runs nothing"
+else
+	bad "the redaction of a path that holds a sed delimiter: marker=[$(ls "$pp_mark" 2> /dev/null)] out=[$(cat "$S/pp-redact.out")]"
+fi
+# pp_scan_tree LIST NEEDLES ALLOWS [EXEMPTFILE]: load LIST and scan the tree
+# with it.  A missing, empty or unreadable list, a list that fails its own
+# self-test, an exemption that is refused and a scan that could not look are
+# failures; none of them is a pass.  The status of the call is 0 only when
+# every one of them passed.
+pp_scan_tree() {
+	pp_l=$1
+	pp_xf=${4:-$repo/tests/lib/personal-paths.exempt}
+	pp_st=0
+	# Every exemption is printed on every run, before anything can fail: the
+	# entries are reported first, so a missing needle list (or a listing that
+	# failed) cannot hide an exemption.
+	pp_exempt_report "$pp_xf"
+	if ! pp_load "$pp_l" "$2" "$3"; then
+		bad "the needle list is missing, empty, unreadable, has a mistyped line or holds an unsound allow literal: ${pp_l#$repo/}"
+		return 1
+	fi
+	if pp_selftest "$pp_l" "$2" "$3"; then
+		ok "the needle list passes its own self-test"
+	else
+		bad "the needle list fails its own self-test"
+		pp_st=1
+	fi
+	# The scanned files: every regular file under tests/ (recursively), the
+	# code, the scripts, the manual pages and the documents.  The list holds
+	# one file name per line and is read one line at a time: it is never
+	# word-split and never globbed.  The needle list itself is not scanned: it
+	# holds the needles by definition, so it would hit every time.  It is
+	# excluded by its exact path, and it is printed on every run like the
+	# exemptions: an exclusion is never invisible.
+	: > "$S/pp-files"
+	pp_listbad=
+	for p in Makefile scripts lib/libnvrm/Makefile README.md docs man; do
+		find "$repo/$p" -type f >> "$S/pp-files" 2>/dev/null || pp_listbad="$pp_listbad $p"
+	done
+	printf 'exempt: %s (the needle list holds the needles by definition)\n' "tests/lib/personal-paths.txt"
+	pp_file_list "$repo/tests" "$repo/tests/lib/personal-paths.txt" "$S/pp-files" || pp_listbad="$pp_listbad tests"
+	if [ -n "$pp_listbad" ]; then
+		bad "the personal-path scan could not list:$pp_listbad"
+		return 1
+	fi
+	# The exemptions: a file listed in tests/lib/personal-paths.exempt is not
+	# scanned.  Every entry is printed on every run, so an exemption is never
+	# invisible, and an exemption whose file is gone, holds no personal path
+	# any more, holds a number of personal paths other than the one the entry
+	# records or names a path outside the repository is a failure: it cannot
+	# outlive its problem and cannot cover a path added later.
+	: > "$S/pp-exempt-skip"
+	pp_xrc=0
+	pp_exempt_scan "$pp_xf" "$repo" "$2" "$3" "$S/pp-exempt-skip" || pp_xrc=$?
+	case $pp_xrc in
+	0) ok "every personal-path exemption is still justified" ;;
+	2) bad "the exemption file ${pp_xf#$repo/} could not be read"; pp_st=1 ;;
+	*) bad "a personal-path exemption is refused (the message above says why)"; pp_st=1 ;;
+	esac
+	pp_report "$2" "$3" "$S/pp-files" "$S/pp-exempt-skip" || pp_st=1
+	return $pp_st
+}
+# A missing or unreadable list is one failure and no pass.
+( pp_scan_tree "$pp_t/missing" "$pp_t/n" "$pp_t/a" ) > "$S/pp-missing-list.out" 2>&1
+pp_ok=$(grep -c '^ok' "$S/pp-missing-list.out")
+pp_bad=$(grep -c '^FAIL' "$S/pp-missing-list.out")
+if [ "$pp_ok" = 0 ] && [ "$pp_bad" = 1 ]; then
+	ok "a missing needle list is one failure and no pass"
+else
+	bad "a missing needle list reported $pp_bad failure(s) and $pp_ok pass(es)"
+fi
+# Every exemption is printed on every run, even when the scan could not look:
+# the entries are reported before the list is loaded, so a missing needle list
+# cannot hide them.
+if grep -q "^exempt: tests/prime-import-testboot/prime_import_testboot " "$S/pp-missing-list.out"; then
+	ok "every exemption is printed on a run that could not look"
+else
+	bad "a run with a missing needle list printed no exemption: $(cat "$S/pp-missing-list.out")"
+fi
+# The status of the call is the status of the scan: a refused exemption is a
+# failure of the call, not only a line of output.
+pp_r=0
+( pp_scan_tree "$needles" "$pp_pat" "$pp_allow" "$pp_x/exempt-bad" ) > "$S/pp-bad-exempt.out" 2>&1 || pp_r=$?
+if [ "$pp_r" != 0 ]; then
+	ok "pp_scan_tree returns a failure when an exemption is refused"
+else
+	bad "pp_scan_tree returns 0 although an exemption was refused: $(cat "$S/pp-bad-exempt.out")"
+fi
+# The scan of the tree, with the real needle list.
+pp_scan_tree "$needles" "$pp_pat" "$pp_allow"
 
 if [ "$fail" = 0 ]; then
 	echo "make_install_flow_test: PASS"

@@ -159,15 +159,26 @@ dm_table() {
 }
 . "$KIT/guard.sh"
 
-# (e) root must not inherit a work directory under root's home when a defaulted path is needed
-(unset GB10_WORK; guard_work_default 0 make-be.sh "-m -s -o") > "$T/root-mb.out" 2>&1
+# (e) root must not inherit a work directory under root's home when a defaulted path is needed.
+# The option list comes from the shared helper the kit itself uses (guard_work_options), so this
+# assertion cannot pass while the kit builds another list.
+mb_opts=$(guard_work_options 0 0)
+(unset GB10_WORK; guard_work_default 0 make-be.sh "$mb_opts") > "$T/root-mb.out" 2>&1
 expect 2 $? "make-be.sh: root without GB10_WORK refuses the defaulted paths"
-grep -q 'set GB10_WORK or pass -m -s -o' "$T/root-mb.out" && ok "make-be.sh: the root refusal says how to provide the paths" || no "make-be.sh: $(cat "$T/root-mb.out")"
-(unset GB10_WORK; guard_work_default 0 check-be.sh -s) > "$T/root-cb.out" 2>&1
+grep -q 'set GB10_WORK=/absolute/path or pass -m DIR and -o DIR' "$T/root-mb.out" && ok "make-be.sh: the root refusal says how to provide the paths" || no "make-be.sh: $(cat "$T/root-mb.out")"
+# The hash list follows the stage, so the refusal names no -s: the operator must not invent a file
+# he does not need.
+mb_msg=$(sed -n 's/.*or pass \(.*\) (see .*/\1/p' "$T/root-mb.out")
+if [ "$mb_msg" = "-m DIR and -o DIR" ]; then
+	ok "make-be.sh: the root refusal names the work-root options and nothing else"
+else
+	no "make-be.sh: the root refusal names [$mb_msg], want [-m DIR and -o DIR]"
+fi
+(unset GB10_WORK; guard_work_default 0 check-be.sh "-s FILE") > "$T/root-cb.out" 2>&1
 expect 2 $? "check-be.sh: root without GB10_WORK refuses the defaulted hash list"
-grep -q 'set GB10_WORK or pass -s' "$T/root-cb.out" && ok "check-be.sh: the root refusal says how to provide the hash list" || no "check-be.sh: $(cat "$T/root-cb.out")"
-(unset GB10_WORK; guard_work_default 1001 make-be.sh "-m -s -o"); expect 0 $? "make-be.sh: non-root keeps the HOME default"
-(GB10_WORK="$WORK"; guard_work_default 0 check-be.sh -s); expect 0 $? "check-be.sh: an explicit GB10_WORK is accepted for root"
+grep -q 'set GB10_WORK=/absolute/path or pass -s FILE' "$T/root-cb.out" && ok "check-be.sh: the root refusal says how to provide the hash list" || no "check-be.sh: $(cat "$T/root-cb.out")"
+(unset GB10_WORK; guard_work_default 1001 make-be.sh "$mb_opts"); expect 0 $? "make-be.sh: non-root keeps the checkout default"
+(GB10_WORK="$WORK"; guard_work_default 0 check-be.sh "-s FILE"); expect 0 $? "check-be.sh: an explicit GB10_WORK is accepted for root"
 
 # (a) guard_env
 cat > "$T/kld-clean" <<'EOF'

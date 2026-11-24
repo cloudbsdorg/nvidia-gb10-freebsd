@@ -29,10 +29,24 @@
 # differs from the base BE goes into the clone only; the running system is
 # not touched.  No module is loaded or unloaded and nothing is rebooted.
 #
-# Environment: GB10_WORK (default $HOME/work/gb10), BECTL (default bectl), PRIME_MNT (the mount point of
-# the clone, default $GB10_WORK/tmp/<BE name>.mnt).  Test hooks, honoured only with GB10_TEST_HOOKS=1:
-# PRIME_KO_ORDER_TOOL (the module order checker, default ko_sysinit_order.py beside this script) and
-# PRIME_ALLOW_DIRTY=1 (skips the committed-kit checks).
+# Root must set GB10_WORK: the default work root is the work directory of the checkout, which belongs
+# to the developer account that cloned the repository, and root must not write into it (a GB10_WORK
+# inside the checkout is refused for root too).  This kit writes into the work root (the mount point
+# of the clone and the probe), so a root build always needs it.  A kit extracted from git archive lies
+# in no checkout and has no work directory to take a default from: GB10_WORK must be set.  The archive
+# must carry the shared work-root guard the kit sources (tests/native-tools-testboot/guard.sh, beside
+# the kit's directory):
+#   git archive <commit> -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot | tar -x -C <new directory>
+#   GB10_WORK=/absolute/path <new directory>/tests/prime-import-testboot/make-be.sh -V <commit> ...
+# The guard is checked before it is sourced: a regular file, owned by root or by the account that
+# runs the kit, not writable by others, and, in a checkout, equal to the committed one.  Every path
+# option and every path the kit writes is absolute.
+#
+# Environment: GB10_WORK (default <repo>/work; the canonical spelling is used), BECTL (default bectl),
+# PRIME_MNT (the mount point of the clone, an absolute path, default $WORK/tmp/<BE name>.mnt, where
+# $WORK is GB10_WORK or the checkout's work directory).  Test hooks, honoured only with
+# GB10_TEST_HOOKS=1: PRIME_KO_ORDER_TOOL (the module order checker, default ko_sysinit_order.py beside
+# this script) and PRIME_ALLOW_DIRTY=1 (skips the committed-kit checks, the guard's included).
 
 set -eu
 
@@ -40,18 +54,23 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 
-KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-WORK=${GB10_WORK:-$HOME/work/gb10}
+KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 2
+[ -n "$KITDIR" ] || { echo "make-be.sh: the kit directory could not be found" >&2; exit 2; }
+ME=$(id -u) || exit 2
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR	# git must look at the kit, not at a repository the environment names
+DIRTY_HOOK=0
+if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "${PRIME_ALLOW_DIRTY:-0}" = 1 ]; then DIRTY_HOOK=1; fi
 BECTL=${BECTL:-bectl}
 BASE=
 DATE=$(date -u +%Y%m%d)
 SEQ=1
-MODDIR=$WORK/testboot-prime-import/mods
+MODDIR=
 UVMKO=
 COMMIT=
 DRY=0
 ACTIVATE=0
 
+# The options are read first, so -h and a usage error need no checkout and no guard.
 need() {
 	[ "$2" -ge 2 ] || { echo "make-be.sh: $1 needs a value" >&2; usage; }
 }
@@ -66,7 +85,7 @@ while [ $# -gt 0 ]; do
 	-b) need "$1" "$#"; BASE=$2; shift 2 ;;
 	-D) need "$1" "$#"; DATE=$2; shift 2 ;;
 	-n) need "$1" "$#"; SEQ=$2; shift 2 ;;
-	-m) need "$1" "$#"; MODDIR=$2; shift 2 ;;
+	-m) need "$1" "$#"; [ -n "$2" ] || { echo "make-be.sh: -m must not be empty" >&2; usage; }; MODDIR=$2; shift 2 ;;
 	-u) need "$1" "$#"; UVMKO=$2; shift 2 ;;
 	-V) need "$1" "$#"; COMMIT=$2; shift 2 ;;
 	--dry-run) DRY=1; shift ;;
@@ -83,6 +102,67 @@ case $COMMIT in
 *[!0-9a-f]*) echo "make-be.sh: -V takes a hex commit id" >&2; exit 2 ;;
 *) [ ${#COMMIT} -ge 7 ] || { echo "make-be.sh: -V needs at least 7 hex digits of the commit" >&2; exit 2; } ;;
 esac
+
+# The work-root guard is one file for every kit: the native-tools one, beside this kit's directory,
+# sourced by path and never copied (a copy of the rule drifts from the rule).  It is checked before it
+# is sourced, because a sourced file runs: a regular file (no symbolic link), owned by root or by the
+# account that runs the kit, not writable by the group or by everyone, and, in a checkout, equal to
+# the committed one (unless the committed-kit checks are skipped: the test hook PRIME_ALLOW_DIRTY).  A
+# guard that is not trusted is not run, and the kit says what to do.
+GUARD=${KITDIR%/*}/native-tools-testboot/guard.sh
+guard_refuse() {
+	echo "make-be.sh: the shared work-root guard $1: $GUARD; copy tests/native-tools-testboot/guard.sh of the reviewed commit there (from a complete checkout, or archive it with the kit: git archive <commit> -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot) and run again" >&2
+	exit 2
+}
+[ -e "$GUARD" ] || guard_refuse "is missing"
+[ ! -L "$GUARD" ] || guard_refuse "is a symbolic link"
+[ -f "$GUARD" ] || guard_refuse "is not a regular file"
+_gst=$(stat -f '%u %Lp' "$GUARD" 2> /dev/null) || guard_refuse "cannot be examined"
+_gown=${_gst%% *}
+_gmode=${_gst##* }
+case $_gown$_gmode in '' | *[!0-9]*) guard_refuse "cannot be examined (stat printed [$_gst])" ;; esac
+[ "$_gown" = 0 ] || [ "$_gown" = "$ME" ] || guard_refuse "belongs to another account (uid $_gown)"
+[ $(( 0$_gmode & 022 )) -eq 0 ] || guard_refuse "is writable by the group or by everyone (mode $_gmode)"
+# The root of the tree the kit lies in: computed with a checked cd, in canonical form, and checked
+# below (guard_repo_root), never assumed from the depth of the kit directory (a kit extracted on its
+# own, one directory below the root of the filesystem, names "/" with the same arithmetic).
+ROOT=$(CDPATH= cd -- "$KITDIR/../.." && pwd -P) || exit 2
+[ -n "$ROOT" ] || { echo "make-be.sh: the root of the tree could not be found" >&2; exit 2; }
+if [ -e "$ROOT/.git" ]; then
+	# a .git entry is not believed: git must name ROOT as the top level of a work tree (an empty .git
+	# file, or a nested directory inside a larger repository, is not one)
+	_gtop=$(git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" rev-parse --show-toplevel 2> /dev/null) && _gtop=$(CDPATH= cd -- "$_gtop" 2> /dev/null && pwd -P) || _gtop=
+	[ "$_gtop" = "$ROOT" ] || { echo "make-be.sh: $ROOT has a .git entry but is not the top level of a git work tree (git names '${_gtop:-nothing}'): it is not the root of a checkout the kit lies in; run the kit from the checkout, or from git archive of the reviewed commit" >&2; exit 2; }
+	if [ "$DIRTY_HOOK" = 0 ]; then
+		git -c safe.directory="$ROOT" --no-optional-locks -C "$ROOT" show HEAD:tests/native-tools-testboot/guard.sh 2> /dev/null | cmp -s - "$GUARD" ||
+			guard_refuse "differs from the one committed at HEAD of $ROOT: build from git archive of the reviewed commit, or commit the guard"
+	fi
+fi
+# A guard that does not parse, or that fails while it is read, is refused with the same message:
+# under set -e a failure inside the sourced file would end the kit without a word.
+sh -n "$GUARD" 2> /dev/null || guard_refuse "does not parse as a shell file (sh -n)"
+set +e
+. "$GUARD"
+_grc=$?
+set -e
+[ "$_grc" = 0 ] || guard_refuse "could not be loaded (it returned $_grc)"
+
+# The kit lies in a checkout (a git work tree whose top level is ROOT and whose tests directory holds
+# the kit), or it does not (an extraction of git archive, whose KIT-COMMIT names its commit below):
+# then there is no work directory to take a default from, and GB10_WORK must name the work root.
+REPO=
+if guard_repo_root "$ROOT" "$KITDIR"; then REPO=$ROOT; fi
+
+# The work root: decided by the shared guard, before any path is taken from it.  Root without
+# GB10_WORK is refused (guard_work_default); the work root is GB10_WORK in canonical form, or the
+# checkout's work directory, or nothing (guard_work_root refuses and says what to set).
+guard_work_default "$ME" make-be.sh "" || exit $?
+WORK=$(guard_work_root "$ME" "$REPO" "$KITDIR") || { echo "make-be.sh: no work root (see above): set GB10_WORK=/absolute/path" >&2; exit 2; }
+[ -n "$MODDIR" ] || MODDIR=$WORK/testboot-prime-import/mods
+# every path option is an absolute path: a relative one names a different place in every directory
+# the kit is started in
+guard_work_abs "make-be.sh: -m" "$MODDIR" || exit 2
+[ -z "$UVMKO" ] || guard_work_abs "make-be.sh: -u" "$UVMKO" || exit 2
 # The kit must come from a committed state: a clean git work tree (its HEAD), or the extraction of
 # `git archive <commit>` (its KIT-COMMIT file carries the commit through export-subst).  -V, when given,
 # must agree with the commit that is found (HEAD, or the one KIT-COMMIT names: KIT-COMMIT is a record, not a proof of content).
@@ -158,7 +238,7 @@ else
 		fi
 		COMMIT=$_head
 	else
-		echo "make-be.sh: this kit is neither in a git work tree nor from git archive (no expanded KIT-COMMIT), so its commit cannot be checked: run git archive <commit> | tar -x -C <new directory> and use the make-be.sh there" >&2
+		echo "make-be.sh: this kit is neither in a git work tree nor from git archive (no expanded KIT-COMMIT), so its commit cannot be checked: run git archive <commit> -- tests/native-tools-testboot/guard.sh tests/prime-import-testboot | tar -x -C <new directory> (the archive must carry the shared guard the kit sources), then GB10_WORK=/absolute/path <new directory>/tests/prime-import-testboot/make-be.sh -V <commit>" >&2
 		exit 2
 	fi
 fi
@@ -175,7 +255,13 @@ esac
 
 BE=nvidia-prime-import-test-$DATE-$SEQ
 [ "$BASE" != "$BE" ] || { echo "make-be.sh: the base boot environment is the target name: $BE would be cloned onto itself and a failure would remove the base" >&2; exit 2; }
-MNT=${PRIME_MNT:-$WORK/tmp/$BE.mnt}
+# the mount point of the clone is written into: an absolute path in canonical form, under the work root unless the
+# hook names another one
+if [ -n "${PRIME_MNT:-}" ]; then
+	MNT=$(guard_work_canon "make-be.sh: PRIME_MNT" "$PRIME_MNT") || exit 2
+else
+	MNT=$WORK/tmp/$BE.mnt
+fi
 
 run() {
 	echo "+ $*"

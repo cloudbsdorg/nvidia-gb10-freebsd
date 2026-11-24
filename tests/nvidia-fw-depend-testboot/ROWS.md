@@ -8,9 +8,20 @@ arms a boot only with the hardware owner's go-ahead. Nothing here is run by a te
 - A one-shot boot environment named for what it tests, for example
   `nvidia-fw-depend-test-<UTC date>`, made with `bectl create` and activated with
   `bectl activate -t`. The normal boot environment is untouched.
-- A self-recording rc one-shot writes every row's result under
-  `~/work/gb10/logs/nvidia-fw-depend-testboot-<UTC stamp>/` (one line per row, `PASS`, `FAIL`
-  or `INFO`, plus the raw output), then reboots into the normal environment.
+- A self-recording rc one-shot writes every row's result under the absolute directory the build kit
+  computed at build time and wrote into the rc configuration of the boot environment (the copy-out
+  base is `$GB10_WORK/logs/nvidia-fw-depend-testboot` for a build that set `GB10_WORK`, and
+  `<repo>/work/logs/nvidia-fw-depend-testboot` for a build that took the checkout default; the
+  one-shot writes `<that directory>/<UTC stamp>/`), one line per row (`PASS`, `FAIL` or `INFO`,
+  plus the raw output), then reboots into the normal environment. The one-shot does not read
+  `GB10_WORK` at boot: `GB10_WORK` need not exist in the boot environment and `<repo>` is not a
+  path there, so the build kit writes the absolute destination into the rc configuration and the
+  one-shot uses that path.
+- The kit script that builds the boot environment must call `guard_work_default`
+  (`tests/native-tools-testboot/guard.sh`), like the other test-boot kits do: the work directory of
+  the checkout belongs to the developer account that cloned the repository, so root must set
+  `GB10_WORK` when a path comes from the work root. `tests/kit_work_guard_test.sh` checks that this
+  rule stays stated here while the kit has no script yet.
 - The modules come from `git archive` of the reviewed commit, built with base LLD
   (`readelf -p .comment x.ko | grep 'Linker: LLD'` is checked before install). They are
   installed into the test environment's `/boot/modules`: `nvidia.ko`, `nvidia-modeset.ko`,
