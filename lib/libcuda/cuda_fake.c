@@ -33,13 +33,10 @@ typedef struct fake_profile {
 static const char *const default_profile = "gb206";
 
 /* The most profiles one selection may name.  The array of the selected
- * profiles below holds this many of them, so a selection that names more is
- * refused before a profile is written into it. */
+ * profiles below holds this many of them: the write of a selected profile
+ * stops at the bound, and a selection that names more is counted, so the
+ * registry refuses the count and names the reason. */
 #define FAKE_MAX_PROFILES CUDA_NATIVE_MAX_PHYSICAL_DEVICES
-/* The error a selection gets when it names more profiles than the array
- * holds.  The registry refuses the count of the devices before this one is
- * reached, so it is the last line of defence of the write below. */
-#define FAKE_TOO_MANY_PROFILES CUDA_ERROR_INVALID_VALUE
 
 static const fake_profile profiles[] = {
 	{
@@ -94,9 +91,10 @@ static const fake_profile profiles[] = {
 
 static const fake_profile *selected[FAKE_MAX_PROFILES];
 static unsigned selected_count;
-/* The count of the selection, even when the selection names more devices
- * than the array above holds: the registry refuses such a count, and the
- * devices are never addressed. */
+/* The count of the devices the selection names, even when the selection
+ * names more devices than the array above holds: the count saturates at the
+ * limit plus one, the registry refuses such a count and names the reason,
+ * and the devices are never addressed. */
 static unsigned selected_total;
 
 static const fake_profile *
@@ -156,18 +154,6 @@ cudaNativeFakeProfileDefault(void)
 	return (default_profile);
 }
 
-/* The count of the profiles a selection names, one more than the count that
- * was given.  The count saturates at the limit plus one: a counter that
- * wrapped around would name a count below the limit for a selection that is
- * above it, and the write of the profiles would step past the array. */
-static unsigned
-fake_count(unsigned count)
-{
-	if (count < FAKE_MAX_PROFILES + 1)
-		return (count + 1);
-	return (count);
-}
-
 /* The provider applies the profile selection the registry hands it.  The
  * selection is the comma-separated list of profile names, or null when the
  * environment names none; then the provider uses its own default.  The
@@ -188,41 +174,39 @@ fake_select(const char *list)
 	if (*list == '\0')
 		return (CUDA_ERROR_INVALID_VALUE);
 	selected_count = 0;
+	selected_total = 0;
 	cursor = list;
-	/* Time: O(profile-list bytes); Space: O(1). */
-	for (;;) {
-		comma = strchr(cursor, ',');
-		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
-		profile = profile_find(cursor, length);
-		if (profile == NULL)
-			return (CUDA_ERROR_INVALID_VALUE);
-		count = fake_count(count);
-		if (comma == NULL)
-			break;
-		cursor = comma + 1;
-	}
-	selected_total = count;
-	if (count > FAKE_MAX_PROFILES)
-		return (CUDA_SUCCESS);
-	cursor = list;
-	selected_count = 0;
 	/* Time: O(profile-list bytes); Space: O(1) besides selected[]. */
 	for (;;) {
 		comma = strchr(cursor, ',');
 		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
 		profile = profile_find(cursor, length);
-		if (profile == NULL)
+		if (profile == NULL) {
+			/* A selection that names a profile the provider does
+			 * not know is no selection: the count of the last
+			 * one is not the count of this one. */
+			selected_count = 0;
+			selected_total = 0;
 			return (CUDA_ERROR_INVALID_VALUE);
+		}
+		/* The count of the selection saturates at the limit plus
+		 * one: a count that wrapped around would name a count below
+		 * the limit for a selection that is above it, and the
+		 * registry would accept a selection it must refuse. */
+		if (count < FAKE_MAX_PROFILES)
+			count++;
+		else
+			count = FAKE_MAX_PROFILES + 1;
 		/* The array holds the limit's worth of profiles: the write
-		 * stops at the bound, so a count that was wrong cannot step
-		 * past the array. */
-		if (selected_count >= FAKE_MAX_PROFILES)
-			return (FAKE_TOO_MANY_PROFILES);
-		selected[selected_count++] = profile;
+		 * stops at the bound, so a selection that names more cannot
+		 * step past the array. */
+		if (selected_count < FAKE_MAX_PROFILES)
+			selected[selected_count++] = profile;
 		if (comma == NULL)
 			break;
 		cursor = comma + 1;
 	}
+	selected_total = count;
 	return (CUDA_SUCCESS);
 }
 

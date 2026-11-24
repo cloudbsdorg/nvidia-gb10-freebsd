@@ -960,26 +960,20 @@ expect_rc "JSON preserves UTF-8, replaces invalid bytes and escapes controls" "$
 # Every code point the library refuses to copy through is escaped: the raw
 # bytes are absent and the escape is present.  One case per code point, in
 # the text diagnostic and in the JSON document.  The list of code points is
-# read from the table of the tool, so a code point that is added to the
-# table is added to the test with it and the test keeps no copy of it.
-control_ranges() {	# control_ranges HEADER; one "first:last" pair per line, in hex
-	sed -n 's/.*\(0x[0-9a-fA-F]\{1,\}\)[^0-9a-fA-Fx]*\(0x[0-9a-fA-F]\{1,\}\).*/\1:\2/p' \
-	    "$1"
-}
-control_points() {	# control_points HEADER; one code point per line, in hex
-	for pair in $(control_ranges "$1"); do
-		first=${pair%:*}
-		last=${pair#*:}
-		i=$((first))
-		last=$((last))
-		while [ "$i" -le "$last" ]; do
-			# A NUL cannot travel through the environment.
-			if [ "$i" -ne 0 ]; then
-				printf '%04x\n' "$i"
-			fi
-			i=$((i + 1))
-		done
-	done
+# the list of the table of the production code: the program below compiles
+# that header in and prints its code points, so a code point that is added
+# to the table is added to the test with it and the test keeps no copy of
+# it.
+cc $CFLAGS -I"$L" "$T/control_points.c" -o "$W/bin/control_points" \
+    >"$W/build-control-points.log" 2>&1
+rc=$?
+expect_rc "the program of the table of the control code points compiles" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-control-points.log"
+[ -x "$W/bin/control_points" ]
+rc=$?
+expect_rc "the program of the table of the control code points is there" "$rc" 0
+control_points() {	# control_points; one code point per line, in hex
+	"$W/bin/control_points"
 }
 # The UTF-8 bytes of a code point as the octal escapes of printf: the shell
 # of the test has no \u in its printf.
@@ -1049,15 +1043,30 @@ profile_control_case() {	# profile_control_case CODEPOINT
 		bad "the profile diagnostic escapes U+$_cp (rc=$rc)"
 	fi
 }
-for cp in $(control_points "$L/control_ranges.h"); do
+for cp in $(control_points); do
 	control_case "$cp"
 done
-# The bidirectional controls are the ones a reader cannot see, so they are
-# checked in the profile diagnostic too: every code point of the table that
-# is not an ASCII one.
-for cp in $(control_points "$L/control_ranges.h" | awk '$0 >= "061c"'); do
+# The controls that a reader cannot see are the ones checked in the profile
+# diagnostic too: every code point of the table that is not an ASCII one.
+# The list starts at the first code point above the ASCII block, so the C1
+# controls are in it: a code point that is not ASCII is a code point a
+# reader cannot see.
+profile_points=$(control_points | awk '$0 >= "0080"')
+for cp in $profile_points; do
 	profile_control_case "$cp"
 done
+# The C1 block is in the list of the profile cases: its first code point
+# and its last one.
+for cp in 0080 009f; do
+	if printf '%s\n' "$profile_points" | grep -qx "$cp"; then
+		ok "the profile cases hold the C1 control U+$cp"
+	else
+		bad "the profile cases hold the C1 control U+$cp"
+	fi
+done
+# A C1 control of the middle of the block is checked by name, so a range
+# that loses its middle is caught even when its ends are still there.
+profile_control_case 0085
 # The profile diagnostic wraps the bad value in the delimiter it escapes: a
 # value that holds a quote cannot close the value and hide what follows it.
 # The delimiter is the double quote, the one the escaping helper escapes, so
@@ -1871,31 +1880,133 @@ expect_rc "the renamed provider query is exported" "$rc" 0
 # The table of the code points that the tool escapes is the one of the
 # production code: the test reads it and keeps no copy of it, so a code
 # point that is added to the table is exercised with it.
-# The pattern of a range of code points is built here, so that the check
-# does not match itself.
-range_pattern='[0-9a-f]{4}:[0-9a-f]{4}'
-if grep -qE "$range_pattern" "$SRC/tests/libcuda_test.sh"; then
+# The check for a copy looks for the form a copy takes: a pair of code
+# points of the table, written as the table writes them.  The pattern is
+# written in one piece, so that it does not match itself.
+copy_pattern='0x[0-9a-f]{4}, *0x[0-9a-f]{4}'
+grep -E "$copy_pattern" "$SRC/tests/libcuda_test.sh" \
+    "$SRC/tests/libcuda/control_points.c" >"$W/table-copy.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	cat "$W/table-copy.out"
 	bad "the test keeps no copy of the table of the control code points"
-else
+elif [ "$rc" -eq 1 ]; then
 	ok "the test keeps no copy of the table of the control code points"
+else
+	cat "$W/table-copy.out"
+	bad "the check for a copy of the table of the control code points failed"
 fi
 # The list follows the table: a range that is added to the table is added to
-# the list of the code points the test exercises.
-python3 -I - "$L/control_ranges.h" "$W/control_ranges.h" <<'PYEOF'
-import sys
-text = open(sys.argv[1]).read()
-marker = "\t{ 0x2066, 0x2069 }"
-assert marker in text, "the table of the control code points is not in the header"
-text = text.replace(marker,
-    "\t{ 0x2ff0, 0x2ff0 },\t/* a range that is added to the table */ \\\n" + marker, 1)
-open(sys.argv[2], "w").write(text)
+# the list of the code points the test exercises.  The copy of the table in
+# the scratch directory is changed in two ways: the last range of the table
+# is narrowed by one code point, and a range that the production table does
+# not hold is written where the table is written.  The change finds the
+# ranges by their shape and names no code point of the production table, so
+# a table that changes does not break the change.
+MT=$W/table-mutant
+mkdir -p "$MT"
+python3 -I - "$L/control_ranges.h" "$MT/control_ranges.h" \
+    "$W/table-mutation.txt" <<'PYEOF'
+import re, sys
+source, target, report = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(source).read()
+# The ranges of the table, found by their shape.
+ranges = list(re.finditer(r"\{ 0x([0-9a-f]+), 0x([0-9a-f]+) \}", text))
+assert ranges, "the table of the control code points is not in the header"
+last = max(int(entry.group(2), 16) for entry in ranges)
+synthetic = last + 1
+final = ranges[-1]
+first = int(final.group(1), 16)
+assert last > first, "the last range of the table holds one code point"
+narrowed = (text[:final.start()] + "{ 0x%04x, 0x%04x }" % (first, last - 1) +
+    text[final.end():])
+# The range that is added is written where the table is written: after the
+# line that defines the macro of the table.
+out = []
+for line in narrowed.split("\n"):
+    out.append(line)
+    if line.startswith("#define CUDA_NATIVE_CONTROL_RANGES "):
+        out.append("\t{ 0x%04x, 0x%04x },\t/* a range that is added */ \\"
+            % (synthetic, synthetic))
+open(target, "w").write("\n".join(out))
+open(report, "w").write("%04x\n%04x\n" % (synthetic, last))
 PYEOF
 rc=$?
 expect_rc "the table of the control code points with an added range is written" "$rc" 0
-if control_points "$W/control_ranges.h" | grep -q '^2ff0$'; then
-	ok "the list of the code points follows the table of the production code"
-else
-	bad "the list of the code points follows the table of the production code"
+synthetic=
+dropped=
+if [ "$rc" -eq 0 ]; then
+	synthetic=$(sed -n '1p' "$W/table-mutation.txt")
+	dropped=$(sed -n '2p' "$W/table-mutation.txt")
+	cc $CFLAGS -I"$MT" -I"$L" "$T/control_points.c" \
+	    -o "$W/bin/control_points-mutant" \
+	    >"$W/build-control-points-mutant.log" 2>&1
+	rc=$?
+	expect_rc "the program of the changed table of the control code points compiles" \
+	    "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-control-points-mutant.log"
+fi
+if [ -x "$W/bin/control_points-mutant" ]; then
+	if "$W/bin/control_points-mutant" | grep -qx "$synthetic"; then
+		ok "the list of the code points follows the table of the production code"
+	else
+		bad "the list of the code points follows the table of the production code"
+	fi
+	if control_points | grep -qx "$synthetic"; then
+		bad "the list of the code points holds a code point the table does not have"
+	else
+		ok "the list of the code points holds no code point the table does not have"
+	fi
+	if "$W/bin/control_points-mutant" | grep -qx "$dropped"; then
+		bad "the changed table of the control code points is changed"
+	else
+		ok "the changed table of the control code points is changed"
+	fi
+fi
+# The case for a C1 control has teeth: a table without the C1 block copies
+# the code point through, and the profile diagnostic must catch it.  The
+# mutant drops the C1 range from a copy of the table: the range is found by
+# its value, so the mutant names no code point of the table.
+MC=$W/table-c1-mutant
+mkdir -p "$MC"
+python3 -I - "$L/control_ranges.h" "$MC/control_ranges.h" <<'PYEOF'
+import re, sys
+source, target = sys.argv[1], sys.argv[2]
+lines = open(source).read().split("\n")
+out = []
+dropped = False
+for line in lines:
+    match = re.search(r"\{ 0x([0-9a-f]+), 0x([0-9a-f]+) \}", line)
+    # The C1 block is the one above the ASCII block: the range is found by
+    # its value, not named.
+    if match and 0x80 <= int(match.group(1), 16) <= 0xff:
+        dropped = True
+        continue
+    out.append(line)
+assert dropped, "the table of the control code points has no C1 range"
+open(target, "w").write("\n".join(out))
+PYEOF
+rc=$?
+expect_rc "the table without the C1 controls is written" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	cc $CFLAGS -I"$O/info" -I"$MC" -I"$L" -I"$SDK" \
+	    "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+	    "$L/cuda_uuid.c" -L"$O/lib" -lcuda -lthr \
+	    -o "$MC/cuda-native-info" >"$MC/build.log" 2>&1
+	rc=$?
+	expect_rc "the tool of the table without the C1 controls builds" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$MC/build.log"
+	if [ "$rc" -eq 0 ]; then
+		_raw=$(printf "gb$(utf8_escapes 0085)")
+		env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$_raw" \
+		    "$MC/cuda-native-info" >"$MC/profile.out" 2>"$MC/profile.err"
+		rc=$?
+		if grep -qF "\\u0085" "$MC/profile.err"; then
+			bad "the profile case catches a table without the C1 controls"
+		else
+			ok "the profile case catches a table without the C1 controls"
+		fi
+	fi
 fi
 # Every code point of the table is escaped, the NUL included: the environment
 # cannot carry a NUL, so the code points are checked at the C level, against
@@ -1912,31 +2023,14 @@ if [ -x "$W/bin/escape_test" ]; then
 fi
 
 # ---- the count of the profiles of the fake provider -----------------------
-# A count that overflows must not write past the array of the selected
-# profiles.  The count of a selection saturates at the limit, so the counter
-# cannot wrap around: the mutant below starts the counter at UINT_MAX, the
-# state an overflowed counter is in, and the build with the address
-# sanitizer must report no write past the array.
-AS=$W/asan-overflow
-mkdir -p "$AS"
-cp "$L"/*.c "$L"/*.h "$AS/"
-python3 -I - "$AS/cuda_fake.c" <<'PYEOF'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-marker = "fake_select(const char *list)"
-head, sep, tail = text.partition(marker)
-assert sep, "the selection of the fake provider is not in the source"
-patched = tail.replace("unsigned count = 0;", "unsigned count = UINT_MAX;", 1)
-assert patched != tail, "the count of the selection is not in fake_select"
-text = text.replace(head + sep + tail, head + sep + patched, 1)
-if "#include <limits.h>" not in text:
-    text = text.replace("#include <stdlib.h>",
-        "#include <limits.h>\n#include <stdlib.h>", 1)
-open(path, "w").write(text)
-PYEOF
-rc=$?
-expect_rc "the overflowing counter mutant changed the fake provider" "$rc" 0
+# The array of the selected profiles holds a bounded number of them, so a
+# selection that names more must not write past the array.  The count of the
+# selection saturates at the limit plus one, so a counter that has overflowed
+# cannot name a count below the limit, and the write of a selected profile
+# stops at the bound, so the count cannot make the write step past the
+# array.  The address sanitizer proves both: the production sources write no
+# profile past the array, and a source whose bound is moved by one is caught
+# by it.
 cat >"$W/asan-driver.c" <<'EOF'
 /*
  * Copyright (c) 2026 REVYTECH, Inc.
@@ -1967,24 +2061,115 @@ main(void)
 	return (0);
 }
 EOF
-cc $CFLAGS -fsanitize=address -pthread -I"$W" -I"$O/lib" -I"$AS" -I"$SDK" \
-    "$W/asan-driver.c" "$AS"/cuda_*.c -lthr -o "$W/bin/asan-driver" \
-    >"$W/build-asan.log" 2>&1
+# The production sources.
+AS=$W/asan-production
+mkdir -p "$AS"
+cp "$L"/*.c "$L"/*.h "$AS/"
+# The counter that has overflowed: the count of the selection saturates at
+# the limit plus one, so the registry refuses it and no profile is written
+# past the array.
+AO=$W/asan-overflow
+mkdir -p "$AO"
+cp "$L"/*.c "$L"/*.h "$AO/"
+python3 -I - "$AO/cuda_fake.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "fake_select(const char *list)"
+head, sep, tail = text.partition(marker)
+assert sep, "the selection of the fake provider is not in the source"
+patched = tail.replace("unsigned count = 0;", "unsigned count = UINT_MAX;", 1)
+assert patched != tail, "the count of the selection is not in fake_select"
+text = text.replace(head + sep + tail, head + sep + patched, 1)
+if "#include <limits.h>" not in text:
+    text = text.replace("#include <stdlib.h>",
+        "#include <limits.h>\n#include <stdlib.h>", 1)
+open(path, "w").write(text)
+PYEOF
 rc=$?
-expect_rc "the address sanitizer build of the overflowing counter compiles" "$rc" 0
-[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-asan.log"
-if [ -x "$W/bin/asan-driver" ]; then
-	overflow_profiles=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
+expect_rc "the overflowing counter mutant changed the fake provider" "$rc" 0
+# The write without its bound: the check that stops the write of a selected
+# profile at the bound of the array is removed, so the write steps past the
+# array of the selected profiles.  The mutant removes the one check that
+# holds the bound, so a source whose bound is gone is caught by the
+# sanitizer.
+AB=$W/asan-unbounded
+mkdir -p "$AB"
+cp "$L"/*.c "$L"/*.h "$AB/"
+python3 -I - "$AB/cuda_fake.c" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+patched, changed = re.subn(
+    r"\n([ \t]*)if \(selected_count < FAKE_MAX_PROFILES\)\n"
+    r"[ \t]*(selected\[selected_count\+\+\] = profile;)",
+    r"\n\1\2", text)
+assert changed == 1, ("the bound on the write of a selected profile is not "
+    "in the source", changed)
+open(path, "w").write(patched)
+PYEOF
+rc=$?
+expect_rc "the unbounded write mutant changed the fake provider" "$rc" 0
+overflow_profiles=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
+asan_build() {	# asan_build NAME TREE; the address sanitizer driver of a tree
+	cc $CFLAGS -fsanitize=address -pthread -I"$W" -I"$O/lib" -I"$2" -I"$SDK" \
+	    "$W/asan-driver.c" "$2"/cuda_*.c -lthr -o "$W/bin/asan-driver-$1" \
+	    >"$W/build-asan-$1.log" 2>&1
+}
+asan_run() {	# asan_run NAME TREE; the driver with the selection over the limit
 	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$overflow_profiles" \
-	    "$W/bin/asan-driver" >"$W/asan.out" 2>&1
+	    "$W/bin/asan-driver-$1" >"$W/asan-$1.out" 2>&1
+}
+asan_build production "$AS"
+rc=$?
+expect_rc "the address sanitizer build of the production sources compiles" \
+    "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-asan-production.log"
+if [ -x "$W/bin/asan-driver-production" ]; then
+	asan_run production "$AS"
 	rc=$?
-	cat "$W/asan.out"
-	if grep -q 'AddressSanitizer' "$W/asan.out"; then
+	cat "$W/asan-production.out"
+	if grep -q 'AddressSanitizer' "$W/asan-production.out"; then
+		bad "the address sanitizer reports no write past the array of the profiles"
+	else
+		ok "the address sanitizer reports no write past the array of the profiles"
+	fi
+	expect_rc "the selection over the limit is refused over the limit" "$rc" 0
+fi
+asan_build overflow "$AO"
+rc=$?
+expect_rc "the address sanitizer build of the overflowing counter compiles" \
+    "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-asan-overflow.log"
+if [ -x "$W/bin/asan-driver-overflow" ]; then
+	asan_run overflow "$AO"
+	rc=$?
+	cat "$W/asan-overflow.out"
+	if grep -q 'AddressSanitizer' "$W/asan-overflow.out"; then
 		bad "the address sanitizer reports no write past the array of the profiles"
 	else
 		ok "the address sanitizer reports no write past the array of the profiles"
 	fi
 	expect_rc "the overflowing counter is refused over the limit" "$rc" 0
+fi
+asan_build unbounded "$AB"
+rc=$?
+expect_rc "the address sanitizer build of the unbounded write compiles" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-asan-unbounded.log"
+if [ -x "$W/bin/asan-driver-unbounded" ]; then
+	asan_run unbounded "$AB"
+	rc=$?
+	cat "$W/asan-unbounded.out"
+	if grep -q 'global-buffer-overflow' "$W/asan-unbounded.out"; then
+		ok "the address sanitizer catches the write past the array of the profiles"
+	else
+		bad "the address sanitizer catches the write past the array of the profiles"
+	fi
+	if [ "$rc" -eq 0 ]; then
+		bad "the unbounded write is not accepted"
+	else
+		ok "the unbounded write is not accepted"
+	fi
 fi
 
 # ---- the child of the stress case -----------------------------------------
@@ -2001,6 +2186,51 @@ if [ "$rc" -ne 0 ]; then
 else
 	bad "the stress case fails when a child fails"
 	sed -n '1,20p' "$W/stress-disturbed.out"
+fi
+# The exit status of the child must carry the result of the round: a child
+# that drops the result exits 0, the parent sees a success and the failure
+# of the round is swallowed.  The mutant is a copy of the test program whose
+# child drops the result of the round: the production program fails the
+# disturbed round and the mutant swallows it, so the case above has teeth.
+SM=$W/stress-mutant
+mkdir -p "$SM"
+cp "$T/api_test.c" "$SM/"
+python3 -I - "$SM/api_test.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+checked = "rc = stress_round();\n\t\t\tCHECK_EQ(rc, 0);"
+assert checked in text, "the check on the result of the round is not in the child"
+text = text.replace(checked, "(void)stress_round();", 1)
+status = "_exit((rc == 0 && t_fails == 0) ? 0 : 1);"
+assert status in text, "the exit status of the child is not in the test program"
+text = text.replace(status, "_exit(t_fails == 0 ? 0 : 1);", 1)
+declared = "\tint status, rc;"
+assert declared in text, "the status of the child is not declared"
+text = text.replace(declared, "\tint status;", 1)
+open(path, "w").write(text)
+PYEOF
+rc=$?
+expect_rc "the child that drops the result of the round mutant changed the test" \
+    "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	cc $CFLAGS -pthread -I"$W" -I"$SDK" -I"$T" "$SM/api_test.c" \
+	    -L"$O/lib" -lcuda -lthr -o "$SM/api_test" >"$SM/build.log" 2>&1
+	rc=$?
+	expect_rc "the child that drops the result of the round mutant builds" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$SM/build.log"
+	if [ "$rc" -eq 0 ]; then
+		env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
+		    CUDA_NATIVE_TEST_STRESS_DISTURB=1 "$SM/api_test" init-stress \
+		    >"$SM/stress.out" 2>&1
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			ok "a child that drops the result of the round swallows the failure"
+		else
+			bad "a child that drops the result of the round swallows the failure (rc=$rc)"
+			sed -n '1,20p' "$SM/stress.out"
+		fi
+	fi
 fi
 
 # ---- a provider that cannot select ----------------------------------------

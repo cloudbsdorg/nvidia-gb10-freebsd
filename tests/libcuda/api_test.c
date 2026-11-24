@@ -830,14 +830,17 @@ stress_thread(void *arg)
 }
 
 /* One round: the threads call cuInit at once and must all see the same
- * device count.  The number of failed checks is the answer, so a child
- * process can report it. */
+ * device count, and that count must be the number of devices the selection
+ * names.  The round counts the threads that saw another count and returns
+ * that number: the result of the round is a fact of the round itself and
+ * does not depend on the counter of the checks of the framework, so a
+ * child process can report it in its exit status. */
 static int
 stress_round(void)
 {
 	struct stress_case cases[INIT_STRESS_THREADS];
 	pthread_t threads[INIT_STRESS_THREADS];
-	int i, first;
+	int i, first, mismatched = 0;
 
 	memset(cases, 0, sizeof(cases));
 	/* Time: O(threads); Space: O(1). */
@@ -854,11 +857,12 @@ stress_round(void)
 		CHECK_EQ(cases[i].count_result, CUDA_SUCCESS);
 		if (first == -1)
 			first = cases[i].count;
-		/* Every thread sees the same device count. */
-		CHECK_EQ(cases[i].count, first);
-		CHECK_EQ(cases[i].count, 2);
+		/* Every thread sees the same device count, and that count
+		 * is the number of the devices the selection names. */
+		if (cases[i].count != first || cases[i].count != 2)
+			mismatched++;
 	}
-	return (t_fails);
+	return (mismatched);
 }
 
 static int
@@ -866,7 +870,7 @@ init_stress_test(void)
 {
 	unsigned round;
 	pid_t pid;
-	int status;
+	int status, rc;
 
 	/* Time: O(rounds * threads); Space: O(threads). */
 	for (round = 0; round < INIT_STRESS_ROUNDS; round++) {
@@ -885,10 +889,15 @@ init_stress_test(void)
 			    CUDA_NATIVE_INIT_NOT_ATTEMPTED);
 			/* The child has its own checks and its own failure
 			 * count: the parent sees only the exit status, so
-			 * a failure of the child has to be in it. */
-			(void)stress_round();
+			 * a failure of the child has to be in it.  The result
+			 * of the round is checked as well as the count of
+			 * the checks: the round reports the threads that
+			 * saw another count in its return value, and that
+			 * value is not the count of the checks. */
+			rc = stress_round();
+			CHECK_EQ(rc, 0);
 			fflush(NULL);
-			_exit(t_fails == 0 ? 0 : 1);
+			_exit((rc == 0 && t_fails == 0) ? 0 : 1);
 		}
 		CHECK_EQ(waitpid(pid, &status, 0), pid);
 		CHECK(WIFEXITED(status));
