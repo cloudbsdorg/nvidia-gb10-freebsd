@@ -24,14 +24,16 @@ NVRM_1.0 {
 		nvrm_reason_text;
 		nvrm_source_name;
 		nvrm_cap_name;
-		nvrm_info_nfields;
-		nvrm_info_field;
 		nvrm_json_document;
 		nvrm_json_header;
 		nvrm_json_device;
 		nvrm_json_end;
 		nvrm_json_error;
 		nvrm_json_schema;
+		/* also in NVRM_1.2: the table grew; see nvrm_compat.c.  LLD needs the
+		 * name in both nodes for the two .symver versions to be exported. */
+		nvrm_info_nfields;
+		nvrm_info_field;
 	local:
 		*;
 };
@@ -60,7 +62,7 @@ NVRM_1.1 {
 		nvrm_mem_import_fd;
 } NVRM_1.0;
 
-/* API minor 2: version numbers (nvrm(3)). */
+/* API minor 2: version numbers (nvrm(3)) and the grown field table. */
 NVRM_1.2 {
 	global:
 		nvrm_driver_version;
@@ -69,6 +71,11 @@ NVRM_1.2 {
 		nvrm_library_version;
 		nvrm_symbol_version;
 		nvrm_schema_version;
+		nvrm_reason_from_id;
+		/* the default versions: they grew rows after 1.0; the 1.0 versions
+		 * (nvrm_compat.c, .symver) return only the rows 1.0 had */
+		nvrm_info_nfields;
+		nvrm_info_field;
 } NVRM_1.1;
 
 /* API minor 3: GPFIFO channels and ordered submission (nvrm_chan(3)). */

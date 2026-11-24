@@ -45,12 +45,10 @@ usage(FILE *fp)
 static int
 text_version_reason(const nvrm_version *v)
 {
-	int reason;
+	int reason = nvrm_reason_from_id(v->reason);
 
-	for (reason = 0; reason < NVRM_R__COUNT; reason++)
-		if (v->reason != NULL &&
-		    strcmp(v->reason, nvrm_reason_id(reason)) == 0)
-			return (reason);
+	if (reason > 0)
+		return (reason);
 #ifdef NVRM_FAULT_INJECT
 	abort();	/* a stored id must name a table row */
 #else
@@ -91,10 +89,10 @@ text_value(const nvrm_field *f, const char *base)
 	} else if (f->kind == NVRM_K_VERSION && ver->version.available)
 		printf("%s (%s)\n", ver->version.string,
 		    nvrm_source_name(ver->source));
-	else if (f->kind == NVRM_K_VERSION) {
-		text_version(&ver->version);
-		putchar('\n');
-	} else
+	else if (f->kind == NVRM_K_VERSION)
+		printf("unavailable: %s\n",
+		    nvrm_reason_text(text_version_reason(&ver->version)));
+	else
 		printf("unavailable: %s\n", nvrm_reason_text(
 		    f->kind == NVRM_K_U64 ? u->reason :
 		    f->kind == NVRM_K_STR ? st->reason : l->reason));

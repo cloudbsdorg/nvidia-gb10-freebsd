@@ -9,7 +9,7 @@
  *
  * Environment:
  *   NVRM_FAKE_PROFILE  comma list of profiles, one GPU each (default
- *                      "discrete"): discrete, unified, alias, unknown, sparse
+ *                      "discrete"): discrete, unified, untabled, unknown, sparse
  *   NVRM_FAKE_FAIL     open, version, list, gpu_open, limit: make that step
  *                      fail, so callers' error paths run without hardware;
  *                      nogpu: list no GPU (a success with zero devices).
@@ -110,8 +110,9 @@ static fake_profile profiles[] = {
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
 	},
 	{
-		/* GB20C has no compute table row; its raw code uses the alias. */
-		.name = "alias",
+		/* GB20C: architecture and implementation known, no compute table
+		 * row, so compute capability is family_unknown. */
+		.name = "untabled",
 		.val = {
 			PCI(0, 2, 0, 0x10de, 0x2e13, 0x10de, 0x0000, 0xa1),
 			[NVRM_P_ARCHITECTURE] = 0x1b0,
@@ -323,7 +324,7 @@ fake_open(nvrm_backend **bep, char *err, size_t errlen)
 		if (i == NPROFILES) {
 			snprintf(err, errlen, "fake backend: unknown profile "
 			    "\"%.*s\" in NVRM_FAKE_PROFILE (known: discrete, "
-			    "unified, alias, unknown, sparse)", (int)len, p);
+			    "unified, untabled, unknown, sparse)", (int)len, p);
 			free(be);
 			return (NVRM_E_INVAL);
 		}
@@ -463,16 +464,25 @@ fake_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 	buf[0] = '\0';
 	if (roundtrip(g) != 0)
 		return (NVRM_R_OS_CALL_FAILED);
-	if ((unsigned)p >= NVRM_SP_COUNT)
+	switch (p) {
+	case NVRM_SP_UUID:
+		value = g->p->uuid;
+		break;
+	case NVRM_SP_VBIOS:
+		value = g->p->vbios;
+		break;
+	case NVRM_SP_GSP_FIRMWARE:
+		value = g->p->gsp_firmware;
+		break;
+	default:
 		return (NVRM_R_BACKEND_NONE);
+	}
 	if (p == NVRM_SP_UUID && inject_uuid_fail != 0)
 		return (inject_uuid_fail);
 	if (inject_str_fail[p] != 0)
 		return (inject_str_fail[p]);
 	if (g->p->sfail[p] != 0)
 		return (g->p->sfail[p]);
-	value = p == NVRM_SP_UUID ? g->p->uuid :
-	    p == NVRM_SP_VBIOS ? g->p->vbios : g->p->gsp_firmware;
 	if (value == NULL)
 		return (NVRM_R_RM_FAILED);
 	snprintf(buf, len, "%s", value);

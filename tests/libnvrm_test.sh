@@ -131,6 +131,40 @@ printf '%s\n' '#include <nvrm/nvrm_version.h>' | cc -I"$L/include" -fsyntax-only
 rc=$?
 expect_rc "version header compiles alone for user space" $rc 0
 
+# NVRM_1.0 callers: dlvsym on the built library; the 1.0 symbols return only
+# the 1.0 rows, in 1.0 order (security: no row of a kind 1.0 does not know)
+cc $CINC -o "$W/compat_test" "$T/compat_test.c" >"$W/cc-compat.log" 2>&1
+rc=$?
+expect_rc "compat_test compiles" $rc 0
+"$W/compat_test" "$O/lib/libnvrm.so.1"
+rc=$?
+expect_rc "NVRM_1.0 field table: dlvsym returns the 1.0 rows in 1.0 order, no version rows" $rc 0
+# mutant: the 1.0 accessor returns the whole table; the test must fail
+M=$W/mut-compat
+[ -n "$W" ] && rm -rf "$M" "$W/mo-compat"
+mkdir -p "$M" && cp -R "$SRC/lib" "$M/lib" && cp "$SRC/SOURCES" "$M/SOURCES"
+sed -i '' 's/^#define NVRM_NFIELDS_1_0.*/#define NVRM_NFIELDS_1_0	35/' "$M/lib/libnvrm/nvrm_internal.h"
+grep -q 'NFIELDS_1_0	35' "$M/lib/libnvrm/nvrm_internal.h"
+rc=$?
+expect_rc "compat mutant: the edit is in place" $rc 0
+mkdir -p "$W/mo-compat"
+(cd "$M/lib/libnvrm" && MAKEOBJDIR=$W/mo-compat OGKM=${COMPAT_MUTANT_OGKM:-$OGKM} make >"$W/mo-compat.log" 2>&1)
+rc=$?
+expect_rc "compat mutant builds" $rc 0
+[ -f "$W/mo-compat/libnvrm.so.1" ]
+rc=$?
+expect_rc "compat mutant: the library exists" $rc 0
+if [ $rc -eq 0 ]; then
+	"$W/compat_test" "$W/mo-compat/libnvrm.so.1" >/dev/null 2>&1
+	rc=$?
+	# exit 1 is a row check failing; 3 is "could not load" and is no kill
+	if [ $rc -eq 1 ]; then ok "compat mutant killed: a 1.0 caller would meet the new rows"; else bad "compat mutant SURVIVED or was not run (rc=$rc)"; fi
+fi
+# the static archive carries no compat names
+nm "$O/lib/libnvrm.a" 2>/dev/null | grep -q '_1_0'
+rc=$?
+expect_rc "static archive has no nvrm_info_*_1_0 symbol" $rc 1
+
 (cd "$W/cov" && LLVM_PROFILE_FILE=core.%m.profraw ./core_test)
 rc=$?
 expect_rc "core_test (registry, enumeration, model, decorators, JSON, fake)" $rc 0
@@ -200,7 +234,7 @@ expect_rc "text mode explains the inconsistent running version" $rc 0
 "$W/cov/info_test" sparse >"$W/info-sparse.txt"
 rc=$?
 expect_rc "scripted nvrm-info runs with unavailable per-GPU versions" $rc 0
-grep -Eq 'vbios +unknown \(the RM control returned an error\)' "$W/info-sparse.txt" && grep -Eq 'gsp_firmware +unknown \(the RM reports the control is not supported on this GPU\)' "$W/info-sparse.txt"
+grep -Eq 'vbios +unavailable: the RM control returned an error$' "$W/info-sparse.txt" && grep -Eq 'gsp_firmware +unavailable: the RM reports the control is not supported on this GPU$' "$W/info-sparse.txt" && ! grep -Eq '(vbios|gsp_firmware) +unknown' "$W/info-sparse.txt"
 rc=$?
 expect_rc "text mode explains unavailable per-GPU versions with reason text" $rc 0
 "$W/cov/info_test" default --json >"$W/info-scripted.json"
@@ -306,6 +340,8 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	"$MD/t" >/dev/null 2>&1
 	if [ $? -ne 0 ]; then ok "mutant killed: $1"; else bad "mutant SURVIVED: $1"; fi
 }
+mutant dup-appended-row nvrm_fields.c 's/F("versions", gsp_firmware, NVRM_K_VERSION, "GSP firmware version"),/&	F("versions", gsp_firmware, NVRM_K_VERSION, "GSP firmware version"),/' core_test
+mutant nfields-1-0-low nvrm_internal.h 's/^#define NVRM_NFIELDS_1_0.*/#define NVRM_NFIELDS_1_0	29/' core_test
 mutant sm-shift nvrm.c 's/>>= 8;/>>= 7;/' core_test
 mutant sm-mask nvrm.c 's/&= 0xff;/\&= 0x7f;/' core_test
 mutant compute-table-minor nvrm_table.c 's/{ 0x1b0, 0x06, 12, 0 }/{ 0x1b0, 0x06, 12, 1 }/' core_test
@@ -346,6 +382,7 @@ mutant rm-least-privilege nvrm_rm.c 's/if (!allow_alloc)/if (0)/' cap_test
 mutant opts-default nvrm.c 's/(opts->flags \& NVRM_ENUM_ALLOW_ALLOC) != 0);/1);/' cap_test
 mutant opts-null nvrm.c 's/rc = ops->limit(ctx->be, opts != NULL \&\&$/rc = ops->limit(ctx->be, 1 ||/' cap_test
 mutant struct-member include/nvrm/nvrm.h 's/nvrm_u64	vram_size, bar1_size/nvrm_u64	l2_size, vram_size, bar1_size/' core_test
+mutant fake-str-swap nvrm_fake.c '/case NVRM_SP_VBIOS:/,/break;/s/g->p->vbios/g->p->gsp_firmware/' core_test
 mutant fields-bound nvrm_fields.c 's/index < nvrm_nfields ?/1 ?/' core_test
 mutant fields-abort nvrm_fields.c 's/abort();/return (NULL);/' core_test
 mutant family-no-value nvrm.c 's/NVRM_R_FAMILY_NO_CLASS, NVRM_S_FAMILY/NVRM_R_FAMILY_UNKNOWN, NVRM_S_FAMILY/' core_test
@@ -450,6 +487,16 @@ mutant chan-sleep-past-deadline nvrm_chan.c 's/return (left < nvrm_chan_slice_ns
 mutant chan-set-object-any nvrm_fake_chan.c 's/if (data != 0 \&\& data != b->granted\[subch\]) {/if (0) {/' chan_test
 mutant chan-ring-writable nvrm_chan.c 's/	    .flags = NVRM_MAP_READ_ONLY };/	    .flags = 0 };/' chan_test
 mutant chan-stats-v11 nvrm_mem.c 's/if (want != sizeof(full) \&\& want != v11)/if (want != sizeof(full))/' mem_test
+# the channel mutants pin: the ring space rule, the ordered submit queue, the
+# release segment reuse, a refused destroy kept until close and forgotten at
+# close, the fork child that makes no backend call, the fake engine running
+# one process's channels only, a backend without forget refused, and the
+# client stats size rule
+mutant chan-segment-reuse nvrm_chan.c 's/if (ch->slot_point\[slot\] > ch->completed)/if (0)/' chan_test
+mutant chan-held-forget nvrm_chan.c 's/cl->ops->chan->forget(ch->b);//' chan_test
+mutant chan-foreign-run nvrm_fake_chan.c 's/if (!nvrm_owner_is_me(\&b->core->cl->owner))/if (0)/' chan_test
+mutant chan-forget-required nvrm_chan.c 's/if (cl->ops->chan->destroy == NULL || cl->ops->chan->forget == NULL)/if (0)/' chan_test
+mutant chan-stats-zero-size nvrm_mem.c 's/size_t want = st->size == 0 ? sizeof(full) : st->size;/size_t want = st->size == 0 ? v11 : st->size;/' mem_test
 
 # ---- JSON modes against the schema --------------------------------------
 export NVRM_BACKEND=fake
@@ -467,6 +514,29 @@ for p in discrete unified unknown sparse discrete,unified discrete,unified,unkno
 	rc=$?
 	expect_rc "--jsonl validates (header, devices, end), profile $p" $rc 0
 done
+# the gpu group is one JSON object per device (no duplicate key) holding the
+# rows appended after 1.0, and each field is listed once per GPU in the text
+NVRM_FAKE_PROFILE=discrete,unified $INFO --json >"$W/grp.json"
+NVRM_FAKE_PROFILE=discrete,unified $INFO >"$W/grp.txt"
+python3 -I - "$W/grp.json" "$W/grp.txt" <<'PY'
+import json, sys
+def no_dups(pairs):
+    keys = [k for k, _ in pairs]
+    assert len(keys) == len(set(keys)), keys
+    return dict(pairs)
+raw = open(sys.argv[1]).read()
+doc = json.loads(raw, object_pairs_hook=no_dups)
+assert raw.count('"gpu":{') == len(doc["devices"]) == 2, raw.count('"gpu":{')
+for d in doc["devices"]:
+    assert "rm_sm_version" in d["gpu"] and "compute_capability_major" in d["gpu"]
+txt = open(sys.argv[2]).read().split("\n")
+heads = [l for l in txt if l.startswith("GPU ")]
+assert len(heads) == 2, heads
+for name in ("rm_sm_version", "uuid"):
+    assert sum(1 for l in txt if l.split()[:1] == [name]) == 2, name
+PY
+rc=$?
+expect_rc "JSON: one gpu key per device with the appended rows; text: each field once per GPU" $rc 0
 # --json is one line, one document
 NVRM_FAKE_PROFILE=discrete,unified $INFO --json | wc -l | grep -qx ' *1'
 rc=$?
@@ -1411,7 +1481,7 @@ printf 'on the RM backend with no linux kmod loaded is shown by boot_nvrm_info.s
 want=$(awk '$1=="ogkm_tag"{print $2}' "$SRC/SOURCES")
 grep -q "#define NVRM_RM_VERSION		\"$want\"" "$L/include/nvrm/nvrm.h"; rc=$?
 expect_rc "NVRM_RM_VERSION equals SOURCES ogkm_tag ($want)" $rc 0
-nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T"{sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported.txt"
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T"{sub(/@.*/,"",$3); print $3}' | sort -u >"$W/exported.txt"
 # declarations only: a comment line (one that starts with "/*" or " *") may
 # name a manual page, nvrm_mem(3), which is not a function
 grep -vE '^[[:space:]]*/?\*' "$L/include/nvrm/nvrm.h" "$L/include/nvrm/nvrm_chan.h" | grep -oE '\bnvrm_[a-z_0-9]+\(' | tr -d '(' | sort -u >"$W/declared.txt"

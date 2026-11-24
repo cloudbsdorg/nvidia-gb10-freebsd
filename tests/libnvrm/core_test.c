@@ -545,8 +545,8 @@ test_model_unknown_and_sparse(void)
 	CHECK(NVRM_HAVE(i->classes));
 	nvrm_close(ctx);
 
-	/* GB20C has no row either: the 0x0a04 alias cannot invent CC 12.0. */
-	ctx = must_enum("alias");
+	/* GB20C has no row either: the raw 0x0a04 cannot invent CC 12.0. */
+	ctx = must_enum("untabled");
 	i = info_of(ctx, 0);
 	CHECK_EQ(i->architecture.value, 0x1b0);
 	CHECK_EQ(i->implementation.value, 0x0c);
@@ -559,7 +559,8 @@ test_model_unknown_and_sparse(void)
 	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
 	nvrm_close(ctx);
 
-	/* With no table row, raw zero leaves compute capability unavailable. */
+	/* With no table row the reason is family_unknown whatever the raw code
+	 * is: the table does not read it (zero here). */
 	reset_env();
 	nvrm_fake_inject_value(NVRM_P_SM_VERSION, 0);
 	ctx = must_enum("unknown");
@@ -570,9 +571,9 @@ test_model_unknown_and_sparse(void)
 	CHECK(!NVRM_HAVE(i->rm_sm_version));
 	CHECK_EQ(i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED);
 	CHECK(!NVRM_HAVE(i->compute_capability_major));
-	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_INPUT_MISSING);
+	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK(!NVRM_HAVE(i->compute_capability_minor));
-	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_INPUT_MISSING);
+	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
 	nvrm_close(ctx);
 
 	/* everything missing: every value says why, nothing is a fake zero */
@@ -945,7 +946,8 @@ test_decorators(void)
 static void
 test_abi_1_0_layout(void)
 {
-	/* Offsets measured from tmp/round-a/nvrm-1.0.h (8702134). */
+	/* The 1.0 layout (LP64), measured from the header of commit 8702134:
+	 * the file lib/libnvrm/include/nvrm/nvrm.h in that commit. */
 	/* CPD-OFF -- ABI offset expectations are tabular data. */
 	static const struct {
 		const char *name;
@@ -1052,6 +1054,9 @@ test_names_and_fields(void)
 	CHECK_EQ(nvrm_reason_from_id("version_inconsistent"),
 	    NVRM_R_VERSION_INCONSISTENT);
 	CHECK_EQ(nvrm_reason_from_id("not_a_reason"), -1);
+	CHECK_EQ(nvrm_reason_from_id(NULL), -1);
+	/* the documented contract: the NONE id is not a reason a value gives */
+	CHECK_EQ(nvrm_reason_from_id(nvrm_reason_id(NVRM_R_NONE)), -1);
 	CHECK_STR(nvrm_source_name(NVRM_S_BOARD), "board");
 	CHECK_STR(nvrm_source_name(-1), "unknown");
 	CHECK_STR(nvrm_source_name(NVRM_S__COUNT), "unknown");
@@ -1090,7 +1095,7 @@ test_field_table(void)
 	 * overlap, so a new member without a row is caught here */
 	{
 		size_t pos = 0, sz = 0;
-		unsigned j, found, rows = 0;
+		unsigned j, found, rows = 0, appended = 0;
 
 		while (pos < offsetof(nvrm_device_info, caps)) {
 			found = 0;
@@ -1111,8 +1116,28 @@ test_field_table(void)
 			pos += sz;
 		}
 		CHECK_EQ(pos, offsetof(nvrm_device_info, caps));
-		/* The five appended members are checked separately below. */
-		CHECK_EQ(rows + 5, nvrm_nfields);
+		/* The rows of the members appended after the 1.0 layout, from
+		 * rm_sm_version on, are checked separately below. */
+		for (j = 0; j < nvrm_nfields; j++)
+			if (NVRM_ADDED_AFTER_1_0(nvrm_fields[j].offset))
+				appended++;
+		CHECK_EQ(rows + appended, nvrm_nfields);
+		/* NVRM_NFIELDS_1_0 is the table position where the appended
+		 * rows start: the rows before it are 1.0 rows, every row from
+		 * it on was added later (a row inserted mid-table fails here),
+		 * and a duplicated row is caught by the count and by the
+		 * pairwise distinct offsets. */
+		CHECK_EQ(nvrm_nfields - appended, NVRM_NFIELDS_1_0);
+		CHECK_EQ(appended, 5);
+		for (j = 0; j < nvrm_nfields; j++) {
+			unsigned k;
+
+			CHECK(NVRM_ADDED_AFTER_1_0(nvrm_fields[j].offset) ==
+			    (j >= NVRM_NFIELDS_1_0));
+			for (k = j + 1; k < nvrm_nfields; k++)
+				CHECK(nvrm_fields[j].offset !=
+				    nvrm_fields[k].offset);
+		}
 	}
 	/* ... and the whole struct is tied, not only the part before the
 	 * capabilities: the capability array, the decorator count and the
@@ -1386,6 +1411,13 @@ test_fake_direct(void)
 	CHECK_EQ(o->gpu_u64(g, NVRM_P_RM_GPU_ID, 0, &v), 0);
 	CHECK_EQ(v, ids[0]);
 	CHECK_EQ(o->gpu_str(g, NVRM_SP_UUID, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "GPU-00000000-0000-4000-8000-0000000000a1");
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_VBIOS, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "96.06.1e.00.4a");
+	CHECK_EQ(o->gpu_str(g, NVRM_SP_GSP_FIRMWARE, buf, sizeof(buf)), 0);
+	CHECK_STR(buf, "580.178.04");
+	CHECK_EQ(o->gpu_str(g, (enum nvrm_sprop)-1, buf, sizeof(buf)),
+	    NVRM_R_BACKEND_NONE);
 	CHECK_EQ(o->gpu_str(g, NVRM_SP_COUNT, buf, sizeof(buf)),
 	    NVRM_R_BACKEND_NONE);
 	CHECK_EQ(o->gpu_classes(g, cl, 2, &n), 0);

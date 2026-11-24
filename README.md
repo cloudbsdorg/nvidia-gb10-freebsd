@@ -266,6 +266,10 @@ firmware already registered. The kernel names the module after the file with `_f
 module is not installed or the index is stale: run `make install` again, which runs `kldxref`.
 See `man/nvidia.4`.
 
+Today `nvidia.ko` loads both GSP firmware modules on every machine (amd64; arm64 loads the one it builds).
+[`docs/DEVICE-DECISION.md`](docs/DEVICE-DECISION.md) designs a step that decides, per card and before
+anything loads, which firmware and driver it gets. Design only; nothing changes yet.
+
 ## Diagnostics
 
 The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN`. If that first
@@ -825,6 +829,16 @@ API is tested without hardware; the RM backend is tested against a scripted kern
 - `linux_enable="NO"`;
 - no Linuxulator or LinuxKPI module (amdgpu and drm are stripped from `kld_list` and blocked in
   devmatch);
+- no rc.d service that loads such a module by itself: `make-be.sh` reads every rc script of the
+  clone, expands the `required_modules` of each with the rc.conf variables it uses (the variables of
+  the script itself and the rc.conf of the service), and turns off every service that is enabled and
+  loads a forbidden driver (`drm_ready` loads `amdgpu`), and sets `cloudbsd_hwprobe_command="probe"`
+  so the hwprobe loads no KMS driver. A service whose `rcvar` or whose modules cannot be read is
+  refused, not ignored: a service that is not read is a service that is not known. `check-be.sh`
+  refuses a clone that still has one, and names the service and the module; it also refuses a devd
+  rule that loads a driver by itself, or that starts a service which loads one, and `make-be.sh`
+  refuses a base with such a rule (devd runs it when the device appears, and the kit cannot make it
+  safe);
 - only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
   Linux dependency since #2363;
 - `gpu-detect.sh` and `nvrm-info` traced under `ktrace`, so that every file they execute is checked.
@@ -832,12 +846,21 @@ API is tested without hardware; the RM backend is tested against a scripted kern
 The environment check fails when a loaded file other than the kernel, or a module record in such a
 file, has a Linux-layer name listed by `guard_layer_name`, or when `compat.linux` answers. Module
 records built into the kernel file are only reported. A failed environment check makes every row
-`not-available` and the verdict `fail`. A traced tool fails its row when it executes a non-FreeBSD binary,
-calls `fexecve`, or calls `execve` with no path. A correct run on current main ends with the verdict
-`incomplete`: some rows are `not-available`, `needs-linux` or `needs-linuxkpi`. Without the optional
+`not-available` and the verdict `fail`. A module can be loaded by more than the loader list: an
+enabled rc.d service loads the modules of its `required_modules` entry, and a devd rule can start
+such a service. The failure message names the loader it can see and points at `check-be.sh`, which
+names the service and the module; when it cannot see a loader it says so instead of naming one. A
+traced tool fails its row when it
+executes a non-FreeBSD binary, calls `fexecve`, or calls `execve` with no path. A correct run on
+current main ends with the verdict `incomplete`: some rows are `not-available`, `needs-linux` or
+`needs-linuxkpi`. Without the optional
 UVM and DRM control modules their rows are `not-available`; the known Linux-dependent controls make
 the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json` (schema
-`native-tools-summary/1`) plus per-tool JSON. See
+`native-tools-summary/1`) plus per-tool JSON. The copy-out of a run belongs to the person who ran
+`make-be.sh`: the user is recorded (`DOAS_USER`, else `SUDO_USER`, else the owner of the copy-out
+parent directory), it must be a user of the boot environment, and the one-shot gives the copy to
+them, the directory 0700 and the files 0600.
+See
 [tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
 statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
 tests the kit without a boot.

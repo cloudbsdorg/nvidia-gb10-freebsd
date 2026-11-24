@@ -2432,6 +2432,14 @@ test_stats_v11_size(void)
 	for (i = v11; i < sizeof(u.raw); i++)
 		CHECK_EQ(u.raw[i], 0xcc);
 	CHECK_STR(nvrm_client_errmsg(cl), "");
+	/* size 0 is the whole structure: a caller that zero-inits the
+	 * structure gets every member, the channel counts included */
+	memset(&u, 0, sizeof(u));
+	u.st.size = 0;
+	CHECK_EQ(stats_get(cl, &u.st), NVRM_OK);
+	CHECK_EQ(u.st.size, sizeof(u.st));
+	CHECK_EQ(u.st.live_channels, 1);
+	CHECK_EQ(u.st.channels_created, 1);
 	u.st.size = (uint32_t)v11 + 8;
 	CHECK_EQ(stats_get(cl, &u.st), NVRM_E_INVAL);
 	CHECK(strstr(nvrm_client_errmsg(cl), "NVRM_1.1 size") != NULL);

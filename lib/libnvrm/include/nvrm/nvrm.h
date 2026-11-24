@@ -347,8 +347,10 @@ typedef struct nvrm_mem_info {
 } nvrm_mem_info;
 
 /* What a client holds now and what it has done: leak checks read this.
- * size is 0, sizeof(nvrm_client_stats), or offsetof(nvrm_client_stats,
- * live_channels) for a caller built against NVRM_1.1 (that much is filled). */
+ * size is 0 or sizeof(nvrm_client_stats) for the whole structure, or
+ * offsetof(nvrm_client_stats, live_channels) for a caller built against
+ * NVRM_1.1 (that much is filled).  The members past the size the call
+ * returns are not written, so check size on return. */
 typedef struct nvrm_client_stats {
 	uint32_t	size;
 	uint32_t	reserved;
@@ -424,6 +426,7 @@ const char	*nvrm_strerror(int error);
 const char	*nvrm_error_id(int error);	/* stable machine id */
 const char	*nvrm_reason_id(int reason);
 const char	*nvrm_reason_text(int reason);
+int		nvrm_reason_from_id(const char *id);
 const char	*nvrm_source_name(int source);
 /* Capability flag name for a stable index, NULL when out of range. */
 const char	*nvrm_cap_name(unsigned index);

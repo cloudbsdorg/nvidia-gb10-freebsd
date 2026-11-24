@@ -281,8 +281,9 @@ lost(nvrm_chan *ch)
 	    __atomic_load_n(&ch->error, __ATOMIC_ACQUIRE)));
 }
 
+/* The ring slots GP_GET has passed, less the E-2 rule. */
 static unsigned
-space_locked(nvrm_chan *ch)
+ring_space(nvrm_chan *ch)
 {
 	uint32_t get = __atomic_load_n(&ch->gp_get, __ATOMIC_ACQUIRE);
 	unsigned pending = (ch->gp_put - get) & (ch->entries - 1);
@@ -290,6 +291,27 @@ space_locked(nvrm_chan *ch)
 	if (pending >= ch->entries - 1)
 		return (0);
 	return (ch->entries - 2 - pending);
+}
+
+/*
+ * The caller entries a batch may place.  GP_GET moves when the GPU fetches a
+ * ring entry, which can be before it reads the pushbuffer that entry names,
+ * so the slot of a core release is free again only when the progress
+ * semaphore has reached that release.  The slots a batch of ring_space()
+ * entries and its release would write are checked from GP_PUT on, and the
+ * batch ends before the first slot whose release has not run.
+ */
+static unsigned
+space_locked(nvrm_chan *ch)
+{
+	unsigned space = ring_space(ch), run, slot;
+
+	for (run = 0; run <= space; run++) {
+		slot = (ch->gp_put + run) & (ch->entries - 1);
+		if (ch->slot_point[slot] > ch->completed)
+			break;
+	}
+	return (run - (run != 0));
 }
 
 static int
@@ -372,6 +394,16 @@ create_memory(nvrm_chan *ch)
 	return (NVRM_OK);
 }
 
+/* Free the core record: the memory it owned is already released. */
+static void
+chan_free(nvrm_chan *ch)
+{
+	(void)pthread_cond_destroy(&ch->turn);
+	(void)pthread_mutex_destroy(&ch->lock);
+	free(ch->slot_point);
+	free(ch);
+}
+
 static int
 create_locked(nvrm_client *cl, const nvrm_chan_params *p, nvrm_chan **chp)
 {
@@ -387,6 +419,9 @@ create_locked(nvrm_client *cl, const nvrm_chan_params *p, nvrm_chan **chp)
 	if (cl->ops->chan == NULL)
 		return (fail_locked(cl, NVRM_E_NOTSUP, "the backend has no "
 		    "channels"));
+	if (cl->ops->chan->destroy == NULL || cl->ops->chan->forget == NULL)
+		return (fail_locked(cl, NVRM_E_NOTSUP, "the backend has no "
+		    "channel destroy or forget operation"));
 	ch = NVRM_CALLOC(1, sizeof(*ch));
 	if (ch == NULL)
 		return (fail_locked(cl, NVRM_E_NOMEM, "out of memory"));
@@ -396,6 +431,11 @@ create_locked(nvrm_client *cl, const nvrm_chan_params *p, nvrm_chan **chp)
 	rc = check_create(ch, p);
 	if (rc != NVRM_OK)
 		goto bad;
+	ch->slot_point = NVRM_CALLOC(ch->entries, sizeof(*ch->slot_point));
+	if (ch->slot_point == NULL) {
+		rc = fail_locked(cl, NVRM_E_NOMEM, "out of memory");
+		goto bad;
+	}
 	if (!cl->allow_map) {
 		rc = fail_locked(cl, NVRM_E_DENIED, "open the client with "
 		    "NVRM_OPEN_ALLOW_MAP to create a channel");
@@ -428,9 +468,7 @@ create_locked(nvrm_client *cl, const nvrm_chan_params *p, nvrm_chan **chp)
 bad:
 	strlcpy(saved, cl->errmsg, sizeof(saved));
 	create_unwind(ch);
-	(void)pthread_cond_destroy(&ch->turn);
-	(void)pthread_mutex_destroy(&ch->lock);
-	free(ch);
+	chan_free(ch);
 	strlcpy(cl->errmsg, saved, sizeof(cl->errmsg));
 	return (rc);
 }
@@ -542,6 +580,7 @@ place_batch(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 		ring[idx * 2] = nvrm_gp_entry0(e[i].va);
 		ring[idx * 2 + 1] = nvrm_gp_entry1(e[i].va, e[i].dwords,
 		    (e[i].flags & NVRM_GP_NO_PREFETCH) != 0);
+		ch->slot_point[idx] = 0;
 	}
 	idx = (ch->gp_put + n) & (ch->entries - 1);
 	put = (idx + 1) & (ch->entries - 1);
@@ -551,6 +590,7 @@ place_batch(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 	seg_va = ch->ring_va + NVRM_CHAN_SEG_OFF(ch->entries, idx);
 	ring[idx * 2] = nvrm_gp_entry0(seg_va);
 	ring[idx * 2 + 1] = nvrm_gp_entry1(seg_va, dwords, 0);
+	ch->slot_point[idx] = point;
 	ch->gp_put = put;
 	nvrm_barrier_normal();
 	ch->cl->ops->chan->gp_put(ch->b, put);
@@ -799,8 +839,10 @@ nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info)
 
 /*
  * Destroy a channel.  When the backend refuses to destroy its channel, the
- * ring memory and VA stay held (the backend may still use them): the failure
- * is counted and its message kept, and the client's close frees them.
+ * ring memory and VA stay held (the backend may still use them) and so does
+ * the core record, which the backend may still point to: the failure is
+ * counted and its message kept, the channel moves to the client's held list,
+ * and the client's close forgets the backend record, then frees them.
  */
 void
 nvrm_chan_destroy(nvrm_chan *ch)
@@ -825,8 +867,32 @@ nvrm_chan_destroy(nvrm_chan *ch)
 		;
 	*pp = ch->next;
 	cl->st.live_channels--;
+	if (held) {
+		ch->next = cl->held;
+		cl->held = ch;
+	}
 	(void)pthread_mutex_unlock(&cl->errlock);
-	(void)pthread_cond_destroy(&ch->turn);
-	(void)pthread_mutex_destroy(&ch->lock);
-	free(ch);
+	if (held)
+		return;
+	chan_free(ch);
+}
+
+/* Client close: the channels whose destroy was refused.  The backend record
+ * goes first, because it points to the core record and the ring memory that
+ * are freed here.  A fork child owns no backend record: it forgets nothing,
+ * drops the record and lets the memory go through the public memory calls,
+ * which pass owner 0 there. */
+void
+nvrm_chan_release_held(nvrm_client *cl)
+{
+	nvrm_chan *ch;
+
+	while ((ch = cl->held) != NULL) {
+		cl->held = ch->next;
+		if (nvrm_owner_is_me(&cl->owner))
+			cl->ops->chan->forget(ch->b);
+		ch->b = NULL;
+		create_unwind(ch);
+		chan_free(ch);
+	}
 }

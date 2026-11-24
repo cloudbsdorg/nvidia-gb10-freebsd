@@ -40,6 +40,7 @@
 /usr/local/share/man/man3/nvrm_json_header.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_json_schema.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_library_version.3 link nvrm.3
+/usr/local/share/man/man3/nvrm_reason_from_id.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_reason_id.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_reason_text.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_rm_api_version.3 link nvrm.3

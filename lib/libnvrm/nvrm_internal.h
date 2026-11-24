@@ -118,8 +118,6 @@ uint32_t nvrm_fake_gpu_id(const nvrm_gpu *g);
 extern void (*nvrm_registry_pause_hook)(void);
 extern const nvrm_backend_ops nvrm_backend_rm_ops;
 extern const nvrm_backend_ops nvrm_backend_fake_ops;
-/* Translate a stored reason id; -1 means the id is not in the reason table. */
-int	nvrm_reason_from_id(const char *id);
 /* The process and fork generation that own backend objects. */
 typedef struct nvrm_owner {
 	pid_t		pid;
@@ -311,6 +309,10 @@ typedef struct nvrm_chan_ops {
 		    nvrm_bchan **b, nvrm_bchan_info *out, char *err,
 		    size_t errlen);
 	int	(*destroy)(nvrm_bchan *b, char *err, size_t errlen);
+	/* Drop the backend record of a channel whose destroy was refused,
+	 * without touching device state: the client is closing and the core
+	 * is about to free the memory the record refers to. */
+	void	(*forget)(nvrm_bchan *b);
 	uint32_t (*gp_get)(nvrm_bchan *b);
 	void	(*gp_put)(nvrm_bchan *b, uint32_t put);
 	void	(*doorbell)(nvrm_bchan *b);
@@ -340,6 +342,8 @@ struct nvrm_chan {
 	pthread_mutex_t	lock;
 	pthread_cond_t	turn;		/* the queue head changed or a waiter left */
 	nvrm_chan_waiter *q_head, *q_tail;
+	uint64_t	*slot_point;	/* per ring slot: the release written
+					 * there, 0 for a caller entry */
 	uint32_t	gp_put;
 	uint32_t	gp_get;		/* atomic: waiters refresh peer channels */
 	uint32_t	state, error;	/* atomic for the same reason */
@@ -350,6 +354,11 @@ struct nvrm_chan {
 extern const nvrm_mem_ops nvrm_fake_mem_ops;
 extern const nvrm_mem_ops nvrm_rm_mem_ops;
 extern nvrm_chan_ops nvrm_fake_chan_ops;
+/* Test seam: the next nth GPU reads of the fake channel fail (0 disarms
+ * it).  A read error is not a fault: the channel stays alive. */
+extern void nvrm_fake_chan_read_fail(unsigned nth);
+/* Client close: forget and free the channels whose destroy was refused. */
+void	nvrm_chan_release_held(nvrm_client *cl);
 extern uint64_t nvrm_chan_slice_ns;
 /* Test seam: runs between the unlock and the sleep of a waiter. */
 extern void (*nvrm_chan_presleep_hook)(void);
@@ -411,6 +420,7 @@ struct nvrm_client {
 	nvrm_gmap	*gmaps;
 	nvrm_mem	*mems;
 	nvrm_chan	*channels;
+	nvrm_chan	*held;		/* destroy refused: kept until close */
 	nvrm_u64	vram_size;	/* from the device, as enumerated */
 	nvrm_u64	wc_cap;
 	nvrm_list	page_sizes;
@@ -443,6 +453,9 @@ int	nvrm_fake_gpu_access(nvrm_client *cl, uint64_t va, void *buf,
 #define NVRM_FAKE_CHAN_ERR_UNSUPPORTED	13
 #define NVRM_FAKE_CHAN_ERR_MMU		31
 void	nvrm_fake_chan_manual(int on);
+/* Test seam: GP_GET moves when an entry is fetched, up to two entries ahead
+ * of the pushbuffer that runs (a step is one fetch or one pushbuffer). */
+void	nvrm_fake_chan_lag(int on);
 int	nvrm_fake_chan_step(nvrm_chan *ch, unsigned max_entries);
 void	nvrm_fake_chan_fault(nvrm_chan *ch, uint32_t code);
 typedef struct nvrm_fake_chan_counts {
@@ -481,6 +494,20 @@ int	*nvrm_field_reason(nvrm_device_info *info, const nvrm_field *f);
 
 extern const nvrm_field nvrm_fields[];
 extern const unsigned nvrm_nfields;
+/* The rows nvrm_info_field() returned at NVRM_1.0 (the table's first rows, in
+ * their 1.0 order; every later row is after them).  nvrm_compat.c serves
+ * exactly these to a caller bound to the NVRM_1.0 symbols. */
+#define NVRM_NFIELDS_1_0	30
+/* The one definition of "added after NVRM_1.0": a row whose member sits at or
+ * after rm_sm_version in nvrm_device_info.  nvrm_compat.c and core_test both
+ * use it; core_test ties NVRM_NFIELDS_1_0 to it (the first NVRM_NFIELDS_1_0
+ * rows are not added after 1.0, every later row is). */
+#define NVRM_ADDED_AFTER_1_0(off)					\
+	((off) >= offsetof(nvrm_device_info, rm_sm_version))
+/* The NVRM_1.0 versions of the field-table calls (nvrm_compat.c, shared
+ * library only). */
+unsigned nvrm_info_nfields_1_0(void);
+const nvrm_field *nvrm_info_field_1_0(unsigned index);
 extern const char *const nvrm_group_names[];
 extern const unsigned nvrm_ngroups;
 

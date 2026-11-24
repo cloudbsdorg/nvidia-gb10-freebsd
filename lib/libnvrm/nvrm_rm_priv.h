@@ -51,6 +51,9 @@ struct nvrm_backend {
 	int			wc, wc_reason;
 };
 
+/* Derive the running version (nvrm_rm_running_version) from the driver one. */
+void	nvrm_rm_sync_running_version(nvrm_backend *be);
+
 struct nvrm_gpu {
 	nvrm_backend		*be;
 	uint32_t		id;
