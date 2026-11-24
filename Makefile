@@ -1,10 +1,10 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# nvidia-gb10-freebsd: NVIDIA's FreeBSD driver built for arm64 (nvidia.ko,
-# nvidia-modeset.ko, nvidia-drm.ko, the GSP firmware module, the optional
-# Linux providers), libnvrm and nvrm-info, the rc.d script and the manual
-# pages.  One Makefile for GNU make and bmake (skill
+# nvidia-gb10-freebsd: NVIDIA's FreeBSD driver built for arm64 and amd64
+# (nvidia.ko, nvidia-modeset.ko, nvidia-drm.ko, the GSP firmware module,
+# the optional Linux providers), libnvrm and nvrm-info, the rc.d script
+# and the manual pages.  One Makefile for GNU make and bmake (skill
 # project-makefile-contract): recipe lines start with a tab, no make
 # conditionals, no GNU functions, no bmake modifiers.  Every recipe hands
 # its target to scripts/make.sh, which holds the logic in sh(1).
@@ -42,7 +42,8 @@ ACCEPT_ALL_LICENSES = 0
 E2E_REPO_URL =
 E2E_REF =
 E2E_OS = 16.0-CURRENT
-E2E_ARCH = aarch64
+# Empty: scripts/make.sh defaults to the running architecture (hookarch).
+E2E_ARCH =
 E2E_BACKEND = vmm
 E2E_SSH =
 JSON = 0
@@ -54,8 +55,8 @@ DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_
 help:
 	@printf '%s\n' \
 		"purpose: $(REPO_PURPOSE)" \
-		"NVIDIA's FreeBSD driver for arm64, libnvrm and nvrm-info," \
-		"for any user on a stock FreeBSD arm64 install." \
+		"NVIDIA's FreeBSD driver for arm64 and amd64, libnvrm and nvrm-info," \
+		"for any user on a stock FreeBSD arm64 or amd64 install." \
 		"" \
 		"Targets (same names on every OS):" \
 		"  make help             this message (default)" \
@@ -66,7 +67,9 @@ help:
 		"                        install-deps: the same)" \
 		"  make configure        loader.conf and rc.conf for boot loading:" \
 		"                        shows the change, backs up, asks" \
-		"  make build            every module, drm.ko, libnvrm, nvrm-info" \
+		"  make build            every module, libnvrm, nvrm-info" \
+		"                        (drm.ko: from drm-kmod packages on amd64;" \
+		"                        built here on arm64)" \
 		"  make test             the repository unit tests" \
 		"  make install          prerequisites, build if needed, then install" \
 		"  make deinstall        remove what install and configure wrote" \

@@ -24,6 +24,14 @@ fail=0
 ok() { printf 'ok    %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 
+# Architecture (Track #2475).  On amd64 the DRM modules of the target system
+# come from FreeBSD's drm-kmod packages and this repository does not install
+# them; on aarch64 this repository builds and installs drm.ko and dmabuf.ko.
+# Every expectation below is architecture aware: the amd64 cases never expect
+# this repository to install drm.ko or dmabuf.ko, and the arm64 cases keep
+# the wording they always required.
+arch=$(uname -p)
+
 for need in README.md docs/MANUAL-BUILD.md docs/llm.md scripts/make.sh; do
 	if [ -f "$repo/$need" ] && [ -r "$repo/$need" ]; then
 		ok "$need exists and is readable"
@@ -321,6 +329,13 @@ check() {  # check DESCRIPTION COMMAND...
 # (0 found, 1 not found; 2 is an error and fails either way).
 no_match() { grep -E -- "$1" "$2" >/dev/null 2>&1; [ $? = 1 ]; }
 has() { grep -F -- "$1" "$2" >/dev/null 2>&1; [ $? = 0 ]; }
+# doc_has PHRASE FILE: 0 when FILE holds PHRASE, ignoring how Markdown wraps
+# it: the words of the phrase may be split over two lines.  A missing or
+# unreadable file fails, like no_match does.
+doc_has() {
+	[ -r "$2" ] || return 1
+	tr '\n' ' ' < "$2" | tr -s ' ' | grep -qF -- "$1"
+}
 
 # The doas setup block, run in /bin/sh against a scratch file.
 check "README doas setup has no <user> placeholder" no_match '<user>' "$readme"
@@ -485,10 +500,18 @@ mkdir -p "$S/samples"
 # Sample-only mode of the flow test: it runs the planted blocked install, the
 # planted install and the doas next steps, and exits non-zero if any of them
 # misbehaves.  Its other checks are its own business.
+# The planted install goes into a scratch destination of the flow test.  On
+# amd64 that destination carries a packaged drm.ko and dmabuf.ko of its own
+# (the policy of tests/make_install_flow_test.sh), because on amd64 the DRM
+# modules come from FreeBSD's drm-kmod packages and this repository does not
+# install them.  Without that stand-in the install is blocked on drm.ko
+# ("pkg install drm-kmod") and none of the quoted output below can be read.
 if GB10_FLOW_SAMPLES_ONLY=1 GB10_FLOW_SAMPLES=$S/samples sh "$repo/tests/make_install_flow_test.sh" > "$S/flow.log" 2>&1 \
     && [ -s "$S/samples/blocked.out" ] && [ -s "$S/samples/installed.out" ] \
     && [ -s "$S/samples/next-doas.out" ] && [ -s "$S/samples/next-note.out" ]; then
 	ok "the planted blocked run, install and next steps ran and wrote their output"
+elif [ "$arch" = amd64 ]; then
+	bad "the planted runs behind the quoted output failed (on amd64 the destination needs a packaged drm.ko, the one FreeBSD's drm-kmod packages provide): $(tail -n 3 "$S/flow.log" | tr '\n' ' ')"
 else
 	bad "the planted runs behind the quoted output failed: $(tail -n 3 "$S/flow.log" | tr '\n' ' ')"
 fi
@@ -518,14 +541,49 @@ fi
 # The other quoted lines (not next:) must be lines make.sh printed.
 grep -E '^install: ' "$S/installed" > "$S/install-lines"
 [ -s "$S/install-lines" ] || bad "README Installed has no quoted install: lines"
+# A quoted line that names drm.ko or dmabuf.ko describes an install that
+# wrote the DRM modules.  On amd64 this repository does not write them: they
+# come from FreeBSD's drm-kmod packages.  Such a line then describes another
+# architecture, and must not fail the check here.  nvidia-drm.ko is ours on
+# every architecture and does not count.
+drm_quoted_line() {
+	[ "$arch" = amd64 ] || return 1
+	case $1 in
+	*/drm.ko|*/drm.ko\ *|*/dmabuf.ko|*/dmabuf.ko\ *) return 0 ;;
+	esac
+	return 1
+}
 while IFS= read -r il; do
 	[ -n "$il" ] || continue
 	if grep -qxF -- "$il" "$S/samples/installed.out" 2>/dev/null; then
 		ok "Installed line is what make.sh printed: $il"
+	elif drm_quoted_line "$il"; then
+		ok "Installed line names a DRM module this repository does not install on $arch: $il"
 	else
 		bad "Installed line is not what make.sh printed: $il"
 	fi
 done < "$S/install-lines"
+# The DRM modules of the installed sample: on arm64 this repository builds
+# and installs drm.ko and dmabuf.ko itself; on amd64 they come from FreeBSD's
+# drm-kmod packages and this repository must not claim them.
+if [ ! -s "$S/samples/installed.out" ]; then
+	bad "the install sample is missing, so the DRM modules cannot be checked"
+elif [ "$arch" = amd64 ]; then
+	if grep -qE '^installed /boot/modules/(drm|dmabuf)\.ko' "$S/samples/installed.out" 2>/dev/null; then
+		bad "amd64: the install sample claims drm.ko or dmabuf.ko, which come from FreeBSD's drm-kmod packages"
+	else
+		ok "amd64: the install sample does not claim drm.ko or dmabuf.ko (FreeBSD's drm-kmod packages provide them)"
+	fi
+else
+	_drm_missing=
+	grep -q '^installed /boot/modules/drm\.ko' "$S/samples/installed.out" 2>/dev/null || _drm_missing="$_drm_missing drm.ko"
+	grep -q '^installed /boot/modules/dmabuf\.ko' "$S/samples/installed.out" 2>/dev/null || _drm_missing="$_drm_missing dmabuf.ko"
+	if [ -z "$_drm_missing" ]; then
+		ok "the install sample lists drm.ko and dmabuf.ko, which this repository installs on arm64"
+	else
+		bad "the install sample does not list:$_drm_missing"
+	fi
+fi
 check "README Installed says the root tool in the kldload line is the one you have" has 'root tool in that line is the one' "$S/installed"
 check "README Installed puts EnableGpuFirmware=1 with the load instructions" has 'hw.nvidia.registry.EnableGpuFirmware=1' "$S/installed"
 grep -v '^next: ' "$readme" > "$S/readme-unquoted"
@@ -653,6 +711,25 @@ else
 	bad "MANUAL-BUILD Load at boot has no loader.conf block ending in a closing brace"
 fi
 check "MANUAL-BUILD Test-load names the trust in the user who owns the work tree" has 'trust' "$S/load-section"
+
+# The DRM modules in the documents.  On arm64 this repository builds and
+# installs drm.ko and dmabuf.ko; on amd64 they come from FreeBSD's drm-kmod
+# packages and this repository installs neither.  Each document must say so
+# for the architecture it is read on: the amd64 wording is the one the
+# documents carry for amd64, the arm64 wording stays required on arm64.
+case $arch in
+amd64)
+	check "README says the DRM module comes from FreeBSD's drm-kmod packages on amd64" doc_has "FreeBSD's drm-kmod packages are amd64-only" "$readme"
+	check "README says that on amd64 this repository does not build its own drm.ko" doc_has "On amd64, \`make build\` does not build our own \`drm.ko\`" "$readme"
+	check "README says that on amd64 the install writes no drm.ko and no dmabuf.ko" doc_has "on amd64 those come from FreeBSD's drm-kmod packages, not from this install" "$readme"
+	check "MANUAL-BUILD says the DRM module comes from FreeBSD's drm-kmod packages on amd64" doc_has "On amd64 that \`drm.ko\` comes from FreeBSD's drm-kmod packages (\`pkg install drm-kmod\`); this tree does not build its own" "$manual"
+	;;
+*)
+	check "README says that on arm64 this repository builds drm.ko and dmabuf.ko" doc_has "On arm64 \`make build\` builds \`drm.ko\` and \`dmabuf.ko\` from the pinned tree" "$readme"
+	check "README says that on arm64 the install writes drm.ko and dmabuf.ko" doc_has "on arm64 also \`drm.ko\` and \`dmabuf.ko\`" "$readme"
+	check "MANUAL-BUILD says that on arm64 the build produces drm.ko and dmabuf.ko" doc_has "On arm64 the build produces \`drm.ko\` and \`dmabuf.ko\` from the pinned drm-kmod sources" "$manual"
+	;;
+esac
 
 # MANUAL-BUILD.md names only files the build scripts produce.
 grep -o '\$T/[A-Za-z0-9_./-]*' "$repo/docs/MANUAL-BUILD.md" | sort -u > "$S/manual-paths"

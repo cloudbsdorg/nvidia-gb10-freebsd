@@ -6,8 +6,12 @@ repository root and check its result before continuing.
 
 ## Requirements
 
-- FreeBSD 16.0-CURRENT on arm64 and the source for the running kernel (`/usr/src/sys` by
-  default; override it with `SYSDIR=`).
+- FreeBSD 16.0-CURRENT on arm64 or amd64, and the source for the running kernel
+  (`/usr/src/sys` by default; override it with `SYSDIR=`). The RM core is built for the
+  running architecture from open-gpu-kernel-modules 580.178.04 (`nv-kernel-aarch64.o` or
+  `nv-kernel-amd64.o`). On amd64 the open core is still rebuilt; NVIDIA's prebuilt
+  `nv-kernel.o` is not what the final `nvidia.ko` links. Kernel modules are linked with
+  the base system's `ld.lld` (`/usr/bin` ahead of `/usr/local/bin`).
 - An Ampere-generation or newer NVIDIA GPU (RTX 30 series and later, and data-centre parts of
   the same generations). Turing needs `gsp_tu10x`, which this build does not produce.
 - `git`, `gmake` and `zstd`, plus the base system's `clang` and `ld.lld`:
@@ -21,7 +25,10 @@ repository root and check its result before continuing.
   load.
 - For `nvidia-drm`, the drm-kmod source tree from which the installed `drm.ko` was built
   (`DRMKMODDIR=`, an absolute path) and the FreeBSD source headers (`BSDSRCTOP=`, the parent of
-  `SYSDIR` by default).
+  `SYSDIR` by default). On amd64 that `drm.ko` comes from FreeBSD's drm-kmod packages
+  (`pkg install drm-kmod`); this tree does not build its own. On arm64 the build produces
+  `drm.ko` and `dmabuf.ko` from the pinned drm-kmod sources unless a foreign `drm.ko` is
+  already installed.
 - An Ampere Altra host needs the PCIe workarounds in
   [`kernel-patches/README.md`](../kernel-patches/README.md). On every arm64 host, `nvidia-drm`
   needs the LinuxKPI write-combining change from the same guide. `nvidia.ko` alone needs neither
@@ -67,14 +74,22 @@ sh scripts/build-shim.sh --module=nvidia-modeset-linux   # only to run Linux bin
 sh tests/kmod_symbols_test.sh
 ```
 
-The first `build-shim.sh` pass has no arm64 RM core to link yet. It must exit 3 and end with
-exactly this summary (`make rc 1` is make's status, not the script's):
+The first `build-shim.sh` pass has no rebuilt open RM core to link yet. On arm64 the
+tree still holds NVIDIA's prebuilt x86-64 `nv-kernel.o`, so the link must fail and the
+script must exit 3, ending with exactly this summary (`make rc 1` is make's status, not
+the script's):
 
 ```text
 errors: 1
 ld: error: nv-kernel.o is incompatible with aarch64elf
 build: FAILED (make rc 1)
 ```
+
+On amd64 that prebuilt object is an amd64 object, so pass 1 may link it and exit 0.
+That is only a compile check: `build-stubs.sh` and the second `build-shim.sh` pass
+still replace it with the open core (`nv-kernel-gb10.o`) before `nvidia.ko` is the
+finished module. The second pass must print `build: OK`, and `readelf -p .comment`
+on the module must name LLD.
 
 Any other error, or a failure at any other step, means stop and investigate. The second pass
 links `nvidia.ko`. `build-stubs.sh` checks the core against the compiled OS layer between the

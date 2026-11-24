@@ -114,6 +114,9 @@ trap 'exit 143' TERM
 # is set (case (g) proves it).
 GB10_TEST_HOOKS=1
 export GB10_TEST_HOOKS
+# Pin the aarch64 path so these cases stay valid on amd64 hosts (Track #2475).
+GB10_TEST_ARCH=aarch64
+export GB10_TEST_ARCH
 
 ok() {
 	PASSED=$((PASSED + 1))
@@ -203,9 +206,12 @@ printf 'ogkm_commit %s\n' "0000000000000000000000000000000000000000" \
 # carries the AArch64 BTI/PAC property note that build-rmcore.sh now
 # requires before "state done" (pass-3 u09 #2); the second copy, built
 # WITHOUT the flag, is the note-less object case (r) must refuse.
+# -target aarch64-unknown-freebsd is required so this compile succeeds on
+# amd64 hosts too, where the aarch64 path is pinned (Track #2475).
 printf 'extern int rmcore_missing_1(void);\nint f(void) { return rmcore_missing_1(); }\n' \
 	> "$TESTROOT/fake-kernel.c"
-cc -c -fno-stack-protector -mbranch-protection=standard \
+cc -c -fno-stack-protector -target aarch64-unknown-freebsd \
+	-mbranch-protection=standard \
 	-o "$TESTROOT/fake-nv-kernel.o" "$TESTROOT/fake-kernel.c"
 cc -c -fno-stack-protector \
 	-o "$TESTROOT/fake-nv-kernel-nonote.o" "$TESTROOT/fake-kernel.c"

@@ -314,11 +314,39 @@ gate_line_safe() {
 	return 1
 }
 
+# gate_arch_map <processor>: the FreeBSD MACHINE and MACHINE_ARCH of a processor name, printed as one line.
+# The compile line must be the one of the architecture the host runs: bsd.kmod.mk adds -mno-outline-atomics when
+# MACHINE_ARCH is aarch64, and an x86_64 clang refuses that flag ("does not support '-mno-outline-atomics'"), so
+# asking make for the arm64 line on an amd64 host parses the source with flags that cannot be used there.  A
+# processor this test does not know is refused (status 1, nothing printed): the caller then does not run, rather
+# than run with the flags of another architecture.
+gate_arch_map() {
+	case ${1:-} in
+	amd64|x86_64) echo "amd64 amd64" ;;
+	aarch64|arm64) echo "arm64 aarch64" ;;
+	*) return 1 ;;
+	esac
+}
+
+# gate_arch: the same for the running host: uname -p names the processor (on FreeBSD: amd64 or aarch64), and a
+# host whose uname -p says nothing useful is asked again with uname -m.  Status 1 when the architecture is not
+# one this test knows: the check refuses to run on it, it does not fall back to another architecture's flags.
+gate_arch() {
+	_gp=$(uname -p 2> /dev/null) || _gp=
+	_gm=$(gate_arch_map "$_gp") && { echo "$_gm"; return 0; }
+	_gp=$(uname -m 2> /dev/null) || _gp=
+	_gm=$(gate_arch_map "$_gp") || return 1
+	echo "$_gm"
+}
+
 # gate_ast <tree> <file>: the AST of one patched nvidia-drm source (lkpi.c or drv.c), parsed by clang with the
 # module's own compile line, so that macros, token pasting, typedefs and attributes are resolved before the
 # names are looked at.  The flags are the ones make prints for that object in a prepared build tree
-# (PRIME_BUILD_TREE, default $WORK/build/tree): the tree's generated headers and the kernel and drm-kmod trees it
-# was configured against (its .gb10-sysdir stamp) are what the source includes.  The patched file replaces the
+# (PRIME_BUILD_TREE, default $WORK/build/tree) FOR THE ARCHITECTURE THIS HOST RUNS: make is asked with this
+# host's MACHINE and MACHINE_ARCH, never with a hard-coded pair, because the flags of one architecture are not
+# the flags of another (bsd.kmod.mk adds -mno-outline-atomics for aarch64 and an x86_64 clang refuses it).  The
+# tree's generated headers and the kernel and drm-kmod trees it was configured against (its .gb10-sysdir stamp)
+# are what the source includes.  The patched file replaces the
 # one of the tree; the headers of the tree under test come first (a quoted include looks next to the file).
 # tests/data/gate_ast_check.py then refuses every declaration named exactly one of the gate names that is not
 # the external declaration.  Prints the first defect, or AST-OK as its only line when there is none: the caller
@@ -333,12 +361,28 @@ gate_ast() {
 	_gsys=$(awk '$1 == "sysdir" { print $2 }' "$_gs"); _gtop=$(awk '$1 == "bsdsrctop" { print $2 }' "$_gs"); _gdrm=$(awk '$1 == "drmkmoddir" { print $2 }' "$_gs")
 	[ -n "$_gsys" ] && [ -n "$_gtop" ] && [ -n "$_gdrm" ] || { echo "D6: $_gs does not name sysdir, bsdsrctop and drmkmoddir"; return; }
 	_gname=${_gb%.c}
+	# the compile line is asked for THIS architecture: the flags make prints depend on MACHINE and MACHINE_ARCH
+	# (bsd.kmod.mk adds -mno-outline-atomics when MACHINE_ARCH is aarch64, and an x86_64 clang refuses that flag),
+	# so they are asked for the running host and not for a hard-coded pair.  An architecture this test does not
+	# know is refused here: the check does not run with the flags of another architecture.
+	_garch=$(gate_arch) || { echo "D6: the architecture of this host ($(uname -m 2> /dev/null)) is not one this check knows (amd64 or aarch64): the module's compile line cannot be asked for"; return; }
+	_gmachine=${_garch%% *}
+	_gmachine_arch=${_garch#* }
 	( cd "$_gd" && env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX make -n -B \
-	    MACHINE=arm64 MACHINE_ARCH=aarch64 SYSDIR="$_gsys" BSDSRCTOP="$_gtop" DRMKMODDIR="$_gdrm" "$_gname.o" ) 2> "$TMPD/ast-make.err" | grep '^cc ' > "$TMPD/ast-cc.txt"
+	    MACHINE="$_gmachine" MACHINE_ARCH="$_gmachine_arch" SYSDIR="$_gsys" BSDSRCTOP="$_gtop" DRMKMODDIR="$_gdrm" "$_gname.o" ) 2> "$TMPD/ast-make.err" | grep '^cc ' > "$TMPD/ast-cc.txt"
 	[ -s "$TMPD/ast-cc.txt" ] || { echo "D6: make prints no compile line for $_gname.o in $_gd: $(head -1 "$TMPD/ast-make.err")"; return; }
 	[ "$(wc -l < "$TMPD/ast-cc.txt" | tr -d ' ')" = 1 ] || { echo "D6: make prints more than one compile line for $_gname.o"; return; }
 	_gline=$(cat "$TMPD/ast-cc.txt")
 	gate_line_safe "$_gline" || { echo "D6: the compile line of $_gname.o is not plain words (a separator, pipe, redirection or substitution): it is not run"; return; }
+	# the flags are the ones of this architecture: on amd64 the aarch64-only flag must not be in the line (an
+	# x86_64 clang refuses it, with -Werror that is an error); on aarch64 it may be there, and is when make
+	# prints it.  The same line gives the flags to the syntax-only run below and to the object compile further
+	# down: one architecture, one set of flags.
+	case $_gmachine_arch in
+	amd64) case $_gline in
+		*-mno-outline-atomics*) echo "D6: the compile line of $_gname.o carries -mno-outline-atomics, which is an aarch64-only flag: an amd64 clang refuses it, so the source cannot be parsed with it"; return ;;
+		esac ;;
+	esac
 	# the line is shell syntax (it carries quoted -D values): split it by the shell, then drop what makes an object
 	eval "set -- $_gline"
 	shift
@@ -622,7 +666,7 @@ $(cat "$@" | grep '^+')"
 		_fn=${_fn%%|*}
 		_file=${_fn% *}; _name=${_fn#* }
 		body "$_t/$_file" "$_name" "$_g/one.c" || { echo "D6: the harness cannot extract $_name"; return; }
-		if head -1 "$_g/one.c" | grep -Eq "^[[:space:]]*$_name[[:space:]]*\("; then printf '%s\n' "$_pre" >> "$_g/glue_funcs.h"; fi
+		if head -1 "$_g/one.c" | grep -Eq "^[[:space:]]*${_name}[[:space:]]*\("; then printf '%s\n' "$_pre" >> "$_g/glue_funcs.h"; fi
 		cat "$_g/one.c" >> "$_g/glue_funcs.h"
 		echo >> "$_g/glue_funcs.h"
 	done

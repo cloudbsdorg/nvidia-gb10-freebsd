@@ -22,6 +22,13 @@ fail=0
 ok() { printf 'ok    %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 
+# Architecture (Track #2475).  On amd64 the DRM modules of the target system
+# come from FreeBSD's drm-kmod packages and this repository does not install
+# them; on aarch64 the repository ships its own drm.ko and dmabuf.ko.  Every
+# expectation below is architecture aware: the amd64 cases never expect this
+# repository to install drm.ko or dmabuf.ko.
+arch=$(uname -p)
+
 url=$(awk '$1 == "nvidia_freebsd_url" { print $2 }' "$repo/SOURCES")
 want_sha=$(awk '$1 == "nvidia_freebsd_sha256" { print $2 }' "$repo/SOURCES")
 ogkm_tag=$(awk '$1 == "ogkm_tag" { print $2 }' "$repo/SOURCES")
@@ -125,8 +132,24 @@ snap() {
 	done)
 }
 
+# plant_packaged_drm DESTDIR: on amd64 the DRM modules of the target system
+# come from FreeBSD's drm-kmod packages, not from this repository, so the
+# destination has to carry a packaged drm.ko and dmabuf.ko of its own before
+# the install runs.  The stand-in satisfies the DRM policy for the cases
+# which are about something else.  It is not ours: the install must leave it
+# alone and must not claim it in the manifest.
+drm_standin='packaged drm.ko stand-in (drm-kmod)'
+dmabuf_standin='packaged dmabuf.ko stand-in (drm-kmod)'
+plant_packaged_drm() {
+	[ "$arch" = amd64 ] || return 0
+	[ -d "$1/boot/modules" ] || return 0
+	printf '%s\n' "$drm_standin" > "$1/boot/modules/drm.ko"
+	printf '%s\n' "$dmabuf_standin" > "$1/boot/modules/dmabuf.ko"
+}
+
 new_dest() {
 	mkdir -p -- "$1/boot/modules" "$1/usr/local/etc" "$1/etc"
+	plant_packaged_drm "$1"
 }
 
 W1=$S/w1
@@ -243,6 +266,51 @@ assert len(d["next"]) == 3 and "staged under" in d["next"][0]
 assert d["next"][1:] == ["kldstat", "nvrm-info --json"]
 EOF
 then ok "installed JSON is one object and agrees with English"; else bad "installed JSON (rc $rc): $(tail -n 4 "$S/installed.json" | tr '\n' ' ')"; fi
+
+# (Track #2475) On amd64 the DRM modules of the target system come from
+# FreeBSD's drm-kmod packages; this repository does not install them.  The
+# packaged drm.ko which is already in the destination is left exactly as it
+# is, and it is not claimed in our manifest or in the machine output.
+if [ "$arch" = amd64 ]; then
+	_mf=$D1/var/db/nvidia-gb10-freebsd/installed.manifest
+	_drm_left=1
+	[ "$(cat "$D1/boot/modules/drm.ko" 2>/dev/null)" = "$drm_standin" ] || _drm_left=0
+	[ "$(cat "$D1/boot/modules/dmabuf.ko" 2>/dev/null)" = "$dmabuf_standin" ] || _drm_left=0
+	if [ -f "$_mf" ]; then
+		grep -Eq '(^|[^[:alnum:]_.-])drm\.ko' "$_mf" && _drm_left=0
+		grep -Eq '(^|[^[:alnum:]_.-])dmabuf\.ko' "$_mf" && _drm_left=0
+	fi
+	grep -q '^installed /boot/modules/drm\.ko' "$S/installed.out" && _drm_left=0
+	grep -q '^installed /boot/modules/dmabuf\.ko' "$S/installed.out" && _drm_left=0
+	if [ "$_drm_left" = 1 ] && python3 -I - "$S/installed.json" <<'EOF'
+import json, sys
+d = json.loads(open(sys.argv[1]).read())
+paths = [x["path"] for x in d["installed"]]
+assert not any(p.endswith("/drm.ko") or p.endswith("/dmabuf.ko") for p in paths), paths
+EOF
+	then ok "amd64: the packaged drm.ko of the destination is left alone and is not in the manifest"
+	else bad "amd64 DRM modules (manifest=[$(head -c 200 "$_mf" 2>/dev/null | tr '\n' ' ')] drm.ko=[$(head -c 40 "$D1/boot/modules/drm.ko" 2>/dev/null)]): the install touched the DRM modules of the destination"
+	fi
+	# The DRM policy on amd64 is a precondition of the install, not something
+	# this repository provides: without a packaged drm.ko in the destination
+	# the install is blocked and the block names the package which does.
+	DND=$S/d-no-drm
+	new_dest "$DND"
+	rm -f -- "$DND/boot/modules/drm.ko" "$DND/boot/modules/dmabuf.ko"
+	run_install "$W1" "$DND" "$S/nodrm.json" ACCEPT_NVIDIA_LICENSE=1 JSON=1
+	rc=$?
+	if [ "$rc" = 1 ] && python3 -I - "$S/nodrm.json" <<'EOF'
+import json, sys
+d = json.loads(open(sys.argv[1]).read().split('\n')[0])
+assert d["outcome"] == "blocked", d
+assert d["installed"] == [], d
+b = [x for x in d["blockers"] if "drm" in (x["name"] + x["reason"] + x["fix"]).lower()]
+assert b, d["blockers"]
+EOF
+	then ok "amd64: without a packaged drm.ko in the destination the install is blocked by the DRM policy"
+	else bad "amd64 DRM policy (rc $rc): $(head -c 300 "$S/nodrm.json" | tr '\n' ' ')"
+	fi
+fi
 
 # Output wording (Track #2440): the fix names the command the user ran, the
 # progress prefix is printed once, and the next steps are commands to paste.

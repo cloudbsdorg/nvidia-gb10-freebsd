@@ -2,8 +2,9 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# build-shim.sh - measure the arm64 compile state of NVIDIA's FreeBSD OS
-# layer: build TREE/nvidia for arm64 and summarise the compiler errors.
+# build-shim.sh - measure the compile state of NVIDIA's FreeBSD OS
+# layer: build TREE/<module> for the running architecture (aarch64 or
+# amd64) and summarise the compiler errors.
 #
 # Usage: scripts/build-shim.sh [--module=nvidia|nvidia-modeset|nvidia-drm|nvidia-linux|nvidia-modeset-linux] [TREE] [LOG]
 #   --module the module directory to build: nvidia (the default),
@@ -19,13 +20,25 @@
 # Environment:
 #   GB10_WORK work root holding the default TREE and logs/
 #   SYSDIR    kernel source sys/ directory; defaults to /usr/src/sys
-#   RMOBJ     aarch64 RM core object to link in place of NVIDIA's amd64
+#   RMOBJ     the RM core object to link in place of NVIDIA's prebuilt
 #             blob (scripts/build-rmcore.sh + build-stubs.sh produce
-#             $WORK/build/nv-kernel-gb10.o for the nvidia module and
+#             $WORK/build/nv-kernel-gb10.o for the nvidia module, and
 #             scripts/build-rmcore.sh --core=nvidia-modeset produces
-#             $WORK/build/nv-modeset-kernel-aarch64.o for the modeset
-#             module); defaults to that path. The nvidia-drm module has no
-#             RM core of its own and never copies one.
+#             $WORK/build/nv-modeset-kernel-aarch64.o on aarch64 or
+#             $WORK/build/nv-modeset-kernel-amd64.o on amd64 for the
+#             modeset module); defaults to the path for the architecture
+#             resolved below. The nvidia-drm module has no RM core of its
+#             own and never copies one.
+#   GB10_TEST_HOOKS
+#             set to 1 to let the test hooks below be taken from the
+#             environment; without it they are ignored and the host's own
+#             architecture decides
+#   GB10_TEST_ARCH
+#             test hook: the architecture to build for, aarch64 or amd64;
+#             honoured only with GB10_TEST_HOOKS=1, and when it is unset
+#             (or the hooks are off) the host's `uname -p` decides. Any
+#             other architecture is refused with exit 1, never a fallback
+#             to aarch64
 #   DRMKMODDIR
 #             the drm-kmod source tree nvidia-drm is built against: the
 #             tree the running drm.ko was built from. Required for
@@ -45,7 +58,8 @@
 # Exit codes: 0 build OK; 1 usage error, or an unsafe LOG (a symlink, or
 # its directory does not resolve under $WORK/logs) or an unsafe $WORK/tmp
 # (a symlink, not owned by the current user, or group/other writable), or
-# a refused DRMKMODDIR/BSDSRCTOP;
+# a refused DRMKMODDIR/BSDSRCTOP, or an unsupported architecture (anything
+# but aarch64 or amd64);
 # 2 TREE/<module> missing, or TREE/.prepared does not say "state done" (an
 # incomplete or interrupted prepare-tree.sh run must never be measured);
 # 3 build failed: make's exit status was non-zero, the pre-build
@@ -88,6 +102,42 @@ SYSDIR=${SYSDIR:-/usr/src/sys}
 
 SCRIPTDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPTDIR/lib.sh"
+
+# The architecture the OS-layer modules are built for: the running
+# architecture, not a fixed one. It is the host's own architecture
+# (`uname -p`) unless the test hook GB10_TEST_ARCH says otherwise: the hook
+# is taken from the environment only with GB10_TEST_HOOKS=1, validated and
+# announced by test_hook, exactly as build-rmcore.sh does it. Without it
+# the host decides, whatever the environment says.
+HOSTARCH=$(uname -p) || {
+	echo "build-shim: cannot read the host architecture with uname -p" >&2
+	exit 1
+}
+ARCH=$(test_hook build-shim GB10_TEST_ARCH "$HOSTARCH") || exit 1
+# aarch64 and amd64 are the two architectures FreeBSD names this way (see
+# uname -p). Anything else is refused outright: a silent fallback to
+# aarch64 would build the wrong object and call it right.
+case $ARCH in
+aarch64|amd64) ;;
+*)
+	echo "build-shim: unsupported architecture: $ARCH (aarch64 or amd64)" >&2
+	exit 1
+	;;
+esac
+# The make variables for the resolved architecture: MACHINE is FreeBSD's
+# machine name and MACHINE_ARCH its C architecture name (arm64/aarch64 on
+# aarch64, amd64/amd64 on amd64). Both make runs - the pre-build
+# `make clean` and the build itself - take them from here.
+case $ARCH in
+aarch64)
+	MACHINE=arm64
+	MACHINE_ARCH=aarch64
+	;;
+amd64)
+	MACHINE=amd64
+	MACHINE_ARCH=amd64
+	;;
+esac
 
 # The module directory to build. Both modules come from the same prepared
 # tree and are built the same way; they differ in the directory built, the
@@ -148,13 +198,19 @@ nvidia)
 	MODDIR=nvidia
 	MODKO=nvidia.ko
 	RMOBNAME=nv-kernel.o
+	# The GB10 core object keeps one name for both architectures:
+	# nv-kernel-gb10.o is linked in on aarch64 and on amd64.
 	RMOBJDEF=$WORK/build/nv-kernel-gb10.o
 	;;
 nvidia-modeset)
 	MODDIR=nvidia-modeset
 	MODKO=nvidia-modeset.ko
 	RMOBNAME=nv-modeset-kernel.o
-	RMOBJDEF=$WORK/build/nv-modeset-kernel-aarch64.o
+	# The modeset core object is named after the architecture it was
+	# built for: nv-modeset-kernel-aarch64.o on aarch64,
+	# nv-modeset-kernel-amd64.o on amd64 - the very names
+	# scripts/build-rmcore.sh --core=nvidia-modeset writes.
+	RMOBJDEF=$WORK/build/nv-modeset-kernel-$ARCH.o
 	;;
 nvidia-drm)
 	# The DRM module has no RM core of its own: it is NVIDIA's own
@@ -369,7 +425,7 @@ if [ "$need_clean" -eq 1 ]; then
 	crc=0
 	env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX \
 	    make -C "$TREE/$MODDIR" \
-	    MACHINE=arm64 MACHINE_ARCH=aarch64 \
+	    MACHINE="$MACHINE" MACHINE_ARCH="$MACHINE_ARCH" \
 	    SYSDIR="$SYSDIR" \
 	    "$@" \
 	    clean >> "$LOG" 2>&1 || crc=$?
@@ -382,9 +438,10 @@ fi
 # objects in the tree - complete or partial - were compiled against.
 printf '%s\n' "$sysstamp" > "$STAMPFILE"
 
-# RM core swap - link against the open RM core for aarch64 (plus the
-# fail-closed stubs) when it has been built; otherwise link whatever
-# core object is already in TREE - and SAY which object that is by sha256,
+# RM core swap - link against the open RM core for the resolved
+# architecture (plus the fail-closed stubs) when it has been built;
+# otherwise link whatever core object is already in TREE - and SAY which
+# object that is by sha256,
 # because an earlier run's swap may have replaced NVIDIA's blob and "as-is"
 # would misreport what gets linked (pass-2 u04 #3). Only the disposable
 # TREE copy of the core object is ever touched; NVIDIA's own file under
@@ -405,8 +462,9 @@ else
 	fi
 fi
 
-# The build itself: cross-compile flags for arm64, -k so every file gets a
-# verdict. Build in TREE/$MODDIR itself, not an object directory: with
+# The build itself: the make variables of the resolved architecture
+# (MACHINE/MACHINE_ARCH), -k so every file gets a verdict. Build in
+# TREE/$MODDIR itself, not an object directory: with
 # MAKEOBJDIR + the obj target, the module's Makefile's stdarg.h symlink and
 # the kmod link are made in the object directory, where the compiler does
 # not find them (nv_stdarg.h:36: 'stdarg.h' file not found).
@@ -423,7 +481,7 @@ rm -f "$TREE/$MODDIR/$MODKO"
 rc=0
 env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOBJDIR -u MAKEOBJDIRPREFIX \
     make -C "$TREE/$MODDIR" -k \
-    MACHINE=arm64 MACHINE_ARCH=aarch64 \
+    MACHINE="$MACHINE" MACHINE_ARCH="$MACHINE_ARCH" \
     SYSDIR="$SYSDIR" \
     "$@" \
     all >> "$LOG" 2>&1 || rc=$?
