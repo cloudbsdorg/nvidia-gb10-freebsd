@@ -269,14 +269,54 @@ expect_rc "a failed generation leaves no temporary file behind" "$rc" 0
 # a shell command is a path and not a command.  The object directory is
 # made first, so that the creation of it is not what is measured.
 IJ=$W/injection
-mkdir -p "$IJ/obj; touch $IJ/pwned #"
+mkdir -p "$IJ/obj; touch $IJ/pwned #/#" "$IJ/#"
 cp "$L/Makefile" "$L/Version.map" "$L/version_map.awk" "$IJ/"
+# The rule is asked for by the target that make expands the object directory
+# into, so the recipe of the generated include really runs.  A target that
+# make does not know makes the build fail before the recipe, and the absence
+# of the command then says nothing at all.
 (cd "$IJ" && MAKEOBJDIR="$IJ/obj; touch $IJ/pwned #" make \
     "#/cuda_exports.inc") >"$IJ/log" 2>&1
 rc=$?
+expect_rc "the generated include builds in an object directory that carries a command" \
+    "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,20p' "$IJ/log"
+grep -q 'version_map.awk' "$IJ/log"
+rc=$?
+expect_rc "the recipe of the generated include ran" "$rc" 0
+if [ -n "$(find "$IJ" -name 'cuda_exports.inc' -size +0 -print -quit \
+    2>/dev/null)" ]; then
+	ok "the generated include is there after the build"
+else
+	bad "the generated include is there after the build"
+fi
 [ ! -e "$IJ/pwned" ]
 rc=$?
 expect_rc "an object directory that carries a command does not run it" "$rc" 0
+# The check above has teeth: the same build with the quoting of the paths
+# removed runs the command of the object directory.
+IM=$W/injection-mutant
+mkdir -p "$IM/obj; touch $IM/pwned #/#" "$IM/#"
+cp "$L/Makefile" "$L/Version.map" "$L/version_map.awk" "$IM/"
+python3 -I - "$IM/Makefile" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '> "${.OBJDIR}/cuda_exports.inc.tmp"'
+new = '> ${.OBJDIR}/cuda_exports.inc.tmp'
+assert old in text, "the recipe does not write the temporary file as quoted"
+open(path, "w").write(text.replace(old, new, 1))
+PY
+rc=$?
+expect_rc "the unquoted recipe mutant changed the Makefile" "$rc" 0
+(cd "$IM" && MAKEOBJDIR="$IM/obj; touch $IM/pwned #" make \
+    "#/cuda_exports.inc") >"$IM/log" 2>&1
+if [ -e "$IM/pwned" ]; then
+	ok "the unquoted recipe runs the command of the object directory"
+else
+	bad "the unquoted recipe runs the command of the object directory"
+	sed -n '1,20p' "$IM/log"
+fi
 cp "$L/version_map.awk" "$SI/version_map.awk"
 (cd "$SI" && MAKEOBJDIR="$SI" make "$SI/cuda_exports.inc") \
     >"$SI/ok.log" 2>&1
@@ -357,15 +397,26 @@ expect_rc "api_test compiles against the shared library" "$rc" 0
 #
 # The support of the compiler for the flag is probed on its own.  A compiler
 # without the flag is a skip, said with the reason; a build of the project
-# sources that fails is a failure.  The two are never the same answer.
-tsan_build() {	# tsan_build CC LOG ARGS...; 0 built, 1 no flag, 2 build failed
+# sources that fails is a failure.  A compiler that takes the flag and
+# cannot link the runtime has failed for a reason of its own: that is a
+# failure of the toolchain and not a compiler without the feature.  The three
+# are never the same answer.
+tsan_build() {	# tsan_build CC LOG ARGS...; 0 built, 1 no flag, 2 build failed, 3 probe failed
 	_cc=$1
 	_log=$2
 	shift 2
 	printf 'int main(void) { return 0; }\n' >"$W/tsan-probe.c"
-	if ! "$_cc" -fsanitize=thread "$W/tsan-probe.c" -o "$W/tsan-probe" \
-	    >"$_log.probe" 2>&1; then
+	# The flag is probed by compiling alone: a compiler that does not
+	# take it fails here, whatever it says about it.
+	if ! "$_cc" -fsanitize=thread -c "$W/tsan-probe.c" \
+	    -o "$W/tsan-probe.o" >"$_log.probe" 2>&1; then
 		return 1
+	fi
+	# The runtime is probed by linking: a compiler that takes the flag
+	# and cannot link the runtime has failed for a reason of its own.
+	if ! "$_cc" -fsanitize=thread "$W/tsan-probe.c" -o "$W/tsan-probe" \
+	    >>"$_log.probe" 2>&1; then
+		return 3
 	fi
 	if "$_cc" -fsanitize=thread "$@" >"$_log" 2>&1; then
 		return 0
@@ -396,6 +447,10 @@ case $? in
 	bad "the thread sanitizer build of the project sources fails"
 	sed -n '1,20p' "$W/build-tsan.log"
 	;;
+3)
+	bad "the thread sanitizer probe failed: the toolchain cannot link the runtime"
+	sed -n '1,20p' "$W/build-tsan.log.probe"
+	;;
 esac
 # The classification of a sanitizer build is checked on its own: a compiler
 # that takes the flag but fails on the project sources is a failure and not a
@@ -419,6 +474,52 @@ rc=$?
 [ "$rc" -eq 2 ]
 rc=$?
 expect_rc "a sanitizer build that fails on the project sources is a failure, not a skip" "$rc" 0
+# The probe is classified on its own: a compiler that does not take the
+# flag is a skip, with the reason, and a compiler that takes the flag and
+# cannot link the runtime is a failure of the toolchain, never a skip.
+cat >"$W/tsan-no-flag-cc" <<'EOF'
+#!/bin/sh
+# A compiler that does not know the sanitizer flag.
+for arg in "$@"; do
+	case $arg in
+	-fsanitize=*)
+		echo "error: unsupported option '$arg'" >&2
+		exit 1
+		;;
+	esac
+done
+exec cc "$@"
+EOF
+chmod +x "$W/tsan-no-flag-cc"
+tsan_build "$W/tsan-no-flag-cc" "$W/build-tsan-noflag.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_noflag"
+rc=$?
+[ "$rc" -eq 1 ]
+rc=$?
+expect_rc "a compiler without the sanitizer flag is a skip" "$rc" 0
+cat >"$W/tsan-no-link-cc" <<'EOF'
+#!/bin/sh
+# A compiler that takes the sanitizer flag and compiles, but cannot link the
+# sanitizer runtime: the link of the probe fails.
+mode=link
+for arg in "$@"; do
+	case $arg in
+	-c) mode=compile ;;
+	esac
+done
+if [ "$mode" = compile ]; then
+	exec cc "$@"
+fi
+echo "ld: error: cannot find the sanitizer runtime" >&2
+exit 1
+EOF
+chmod +x "$W/tsan-no-link-cc"
+tsan_build "$W/tsan-no-link-cc" "$W/build-tsan-nolink.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_nolink"
+rc=$?
+[ "$rc" -eq 3 ]
+rc=$?
+expect_rc "a compiler that cannot link the sanitizer runtime is a failure, not a skip" "$rc" 0
 cc $CFLAGS -I"$L" -I"$SDK" -I"$T" "$T/version_test.c" "$L/cuda_version.c" \
     -o "$W/bin/version_test" >"$W/build-version.log" 2>&1
 rc=$?
@@ -611,12 +712,30 @@ else
 	ok "a failure that is not the device limit prints no device-limit hint"
 fi
 # The capacity failure of the provider has its own reason and says what to
-# do next: the bound of the registry and the two ways to lower the count.
+# do next: the bound of the registry and the setting that can lower the
+# count of the provider.  The visibility filter cannot lower it: the
+# registry refuses the count of the provider before the filter is applied,
+# so the diagnostic must not advertise the filter as the remedy.
 grep -q '128' "$W/provider-limit.err" &&
-    grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$W/provider-limit.err" &&
-    grep -q 'CUDA_VISIBLE_DEVICES' "$W/provider-limit.err"
+    grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$W/provider-limit.err"
 rc=$?
 expect_rc "the provider capacity diagnostic names the bound and the remedy" "$rc" 0
+if grep -q 'CUDA_VISIBLE_DEVICES' "$W/provider-limit.err"; then
+	bad "the provider capacity diagnostic does not advertise the visibility filter"
+else
+	ok "the provider capacity diagnostic does not advertise the visibility filter"
+fi
+# The filter does not change the failure either: the count of the provider
+# is refused before the filter is read, so the same reason is reported.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" \
+    CUDA_VISIBLE_DEVICES=0 "$INFO" >"$W/provider-limit-filtered.txt" \
+    2>"$W/provider-limit-filtered.err"
+rc=$?
+expect_rc "a provider list beyond the registry fails with a filter too" "$rc" 1
+grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$W/provider-limit-filtered.err" &&
+    ! grep -q 'CUDA_VISIBLE_DEVICES' "$W/provider-limit-filtered.err"
+rc=$?
+expect_rc "the filtered provider capacity diagnostic names the setting that fixes it" "$rc" 0
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" "$API" \
     init-reason >"$W/reason-provider.out" 2>&1
 rc=$?
@@ -841,14 +960,18 @@ expect_rc "JSON preserves UTF-8, replaces invalid bytes and escapes controls" "$
 # Every code point the library refuses to copy through is escaped: the raw
 # bytes are absent and the escape is present.  One case per code point, in
 # the text diagnostic and in the JSON document.  The list of code points is
-# built from the ranges of the one table of the tool, so a code point that
-# is added to the table is added to the test.
-control_points() {
-	for range in 0000:001f 007f:007f 0080:009f 061c:061c 200e:200f \
-	    2028:2029 202a:202e 2066:2069; do
-		first=$((0x${range%:*}))
-		last=$((0x${range#*:}))
-		i=$first
+# read from the table of the tool, so a code point that is added to the
+# table is added to the test with it and the test keeps no copy of it.
+control_ranges() {	# control_ranges HEADER; one "first:last" pair per line, in hex
+	sed -n 's/.*\(0x[0-9a-fA-F]\{1,\}\)[^0-9a-fA-Fx]*\(0x[0-9a-fA-F]\{1,\}\).*/\1:\2/p' \
+	    "$1"
+}
+control_points() {	# control_points HEADER; one code point per line, in hex
+	for pair in $(control_ranges "$1"); do
+		first=${pair%:*}
+		last=${pair#*:}
+		i=$((first))
+		last=$((last))
 		while [ "$i" -le "$last" ]; do
 			# A NUL cannot travel through the environment.
 			if [ "$i" -ne 0 ]; then
@@ -926,28 +1049,44 @@ profile_control_case() {	# profile_control_case CODEPOINT
 		bad "the profile diagnostic escapes U+$_cp (rc=$rc)"
 	fi
 }
-for cp in $(control_points); do
+for cp in $(control_points "$L/control_ranges.h"); do
 	control_case "$cp"
 done
 # The bidirectional controls are the ones a reader cannot see, so they are
-# checked in the profile diagnostic too.
-for cp in 061c 200e 200f 202a 202b 202c 202d 202e 2066 2067 2068 2069; do
+# checked in the profile diagnostic too: every code point of the table that
+# is not an ASCII one.
+for cp in $(control_points "$L/control_ranges.h" | awk '$0 >= "061c"'); do
 	profile_control_case "$cp"
 done
 # The profile diagnostic wraps the bad value in the delimiter it escapes: a
 # value that holds a quote cannot close the value and hide what follows it.
-env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="a'b" "$INFO" \
+# The delimiter is the double quote, the one the escaping helper escapes, so
+# the value that is tested holds a double quote and not another one.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE='a"b' "$INFO" \
     >"$W/quote-profile.out" 2>"$W/quote-profile.err"
 rc=$?
-expect_rc "a profile with a quote in it is refused" "$rc" 1
+expect_rc "a profile with the delimiter in it is refused" "$rc" 1
 python3 -I - "$W/quote-profile.err" <<'PY'
 import sys
 text = open(sys.argv[1], errors="replace").read()
-assert 'unknown profile "a\'b"' in text, text
-assert "unknown profile 'a'b'" not in text, text
+assert 'unknown profile "a\\"b"' in text, text
+assert 'unknown profile "a"b"' not in text, text
 PY
 rc=$?
 expect_rc "the profile diagnostic escapes the quote it uses as a delimiter" "$rc" 0
+# A quote that is not the delimiter is an ordinary character: it is copied
+# through, inside the delimited value.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="a'b" "$INFO" \
+    >"$W/apostrophe-profile.out" 2>"$W/apostrophe-profile.err"
+rc=$?
+expect_rc "a profile with an apostrophe in it is refused" "$rc" 1
+python3 -I - "$W/apostrophe-profile.err" <<'PY'
+import sys
+text = open(sys.argv[1], errors="replace").read()
+assert 'unknown profile "a\'b"' in text, text
+PY
+rc=$?
+expect_rc "the profile diagnostic keeps the quote that is not its delimiter" "$rc" 0
 
 # A changed library default must change the CLI's reported backend too.
 DB=$W/default-backend
@@ -1728,6 +1867,182 @@ fi
 grep -q 'cudaNativeProviderTakesFakeProfiles' "$W/nm.out"
 rc=$?
 expect_rc "the renamed provider query is exported" "$rc" 0
+# ---- the table of the control code points ---------------------------------
+# The table of the code points that the tool escapes is the one of the
+# production code: the test reads it and keeps no copy of it, so a code
+# point that is added to the table is exercised with it.
+# The pattern of a range of code points is built here, so that the check
+# does not match itself.
+range_pattern='[0-9a-f]{4}:[0-9a-f]{4}'
+if grep -qE "$range_pattern" "$SRC/tests/libcuda_test.sh"; then
+	bad "the test keeps no copy of the table of the control code points"
+else
+	ok "the test keeps no copy of the table of the control code points"
+fi
+# The list follows the table: a range that is added to the table is added to
+# the list of the code points the test exercises.
+python3 -I - "$L/control_ranges.h" "$W/control_ranges.h" <<'PYEOF'
+import sys
+text = open(sys.argv[1]).read()
+marker = "\t{ 0x2066, 0x2069 }"
+assert marker in text, "the table of the control code points is not in the header"
+text = text.replace(marker,
+    "\t{ 0x2ff0, 0x2ff0 },\t/* a range that is added to the table */ \\\n" + marker, 1)
+open(sys.argv[2], "w").write(text)
+PYEOF
+rc=$?
+expect_rc "the table of the control code points with an added range is written" "$rc" 0
+if control_points "$W/control_ranges.h" | grep -q '^2ff0$'; then
+	ok "the list of the code points follows the table of the production code"
+else
+	bad "the list of the code points follows the table of the production code"
+fi
+# Every code point of the table is escaped, the NUL included: the environment
+# cannot carry a NUL, so the code points are checked at the C level, against
+# the one table of the tool.
+cc $CFLAGS -I"$O/info" -I"$L" -I"$L/cuda-native-info" -I"$SDK" -I"$T" \
+    "$T/escape_test.c" "$L/cuda_version.c" "$L/cuda_uuid.c" \
+    -L"$O/lib" -lcuda -lthr -o "$W/bin/escape_test" \
+    >"$W/build-escape.log" 2>&1
+rc=$?
+expect_rc "the escape test compiles against the tool" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-escape.log"
+if [ -x "$W/bin/escape_test" ]; then
+	run_case "every code point of the table is escaped" "$W/bin/escape_test"
+fi
+
+# ---- the count of the profiles of the fake provider -----------------------
+# A count that overflows must not write past the array of the selected
+# profiles.  The count of a selection saturates at the limit, so the counter
+# cannot wrap around: the mutant below starts the counter at UINT_MAX, the
+# state an overflowed counter is in, and the build with the address
+# sanitizer must report no write past the array.
+AS=$W/asan-overflow
+mkdir -p "$AS"
+cp "$L"/*.c "$L"/*.h "$AS/"
+python3 -I - "$AS/cuda_fake.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "fake_select(const char *list)"
+head, sep, tail = text.partition(marker)
+assert sep, "the selection of the fake provider is not in the source"
+patched = tail.replace("unsigned count = 0;", "unsigned count = UINT_MAX;", 1)
+assert patched != tail, "the count of the selection is not in fake_select"
+text = text.replace(head + sep + tail, head + sep + patched, 1)
+if "#include <limits.h>" not in text:
+    text = text.replace("#include <stdlib.h>",
+        "#include <limits.h>\n#include <stdlib.h>", 1)
+open(path, "w").write(text)
+PYEOF
+rc=$?
+expect_rc "the overflowing counter mutant changed the fake provider" "$rc" 0
+cat >"$W/asan-driver.c" <<'EOF'
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * The driver of the address sanitizer build: it initializes the library with
+ * a selection of more profiles than the registry holds and reports what
+ * happened.  Every outcome it does not expect has a status of its own, so
+ * the shell can tell them apart.
+ */
+#include <stdio.h>
+
+#include <cuda.h>
+
+int
+main(void)
+{
+	CUresult result;
+	cudaNativeInitReason reason;
+
+	result = cuInit(0);
+	reason = cudaNativeInitFailureReason();
+	printf("init %d reason %d\n", (int)result, (int)reason);
+	if (result != CUDA_ERROR_INVALID_VALUE)
+		return (2);
+	if (reason != CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT)
+		return (3);
+	return (0);
+}
+EOF
+cc $CFLAGS -fsanitize=address -pthread -I"$W" -I"$O/lib" -I"$AS" -I"$SDK" \
+    "$W/asan-driver.c" "$AS"/cuda_*.c -lthr -o "$W/bin/asan-driver" \
+    >"$W/build-asan.log" 2>&1
+rc=$?
+expect_rc "the address sanitizer build of the overflowing counter compiles" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-asan.log"
+if [ -x "$W/bin/asan-driver" ]; then
+	overflow_profiles=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$overflow_profiles" \
+	    "$W/bin/asan-driver" >"$W/asan.out" 2>&1
+	rc=$?
+	cat "$W/asan.out"
+	if grep -q 'AddressSanitizer' "$W/asan.out"; then
+		bad "the address sanitizer reports no write past the array of the profiles"
+	else
+		ok "the address sanitizer reports no write past the array of the profiles"
+	fi
+	expect_rc "the overflowing counter is refused over the limit" "$rc" 0
+fi
+
+# ---- the child of the stress case -----------------------------------------
+# A child of the stress case that fails must be reported as a failure: the
+# parent sees the exit status of the child and nothing else.  The switch
+# makes one thread of a round see a device count that the other threads do
+# not see, so the round fails on purpose.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
+    CUDA_NATIVE_TEST_STRESS_DISTURB=1 "$API" init-stress \
+    >"$W/stress-disturbed.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	ok "the stress case fails when a child fails"
+else
+	bad "the stress case fails when a child fails"
+	sed -n '1,20p' "$W/stress-disturbed.out"
+fi
+
+# ---- a provider that cannot select ----------------------------------------
+# A provider of the synthetic kind that cannot apply a selection must not
+# keep the capability it cannot apply: the library reports that it takes no
+# profiles and refuses to initialize it.
+NS=$W/no-select-mutant
+mkdir -p "$NS"
+cp "$L"/*.c "$L"/*.h "$NS/"
+sed -i '' 's/\.select = fake_select,/.select = NULL,/' "$NS/cuda_fake.c"
+grep -q '\.select = NULL' "$NS/cuda_fake.c"
+rc=$?
+expect_rc "the provider without a selection callback mutant changed the library" \
+    "$rc" 0
+# The mutant leaves the selection function of the provider unused: the
+# warning about that is not what this case is about.
+(
+    cc $CFLAGS -Wno-unused-function -pthread -I"$W" -I"$O/lib" -I"$NS" \
+        -I"$SDK" -I"$T" "$T/api_test.c" "$NS"/*.c -lthr -o "$NS/api_test"
+) >"$NS/build.log" 2>&1
+rc=$?
+expect_rc "the provider without a selection callback library builds" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$NS/build.log"
+if [ "$rc" -eq 0 ]; then
+    env CUDA_NATIVE_BACKEND=fake "$NS/api_test" providers \
+        >"$NS/providers.out" 2>&1
+    rc=$?
+    expect_rc "the mutant library reports its providers" "$rc" 0
+    if grep -q '^synthetic fake$' "$NS/providers.out"; then
+        bad "a provider that cannot select takes no profile"
+    else
+        ok "a provider that cannot select takes no profile"
+    fi
+    env CUDA_NATIVE_BACKEND=fake "$NS/api_test" init-reason \
+        >"$NS/reason.out" 2>&1
+    rc=$?
+    expect_rc "the reason query runs for the provider that cannot select" "$rc" 0
+    grep -q '^reason provider-error$' "$NS/reason.out"
+    rc=$?
+    expect_rc "the library refuses a provider that cannot select" "$rc" 0
+fi
+
 MANWIDTH=80 man -l "$L/cuda-native-info/cuda-native-info.1" \
     >"$W/info-man.raw" 2>"$W/info-man.err" &&
     col -b <"$W/info-man.raw" >"$W/info-man.txt"

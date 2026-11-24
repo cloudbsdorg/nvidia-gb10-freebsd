@@ -802,7 +802,20 @@ struct stress_case {
 	CUresult init;
 	CUresult count_result;
 	int count;
+	int index;
 };
+
+/* A test-only switch: it makes one thread of a round see a device count that
+ * the other threads do not see.  The round fails, and the failure has to
+ * reach the parent through the exit status of the child: a child that exits
+ * with the status of success hides the failure. */
+static int
+stress_count_disturbed(void)
+{
+	const char *value = getenv("CUDA_NATIVE_TEST_STRESS_DISTURB");
+
+	return (value != NULL && *value != '\0');
+}
 
 static void *
 stress_thread(void *arg)
@@ -811,6 +824,8 @@ stress_thread(void *arg)
 
 	sc->init = cuInit(0);
 	sc->count_result = cuDeviceGetCount(&sc->count);
+	if (stress_count_disturbed() && sc->index == 0 && sc->count > 0)
+		sc->count++;
 	return (NULL);
 }
 
@@ -826,9 +841,11 @@ stress_round(void)
 
 	memset(cases, 0, sizeof(cases));
 	/* Time: O(threads); Space: O(1). */
-	for (i = 0; i < INIT_STRESS_THREADS; i++)
+	for (i = 0; i < INIT_STRESS_THREADS; i++) {
+		cases[i].index = i;
 		CHECK_EQ(pthread_create(&threads[i], NULL, stress_thread,
 		    &cases[i]), 0);
+	}
 	first = -1;
 	/* Time: O(threads); Space: O(1). */
 	for (i = 0; i < INIT_STRESS_THREADS; i++) {
@@ -866,12 +883,16 @@ init_stress_test(void)
 			 * first cuInit. */
 			CHECK_EQ(cudaNativeInitFailureReason(),
 			    CUDA_NATIVE_INIT_NOT_ATTEMPTED);
-			CHECK_EQ(stress_round(), 0);
+			/* The child has its own checks and its own failure
+			 * count: the parent sees only the exit status, so
+			 * a failure of the child has to be in it. */
+			(void)stress_round();
 			fflush(NULL);
-			_exit(0);
+			_exit(t_fails == 0 ? 0 : 1);
 		}
 		CHECK_EQ(waitpid(pid, &status, 0), pid);
 		CHECK(WIFEXITED(status));
+		CHECK(!WIFSIGNALED(status));
 		CHECK_EQ(WEXITSTATUS(status), 0);
 	}
 	return (t_done("api concurrent cuInit and count, 32 threads, 200 rounds"));

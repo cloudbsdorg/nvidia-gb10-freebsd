@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "cuda_internal.h"
+#include "control_ranges.h"
 
 static const char schema_text[] =
 #include "schema.inc"
@@ -211,27 +212,14 @@ utf8_decode(const unsigned char *p, uint32_t *code)
 }
 
 /* The code points that are written as text instead of being copied through.
- * The table is the one list of them.  The C0 controls and DEL are control
- * characters in every terminal.  The C1 controls (U+0080 to U+009F) are
- * control sequences in the UTF-8 encoding of a terminal that implements
- * 8-bit controls.  The line and paragraph separators (U+2028, U+2029) are
- * not safe in a JSON document that a program reads as source text.  The
- * bidirectional formatting controls can reorder what a reader sees, so every
- * Unicode Bidi_Control code point is in the table: the Arabic letter mark,
- * the left-to-right and right-to-left marks, the embeddings and the
- * override, and the isolates. */
+ * The table is the one list of them: it lives in control_ranges.h, which the
+ * test reads as well, so a code point that is added to the table is added to
+ * the test with it. */
 static const struct control_range {
 	uint32_t first;
 	uint32_t last;
 } control_ranges[] = {
-	{ 0x0000, 0x001f },	/* C0 controls */
-	{ 0x007f, 0x007f },	/* DEL */
-	{ 0x0080, 0x009f },	/* C1 controls */
-	{ 0x061c, 0x061c },	/* ARABIC LETTER MARK */
-	{ 0x200e, 0x200f },	/* LEFT-TO-RIGHT MARK, RIGHT-TO-LEFT MARK */
-	{ 0x2028, 0x2029 },	/* LINE SEPARATOR, PARAGRAPH SEPARATOR */
-	{ 0x202a, 0x202e },	/* embeddings and the override */
-	{ 0x2066, 0x2069 }	/* isolates */
+	CUDA_NATIVE_CONTROL_RANGES
 };
 
 static int
@@ -628,13 +616,24 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 	} else if (detail == NULL &&
 	    cudaNativeInitFailureReason() ==
 	    CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT) {
-		/* The provider reported more devices than the registry holds:
-		 * name the bound and the two ways to lower the count. */
-		snprintf(hint_text, sizeof(hint_text),
-		    "the provider reports more devices than the registry holds, "
-		    "at most %d; reduce the device list of the provider, with "
-		    "CUDA_NATIVE_FAKE_PROFILE or CUDA_VISIBLE_DEVICES",
-		    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+		/* The provider reported more devices than the registry holds.
+		 * The registry refuses that count before it applies the
+		 * visibility filter, so CUDA_VISIBLE_DEVICES cannot lower
+		 * it: the advice names the setting of the provider that
+		 * can, and says what to do when the provider has none. */
+		if (cudaNativeProviderTakesFakeProfiles(backend))
+			snprintf(hint_text, sizeof(hint_text),
+			    "the provider reports more devices than the registry "
+			    "holds, at most %d; name fewer profiles in "
+			    "CUDA_NATIVE_FAKE_PROFILE",
+			    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+		else
+			snprintf(hint_text, sizeof(hint_text),
+			    "the provider reports more devices than the registry "
+			    "holds, at most %d; reduce the number of devices the "
+			    "provider reports: no setting of this library changes "
+			    "it",
+			    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
 		hint = hint_text;
 	} else if (detail == NULL &&
 	    cudaNativeInitFailureReason() == CUDA_NATIVE_INIT_PROVIDER_ERROR) {

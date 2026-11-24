@@ -59,14 +59,30 @@ provider_find(const char *backend)
 	return (NULL);
 }
 
+/* One fact about a provider: it takes the fake profiles when it is the
+ * synthetic kind and it applies a selection.  The capability the library
+ * reports and the selection the registry applies are read from this one
+ * predicate, so a provider that cannot apply a selection cannot be
+ * advertised as one that takes profiles. */
+static int
+provider_takes_profiles(const cuda_provider *provider)
+{
+	return (provider != NULL &&
+	    provider->kind == CUDA_PROVIDER_SYNTHETIC &&
+	    provider->select != NULL);
+}
+
+/* The provider that takes the fake profiles, if there is one.  The advice of
+ * the library names such a provider, so it names one that can serve
+ * synthetic devices. */
 static const cuda_provider *
-provider_by_kind(enum cuda_provider_kind kind)
+provider_taking_profiles(void)
 {
 	size_t i;
 
 	/* Time: O(providers); Space: O(1). */
 	for (i = 0; i < sizeof(providers) / sizeof(providers[0]); i++)
-		if (providers[i]->kind == kind)
+		if (provider_takes_profiles(providers[i]))
 			return (providers[i]);
 	return (NULL);
 }
@@ -92,16 +108,14 @@ cudaNativeProviderName(unsigned index)
 }
 
 /* The library knows which provider takes the fake profiles, so a caller does
- * not have to know the provider names to find out.  The provider kind is the
- * one fact about a provider: the registry applies the profile selection
- * under the same kind, so the advertised capability and the behavior cannot
+ * not have to know the provider names to find out.  The predicate is the one
+ * fact about a provider: the registry applies the profile selection under
+ * the same fact, so the advertised capability and the behavior cannot
  * disagree. */
 int
 cudaNativeProviderTakesFakeProfiles(const char *name)
 {
-	const cuda_provider *provider = provider_find(name);
-
-	return (provider != NULL && provider->kind == CUDA_PROVIDER_SYNTHETIC);
+	return (provider_takes_profiles(provider_find(name)));
 }
 
 /* The library's advice for a provider whose discovery is not implemented.  The
@@ -121,7 +135,7 @@ cudaNativeProviderHint(const char *name, char *buffer, size_t size)
 	provider = provider_find(name);
 	if (provider == NULL || provider->kind != CUDA_PROVIDER_NATIVE)
 		return (0);
-	fallback = provider_by_kind(CUDA_PROVIDER_SYNTHETIC);
+	fallback = provider_taking_profiles();
 	if (fallback == NULL)
 		return (0);
 	length = snprintf(advice, sizeof(advice),
@@ -272,11 +286,17 @@ registry_initialize_once(void)
 		reason = CUDA_NATIVE_INIT_UNKNOWN_PROVIDER;
 		goto out;
 	}
-	/* The provider kind is the one fact about a provider: the profile
-	 * selection is applied under the same kind the capability is
-	 * reported from, so the two cannot disagree. */
-	if (registry.provider->kind == CUDA_PROVIDER_SYNTHETIC &&
-	    registry.provider->select != NULL) {
+	/* The provider kind and the selection callback are one fact about a
+	 * provider: the capability the library reports and the selection
+	 * the registry applies are read from the same predicate.  A
+	 * synthetic provider that cannot apply a selection is refused, so
+	 * the library never advertises a profile it would not apply. */
+	if (registry.provider->kind == CUDA_PROVIDER_SYNTHETIC) {
+		if (!provider_takes_profiles(registry.provider)) {
+			registry.result = CUDA_ERROR_INVALID_VALUE;
+			reason = CUDA_NATIVE_INIT_PROVIDER_ERROR;
+			goto out;
+		}
 		profiles = getenv("CUDA_NATIVE_FAKE_PROFILE");
 		result = registry.provider->select(profiles);
 		if (result != CUDA_SUCCESS) {

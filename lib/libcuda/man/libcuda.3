@@ -113,6 +113,10 @@ The fake provider is the synthetic kind: it takes the fake profiles of
 and applies them.
 The nvrm provider is the native kind: it takes no profile, and its discovery
 is not implemented in this release.
+A provider of the synthetic kind that cannot apply a selection is refused, so
+the library never advertises a profile it would not apply; the reason of the
+failure is
+.Dv CUDA_NATIVE_INIT_PROVIDER_ERROR .
 .Pp
 The fake provider defaults to one synthetic GB206 device.
 .Ev CUDA_NATIVE_FAKE_PROFILE
@@ -238,6 +242,10 @@ The registry holds at most 128 provider devices.
 A provider that reports more devices than that is an invalid value, and the
 reason of the failure is
 .Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT .
+The count of the provider is refused before the visibility filter is applied,
+so
+.Ev CUDA_VISIBLE_DEVICES
+cannot lower it: the device list of the provider is what has to change.
 A provider may report more devices than the limit of 64: the devices that no
 filter selects are not exposed.
 Without a filter the visible set is every provider device, so a provider that
