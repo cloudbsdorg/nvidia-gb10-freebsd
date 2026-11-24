@@ -164,8 +164,11 @@ import json, sys
 raw = open(sys.argv[1]).read()
 d = json.loads(raw)
 assert raw.count('\n{') == 0
-assert d["schema_version"] == "1.0" and d["tool"] == "install"
+assert d["schema_version"] == "2.1" and d["tool"] == "install"
+assert d["schema_version_major"] == 2 and d["schema_version_minor"] == 1
 assert d["outcome"] == "blocked" and d["installed"] == []
+assert d["kind"] == "summary", d
+assert "resume" not in d, d.get("resume")
 b = [b for b in d["blockers"] if b["name"] == "licence"]
 assert len(b) == 1 and "ACCEPT_NVIDIA_LICENSE=1" in b[0]["fix"]
 assert [x["index"] for x in d["blockers"]] == list(range(len(d["blockers"])))
@@ -210,10 +213,10 @@ if [ "${GB10_FLOW_SAMPLES_ONLY:-0}" = 1 ]; then
 fi
 if [ "$rc" = 0 ] && grep -q '/boot/modules/nvidia.ko' "$S/installed.out" \
     && grep -q 'staged under' "$S/installed.out" \
-    && grep -q 'kldstat' "$S/installed.out" && grep -q 'nvrm-info --json' "$S/installed.out" \
+    && ! grep -q '^next: ' "$S/installed.out" \
     && [ -f "$D1/boot/modules/nvidia.ko" ] \
     && grep -q 'accepted by ACCEPT_NVIDIA_LICENSE=1' "$W1/sources/nvidia-licence.accepted"; then
-	ok "one command installs and prints the load and check instructions"
+	ok "one command installs and says where the files are staged"
 else
 	bad "installed English (rc $rc): $(tail -n 5 "$S/installed.out" | tr '\n' ' ')"
 fi
@@ -227,8 +230,11 @@ import json, re, sys
 raw = open(sys.argv[1]).read()
 d = json.loads(raw)
 assert raw.count('\n{') == 0
-assert d["schema_version"] == "1.0" and d["tool"] == "install"
+assert d["schema_version"] == "2.1" and d["tool"] == "install"
+assert d["schema_version_major"] == 2 and d["schema_version_minor"] == 1
 assert d["outcome"] == "installed" and d["blockers"] == []
+assert d["kind"] == "summary", d
+assert "resume" not in d, d.get("resume")
 paths = [x["path"] for x in d["installed"]]
 assert "/boot/modules/nvidia.ko" in paths
 assert len(paths) == len(set(paths)) and paths
@@ -239,15 +245,20 @@ for line in open(sys.argv[2]):
     if m:
         english.append({"path": m.group(1), "mode": m.group(2)})
 assert english == d["installed"], (english, d["installed"])
-assert len(d["next"]) == 3 and "staged under" in d["next"][0]
-assert d["next"][1:] == ["kldstat", "nvrm-info --json"]
+# A staged install has no next step: the files are only staged, so there is
+# nothing to run on this system.  The explanation is prose, in the note.
+assert d["next"] == [], d["next"]
+assert d["requires_root_shell"] == [], d["requires_root_shell"]
+assert "staged under" in d["note"] and "nothing was loaded" in d["note"], d["note"]
 EOF
 then ok "installed JSON is one object and agrees with English"; else bad "installed JSON (rc $rc): $(tail -n 4 "$S/installed.json" | tr '\n' ' ')"; fi
 
-# Output wording (Track #2440): the fix names the command the user ran, the
-# progress prefix is printed once, and the next steps are commands to paste.
-LICFIX_RUN='make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question'
-LICFIX_PRE='make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer the licence question'
+# Output wording (Track #2440): the fix names the command the user ran and the
+# settings that change where the install goes, the progress lines carry a
+# phase word, and the next steps are commands to paste.
+# The blocked run above went to a DESTDIR, so the fix keeps it.
+LICFIX_RUN="make install DESTDIR='$D1' ACCEPT_NVIDIA_LICENSE=1"
+LICFIX_PRE='make install-prereqs ACCEPT_NVIDIA_LICENSE=1'
 if grep -qxF "fix: $LICFIX_RUN" "$S/blocked.out" \
     && ! grep -q 'make install-prereqs' "$S/blocked.out" \
     && python3 -I - "$S/blocked.json" "$LICFIX_RUN" <<'PEOF'
@@ -257,8 +268,29 @@ b = [x for x in d["blockers"] if x["name"] == "licence"]
 assert len(b) == 1, b
 assert b[0]["fix"] == sys.argv[2], b[0]["fix"]
 PEOF
-then ok "make install: the blocked licence fix names make install, in English and JSON"
+then ok "make install: the blocked licence fix names make install and the DESTDIR, in English and JSON"
 else bad "licence fix names the wrong command: $(grep '^fix:' "$S/blocked.out" | tr '\n' ' ')"; fi
+# The fix is a command: it is valid shell and it says what to do.
+if printf '%s\n' "$LICFIX_RUN" | sh -n 2>/dev/null \
+    && grep -q 'accept every licence instead run make install' "$S/blocked.out"; then
+	ok "the licence fix is one pasteable command, and the other ways are prose"
+else
+	bad "the licence fix is not a command: $(grep '^fix:' "$S/blocked.out" | tr '\n' ' ')"
+fi
+# The same fix with a PREFIX the user chose: the fix keeps that too.  The work
+# tree is fresh, so the licence is not accepted yet and the run blocks.
+WPFX=$S/wpfix
+DPFX=$S/dpfix
+plant_work "$WPFX"
+new_dest "$DPFX"
+run_install "$WPFX" "$DPFX" "$S/blocked-prefix.out" PREFIX=/opt/gb10
+rc=$?
+LICFIX_PREFIX="make install DESTDIR='$DPFX' PREFIX='/opt/gb10' ACCEPT_NVIDIA_LICENSE=1"
+if [ "$rc" = 1 ] && grep -qxF "fix: $LICFIX_PREFIX" "$S/blocked-prefix.out"; then
+	ok "the licence fix keeps the PREFIX the user gave"
+else
+	bad "licence fix with a PREFIX (rc $rc): $(grep '^fix:' "$S/blocked-prefix.out" | tr '\n' ' ')"
+fi
 # make preflight (the install-prereqs view) keeps naming install-prereqs.
 WPF=$S/wpf
 plant_work "$WPF"
@@ -274,18 +306,122 @@ assert len(r) == 1 and r[0]["fix"] == sys.argv[1], r' "$LICFIX_PRE"; then
 else
 	bad "preflight licence fix: $(printf '%s' "$_wp" | grep -o '"fix": "make install-prereqs[^"]*"' | head -n 2 | tr '\n' ' ')"
 fi
-if [ "$(grep -c '^install: done$' "$S/installed.out")" = 1 ] && ! grep -q '^install: install:' "$S/installed.out"; then
-	ok "the install progress prefix is printed once"
+# The warning path: the acceptance setting is set, so the licence is a
+# warning, not a blocker.  Its fix must still carry the acceptance setting,
+# or a user who copies it into a shell without it does not accept anything.
+WWA=$S/wwarn
+DWA=$S/dwarn
+plant_work "$WWA"
+new_dest "$DWA"
+_wpwarn=$(cd "$repo" && env -u ACCEPT_NVIDIA_LICENSE -u ACCEPT_ALL_LICENSES GB10_TEST_HOOKS=1 \
+    MK_ACCEPT_NVIDIA_LICENSE=1 MK_WORK="$WWA" MK_DESTDIR="$DWA" \
+    MK_SYSDIR="$WWA/src/sys" MK_BSDSRCTOP="$WWA/src" MK_DRMKMODDIR="$WWA-drm" \
+    sh scripts/make.sh preflight --json 2>/dev/null < /dev/null)
+if printf '%s\n' "$_wpwarn" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+r = [x for x in d["status"] if x["name"] == "licence"]
+assert len(r) == 1, r
+assert r[0]["state"] == "warn", r
+fix = r[0]["fix"]
+assert "ACCEPT_NVIDIA_LICENSE=1" in fix, fix
+assert "DESTDIR=" in fix, fix
+'; then
+	ok "the licence warning keeps the acceptance setting in its fix"
 else
-	bad "doubled prefix: $(grep 'install:' "$S/installed.out" | tr '\n' ' ')"
+	bad "licence warning fix: $(printf '%s' "$_wpwarn" | grep -o '"name": "licence"[^}]*' | head -n 1)"
+fi
+# The licence fix is written once: the fix of a licence that was never
+# accepted and the fix of a licence that changed since it was accepted are the
+# same command.  The behaviour, not the source text, is what is checked.
+WCH=$S/wchanged
+DCH=$S/dchanged
+plant_work "$WCH"
+new_dest "$DCH"
+run_install "$WCH" "$DCH" "$S/changed-accepted.out" ACCEPT_NVIDIA_LICENSE=1
+rc=$?
+# A new tarball with a different licence text: the acceptance on record is
+# for the old one, so the licence must be accepted again.
+printf 'NVIDIA Driver License Agreement (test copy, changed)\n' > "$WCH/sources/$top/doc/license.txt"
+tar -cJf "$WCH/sources/$top.tar.xz" -C "$WCH/sources" "$top"
+snap "$DCH" > "$S/changed.before"
+run_install "$WCH" "$DCH" "$S/changed.out"
+rc=$?
+snap "$DCH" > "$S/changed.after"
+_changed_fix=$(sed -n 's/^fix: //p' "$S/changed.out" | head -n 1)
+_changed_reason=$(sed -n 's/^blocked licence: //p' "$S/changed.out" | head -n 1)
+if [ "$rc" = 1 ] && [ -n "$_changed_fix" ] \
+    && [ -f "$WCH/sources/nvidia-licence.accepted" ] \
+    && [ "$_changed_fix" = "make install DESTDIR='$DCH' ACCEPT_NVIDIA_LICENSE=1" ] \
+    && [ "$_changed_fix" = "$(sed -n 's/^fix: //p' "$S/blocked.out" | head -n 1 | sed "s|$D1|$DCH|")" ] \
+    && printf '%s\n' "$_changed_fix" | sh -n 2>/dev/null \
+    && printf '%s\n' "$_changed_reason" | grep -q 'changed since it was accepted'; then
+	ok "a changed licence gets the same fix as an unaccepted one, and it is a command"
+else
+	bad "the changed-licence fix (rc $rc): [$_changed_fix] reason: [$_changed_reason]"
+fi
+# The acceptance must match the licence that blocked.  The settings file
+# (the acceptance on record) names an old licence text: it is not an
+# acceptance of the licence now required, so the install stays blocked and
+# writes nothing.  The message names the licence now required, and the one
+# the record names.
+_new_lic=$(sha256 -q "$WCH/sources/$top/doc/license.txt")
+_old_lic=$(sed -n 1p "$WCH/sources/nvidia-licence.accepted" 2>/dev/null)
+if [ "$_new_lic" != "$_old_lic" ] \
+    && printf '%s\n' "$_changed_reason" | grep -qF "the licence now required is NVIDIA driver licence sha256:$_new_lic" \
+    && printf '%s\n' "$_changed_reason" | grep -qF "the acceptance on record is for sha256:$_old_lic" \
+    && cmp -s "$S/changed.before" "$S/changed.after"; then
+	ok "a settings file accepting an old licence text: the install stays blocked and the message names the licence required"
+else
+	bad "the licence the message names: [$_changed_reason] (required: $_new_lic, on record: $_old_lic)"
+fi
+# The machine output names the same licences as the English one.
+run_blocked_driver_json "$WCH" "$DCH" "$S/changed.json"
+rc=$?
+if [ "$rc" = 1 ] && python3 -I - "$S/changed.json" "$_new_lic" "$_old_lic" <<'PEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+new, old = sys.argv[2], sys.argv[3]
+assert d["outcome"] == "blocked", d["outcome"]
+b = [x for x in d["blockers"] if x["name"] == "licence"]
+assert len(b) == 1, d["blockers"]
+assert "the licence now required is NVIDIA driver licence sha256:" + new in b[0]["reason"], b[0]["reason"]
+assert "the acceptance on record is for sha256:" + old in b[0]["reason"], b[0]["reason"]
+PEOF
+then ok "the machine output names the licence required and the one the record names"
+else bad "the licence in the machine output: $(head -c 300 "$S/changed.json")"; fi
+# The fix accepts exactly the licence the blocker named: the acceptance it
+# records is the one for the licence now required, never the one the old
+# record carried over.
+DCH2=$S/dchanged2
+new_dest "$DCH2"
+run_install "$WCH" "$DCH2" "$S/changed-fixed.out" ACCEPT_NVIDIA_LICENSE=1
+rc=$?
+_rec_now=$(sed -n 1p "$WCH/sources/nvidia-licence.accepted" 2>/dev/null)
+_rec_id=$(sed -n 3p "$WCH/sources/nvidia-licence.accepted" 2>/dev/null)
+if [ "$rc" = 0 ] && [ "$_rec_now" = "$_new_lic" ] \
+    && [ "$_rec_id" = "NVIDIA driver licence sha256:$_new_lic" ]; then
+	ok "the fix accepts exactly the licence the blocker named, and the record names it"
+else
+	bad "the acceptance the fix records: [$_rec_now] [$_rec_id] (the licence required: $_new_lic)"
+fi
+# Progress lines carry a phase word; the outcome line is install: installed.
+_prog_all=$(grep -c '^install: ' "$S/installed.out")
+_prog_phased=$(grep -cE '^install: (prerequisites|build|staging|copying) ' "$S/installed.out")
+if ! grep -qx 'install: done' "$S/installed.out" \
+    && grep -qx 'install: copying done' "$S/installed.out" \
+    && grep -qx 'install: installed' "$S/installed.out" \
+    && [ "$_prog_all" -eq $((_prog_phased + 1)) ]; then
+	ok "every progress line names its phase and the outcome line is install: installed"
+else
+	bad "progress wording: $(grep '^install: ' "$S/installed.out" | tr '\n' ' ')"
 fi
 FWK=hw.nvidia.registry.EnableGpuFirmware=1
-NONE_SUF='(as root: this user has no doas, sudo or su)'
 oldifs=$IFS
 IFS='|'
 for _pair in "root|kenv $FWK|kldload nvidia-drm" "doas|doas kenv $FWK|doas kldload nvidia-drm" \
     "sudo|sudo kenv $FWK|sudo kldload nvidia-drm" "su|su root -c 'kenv $FWK'|su root -c 'kldload nvidia-drm'" \
-    "none|kenv $FWK $NONE_SUF|kldload nvidia-drm $NONE_SUF"; do
+    "none|kenv $FWK|kldload nvidia-drm"; do
 	set -- $_pair
 	_m=$1
 	_fw=$2
@@ -302,7 +438,8 @@ for _pair in "root|kenv $FWK|kldload nvidia-drm" "doas|doas kenv $FWK|doas kldlo
 done
 IFS=$oldifs
 _note=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= sh "$repo/scripts/make.sh" _next-note 2>/dev/null)
-if printf '%s\n' "$_note" | grep -q 'make configure YES=1'; then
+if printf '%s\n' "$_note" | grep -q 'make configure YES=1' \
+    && printf '%s\n' "$_note" | grep -q 'firmware setting and the module load'; then
 	ok "a live install says make configure YES=1 loads the driver at boot"
 else
 	bad "no boot-load note: [$_note]"
@@ -325,7 +462,22 @@ assert len(rows) > 1
 assert all(r.get("tool") == "install" for r in rows)
 assert all(r.get("kind") == "progress" for r in rows[:-1])
 assert rows[-1]["outcome"] == "installed" and rows[-1]["blockers"] == []
+# The summary row carries the discriminator the contract promises, so a
+# consumer that dispatches on kind finds every record it gets.
+assert rows[-1]["kind"] == "summary", rows[-1]
 assert any(r["path"] == "/boot/modules/nvidia.ko" for r in rows[-1]["installed"])
+# The version of the contract is the schema's version, in the summary and in
+# every progress record, with its parts as integers.
+for r in rows:
+    assert r["schema_version"] == "2.1", r
+    assert r["schema_version_major"] == 2 and r["schema_version_minor"] == 1, r
+# The phase of a progress record is a machine value: it never changes, so a
+# consumer that filters on phase == "install" keeps seeing the copy phase.
+# Only the English line uses the clearer word.
+phases = [r["phase"] for r in rows[:-1]]
+assert phases, rows
+assert set(phases) <= {"prereqs", "build", "stage", "install"}, phases
+assert "install" in phases, phases
 EOF
 then ok "JSONL emits progress records then the install summary"; else bad "installed JSONL (rc $rc): $(tail -n 4 "$S/installed.jsonl" | tr '\n' ' ')"; fi
 
@@ -1214,10 +1366,13 @@ fi
 if python3 -I - "$S/installed.json" <<'PEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
+# A staged install has no next step: the files are only staged, so there is
+# nothing to run here, and the explanation is the note.
+assert d["next"] == [], d["next"]
 assert not any("kldload" in n for n in d["next"]), d["next"]
-assert any("staged under" in n for n in d["next"]), d["next"]
+assert "staged under" in d["note"], d["note"]
 PEOF
-then ok "a DESTDIR install says the files are staged, no kldload"
+then ok "a DESTDIR install says the files are staged, and has no next step"
 else bad "DESTDIR next steps: $(tr -d '\n' < "$S/installed.json" | head -c 300)"; fi
 _ns=
 for _m in root doas sudo su; do
@@ -1248,18 +1403,74 @@ fi
 
 # Schema registration and fixture are part of the machine-output contract.
 if python3 -I - "$repo" "$S/installed.json" "$S/blocked.json" <<'EOF'
-import json, os, sys
+import json, os, re, sys
 repo = sys.argv[1]
-schema = json.load(open(os.path.join(repo, "schema/make-install-1.schema.json")))
+schema = json.load(open(os.path.join(repo, "schema/make-install-2.schema.json")))
 fixture = json.load(open(os.path.join(repo, "tests/fixtures/make-install.json")))
 samples = json.load(open(os.path.join(repo, "schema/samples.json")))["samples"]
-row = [s for s in samples if s.get("schema") == "schema/make-install-1.schema.json"]
-assert len(row) == 1 and row[0]["fixture"] == "tests/fixtures/make-install.json"
-assert schema["properties"]["tool"]["const"] == "install"
-assert schema["properties"]["outcome"]["enum"] == ["installed", "blocked", "interrupted"]
-assert set(schema["required"]) == {"schema_version", "tool", "outcome", "blockers", "installed", "next"}
+row = [s for s in samples if s.get("schema") == "schema/make-install-2.schema.json"
+       and s.get("fixture") == "tests/fixtures/make-install.json"]
+assert len(row) == 1, row
+# The progress records of the same contract are registered too: the schema
+# has both shapes.
+prow = [s for s in samples if s.get("fixture") == "tests/fixtures/make-install-progress.jsonl"]
+assert len(prow) == 1 and prow[0]["schema"] == "schema/make-install-2.schema.json", prow
+# The driver emits the version of the schema: one constant, one contract.
+_mk = open(os.path.join(repo, "scripts/make.sh")).read()
+_mv = re.search(r"^install_schema_version=(\S+)$", _mk, re.M)
+assert _mv, "make.sh has no install_schema_version"
+assert _mv.group(1) == schema["version"], (_mv.group(1), schema["version"])
+# Version 2 is a union of the two shapes the contract has: the progress
+# record and the summary record.  A consumer dispatches on the version and
+# on kind, and every record it gets validates against one of the branches.
+assert "oneOf" in schema, sorted(schema)
+assert len(schema["oneOf"]) == 2, schema["oneOf"]
+summary = schema["$defs"]["summary"]
+progress = schema["$defs"]["progress"]
+assert summary["properties"]["tool"]["const"] == "install"
+assert summary["properties"]["outcome"]["enum"] == ["installed", "blocked", "interrupted"]
+assert set(summary["required"]) == {"schema_version", "schema_version_major",
+                                     "schema_version_minor", "tool", "kind",
+                                     "outcome", "blockers", "installed", "next"}
+assert progress["properties"]["kind"]["const"] == "progress"
+assert set(progress["required"]) == {"schema_version", "schema_version_major",
+                                     "schema_version_minor", "tool", "kind",
+                                     "phase", "message"}
+# The summary record carries the discriminator the contract promises: a
+# consumer dispatches on kind, and every record it gets has one.
+assert summary["properties"]["kind"]["const"] == "summary"
+assert "kind" in summary["required"]
+assert fixture.get("kind") == "summary", fixture
+# The notes about the next steps are their own field, and it is optional (a
+# blocked install has no next steps and so no note).
+assert summary["properties"]["note"]["type"] == "string"
+assert "note" not in summary["required"]
+assert fixture.get("note"), fixture
+# How to resume an interrupted install is its own field too, and it is
+# optional: only the interrupted outcome has one.
+assert summary["properties"]["resume"]["type"] == "string"
+assert "resume" not in summary["required"]
+# The next steps belong to an installed install alone.  The schema says so,
+# and the wording names the other outcomes.
+_next_doc = summary["properties"]["next"]["description"]
+assert "installed install" in _next_doc, _next_doc
+assert "blocked install" in _next_doc, _next_doc
+assert "interrupted install" in _next_doc, _next_doc
+# The steps that need a root shell are named by index; the field is optional.
+assert summary["properties"]["requires_root_shell"]["type"] == "array"
+assert "requires_root_shell" not in summary["required"]
+# The note is prose and it may name a command; the commands to run are in
+# next.  The schema says so, and the note that is emitted says it too.
+assert "make configure YES=1" in summary["properties"]["note"]["description"], \
+    summary["properties"]["note"]["description"]
+assert "Never a command" not in summary["properties"]["note"]["description"], \
+    summary["properties"]["note"]["description"]
 for doc in (fixture, json.load(open(sys.argv[2])), json.load(open(sys.argv[3]))):
-    assert doc["schema_version"] == "1.0" and doc["tool"] == "install"
+    # The document names the contract it follows: the version of the schema
+    # is the version every document carries, with its parts as integers.
+    assert doc["schema_version"] == schema["version"], (doc["schema_version"], schema["version"])
+    assert doc["schema_version_major"] == 2 and doc["schema_version_minor"] == 1, doc
+    assert doc["tool"] == "install"
     assert doc["outcome"] in ("installed", "blocked", "interrupted")
     assert isinstance(doc["blockers"], list) and isinstance(doc["installed"], list) and isinstance(doc["next"], list)
     for i, b in enumerate(doc["blockers"]):
@@ -1414,6 +1625,525 @@ if printf '%s\n' "$_hn" | grep -q 'test hook GB10_TEST_ROOT_METHOD'; then
 else
 	bad "root-method hook is silent: [$_hn]"
 fi
+
+# ---- install output wording: the notes, the commands, the licence fix ------
+
+# The summary is called here with a stubbed root method, so the live system is
+# never touched: a live install would load a module.  The functions come from
+# make.sh by name; a missing one fails loudly below.
+fn_extract "$repo/scripts/make.sh" install_summary install_next_list install_next_steps \
+    install_next_note install_next_root_note install_next_staged_note install_next_notes \
+    install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
+    install_next_add install_next_render install_resume_command \
+    >> "$S/hook-fns.sh"
+for _fn in install_summary install_next_list install_next_steps install_next_note \
+    install_next_root_note install_next_staged_note install_next_notes \
+    install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
+    install_next_add install_next_render install_resume_command; do
+	( . "$S/hook-fns.sh"; command -v "$_fn" > /dev/null ) \
+	    || bad "the function $_fn is missing from make.sh"
+done
+# summary ROOT-METHOD JSON [DESTDIR] [PREFIX]: the summary of an installed
+# live install, with ROOT-METHOD as the way this user becomes root.
+summary() {
+	(
+		. "$S/hook-fns.sh"
+		_rmstub=$1
+		root_method() { printf '%s\n' "$_rmstub"; }
+		DESTDIR=${3:-}
+		PREFIX=${4:-/usr/local}
+		# the version the driver emits, read from the driver itself
+		install_schema_version=$(sed -n 's/^install_schema_version=//p' "$repo/scripts/make.sh")
+		install_records='/boot/modules/nvidia.ko|555
+'
+		install_blockers=
+		MK_JSON=$2
+		install_summary installed
+	)
+}
+_sum_none=$(summary none 0)
+_sum_doas=$(summary doas 0)
+_sum_json_none=$(summary none 1)
+_sum_json_doas=$(summary doas 1)
+printf '%s\n' "$_sum_json_doas" > "$S/sum.json"
+# The fixture is the output of the generator: the same live summary, with a
+# doas user, has the same next steps, the same note and the same root steps.
+if python3 -I - "$repo" "$S/sum.json" <<'PEOF'
+import json, os, sys
+repo = sys.argv[1]
+fixture = json.load(open(os.path.join(repo, "tests/fixtures/make-install.json")))
+live = json.load(open(sys.argv[2]))
+assert fixture["next"] == live["next"], (fixture["next"], live["next"])
+assert fixture["note"] == live["note"], (fixture["note"], live["note"])
+assert fixture["requires_root_shell"] == live["requires_root_shell"], fixture["requires_root_shell"]
+assert fixture["schema_version"] == live["schema_version"], fixture["schema_version"]
+PEOF
+then ok "the fixture is what the generator emits for a doas user"
+else bad "the fixture and the generated summary differ"; fi
+# The root note stands before the list of commands; the boot-load note after
+# it; every next: line is a command and nothing else.
+printf '%s\n' "$_sum_none" > "$S/sum.none"
+cat > "$S/sum.none.want" <<'XEOF'
+installed /boot/modules/nvidia.ko 555
+the firmware setting and the module load run as root (this user has no doas, sudo or su): ask an administrator to run them as root, or open a root shell on the console and run them there.
+next: kenv hw.nvidia.registry.EnableGpuFirmware=1
+next: kldload nvidia-drm
+next: kldstat
+next: nvrm-info --json
+To load the driver at boot instead of the firmware setting and the module load, run make configure YES=1 once.
+install: installed
+XEOF
+if cmp -s "$S/sum.none" "$S/sum.none.want"; then
+	ok "with no root tool the commands are bare and the root note says what to do"
+else
+	bad "the summary with no root tool: $(printf '%s' "$_sum_none" | tr '\n' '|')"
+fi
+if ! printf '%s\n' "$_sum_doas" | grep -q 'no doas, sudo or su' \
+    && printf '%s\n' "$_sum_doas" | grep -q 'make configure YES=1'; then
+	ok "with a root tool there is no root note, and the boot-load note comes after the list"
+else
+	bad "the summary with doas: $(printf '%s' "$_sum_doas" | tr '\n' '|')"
+fi
+# The JSON: the next array holds commands only, the steps that need a root
+# shell are named by index, and the notes are prose in their own field.
+if printf '%s\n' "$_sum_json_none" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["next"] == ["kenv hw.nvidia.registry.EnableGpuFirmware=1", "kldload nvidia-drm",
+                     "kldstat", "nvrm-info --json"], d["next"]
+assert all(" as root" not in n for n in d["next"]), d["next"]
+assert d["requires_root_shell"] == [0, 1], d["requires_root_shell"]
+assert "no doas, sudo or su" in d["note"], d["note"]
+assert "open a root shell" in d["note"], d["note"]
+assert "make configure YES=1" in d["note"], d["note"]
+' && printf '%s\n' "$_sum_json_doas" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["next"] == ["doas kenv hw.nvidia.registry.EnableGpuFirmware=1", "doas kldload nvidia-drm",
+                     "kldstat", "nvrm-info --json"], d["next"]
+assert d["requires_root_shell"] == [], d["requires_root_shell"]
+assert "no doas" not in d["note"], d["note"]
+assert d["note"].startswith("To load the driver at boot"), d["note"]
+'; then
+	ok "the JSON next array holds commands only and the notes are their own field"
+else
+	bad "the JSON summary: $(printf '%s\n' "$_sum_json_none" | tr '\n' ' ')"
+fi
+# One notion of "no root tool": a root method that is empty or unknown means
+# the same thing as none, and then the commands are bare and the note says
+# they run as root.
+for _rm in '' unknown none; do
+	_sum_rm=$(summary "$_rm" 0)
+	_sum_json_rm=$(summary "$_rm" 1)
+	if printf '%s\n' "$_sum_rm" | grep -q '^next: kenv hw.nvidia.registry.EnableGpuFirmware=1$' \
+	    && printf '%s\n' "$_sum_rm" | grep -q 'no doas, sudo or su' \
+	    && printf '%s\n' "$_sum_json_rm" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["next"][0] == "kenv hw.nvidia.registry.EnableGpuFirmware=1", d["next"]
+assert d["requires_root_shell"] == [0, 1], d["requires_root_shell"]
+assert "no doas, sudo or su" in d["note"], d["note"]
+'; then
+		ok "the root method [$_rm] means no root tool: bare commands and the root note"
+	else
+		bad "the root method [$_rm]: $(printf '%s\n' "$_sum_rm" | tr '\n' '|')"
+	fi
+done
+# A staged install has no next step at all: the files are only staged, so
+# there is nothing to run on this system, and the explanation is the note.
+_sum_staged=$(summary none 0 /some/stage)
+_sum_json_staged=$(summary none 1 /some/stage)
+if ! printf '%s\n' "$_sum_staged" | grep -q '^next: ' \
+    && printf '%s\n' "$_sum_staged" | grep -q 'staged under /some/stage' \
+    && printf '%s\n' "$_sum_json_staged" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["next"] == [], d["next"]
+assert d["requires_root_shell"] == [], d["requires_root_shell"]
+assert "staged under /some/stage" in d["note"], d["note"]
+assert "nothing was loaded" in d["note"], d["note"]
+'; then
+	ok "a staged install has no next step, and its note says where the files are"
+else
+	bad "the staged summary: $(printf '%s\n' "$_sum_staged" | tr '\n' '|')"
+fi
+# A PREFIX the user chose: the tool is not on PATH, so the command names the
+# installed path.
+_sum_json_prefix=$(summary doas 1 '' /opt/gb10)
+if printf '%s\n' "$_sum_json_prefix" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["next"][-1] == chr(39) + "/opt/gb10/sbin/nvrm-info" + chr(39) + " --json", d["next"]
+'; then
+	ok "with a PREFIX the check command names the installed tool"
+else
+	bad "the summary with a PREFIX: $(printf '%s\n' "$_sum_json_prefix" | tr '\n' ' ')"
+fi
+# The note and the steps come from one list: the note names the steps it
+# replaces instead of counting them.
+if grep -q 'install_next_load=' "$repo/scripts/make.sh" \
+    && ! grep -q 'the first two next steps' "$repo/scripts/make.sh"; then
+	ok "the boot-load note names the steps it replaces, it does not count them"
+else
+	bad "the boot-load note still counts the steps"
+fi
+# su root -c: the command is quoted, so a single quote in it cannot break out.
+_suq=$(. "$S/hook-fns.sh"; su_quote "echo it's here")
+_suw=$(eval "printf '%s' $_suq" 2>/dev/null)
+_suc=$(. "$S/hook-fns.sh"; root_method() { printf 'su\n'; }; root_cmd su "echo it's here")
+if [ "$_suw" = "echo it's here" ] \
+    && [ "$_suc" = "su root -c 'echo it'\''s here'" ]; then
+	ok "the su command is quoted, so a single quote in it cannot break out"
+else
+	bad "the su quoting: [$_suc] (word: [$_suw])"
+fi
+# The licence fix names the terminal way of accepting it, and a terminal run
+# of make install really asks the licence question.
+if grep -q 'on a terminal and answer the licence question' "$S/blocked.out" \
+    && grep -q 'Do you accept the NVIDIA driver licence' "$S/lic.out"; then
+	ok "the licence fix names the terminal way, and make install asks on a terminal"
+else
+	bad "the licence fix does not name a way that works: $(grep '^fix:' "$S/blocked.out" | tr '\n' ' ')"
+fi
+
+# ---- the ladder gate: every next step is one pasteable command -------------
+
+# A PREFIX is a path the user typed.  Every command that names it quotes the
+# path as one word, so a prefix with a space in it names the tool that was
+# installed and not the first word of the path.
+PFXDIR="$S/prefix with space"
+mkdir -p "$PFXDIR/sbin"
+printf '#!/bin/sh\nprintf "FAKE-NVRM\\n"\n' > "$PFXDIR/sbin/nvrm-info"
+chmod 755 "$PFXDIR/sbin/nvrm-info"
+_next=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= MK_PREFIX="$PFXDIR" \
+    sh "$repo/scripts/make.sh" _next-steps 2>/dev/null)
+_next_last=$(printf '%s\n' "$_next" | tail -n 1)
+_next_run=$(cd "$S" && sh -c "$_next_last" 2>/dev/null)
+if [ "$_next_run" = "FAKE-NVRM" ]; then
+	ok "a PREFIX with a space names one executable: the command runs the installed tool"
+else
+	bad "the command for a PREFIX with a space: [$_next_last] (it ran: [$_next_run])"
+fi
+# A PREFIX with a shell metacharacter in it cannot run another command: the
+# path is quoted, so the semicolon is part of the name and not a command
+# separator.
+INJ=$S/injection
+mkdir -p "$INJ"
+SENT=$INJ/sentinel
+_inj=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= \
+    MK_PREFIX="$INJ/pfx;touch $SENT #" \
+    sh "$repo/scripts/make.sh" _next-steps 2>/dev/null)
+_inj_last=$(printf '%s\n' "$_inj" | tail -n 1)
+(cd "$INJ" && sh -c "$_inj_last" >/dev/null 2>&1)
+if [ ! -e "$SENT" ]; then
+	ok "a PREFIX with a shell metacharacter cannot run another command"
+else
+	bad "the command for a PREFIX with a metacharacter ran it: [$_inj_last]"
+fi
+# A PREFIX with a newline in it is refused: the next steps travel one
+# command per line, and a newline in a path would make two of them.
+_nl=$(env GB10_TEST_HOOKS=1 MK_DESTDIR= MK_PREFIX="$INJ/pfx
+second" sh "$repo/scripts/make.sh" _next-steps 2>&1)
+_rc=$?
+if [ "$_rc" != 0 ] && printf '%s\n' "$_nl" | grep -qi 'newline'; then
+	ok "a PREFIX with a newline is refused before any command is built from it"
+else
+	bad "a PREFIX with a newline (rc $_rc): $(printf '%s\n' "$_nl" | tr '\n' ' ')"
+fi
+
+# The licence alternatives keep the settings that change where the install
+# goes: following one must not turn a staged install into a live one.
+_reason=$(sed -n 's/^blocked licence: //p' "$S/blocked.out" | head -n 1)
+if printf '%s\n' "$_reason" | grep -q "make install DESTDIR='$D1' ACCEPT_ALL_LICENSES=1" \
+    && printf '%s\n' "$_reason" | grep -q "run make install DESTDIR='$D1' on a terminal" \
+    && ! printf '%s\n' "$_reason" | grep -q 'run make install on a terminal'; then
+	ok "the licence alternatives keep the DESTDIR the install was given"
+else
+	bad "the licence alternatives: [$_reason]"
+fi
+# The same with a PREFIX the user chose: that one is kept too.
+_reason_pfx=$(sed -n 's/^blocked licence: //p' "$S/blocked-prefix.out" | head -n 1)
+if printf '%s\n' "$_reason_pfx" | grep -q "PREFIX='/opt/gb10'" \
+    && printf '%s\n' "$_reason_pfx" | grep -q "run make install DESTDIR='$DPFX' PREFIX='/opt/gb10' on a terminal"; then
+	ok "the licence alternatives keep the PREFIX the install was given"
+else
+	bad "the licence alternatives with a PREFIX: [$_reason_pfx]"
+fi
+
+# The steps that need a root shell are named by requires_root_shell: the
+# field says what it means, and it is empty when the commands carry the
+# root tool.
+_sum_root_none=$(summary none 1)
+_sum_root_doas=$(summary doas 1)
+if printf '%s\n' "$_sum_root_none" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert "requires_root_shell" in d, sorted(d)
+assert "requires_root" not in d, sorted(d)
+assert d["requires_root_shell"] == [0, 1], d["requires_root_shell"]
+assert d["next"][0].endswith("kenv hw.nvidia.registry.EnableGpuFirmware=1"), d["next"]
+assert d["next"][1].endswith("kldload nvidia-drm"), d["next"]
+' && printf '%s\n' "$_sum_root_doas" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["requires_root_shell"] == [], d["requires_root_shell"]
+'; then
+	ok "requires_root_shell names the steps that need a root shell"
+else
+	bad "requires_root_shell: $(printf '%s\n' "$_sum_root_none" | tr -d '\n' | head -c 200)"
+fi
+# The indexes come from the records the commands come from: a copy of the
+# generator with one step before the privileged ones moves them.
+cp "$repo/scripts/make.sh" "$S/make-extra-step.sh"
+sed "s|^\tinstall_next_add 'the firmware setting'|\tinstall_next_add 'a first check' 'true' '' ''\n&|" \
+    "$S/make-extra-step.sh" > "$S/make-extra-step.patched.sh"
+fn_extract "$S/make-extra-step.patched.sh" install_next_list install_next_add install_next_render \
+    >> "$S/hook-fns.sh"
+_extra=$( . "$S/hook-fns.sh"; root_method() { printf 'none\n'; }; DESTDIR=; PREFIX=/usr/local; \
+    install_next_list installed; printf '%s' "$install_next_root" )
+_cmds=$( . "$S/hook-fns.sh"; root_method() { printf 'none\n'; }; DESTDIR=; PREFIX=/usr/local; \
+    install_next_list installed; printf '%s' "$install_next_cmds" )
+_load=$( . "$S/hook-fns.sh"; root_method() { printf 'none\n'; }; DESTDIR=; PREFIX=/usr/local; \
+    install_next_list installed; printf '%s' "$install_next_load" )
+if [ "$_extra" = "1
+2" ] && [ "$(printf '%s\n' "$_cmds" | head -n 1)" = "true" ] \
+    && [ "$_load" = "the firmware setting and the module load" ]; then
+	ok "the root-shell indexes follow the records: a step before them moves them"
+else
+	bad "the root-shell indexes do not follow the records: [$_extra] (first step: [$(printf '%s\n' "$_cmds" | head -n 1)])"
+fi
+# The note names a way to become root that a user without a root tool can
+# actually take.
+if printf '%s\n' "$_sum_none" | grep -qi 'administrator' \
+    && printf '%s\n' "$_sum_none" | grep -qi 'console'; then
+	ok "the no-root-tool note names an escalation route"
+else
+	bad "the no-root-tool note names no way to become root: $(printf '%s\n' "$_sum_none" | head -n 2 | tr '\n' ' ')"
+fi
+
+# A blocked install has no next steps: the module was never installed, so
+# kldload cannot work, and nothing was staged.  The licence is not accepted,
+# so the install blocks before it copies anything.
+BND=$S/wblocked
+DND=$S/dblocked
+plant_work "$BND"
+new_dest "$DND"
+run_install "$BND" "$DND" "$S/blocked-destdir.out"
+rc=$?
+if [ "$rc" = 1 ] && grep -q '^install: blocked' "$S/blocked-destdir.out" \
+    && ! grep -q '^next: ' "$S/blocked-destdir.out" \
+    && ! grep -q 'staged under' "$S/blocked-destdir.out" \
+    && ! grep -q 'make configure YES=1' "$S/blocked-destdir.out" \
+    && ! grep -q 'run as root' "$S/blocked-destdir.out"; then
+	ok "a blocked staged install names no next step"
+else
+	bad "a blocked staged install names next steps (rc $rc): $(grep -E '^(next:|To load|the files)' "$S/blocked-destdir.out" | tr '\n' ' ')"
+fi
+# The same without a DESTDIR: the install is blocked before any root step.
+(cd "$repo" && env -u ACCEPT_NVIDIA_LICENSE -u ACCEPT_ALL_LICENSES -u ACCEPT_EULA \
+    GB10_TEST_HOOKS=1 FETCH=/bin/false SHA256="$H/sha256" GIT="$H/git" \
+    MK_WORK="$BND" MK_DESTDIR= MK_SYSDIR="$BND/src/sys" MK_BSDSRCTOP="$BND/src" \
+    MK_DRMKMODDIR="$BND-drm" sh scripts/make.sh install) > "$S/blocked-live.out" 2>&1 < /dev/null
+rc=$?
+if [ "$rc" = 1 ] && grep -q '^install: blocked' "$S/blocked-live.out" \
+    && ! grep -q '^next: ' "$S/blocked-live.out" \
+    && ! grep -q 'staged under' "$S/blocked-live.out" \
+    && ! grep -q 'make configure YES=1' "$S/blocked-live.out" \
+    && ! grep -q 'run as root' "$S/blocked-live.out"; then
+	ok "a blocked live install names no next step"
+else
+	bad "a blocked live install names next steps (rc $rc): $(grep -E '^(next:|To load|the files)' "$S/blocked-live.out" | tr '\n' ' ')"
+fi
+# The machine output agrees: no next steps and no note for a blocked install.
+(cd "$repo" && env -u ACCEPT_NVIDIA_LICENSE -u ACCEPT_ALL_LICENSES -u ACCEPT_EULA \
+    GB10_TEST_HOOKS=1 FETCH=/bin/false SHA256="$H/sha256" GIT="$H/git" \
+    MK_WORK="$BND" MK_DESTDIR= MK_SYSDIR="$BND/src/sys" MK_BSDSRCTOP="$BND/src" \
+    MK_DRMKMODDIR="$BND-drm" MK_JSON=1 sh scripts/make.sh install) > "$S/blocked-live.json" 2>/dev/null < /dev/null
+if python3 -I - "$S/blocked-live.json" <<'PEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["outcome"] != "installed", d["outcome"]
+assert d["next"] == [], d["next"]
+assert "note" not in d, d.get("note")
+PEOF
+then ok "a blocked install has no next steps and no note in the machine output"
+else bad "the blocked summary: $(head -c 200 "$S/blocked-live.json")"; fi
+
+# ---- the outcome contract: what each outcome names -------------------------
+#
+# The summary says what happened.  An installed install names its next steps;
+# a blocked one names its blocker and that blocker's fix; an interrupted one
+# names how to resume it.  An install that did not happen never names the
+# next steps of an install that did.
+# The functions come from make.sh by name, into a file of their own: the
+# summary is what the driver emits, not what a patched copy of it emits.
+fn_extract "$repo/scripts/make.sh" install_summary install_next_list install_next_steps \
+    install_next_note install_next_root_note install_next_staged_note install_next_notes \
+    install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
+    install_next_add install_next_render install_resume_command \
+    > "$S/summary-fns.sh"
+summary_outcome() {
+	(
+		. "$S/hook-fns.sh"
+		. "$S/summary-fns.sh"
+		_so_outcome=$1
+		_rmstub=$2
+		root_method() { printf '%s\n' "$_rmstub"; }
+		DESTDIR=${4:-}
+		PREFIX=${5:-/usr/local}
+		# the version the driver emits, read from the driver itself
+		install_schema_version=$(sed -n 's/^install_schema_version=//p' "$repo/scripts/make.sh")
+		install_records='/boot/modules/nvidia.ko|555
+'
+		install_blockers='licence|the NVIDIA driver licence is not accepted|make install ACCEPT_NVIDIA_LICENSE=1
+'
+		MK_JSON=$3
+		install_summary "$_so_outcome"
+	)
+}
+# An installed install: the next steps and the note, and no resume.
+_out_installed=$(summary_outcome installed none 0)
+_out_installed_json=$(summary_outcome installed none 1)
+if printf '%s\n' "$_out_installed" | grep -q '^next: kenv hw.nvidia.registry.EnableGpuFirmware=1$' \
+    && printf '%s\n' "$_out_installed" | grep -q '^install: installed$' \
+    && ! printf '%s\n' "$_out_installed" | grep -q '^resume: ' \
+    && printf '%s\n' "$_out_installed_json" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["kind"] == "summary" and d["outcome"] == "installed", d
+assert any(x.endswith("kenv hw.nvidia.registry.EnableGpuFirmware=1") for x in d["next"]), d["next"]
+assert "note" in d, d
+assert "resume" not in d, d.get("resume")
+'; then
+	ok "an installed install names its next steps and no resume"
+else
+	bad "the installed summary: $(printf '%s\n' "$_out_installed" | tr '\n' ' ')"
+fi
+# A blocked install: the blocker and its fix, and nothing else.
+_out_blocked=$(summary_outcome blocked none 0)
+_out_blocked_json=$(summary_outcome blocked none 1)
+if printf '%s\n' "$_out_blocked" | grep -q '^blocked licence: the NVIDIA driver licence is not accepted$' \
+    && printf '%s\n' "$_out_blocked" | grep -q '^fix: make install ACCEPT_NVIDIA_LICENSE=1$' \
+    && printf '%s\n' "$_out_blocked" | grep -q '^install: blocked$' \
+    && ! printf '%s\n' "$_out_blocked" | grep -q '^next: ' \
+    && ! printf '%s\n' "$_out_blocked" | grep -q '^resume: ' \
+    && printf '%s\n' "$_out_blocked_json" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["kind"] == "summary" and d["outcome"] == "blocked", d
+assert d["next"] == [], d["next"]
+assert "note" not in d, d.get("note")
+assert "resume" not in d, d.get("resume")
+b = d["blockers"][0]
+assert b["name"] == "licence" and b["fix"] == "make install ACCEPT_NVIDIA_LICENSE=1", d["blockers"]
+'; then
+	ok "a blocked install names its blocker and its fix only"
+else
+	bad "the blocked summary: $(printf '%s\n' "$_out_blocked" | tr '\n' ' ')"
+fi
+# An interrupted install: how to resume it, and no next steps.
+_out_interrupted=$(summary_outcome interrupted none 0 /stage)
+_out_interrupted_json=$(summary_outcome interrupted none 1 /stage)
+if printf '%s\n' "$_out_interrupted" | grep -q "^resume: make install DESTDIR='/stage'$" \
+    && printf '%s\n' "$_out_interrupted" | grep -q '^install: interrupted$' \
+    && ! printf '%s\n' "$_out_interrupted" | grep -q '^next: ' \
+    && printf '%s\n' "$_out_interrupted_json" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["kind"] == "summary" and d["outcome"] == "interrupted", d
+assert d["next"] == [], d["next"]
+assert "note" not in d, d.get("note")
+assert d["resume"] == "make install DESTDIR='"'"'/stage'"'"'", d.get("resume")
+'; then
+	ok "an interrupted install names how to resume it and no next steps"
+else
+	bad "the interrupted summary: $(printf '%s\n' "$_out_interrupted" | tr '\n' ' ')"
+fi
+
+# Every row of the machine output is described by the schema of the contract
+# it names: the progress rows and the summary row both validate.
+if python3 -I - "$repo" "$S/installed.jsonl" "$S/blocked.json" <<'PEOF'
+import json, os, re, sys
+repo = sys.argv[1]
+schema = json.load(open(os.path.join(repo, "schema/make-install-2.schema.json")))
+
+
+def validate(node, doc, root):
+    if "$ref" in node:
+        ref = node["$ref"]
+        assert ref.startswith("#/"), ref
+        target = root
+        for part in ref[2:].split("/"):
+            target = target[part]
+        return validate(target, doc, root)
+    if "oneOf" in node:
+        errors = []
+        for sub in node["oneOf"]:
+            try:
+                return validate(sub, doc, root)
+            except AssertionError as exc:
+                errors.append(str(exc))
+        raise AssertionError("no branch of the union matched: " + "; ".join(errors))
+    if "const" in node:
+        assert doc == node["const"], (doc, node["const"])
+    if "enum" in node:
+        assert doc in node["enum"], (doc, node["enum"])
+    kind = node.get("type")
+    if kind == "object":
+        assert isinstance(doc, dict), doc
+        props = node.get("properties", {})
+        for name in node.get("required", []):
+            assert name in doc, "missing " + name
+        if node.get("additionalProperties") is False:
+            for name in doc:
+                assert name in props, "unexpected property " + name
+        for name, value in doc.items():
+            if name in props:
+                validate(props[name], value, root)
+    elif kind == "array":
+        assert isinstance(doc, list), doc
+        for item in doc:
+            validate(node["items"], item, root)
+    elif kind == "string":
+        assert isinstance(doc, str), doc
+        if "minLength" in node:
+            assert len(doc) >= node["minLength"], doc
+        if "pattern" in node:
+            assert re.search(node["pattern"], doc), doc
+    elif kind == "integer":
+        assert isinstance(doc, int) and not isinstance(doc, bool), doc
+        if "minimum" in node:
+            assert doc >= node["minimum"], doc
+
+
+rows = [json.loads(line) for line in open(sys.argv[2]) if line.strip()]
+assert len(rows) > 1, rows
+for row in rows:
+    validate(schema, row, schema)
+for path in (sys.argv[3],):
+    doc = json.load(open(path))
+    validate(schema, doc, schema)
+fixture = json.load(open(os.path.join(repo, "tests/fixtures/make-install.json")))
+validate(schema, fixture, schema)
+# The registered progress sample: every row of it is one of the two shapes
+# the contract has, and its progress rows carry the same keys as the rows a
+# real run emits.
+progress_sample = os.path.join(repo, "tests/fixtures/make-install-progress.jsonl")
+sample_rows = [json.loads(line) for line in open(progress_sample) if line.strip()]
+assert sample_rows, "the progress sample is empty"
+for row in sample_rows:
+    validate(schema, row, schema)
+real_progress = [r for r in rows if r.get("kind") == "progress"]
+sample_progress = [r for r in sample_rows if r.get("kind") == "progress"]
+assert sample_progress, sample_rows
+assert set(sample_progress[0]) == set(real_progress[0]), (sample_progress[0], real_progress[0])
+# Every registered sample names a fixture that is there.
+samples = json.load(open(os.path.join(repo, "schema/samples.json")))["samples"]
+for sample in samples:
+    assert os.path.isfile(os.path.join(repo, sample["fixture"])), sample
+PEOF
+then ok "every row of the machine output validates against the schema it names"
+else bad "the machine output does not validate against its own schema"; fi
 
 # No personal defaults.  The needles are tests/lib/personal-paths.txt, the
 # same list tests/readme_install_doc_test.sh reads.  README.md, docs/ and man/
