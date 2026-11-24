@@ -50,8 +50,11 @@ nvrm_attribute(unsigned index, CUdevice_attribute attribute, int *value)
 	return (CUDA_ERROR_NOT_SUPPORTED);
 }
 
+/* This provider is the native kind: it takes no fake profile, and its
+ * discovery is not implemented in this release. */
 const cuda_provider cuda_nvrm_provider = {
 	.backend = "nvrm",
+	.kind = CUDA_PROVIDER_NATIVE,
 	.enumerate = nvrm_enumerate,
 	.name = nvrm_name,
 	.uuid = nvrm_uuid,

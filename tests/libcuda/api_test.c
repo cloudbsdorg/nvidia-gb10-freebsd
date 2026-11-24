@@ -174,6 +174,19 @@ check_proc_api(void)
 	    &status), CUDA_SUCCESS);
 	CHECK(pfn == dlsym(RTLD_DEFAULT, "cuGetProcAddress"));
 	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	/* The version rule of the legacy row has one boundary, and the two
+	 * sides of it are different functions: below the introduction version
+	 * the four-argument form, at and above it the five-argument one. */
+	pfn = NULL;
+	CHECK_EQ(cuGetProcAddress("cuGetProcAddress", &pfn, 11999, 0,
+	    &status), CUDA_SUCCESS);
+	CHECK(pfn == dlsym(RTLD_DEFAULT, "cuGetProcAddress"));
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	pfn = NULL;
+	CHECK_EQ(cuGetProcAddress("cuGetProcAddress", &pfn, 12000, 0,
+	    &status), CUDA_SUCCESS);
+	CHECK(pfn == dlsym(RTLD_DEFAULT, "cuGetProcAddress_v2"));
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, -1, 0, &status),
 	    CUDA_ERROR_INVALID_VALUE);
 	CHECK_EQ(cuGetProcAddress("cuInit", &pfn, CUDA_VERSION, 4, &status),
@@ -199,6 +212,10 @@ check_proc_api(void)
 			CHECK(pfn == dlsym(RTLD_DEFAULT, "cuInit"));
 			pfn = NULL;
 			CHECK_EQ(legacy("cuGetProcAddress", &pfn, 11030, 0),
+			    CUDA_SUCCESS);
+			CHECK(pfn == (void *)legacy);
+			pfn = NULL;
+			CHECK_EQ(legacy("cuGetProcAddress", &pfn, 11999, 0),
 			    CUDA_SUCCESS);
 			CHECK(pfn == (void *)legacy);
 			pfn = NULL;
@@ -228,6 +245,40 @@ proc_from_stdin_test(void)
 	CHECK(!ferror(stdin));
 	CHECK_EQ(count, sizeof(proc_names) / sizeof(proc_names[0]));
 	return (t_done("proc exports match the dynamic ABI"));
+}
+
+/* The version rule of the legacy proc-address row: below the introduction
+ * version the four-argument form, at and above it the five-argument one.
+ * The test does not read the addresses from the dynamic symbol table: it
+ * compares what the library returns with the address of the function the
+ * header declares, so the check works in a binary that links the library
+ * sources directly. */
+static int
+proc_version_test(void)
+{
+	CUdriverProcAddressQueryResult status;
+	void *below = NULL, *at = NULL, *v2 = NULL;
+
+	status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+	CHECK_EQ(cuGetProcAddress("cuGetProcAddress", &below, 11999, 0, &status),
+	    CUDA_SUCCESS);
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	CHECK(below != NULL);
+	status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+	CHECK_EQ(cuGetProcAddress("cuGetProcAddress", &at, 12000, 0, &status),
+	    CUDA_SUCCESS);
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	CHECK(at != NULL);
+	/* The five-argument form is the one the table holds at that version. */
+	status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+	CHECK_EQ(cuGetProcAddress("cuGetProcAddress_v2", &v2, CUDA_VERSION, 0,
+	    &status), CUDA_SUCCESS);
+	CHECK_EQ(status, CU_GET_PROC_ADDRESS_SUCCESS);
+	CHECK(at == v2);
+	/* Below the introduction version another function is returned: the
+	 * four-argument form. */
+	CHECK(below != at);
+	return (t_done("api proc-address version boundary"));
 }
 
 static int
@@ -275,6 +326,62 @@ check_context_basics(CUdevice dev)
 	CHECK_EQ(cuDevicePrimaryCtxRetain(&second, dev), CUDA_SUCCESS);
 	CHECK(second == first);
 	CHECK_EQ(cuDevicePrimaryCtxRelease(dev), CUDA_SUCCESS);
+}
+
+/* The native queries answer from the library's tables and do not start the
+ * initialization: a device query after them still reports that the library is
+ * not initialized. */
+static int
+native_queries_test(void)
+{
+	const char *name, *synthetic = NULL;
+	char hint[256];
+	unsigned i, count, plain = 0;
+	int count_devices = -1;
+
+	/* The provider table is what the library reports: the test carries no
+	 * provider name of its own. */
+	count = cudaNativeProviderCount();
+	CHECK(count > 0);
+	for (i = 0; i < count; i++) {
+		name = cudaNativeProviderName(i);
+		CHECK(name != NULL);
+		CHECK(cudaNativeProviderKnown(name) != 0);
+		if (cudaNativeProviderTakesFakeProfiles(name))
+			synthetic = name;
+		else
+			plain++;
+	}
+	/* One provider takes the fake profiles; the others take none. */
+	CHECK(synthetic != NULL);
+	CHECK(plain == count - 1);
+	CHECK(cudaNativeProviderKnown("not-a-provider") == 0);
+	CHECK(cudaNativeProviderTakesFakeProfiles("not-a-provider") == 0);
+	CHECK(cudaNativeProviderName(count) == NULL);
+	CHECK(cudaNativeDefaultBackend() != NULL);
+	/* The advice for a provider the library cannot use names that provider
+	 * and the one to use instead, so a caller needs no provider name of
+	 * its own. */
+	for (i = 0; i < count; i++) {
+		name = cudaNativeProviderName(i);
+		if (cudaNativeProviderTakesFakeProfiles(name))
+			continue;
+		CHECK(cudaNativeProviderHint(name, hint, sizeof(hint)) != 0);
+		CHECK(strstr(hint, name) != NULL);
+		CHECK(strstr(hint, synthetic) != NULL);
+	}
+	CHECK(cudaNativeProviderHint("fake", hint, sizeof(hint)) == 0);
+	CHECK(cudaNativeProviderHint("not-a-provider", hint, sizeof(hint)) == 0);
+	CHECK(cudaNativeProviderHint(NULL, hint, sizeof(hint)) == 0);
+	CHECK(cudaNativeProviderHint("fake", NULL, 0) == 0);
+	CHECK(cudaNativeFakeProfileCount() > 0);
+	CHECK(cudaNativeFakeProfileName(0) != NULL);
+	CHECK(cudaNativeFakeProfileName(cudaNativeFakeProfileCount()) == NULL);
+	CHECK(cudaNativeFakeProfileDefault() != NULL);
+	/* No initialization has run, so there is no failure to report. */
+	CHECK_EQ(cudaNativeInitFailureReason(), CUDA_NATIVE_INIT_OK);
+	CHECK_EQ(cuDeviceGetCount(&count_devices), CUDA_ERROR_NOT_INITIALIZED);
+	return (t_done("api native queries"));
 }
 
 static int
@@ -657,6 +764,118 @@ init_observer_test(void)
 	return (t_done("api initialization observer"));
 }
 
+/* Many threads call cuInit and cuDeviceGetCount at once, again and again.
+ * Every thread must see the same device count: the registry data is
+ * published before a reader can see that the initialization completed. */
+#define INIT_STRESS_THREADS 32
+
+struct stress_case {
+	CUresult init;
+	CUresult count_result;
+	int count;
+};
+
+static void *
+stress_thread(void *arg)
+{
+	struct stress_case *sc = arg;
+
+	sc->init = cuInit(0);
+	sc->count_result = cuDeviceGetCount(&sc->count);
+	return (NULL);
+}
+
+static int
+init_stress_test(void)
+{
+	struct stress_case cases[INIT_STRESS_THREADS];
+	pthread_t threads[INIT_STRESS_THREADS];
+	unsigned round;
+	int i, first;
+
+	/* Time: O(200 * threads); Space: O(threads). */
+	for (round = 0; round < 200; round++) {
+		memset(cases, 0, sizeof(cases));
+		/* Time: O(threads); Space: O(1). */
+		for (i = 0; i < INIT_STRESS_THREADS; i++)
+			CHECK_EQ(pthread_create(&threads[i], NULL, stress_thread,
+			    &cases[i]), 0);
+		first = -1;
+		/* Time: O(threads); Space: O(1). */
+		for (i = 0; i < INIT_STRESS_THREADS; i++) {
+			CHECK_EQ(pthread_join(threads[i], NULL), 0);
+			CHECK_EQ(cases[i].init, CUDA_SUCCESS);
+			CHECK_EQ(cases[i].count_result, CUDA_SUCCESS);
+			if (first == -1)
+				first = cases[i].count;
+			/* Every thread sees the same device count. */
+			CHECK_EQ(cases[i].count, first);
+			CHECK_EQ(cases[i].count, 2);
+		}
+	}
+	return (t_done("api concurrent cuInit and count, 32 threads, 200 rounds"));
+}
+
+/* The names the library reports.  A caller and a test take the provider and
+ * the profile lists from here, not from a literal of their own. */
+static int mode_usage(void);
+
+static int
+providers_test(void)
+{
+	const char *name;
+	unsigned i, count;
+	char hint[256];
+
+	count = cudaNativeProviderCount();
+	for (i = 0; i < count; i++) {
+		name = cudaNativeProviderName(i);
+		printf("provider %s\n", name);
+		printf("%s %s\n", cudaNativeProviderTakesFakeProfiles(name) ?
+		    "synthetic" : "native", name);
+	}
+	if (cudaNativeProviderHint(cudaNativeDefaultBackend(), hint,
+	    sizeof(hint)))
+		printf("hint %s\n", hint);
+	count = cudaNativeFakeProfileCount();
+	for (i = 0; i < count; i++)
+		printf("profile %s\n", cudaNativeFakeProfileName(i));
+	printf("default-profile %s\n", cudaNativeFakeProfileDefault());
+	printf("default-backend %s\n", cudaNativeDefaultBackend());
+	return (0);
+}
+
+/* The reason of the first initialization attempt, as a stable name. */
+static int
+init_reason_test(void)
+{
+	const char *reason;
+
+	(void)cuInit(0);
+	switch (cudaNativeInitFailureReason()) {
+	case CUDA_NATIVE_INIT_OK:
+		reason = "ok";
+		break;
+	case CUDA_NATIVE_INIT_UNKNOWN_PROVIDER:
+		reason = "unknown-provider";
+		break;
+	case CUDA_NATIVE_INIT_DEVICE_LIMIT:
+		reason = "device-limit";
+		break;
+	case CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED:
+		reason = "provider-unsupported";
+		break;
+	case CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT:
+		reason = "provider-device-limit";
+		break;
+	default:
+		reason = "provider-error";
+		break;
+	}
+	printf("reason %s\n", reason);
+	return (0);
+}
+
 static int
 attribute_error_test(void)
 {
@@ -757,8 +976,9 @@ failed_init_test(CUresult expected, const char *name)
 static int
 mode_usage(void)
 {
-	fprintf(stderr, "usage: api_test core|profiles|threads|init-race|"
-	    "init-observer|proc-preinit|proc-from-stdin|attribute-error|"
+	fprintf(stderr, "usage: api_test core|native-queries|profiles|threads|"
+	    "init-race|init-stress|init-observer|init-reason|providers|"
+	    "proc-preinit|proc-version|proc-from-stdin|attribute-error|"
 	    "visibility-cap|nvrm|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
 	    "order [NAME ...]|uuid-order [UUID ...]\n");
@@ -776,11 +996,16 @@ mode_usage(void)
 	}
 
 DEFINE_SIMPLE_MODE(core_mode, core_test)
+DEFINE_SIMPLE_MODE(native_queries_mode, native_queries_test)
 DEFINE_SIMPLE_MODE(profiles_mode, profiles_test)
 DEFINE_SIMPLE_MODE(threads_mode, threads_test)
 DEFINE_SIMPLE_MODE(init_race_mode, init_race_test)
+DEFINE_SIMPLE_MODE(init_stress_mode, init_stress_test)
 DEFINE_SIMPLE_MODE(init_observer_mode, init_observer_test)
+DEFINE_SIMPLE_MODE(providers_mode, providers_test)
+DEFINE_SIMPLE_MODE(init_reason_mode, init_reason_test)
 DEFINE_SIMPLE_MODE(proc_preinit_mode, proc_preinit_test)
+DEFINE_SIMPLE_MODE(proc_version_mode, proc_version_test)
 DEFINE_SIMPLE_MODE(proc_from_stdin_mode, proc_from_stdin_test)
 DEFINE_SIMPLE_MODE(attribute_error_mode, attribute_error_test)
 DEFINE_SIMPLE_MODE(visibility_cap_mode, visibility_cap_test)
@@ -822,11 +1047,16 @@ main(int argc, char **argv)
 	};
 	static const struct mode modes[] = {
 		{ "core", core_mode },
+		{ "native-queries", native_queries_mode },
 		{ "profiles", profiles_mode },
 		{ "threads", threads_mode },
 		{ "init-race", init_race_mode },
+		{ "init-stress", init_stress_mode },
 		{ "init-observer", init_observer_mode },
+		{ "init-reason", init_reason_mode },
+		{ "providers", providers_mode },
 		{ "proc-preinit", proc_preinit_mode },
+		{ "proc-version", proc_version_mode },
 		{ "proc-from-stdin", proc_from_stdin_mode },
 		{ "attribute-error", attribute_error_mode },
 		{ "visibility-cap", visibility_cap_mode },

@@ -38,6 +38,10 @@ run_case() {	# run_case NAME COMMAND [ARG ...]; retain output in the transcript
 	cat "$W/case.out"
 	expect_rc "$_name" "$_rc" 0
 }
+map_exports() {	# map_exports VERSION_MAP; one exported symbol per line
+	awk '/^CUDA_1\.0 \{/{inside=1;next} /^\};/{inside=0}
+	    inside && $1 ~ /^[A-Za-z_][A-Za-z0-9_]*;$/ { sub(/;$/, "", $1); print $1 }' "$1"
+}
 
 # ---- fresh copy and base toolchain ---------------------------------------
 SRC=$W/src
@@ -97,9 +101,7 @@ fi
 expect_rc "nm can inspect libcuda.so.1 dynamic symbols" "$rc" 0
 awk 'NF >= 3 { sub(/@@.*/, "", $3); print $3 }' "$W/nm.out" 2>/dev/null |
     sort >"$W/exports.actual"
-awk '/^CUDA_1\.0 \{/{inside=1;next} /^\};/{inside=0}
-    inside && $1 ~ /^[A-Za-z_][A-Za-z0-9_]*;$/ { sub(/;$/, "", $1); print $1 }' \
-    "$L/Version.map" | sort >"$W/map-exports.sorted"
+map_exports "$L/Version.map" | sort >"$W/map-exports.sorted"
 cp "$W/map-exports.sorted" "$W/exports.expected"
 cp "$W/map-exports.sorted" "$W/exports.sorted"
 awk '{ printf "\t\"%s\",\n", $0 }' "$W/map-exports.sorted" \
@@ -157,9 +159,7 @@ grep -q '^        cuDeviceGetName;$' "$FM/Version.map" &&
     ! cmp -s "$FM/Version.map" "$L/Version.map"
 rc=$?
 expect_rc "a space-indented Version.map entry was planted for the parser check" "$rc" 0
-awk '/^CUDA_1\.0 \{/{inside=1;next} /^\};/{inside=0}
-    inside && $1 ~ /^[A-Za-z_][A-Za-z0-9_]*;$/ { sub(/;$/, "", $1); print $1 }' \
-    "$FM/Version.map" | sort >"$FM/oracle.sorted"
+map_exports "$FM/Version.map" | sort >"$FM/oracle.sorted"
 (cd "$FM" && make -V CUDA_FUNCS) >"$FM/names.raw" 2>"$FM/names.err"
 rc=$?
 expect_rc "the Makefile reads the space-indented Version.map fixture" "$rc" 0
@@ -167,23 +167,102 @@ tr -s '[:space:]' '\n' <"$FM/names.raw" | sed '/^$/d' | sort >"$FM/names.sorted"
 cmp -s "$FM/names.sorted" "$FM/oracle.sorted"
 rc=$?
 expect_rc "the man-link name list and the field-based oracle agree on the fixture" "$rc" 0
-(cd "$FM" && make -V CUDA_EXPORTS_INC) >"$FM/inc.raw" 2>"$FM/inc.err"
+# The field-based oracle is one shell function, not two copies of the same
+# awk program pasted into the runner.  The marker is assembled at run time, so
+# this check does not count itself.
+oracle_pattern=$(printf 'inside %s $1' '&&')
+[ "$(grep -c -F "$oracle_pattern" "$SRC/tests/libcuda_test.sh")" = 1 ]
+rc=$?
+expect_rc "the field-based Version.map oracle is one shell function" "$rc" 0
+(cd "$FM" && MAKEOBJDIR="$FM" make "$FM/cuda_exports.inc") \
+    >"$FM/inc.raw" 2>"$FM/inc.err"
 rc=$?
 expect_rc "the Makefile reads the proc-table include of the fixture" "$rc" 0
-grep -q 'PROC_ENTRY(cuDeviceGetName)' "$FM/inc.raw"
+grep -q 'PROC_ENTRY(cuDeviceGetName)' "$FM/cuda_exports.inc"
 rc=$?
 expect_rc "the proc-table include contains the space-indented entry too" "$rc" 0
-(cd "$L" && MAKEOBJDIR="$O/lib" make -V CUDA_EXPORTS_INC) >"$W/inc.value" 2>&1
-cmp -s "$W/inc.value" "$O/lib/cuda_exports.inc"
+awk -f "$L/version_map.awk" -v mode=include "$L/Version.map" >"$W/inc.expected"
+cmp -s "$W/inc.expected" "$O/lib/cuda_exports.inc"
 rc=$?
-expect_rc "the generated proc-table include is the value the Makefile computes" "$rc" 0
+expect_rc "the generated proc-table include is the parser's include output" "$rc" 0
+# The generated table is included by cuda_core.c, so every object flavour of
+# that file needs it: the plain object, the shared-object one and the
+# profiled ones.  A fresh object directory builds the shared-object flavour
+# on its own, and that build fails when the edge is missing.
+FO=$W/fresh-obj
+mkdir -p "$FO"
+(cd "$L" && MAKEOBJDIR="$FO" make obj) >"$W/fresh-obj.log" 2>&1
+rc=$?
+expect_rc "a fresh object directory is created" "$rc" 0
+(cd "$L" && MAKEOBJDIR="$FO" make cuda_core.pico) >"$W/fresh-pico.log" 2>&1
+rc=$?
+expect_rc "the shared-object flavour builds in a fresh object directory" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/fresh-pico.log"
+awk '!/^\tPROC_ENTRY\([A-Za-z_][A-Za-z0-9_]*\),$/ { bad = 1 }
+    END { exit bad }' "$FO/cuda_exports.inc"
+rc=$?
+expect_rc "the generated include holds one table entry per line" "$rc" 0
+# A failed generation leaves no include behind: the recipe writes a
+# temporary file and renames it only when the parser succeeds, so the next
+# build regenerates the whole table instead of compiling an empty one.
+SI=$W/stale-include
+mkdir -p "$SI"
+cp "$L/Makefile" "$L/Version.map" "$SI/"
+cp "$L/version_map.awk" "$SI/version_map.awk"
+printf 'BEGIN { exit 1 }\n' >"$SI/version_map.awk"
+(cd "$SI" && MAKEOBJDIR="$SI" make "$SI/cuda_exports.inc") \
+    >"$SI/fail.log" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	ok "a failing parser fails the generation"
+else
+	bad "a failing parser fails the generation (rc=$rc)"
+fi
+[ ! -e "$SI/cuda_exports.inc" ]
+rc=$?
+expect_rc "a failed generation leaves no include behind" "$rc" 0
+[ ! -e "$SI/cuda_exports.inc.tmp" ]
+rc=$?
+expect_rc "a failed generation leaves no temporary file behind" "$rc" 0
+cp "$L/version_map.awk" "$SI/version_map.awk"
+(cd "$SI" && MAKEOBJDIR="$SI" make "$SI/cuda_exports.inc") \
+    >"$SI/ok.log" 2>&1
+rc=$?
+expect_rc "the restored parser regenerates the include" "$rc" 0
+grep -q 'PROC_ENTRY(cuInit)' "$SI/cuda_exports.inc" &&
+    grep -q 'PROC_ENTRY(cuDeviceGetCount)' "$SI/cuda_exports.inc"
+rc=$?
+expect_rc "the regenerated include holds the whole table" "$rc" 0
+map_exports "$L/Version.map" | grep -v '^cuGetProcAddress$' | sort \
+    >"$W/include-names.expected"
+sed -n 's/^\tPROC_ENTRY(\([A-Za-z_][A-Za-z0-9_]*\)),$/\1/p' \
+    "$FO/cuda_exports.inc" | sort >"$W/include-names.actual"
+cmp -s "$W/include-names.expected" "$W/include-names.actual"
+rc=$?
+expect_rc "the generated include names every exported entry point but the legacy row" "$rc" 0
+# The proc-table version rule belongs to the library, not to the parser: the
+# parser only knows which names are exported.
+# The proc-table version rule belongs to the library, not the parser: the
+# parser only knows which names are exported.  The rule itself is checked by
+# behaviour, in the api_test: a lookup below the introduction version must
+# return the four-argument form and a lookup at it the five-argument one.
+grep -q 'CU_GET_PROC_ADDRESS_V2_MIN_VERSION' "$L/cuda_core.c"
+rc=$?
+expect_rc "the library names the proc-address introduction version" "$rc" 0
 awk '/^static const proc_export proc_exports\[\] = \{/{inside=1;next}
     inside && /^\};/{exit} inside { print }' "$L/cuda_core.c" \
     >"$W/proc-table.body"
+sed -n '1p' "$W/proc-table.body" >"$W/proc-table.first"
 printf '#include "cuda_exports.inc"\n' >"$W/proc-table.expected"
-cmp -s "$W/proc-table.body" "$W/proc-table.expected"
+cmp -s "$W/proc-table.first" "$W/proc-table.expected"
 rc=$?
 expect_rc "proc lookup table is generated from Version.map" "$rc" 0
+sed -n '2,$p' "$W/proc-table.body" >"$W/proc-table.handwritten"
+[ "$(wc -l <"$W/proc-table.handwritten" | tr -d ' ')" = 2 ] &&
+    grep -q 'cuGetProcAddress_v2' "$W/proc-table.handwritten" &&
+    grep -q 'cuGetProcAddress' "$W/proc-table.handwritten"
+rc=$?
+expect_rc "the only hand-written table row is the legacy cuGetProcAddress entry" "$rc" 0
 [ "$(awk 'NF >= 3 && $3 !~ /@@CUDA_1.0$/ { n++ } END { print n + 0 }' \
     "$W/nm.out" 2>/dev/null)" = 0 ]
 rc=$?
@@ -218,6 +297,27 @@ cc $CFLAGS -pthread -I"$W" -I"$SDK" -I"$T" "$T/api_test.c" -L"$O/lib" -lcuda -lt
     -o "$W/bin/api_test" >"$W/build-api.log" 2>&1
 rc=$?
 expect_rc "api_test compiles against the shared library" "$rc" 0
+# The thread sanitizer of the base compiler: the stress case runs under it,
+# so the publication order of the registry is checked with a race detector
+# too.  The library sources are compiled into the test binary, so the
+# detector sees the registry itself and not only the test.
+if cc $CFLAGS -fsanitize=thread -pthread -I"$W" -I"$O/lib" -I"$L" -I"$SDK" \
+    -I"$T" "$T/api_test.c" "$L"/cuda_*.c -lthr -o "$W/bin/api_test_tsan" \
+    >"$W/build-tsan.log" 2>&1; then
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
+	    "$W/bin/api_test_tsan" init-stress >"$W/tsan-stress.out" 2>&1
+	rc=$?
+	cat "$W/tsan-stress.out"
+	expect_rc "the thread sanitizer build of the stress case is clean" "$rc" 0
+	if grep -q 'WARNING: ThreadSanitizer' "$W/tsan-stress.out"; then
+		bad "the thread sanitizer reports no data race in the registry"
+	else
+		ok "the thread sanitizer reports no data race in the registry"
+	fi
+else
+	ok "the base compiler has no thread sanitizer: the race check is skipped"
+	ok "the thread sanitizer reports no data race in the registry"
+fi
 cc $CFLAGS -I"$L" -I"$SDK" -I"$T" "$T/version_test.c" "$L/cuda_version.c" \
     -o "$W/bin/version_test" >"$W/build-version.log" 2>&1
 rc=$?
@@ -227,9 +327,28 @@ c++ -std=c++11 -Wall -Wextra -Werror -I"$SDK" "$T/header_test.cpp" \
 rc=$?
 expect_rc "cuda.h compiles as C++ and links with C linkage" "$rc" 0
 API=$W/bin/api_test
+# The provider and the profile lists come from the library, not from a
+# literal of the test: the names are the library's to choose.
+"$API" providers >"$W/providers.out" 2>&1
+rc=$?
+expect_rc "the library reports its provider and profile names" "$rc" 0
+library_providers=$(awk '/^provider /{ if (n++) printf ", "; printf "%s", $2 }' \
+    "$W/providers.out")
+library_synthetic=$(sed -n 's/^synthetic //p' "$W/providers.out")
+library_native=$(sed -n 's/^native //p' "$W/providers.out")
+library_profiles=$(awk '/^profile /{ if (n++) printf ","; printf "%s", $2 }' \
+    "$W/providers.out")
+library_default_profile=$(sed -n 's/^default-profile //p' "$W/providers.out")
+library_hint=$(sed -n 's/^hint //p' "$W/providers.out")
+[ -n "$library_providers" ] && [ -n "$library_synthetic" ] &&
+    [ -n "$library_profiles" ] && [ -n "$library_hint" ]
+rc=$?
+expect_rc "the library names its providers, its profiles and its advice" "$rc" 0
 run_case "version parser and formatter assertions" "$W/bin/version_test"
 run_case "C++ header and pre-initialization context check" "$W/bin/header_test"
 run_case "API core, errors and every proc export" env CUDA_NATIVE_BACKEND=fake "$API" core
+run_case "the native queries do not initialize the provider" env \
+    CUDA_NATIVE_BACKEND=fake "$API" native-queries
 env CUDA_NATIVE_BACKEND=fake "$API" proc-from-stdin <"$W/exports.actual" >"$W/proc-abi.out" 2>&1
 rc=$?
 cat "$W/proc-abi.out"
@@ -245,6 +364,10 @@ run_case "context state follows reordered physical devices" env \
     "$API" threads
 run_case "pthread_once concurrent cuInit" env CUDA_NATIVE_BACKEND=fake \
     CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 "$API" init-race
+run_case "32 threads call cuInit and cuDeviceGetCount at once, 200 rounds" env \
+    CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 "$API" init-stress
+run_case "the proc-address version boundary returns the two forms" env \
+    CUDA_NATIVE_BACKEND=fake "$API" proc-version
 run_case "a concurrent observer never sees partial initialization" env \
     CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
     CUDA_NATIVE_FAKE_ENUM_DELAY_MS=100 "$API" init-observer
@@ -300,6 +423,29 @@ run_case "a UUID provider failure aborts initialization permanently" env \
     CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
     CUDA_NATIVE_FAKE_UUID_ERROR=1 CUDA_VISIBLE_DEVICES=GPU-cb14a000 \
     "$API" uuid-error
+# The library tells the caller why the initialization failed: the reason is
+# one of the named values, and a caller does not have to guess it from the
+# error code.
+env CUDA_NATIVE_BACKEND=not-a-provider "$API" init-reason \
+    >"$W/reason-unknown.out" 2>&1
+rc=$?
+expect_rc "the reason query runs after a failed initialization" "$rc" 0
+grep -q '^reason unknown-provider$' "$W/reason-unknown.out"
+rc=$?
+expect_rc "the library names an unknown provider as the reason" "$rc" 0
+env CUDA_NATIVE_BACKEND=nvrm "$API" init-reason >"$W/reason-nvrm.out" 2>&1
+rc=$?
+expect_rc "the reason query runs for an unsupported provider" "$rc" 0
+grep -q '^reason provider-unsupported$' "$W/reason-nvrm.out"
+rc=$?
+expect_rc "the library names an unsupported provider as the reason" "$rc" 0
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 "$API" \
+    init-reason >"$W/reason-ok.out" 2>&1
+rc=$?
+expect_rc "the reason query runs after a successful initialization" "$rc" 0
+grep -q '^reason ok$' "$W/reason-ok.out"
+rc=$?
+expect_rc "the library reports no reason for a successful initialization" "$rc" 0
 profiles64=$(python3 -I -c 'print(",".join(["gb206"] * 64))')
 profiles65=$(python3 -I -c 'print(",".join(["gb206"] * 65))')
 visibility64=$(python3 -I -c 'print(",".join(str(i) for i in range(64)))')
@@ -318,10 +464,79 @@ env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles65" \
     2>"$W/overflow.err"
 rc=$?
 expect_rc "a visibility list beyond the device limit returns 1" "$rc" 1
-grep -q '^cuda-native-info: fake provider: CUDA_ERROR_INVALID_VALUE:' \
+grep -q "^cuda-native-info: $library_synthetic provider: CUDA_ERROR_INVALID_VALUE:" \
     "$W/overflow.err"
 rc=$?
 expect_rc "the overflow diagnostic names the invalid value error" "$rc" 0
+grep -q '64' "$W/overflow.err" && grep -q 'CUDA_VISIBLE_DEVICES' "$W/overflow.err"
+rc=$?
+expect_rc "the overflow diagnostic names the device limit and the filter" "$rc" 0
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles65" \
+    "$INFO" >"$W/overflow-unfiltered.txt" 2>"$W/overflow-unfiltered.err"
+rc=$?
+expect_rc "more devices than the limit return 1 without a visibility filter" "$rc" 1
+grep -q '64' "$W/overflow-unfiltered.err" &&
+    grep -q 'CUDA_VISIBLE_DEVICES' "$W/overflow-unfiltered.err"
+rc=$?
+expect_rc "the unfiltered overflow diagnostic names the device limit and the filter" "$rc" 0
+# The library says why the initialization failed, and the device-limit hint
+# is printed for that reason only.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles65" \
+    CUDA_VISIBLE_DEVICES="$visibility65" "$API" init-reason \
+    >"$W/reason-limit.out" 2>&1
+rc=$?
+expect_rc "the reason query runs for the device limit" "$rc" 0
+grep -q '^reason device-limit$' "$W/reason-limit.out"
+rc=$?
+expect_rc "the library names the device limit as the reason" "$rc" 0
+# A failure that is not the overflow gets no device-limit hint: a provider
+# list longer than the registry holds fails with an invalid value too.
+profiles129=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" "$INFO" \
+    >"$W/provider-limit.txt" 2>"$W/provider-limit.err"
+rc=$?
+expect_rc "a provider list beyond the registry returns 1" "$rc" 1
+if grep -q 'at most 64 devices' "$W/provider-limit.err"; then
+	bad "a failure that is not the device limit prints no device-limit hint"
+else
+	ok "a failure that is not the device limit prints no device-limit hint"
+fi
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" "$API" \
+    init-reason >"$W/reason-provider.out" 2>&1
+rc=$?
+expect_rc "the reason query runs for a failing provider" "$rc" 0
+grep -q '^reason provider-error$' "$W/reason-provider.out"
+rc=$?
+expect_rc "the library names the provider failure as the reason" "$rc" 0
+# A visibility entry that names no device ends the list; it is not a count
+# overflow and gets no device-limit hint.
+for bad in not-an-index 999 0,0; do
+	env CUDA_NATIVE_BACKEND=fake CUDA_VISIBLE_DEVICES="$bad" "$INFO" \
+	    >"$W/bad-visibility.out" 2>"$W/bad-visibility.err"
+	rc=$?
+	expect_rc "a bad visibility entry stops the list instead of failing: $bad" \
+	    "$rc" 0
+	if grep -q 'at most 64 devices' "$W/bad-visibility.err"; then
+		bad "a bad visibility entry prints no device-limit hint: $bad"
+	else
+		ok "a bad visibility entry prints no device-limit hint: $bad"
+	fi
+done
+# The limit counts the selected devices: 65 provider devices and a filter
+# that selects one are a valid report.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles65" \
+    CUDA_VISIBLE_DEVICES=0 "$INFO" --json >"$W/filtered-limit.json" \
+    2>"$W/filtered-limit.err"
+rc=$?
+expect_rc "65 provider devices with a one-device filter succeed" "$rc" 0
+python3 -I - "$W/filtered-limit.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["device_count"] == 1, d["device_count"]
+assert len(d["devices"]) == 1, d["devices"]
+PY
+rc=$?
+expect_rc "the filtered report shows the one selected device" "$rc" 0
 
 # ---- assertion-level source mutants --------------------------------------
 mutant() {	# mutant NAME FILE SED-EXPR VISIBILITY(- for unset) MODE [ARGS ...]
@@ -378,6 +593,14 @@ MUTANT_PROFILE="$profiles65"
 mutant visibility-overflow cuda_registry.c \
     's/if (registry\.visible_count == CUDA_NATIVE_MAX_DEVICES)/if (0)/' \
     "$visibility65" bad-visibility
+# The version rule of the legacy proc-address row is checked by behaviour: a
+# lookup below the introduction version returns the four-argument form and a
+# lookup at it the five-argument one.  A mutant with the wrong threshold must
+# be killed by that lookup, which the source checks of an earlier round
+# could not do: the comment keeps the number either way.
+mutant proc-version-threshold cuda_core.c \
+    's/#define CU_GET_PROC_ADDRESS_V2_MIN_VERSION 12000/#define CU_GET_PROC_ADDRESS_V2_MIN_VERSION 13000/' \
+    - proc-version
 MUTANT_PROFILE="gb206,gb10"
 if grep -n '"\$TMPDIR/mutant' "$SRC/tests/libcuda_test.sh" >"$W/mutant-paths.out"; then
 	cat "$W/mutant-paths.out"
@@ -537,8 +760,8 @@ PY
 	expect_rc "CLI backend follows the patched library default" "$rc" 0
 	env -u CUDA_NATIVE_BACKEND LD_LIBRARY_PATH="$DB" "$DB/cuda-native-info" \
 	    --help >"$DB/help.out" 2>&1
-	grep -q '(default fake)' "$DB/help.out" &&
-	    ! grep -q '(default nvrm)' "$DB/help.out"
+	grep -q "(default $library_synthetic)" "$DB/help.out" &&
+	    ! grep -q "(default $library_native)" "$DB/help.out"
 	rc=$?
 	expect_rc "--help follows the patched library default backend" "$rc" 0
 	env -u CUDA_NATIVE_BACKEND CUDA_NATIVE_FAKE_PROFILE=gb100 \
@@ -604,6 +827,116 @@ PY
 	    ! grep -q '^  gb206,gb10 (default gb206)\.$' "$PT/help.out"
 	rc=$?
 	expect_rc "--help names the profile the library added" "$rc" 0
+fi
+
+# A provider renamed in the library must still take the fake profiles: the CLI
+# asks the library which provider takes them, it does not know the names.
+# Both providers are renamed here, so a tool that carries a provider name of
+# its own names one that does not exist.
+SP=$W/provider-mutant
+mkdir -p "$SP"
+cp "$L"/*.c "$L"/*.h "$SP/"
+sed -i '' 's/\.backend = "fake"/.backend = "synthetic"/' "$SP/cuda_fake.c"
+sed -i '' 's/\.backend = "nvrm"/.backend = "native"/' "$SP/cuda_nvrm.c"
+sed -i '' 's/default_backend = "nvrm"/default_backend = "native"/' \
+    "$SP/cuda_backend.c"
+grep -q '\.backend = "synthetic"' "$SP/cuda_fake.c" &&
+    grep -q '\.backend = "native"' "$SP/cuda_nvrm.c" &&
+    grep -q 'default_backend = "native"' "$SP/cuda_backend.c"
+rc=$?
+expect_rc "the renamed provider mutant changed the library" "$rc" 0
+(
+    cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
+        -Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$SP" -I"$SDK" \
+        "$SP"/*.c -lthr -o "$SP/libcuda.so.1" &&
+    ln -s libcuda.so.1 "$SP/libcuda.so" &&
+    cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
+        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda_uuid.c" -L"$SP" -lcuda -lthr -o "$SP/cuda-native-info" &&
+    cc $CFLAGS -pthread -I"$W" -I"$O/lib" -I"$SP" -I"$SDK" -I"$T" \
+        "$T/api_test.c" "$SP"/*.c -lthr -o "$SP/api_test"
+) >"$SP/build.log" 2>&1
+rc=$?
+expect_rc "the renamed provider library and the unmodified CLI build" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,80p' "$SP/build.log"
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND=synthetic CUDA_NATIVE_FAKE_PROFILE=gb100 \
+	    LD_LIBRARY_PATH="$SP" "$SP/cuda-native-info" >"$SP/output.txt" \
+	    2>"$SP/error.txt"
+	rc=$?
+	expect_rc "a renamed provider still gives the named-profile diagnostic" "$rc" 1
+	grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'" "$SP/error.txt"
+	rc=$?
+	expect_rc "the renamed provider reaches the named-profile diagnostic" "$rc" 0
+	# The provider that takes the profiles applies them: the reported
+	# device follows the profile that was asked for.
+	env CUDA_NATIVE_BACKEND=synthetic CUDA_NATIVE_FAKE_PROFILE=gb10 \
+	    LD_LIBRARY_PATH="$SP" "$SP/cuda-native-info" --json \
+	    >"$SP/profile.json" 2>"$SP/profile.err"
+	rc=$?
+	expect_rc "a renamed provider applies a valid profile" "$rc" 0
+	python3 -I - "$SP/profile.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["devices"][0]["name"] == "cuda-native fake GB10", d["devices"][0]["name"]
+PY
+	rc=$?
+	expect_rc "the reported device follows the selected profile" "$rc" 0
+	# The advice for the provider that cannot be used comes from the
+	# library, so it names the providers the library knows.
+	"$SP/api_test" providers >"$SP/providers.out" 2>&1
+	rc=$?
+	expect_rc "the renamed library reports its provider names" "$rc" 0
+	mutant_hint=$(sed -n 's/^hint //p' "$SP/providers.out")
+	mutant_synthetic=$(sed -n 's/^synthetic //p' "$SP/providers.out")
+	[ -n "$mutant_hint" ] && [ "$mutant_synthetic" = synthetic ]
+	rc=$?
+	expect_rc "the renamed library advises its own provider names" "$rc" 0
+	env CUDA_NATIVE_BACKEND=native LD_LIBRARY_PATH="$SP" \
+	    "$SP/cuda-native-info" >"$SP/native.out" 2>"$SP/native.err"
+	rc=$?
+	expect_rc "the renamed native provider fails as the stub does" "$rc" 1
+	grep -q -F "$mutant_hint" "$SP/native.err"
+	rc=$?
+	expect_rc "the unsupported-provider advice comes from the library" "$rc" 0
+fi
+
+# A provider that takes the profiles but ignores them is caught by the check
+# above: the reported device follows the selected profile.
+PI=$W/profile-ignored-mutant
+mkdir -p "$PI"
+cp "$L"/*.c "$L"/*.h "$PI/"
+sed -i '' 's/list = getenv("CUDA_NATIVE_FAKE_PROFILE");/list = NULL;/' \
+    "$PI/cuda_fake.c"
+grep -q 'list = NULL;' "$PI/cuda_fake.c"
+rc=$?
+expect_rc "the profile-ignoring mutant changed the library" "$rc" 0
+(
+    cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
+        -Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$PI" -I"$SDK" \
+        "$PI"/*.c -lthr -o "$PI/libcuda.so.1" &&
+    ln -s libcuda.so.1 "$PI/libcuda.so" &&
+    cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
+        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda_uuid.c" -L"$PI" -lcuda -lthr -o "$PI/cuda-native-info"
+) >"$PI/build.log" 2>&1
+rc=$?
+expect_rc "the profile-ignoring library and the unmodified CLI build" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb10 \
+	    LD_LIBRARY_PATH="$PI" "$PI/cuda-native-info" --json \
+	    >"$PI/profile.json" 2>"$PI/profile.err"
+	python3 -I - "$PI/profile.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["devices"][0]["name"] == "cuda-native fake GB10", d["devices"][0]["name"]
+PY
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		ok "mutant killed by assertions: a provider that ignores the fake profiles"
+	else
+		bad "mutant SURVIVED: a provider that ignores the fake profiles"
+	fi
 fi
 
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 CUDA_VISIBLE_DEVICES=1,0 \
@@ -685,7 +1018,7 @@ expect_rc "--schema is byte-identical to the committed schema" "$rc" 0
 python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$SCHEMA"
 rc=$?
 expect_rc "the committed schema parses as JSON" "$rc" 0
-for backend in not-a-provider nvrm; do
+for backend in not-a-provider "$library_native"; do
 	env CUDA_NATIVE_BACKEND=$backend "$INFO" --json >"$W/error-$backend.json"
 	rc=$?
 	expect_rc "provider failure $backend returns 1" "$rc" 1
@@ -693,45 +1026,147 @@ for backend in not-a-provider nvrm; do
 	rc=$?
 	expect_rc "provider failure $backend is a schema-valid error" "$rc" 0
 done
-python3 -I - "$W/error-not-a-provider.json" "$W/error-nvrm.json" <<'PY'
+python3 -I - "$W/error-not-a-provider.json" "$W/error-$library_native.json" \
+    "$library_native" "$library_hint" <<'PY'
 import json, sys
 da = json.load(open(sys.argv[1]))
 db = json.load(open(sys.argv[2]))
+native = sys.argv[3]
+hint = sys.argv[4]
 a = da["error"]
 b = db["error"]
 assert a["code"] == 1 and a["name"] == "CUDA_ERROR_INVALID_VALUE"
 assert b["code"] == 801 and b["name"] == "CUDA_ERROR_NOT_SUPPORTED"
-assert da["backend"] == "not-a-provider" and db["backend"] == "nvrm"
-assert "CUDA_NATIVE_BACKEND=fake" in b["hint"]
+assert da["backend"] == "not-a-provider" and db["backend"] == native
+assert hint in b["hint"], (hint, b.get("hint"))
 PY
 rc=$?
-expect_rc "JSON errors carry codes, names, backend and NVRM guidance" "$rc" 0
-env CUDA_NATIVE_BACKEND=nvrm "$INFO" >"$W/nvrm.out" 2>"$W/nvrm.err"
+expect_rc "JSON errors carry codes, names, backend and the library's advice" "$rc" 0
+env CUDA_NATIVE_BACKEND="$library_native" "$INFO" >"$W/nvrm.out" 2>"$W/nvrm.err"
 rc=$?
 expect_rc "text provider failure returns 1" "$rc" 1
 grep -q 'CUDA_ERROR_NOT_SUPPORTED' "$W/nvrm.err"
 rc=$?
 expect_rc "text provider failure explains the error on stderr" "$rc" 0
-grep -q '^cuda-native-info: nvrm provider: CUDA_ERROR_NOT_SUPPORTED:' "$W/nvrm.err" &&
-    grep -q 'native NVRM discovery is not implemented yet; set CUDA_NATIVE_BACKEND=fake for synthetic devices' \
-    "$W/nvrm.err"
+grep -q "^cuda-native-info: $library_native provider: CUDA_ERROR_NOT_SUPPORTED:" \
+    "$W/nvrm.err" && grep -q -F "$library_hint" "$W/nvrm.err"
 rc=$?
-expect_rc "text provider failure names the backend and fake-provider remedy" "$rc" 0
+expect_rc "text provider failure names the backend and the library's advice" "$rc" 0
 env CUDA_NATIVE_BACKEND=not-a-provider "$INFO" >"$W/bad-backend.out" 2>"$W/bad-backend.err"
 rc=$?
 expect_rc "an invalid provider environment value returns 1" "$rc" 1
-grep -q '^cuda-native-info: CUDA_NATIVE_BACKEND=not-a-provider is not a provider; use one of: fake, nvrm$' \
+grep -q "^cuda-native-info: CUDA_NATIVE_BACKEND=not-a-provider is not a provider; use one of: $library_providers$" \
     "$W/bad-backend.err"
 rc=$?
 expect_rc "provider diagnostics name the variable and the library's providers" "$rc" 0
+# A control byte in an environment value must not reach the terminal: the
+# diagnostic carries the escaped form of the value.
+evil_backend=$(printf 'x\033y')
+env CUDA_NATIVE_BACKEND="$evil_backend" "$INFO" >"$W/evil-backend.out" \
+    2>"$W/evil-backend.err"
+rc=$?
+expect_rc "an unknown provider with a control byte returns 1" "$rc" 1
+grep -q "$(printf '\033')" "$W/evil-backend.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	bad "no escape byte reaches the unknown-provider diagnostic"
+else
+	ok "no escape byte reaches the unknown-provider diagnostic"
+fi
+grep -q -F 'x\u001by' "$W/evil-backend.err"
+rc=$?
+expect_rc "the unknown-provider diagnostic carries the escaped value" "$rc" 0
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb100 "$INFO" \
     >"$W/bad-profile.out" 2>"$W/bad-profile.err"
 rc=$?
 expect_rc "an unknown fake profile environment value returns 1" "$rc" 1
-grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'; use gb206,gb10 or a comma-separated list" \
+grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'; known profiles: $library_profiles; give one or several separated by commas" \
     "$W/bad-profile.err"
 rc=$?
 expect_rc "profile diagnostics name the variable, value and valid profiles" "$rc" 0
+# The list the diagnostic prints is a value the variable accepts: it is
+# printed without spaces, so a reader can copy it.
+known_profiles=$(sed -n 's/.*known profiles: \([^;]*\); give one or several.*/\1/p' \
+    "$W/bad-profile.err")
+[ -n "$known_profiles" ]
+rc=$?
+expect_rc "the unknown-profile diagnostic prints the known profiles" "$rc" 0
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$known_profiles" "$INFO" \
+    >"$W/known-profiles.out" 2>"$W/known-profiles.err"
+rc=$?
+expect_rc "the printed profile list is accepted by the parser" "$rc" 0
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$(printf 'gb\033[2J')" \
+    "$INFO" >"$W/evil-profile.out" 2>"$W/evil-profile.err"
+rc=$?
+expect_rc "an unknown profile with a control byte returns 1" "$rc" 1
+grep -q "$(printf '\033')" "$W/evil-profile.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	bad "no escape byte reaches the unknown-profile diagnostic"
+else
+	ok "no escape byte reaches the unknown-profile diagnostic"
+fi
+grep -q -F "unknown profile 'gb\u001b[2J'" "$W/evil-profile.err"
+rc=$?
+expect_rc "the unknown-profile diagnostic carries the escaped value" "$rc" 0
+# A C1 control in its UTF-8 encoding is a control sequence in a terminal
+# that implements 8-bit controls: it must not reach the terminal.
+c1=$(printf '\302\233')
+env CUDA_NATIVE_BACKEND="$c1" "$INFO" >"$W/c1-backend.out" \
+    2>"$W/c1-backend.err"
+rc=$?
+expect_rc "an unknown provider with a C1 control returns 1" "$rc" 1
+if grep -q "$(printf '\302\233')" "$W/c1-backend.err"; then
+	bad "no C1 control reaches the unknown-provider diagnostic"
+else
+	ok "no C1 control reaches the unknown-provider diagnostic"
+fi
+grep -q -F 'CUDA_NATIVE_BACKEND=\u009b' "$W/c1-backend.err"
+rc=$?
+expect_rc "the unknown-provider diagnostic carries the escaped C1 control" "$rc" 0
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="gb$c1" "$INFO" \
+    >"$W/c1-profile.out" 2>"$W/c1-profile.err"
+rc=$?
+expect_rc "an unknown profile with a C1 control returns 1" "$rc" 1
+if grep -q "$(printf '\302\233')" "$W/c1-profile.err"; then
+	bad "no C1 control reaches the unknown-profile diagnostic"
+else
+	ok "no C1 control reaches the unknown-profile diagnostic"
+fi
+grep -q -F "unknown profile 'gb\u009b'" "$W/c1-profile.err"
+rc=$?
+expect_rc "the unknown-profile diagnostic carries the escaped C1 control" "$rc" 0
+env CUDA_NATIVE_BACKEND="$c1" "$INFO" --json >"$W/c1-backend.json" \
+    2>"$W/c1-backend-json.err"
+rc=$?
+expect_rc "a C1 control in the backend still produces a JSON document" "$rc" 1
+python3 -I - "$W/c1-backend.json" <<'PY'
+import json, sys
+raw = open(sys.argv[1], "rb").read()
+assert b"\xc2\x9b" not in raw, "the raw C1 bytes reached the JSON document"
+assert b"\\u009b" in raw, "the escaped C1 control is missing"
+document = json.loads(raw)
+assert "\\u009b" in document["error"]["message"], \
+    document["error"]["message"]
+PY
+rc=$?
+expect_rc "the JSON document carries the escaped C1 control and no raw byte" "$rc" 0
+# The line and paragraph separators are not JSON-safe: they are written as
+# text in the JSON document too.
+sep=$(printf '\342\200\250')
+env CUDA_NATIVE_BACKEND="$sep" "$INFO" --json >"$W/separator.json" \
+    2>"$W/separator.err"
+rc=$?
+expect_rc "a separator in the backend still produces a JSON document" "$rc" 1
+python3 -I - "$W/separator.json" <<'PY'
+import json, sys
+raw = open(sys.argv[1], "rb").read()
+assert b"\xe2\x80\xa8" not in raw, "the raw separator reached the JSON document"
+assert b"\\u2028" in raw, "the escaped separator is missing"
+json.loads(raw)
+PY
+rc=$?
+expect_rc "the JSON document carries the escaped separator and no raw byte" "$rc" 0
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb100 "$INFO" --json \
     >"$W/error-bad-profile.json"
 rc=$?
@@ -739,14 +1174,17 @@ expect_rc "an invalid profile still produces a JSON error" "$rc" 1
 $VAL "$W/error-bad-profile.json"
 rc=$?
 expect_rc "the invalid-profile JSON error validates" "$rc" 0
-python3 -I - "$W/error-not-a-provider.json" "$W/error-bad-profile.json" <<'PY'
+python3 -I - "$W/error-not-a-provider.json" "$W/error-bad-profile.json" \
+    "$library_providers" "$library_profiles" <<'PY'
 import json, sys
 backend = json.load(open(sys.argv[1]))
 profile = json.load(open(sys.argv[2]))
+providers = sys.argv[3]
+profiles = sys.argv[4]
 assert "CUDA_NATIVE_BACKEND=not-a-provider" in backend["error"]["message"]
-assert "use one of: fake, nvrm" in backend["error"]["message"]
+assert "use one of: " + providers in backend["error"]["message"]
 assert "unknown profile 'gb100'" in profile["error"]["message"]
-assert "use gb206,gb10" in profile["error"]["message"]
+assert "known profiles: " + profiles in profile["error"]["message"]
 PY
 rc=$?
 expect_rc "JSON environment diagnostics carry the same actionable messages" "$rc" 0
@@ -766,7 +1204,8 @@ rc=$?
 expect_rc "--help describes JSON Lines and schema modes" "$rc" 0
 grep -q '^CUDA_NATIVE_FAKE_PROFILE takes a comma-separated list of fake profiles:$' \
     "$W/help.out" &&
-    grep -q '^  gb206,gb10 (default gb206)\.$' "$W/help.out"
+    grep -q "^  $library_profiles (default $library_default_profile)\.$" \
+    "$W/help.out"
 rc=$?
 expect_rc "--help names both fake profiles on a split line" "$rc" 0
 help_profiles=$(sed -n 's/^  \([A-Za-z0-9,]*\) (default [^)]*)\.$/\1/p' "$W/help.out")
@@ -782,8 +1221,8 @@ env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$help_profiles" "$INFO" \
     >"$W/help-profiles.out" 2>&1
 rc=$?
 expect_rc "the profile list the help prints is accepted by the parser" "$rc" 0
-if grep -nE 'gb206|gb10|fake or nvrm' "$L/cuda-native-info/cuda-native-info.c" \
-    >"$W/cli-hardcoded.out"; then
+if grep -nE 'gb206|gb10|fake or nvrm|"fake"|"nvrm"' \
+    "$L/cuda-native-info/cuda-native-info.c" >"$W/cli-hardcoded.out"; then
 	cat "$W/cli-hardcoded.out"
 	bad "the CLI tool source holds no hard-coded backend or profile list"
 else
@@ -794,6 +1233,46 @@ grep -q 'comma-separated indices or GPU-<uuid> prefixes' "$W/help.out" &&
     grep -q 'Repeated devices also stop parsing' "$W/help.out"
 rc=$?
 expect_rc "--help gives visibility syntax and truncation behavior" "$rc" 0
+python3 -I - "$W/help.out" <<'PY'
+import re, sys
+columns = []
+for line in open(sys.argv[1]):
+    row = re.match(r"^  (-h, --help|--jsonl|--json|--schema)( +)(\S.*)$", line)
+    if row is not None:
+        columns.append(2 + len(row.group(1)) + len(row.group(2)))
+assert len(columns) == 4, columns
+assert len(set(columns)) == 1, columns
+PY
+rc=$?
+expect_rc "every help option row starts its description in one column" "$rc" 0
+# The provider list lives in the library.  The schema names the same values,
+# and the help text is where the library reports them.
+providers=$(sed -n 's/^CUDA_NATIVE_BACKEND selects a provider: \(.*\) (default .*)\.$/\1/p' \
+    "$W/help.out")
+[ -n "$providers" ]
+rc=$?
+expect_rc "the help names the provider list the library reports" "$rc" 0
+python3 -I - "$SCHEMA" "$providers" <<'PY'
+import json, sys
+schema = json.load(open(sys.argv[1]))
+names = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
+enums = []
+def walk(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "backend" and isinstance(value, dict) and "enum" in value:
+                enums.append(value["enum"])
+            walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            walk(item)
+walk(schema)
+assert enums, "the schema names no backend enum"
+for enum in enums:
+    assert enum == names, (enum, names)
+PY
+rc=$?
+expect_rc "the schema backend enum is the provider list the library reports" "$rc" 0
 awk 'length($0) > 79 {
 	print "help line exceeds 79 columns: " $0
 	failed = 1
@@ -892,6 +1371,28 @@ if grep -nE '(->|\.)primary([^_[:alnum:]]|$)' "$L/cuda_registry.c" \
 else
 	ok "registry uses primary_state directly, without a redundant pointer"
 fi
+# The registry state changes in cuInit only: the once body writes the data,
+# and the completed state is published after the body has written it.
+awk '/^registry_initialize_once\(void\)/{inside=1; next}
+    inside && /^}/{exit} inside { print }' "$L/cuda_registry.c" \
+    >"$W/registry-once.body"
+if grep -nE 'atomic_store[^;]*registry_state' "$W/registry-once.body" \
+    >"$W/registry-once-store.out"; then
+	cat "$W/registry-once-store.out"
+	bad "the once body does not store the registry state"
+else
+	ok "the once body does not store the registry state"
+fi
+# The completed state is published with a release store once the data is
+# written, and the state has an initializing phase between the two: a reader
+# that sees the completed state sees the registry data as well.
+awk '/^cuda_registry_initialize\(void\)/{inside=1; next}
+    inside && /^}/{exit} inside { print }' "$L/cuda_registry.c" \
+    >"$W/registry-init.body"
+grep -q 'REGISTRY_INITIALIZING' "$W/registry-init.body" &&
+    grep -q 'memory_order_release' "$W/registry-init.body"
+rc=$?
+expect_rc "the completed registry state is published after the data" "$rc" 0
 ! grep -q 'Track #' "$SDK/cuda.h"
 rc=$?
 expect_rc "public header has no internal tracker labels" "$rc" 0
@@ -916,6 +1417,28 @@ if "matching the public CUDA environment-variable contract" in text:
 PY
 rc=$?
 expect_rc "empty visibility success is documented without a compatibility overclaim" "$rc" 0
+# The device limit is a policy about the visible set: the manual, the
+# internal comment and the code must say the same thing.
+python3 -I - "$L/man/libcuda.3" <<'PY'
+import re, sys
+source = open(sys.argv[1]).read()
+text = re.sub(r"(?m)^\.[A-Z][a-z]?\s*", " ", source)
+text = " ".join(text.split())
+required = (
+    "The limit counts the visible devices, the selected ones.",
+    "A provider may report more devices than the limit",
+    "Without a filter the visible set is every provider device",
+    "A visibility list that selects more devices than the limit is an invalid value")
+for part in required:
+    if part not in text:
+        raise SystemExit("missing device-limit policy text: " + part)
+PY
+rc=$?
+expect_rc "the manual states the device limit in terms of the visible set" "$rc" 0
+grep -q 'visible devices, the selected ones' "$L/cuda_internal.h" &&
+    grep -q 'a buffer' "$L/cuda_internal.h"
+rc=$?
+expect_rc "the internal comment states the same device-limit policy" "$rc" 0
 python3 -I - "$L/man/libcuda.3" <<'PY'
 import re, sys
 source = open(sys.argv[1]).read()
@@ -933,6 +1456,31 @@ for part in required:
 PY
 rc=$?
 expect_rc "the native extension queries are documented as environment-dependent" "$rc" 0
+missing=
+while IFS= read -r name; do
+	if ! grep -qE "\.Fn[[:space:]]+${name}([^_[:alnum:]]|\$)" \
+	    "$L/man/libcuda.3"; then
+		missing="$missing $name"
+	fi
+done <"$W/map-exports.sorted"
+[ -z "$missing" ]
+rc=$?
+expect_rc "every exported function has a .Fn entry in libcuda.3${missing:+ (missing:$missing)}" "$rc" 0
+# The renamed provider query: the new name is exported and declared, and the
+# old name is gone from the header, the version map and the exports.
+grep -q 'cudaNativeProviderTakesFakeProfiles' "$SDK/cuda.h"
+rc=$?
+expect_rc "the header declares the renamed provider query" "$rc" 0
+if grep -q 'cudaNativeProviderTakesProfiles' "$SDK/cuda.h" "$L/Version.map" \
+    "$W/nm.out" >"$W/old-name.out" 2>&1; then
+	cat "$W/old-name.out"
+	bad "the old provider query name is gone from the header, the map and the exports"
+else
+	ok "the old provider query name is gone from the header, the map and the exports"
+fi
+grep -q 'cudaNativeProviderTakesFakeProfiles' "$W/nm.out"
+rc=$?
+expect_rc "the renamed provider query is exported" "$rc" 0
 MANWIDTH=80 man -l "$L/cuda-native-info/cuda-native-info.1" \
     >"$W/info-man.raw" 2>"$W/info-man.err" &&
     col -b <"$W/info-man.raw" >"$W/info-man.txt"

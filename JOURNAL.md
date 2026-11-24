@@ -414,8 +414,8 @@ Test: 161 passed, 0 failed, 0 skipped. Next: gate rounds 1 and 2, then commit.
 
 ## 2026-11-22T13:36Z after the ZFS panic and reboot (about 13:24Z)
 Both Kimi rounds died. Nothing was lost: the staged work of round B pass 4 is intact; items 1-10 were done and item 11 was half done (181 passed, 1 failed).
-Resumed with ~/work/gb10/briefs/2425-c1.1-r3e-resume.md (items 11-15). Commit 3b is still uncommitted. Its gate round 1 receipt fa052367 is spent; round 2 comes after this pass.
-C1.4a pass 3 is resumed in wt-cuda-c14a with ~/work/gb10/briefs/2428-c1.4a-r1d-resume.md. Its gate round 1 receipt 5ec434ec is spent.
+Resumed with 2428-c1.4a-r1d-resume.md (items 11-15). Commit 3b is still uncommitted. Its gate round 1 receipt fa052367 is spent; round 2 comes after this pass.
+C1.4a pass 3 is resumed in the worktree with 2428-c1.4a-r1d-resume.md. Its gate round 1 receipt 5ec434ec is spent.
 # Journal native CUDA C1.4a (Track #2428), branch agent/2428-libcuda-api, worktree wt-cuda-c14a
 
 ## 2026-11-22T12:50Z round 1 (Kimi k3.1-pro in opencode)
@@ -427,7 +427,7 @@ Contents:
 - cuda-native-info with --json, --jsonl and --schema;
 - man pages libcuda(3) and cuda-native-info(1);
 - tests/libcuda_test.sh: 84 checks green, red first.
-Brief: ~/work/gb10/briefs/2428-c1.4a-r1-libcuda-api.md. Report: ~/work/gb10/tmp/2428-r1/ROUND-REPORT.md.
+Brief: 2428-c1.4a-r1-libcuda-api.md. Report: 2428-r1/ROUND-REPORT.md.
 Orchestrator finding: tests/libcuda/schema_validate.py duplicates tests/libnvrm/schema_validate.py; the brief said to reuse it.
 Next: gate rounds 1 and 2, commit, push.
 
@@ -471,31 +471,47 @@ pgrep -l shutdown showed a stub process from another agent's prime-kit test, not
 Next: rebase onto main, then gate round 1.
 
 ## 2026-11-22T17:25Z STOPPED: no opencode model left
-dgx-mlapointe/kimi-k3.1-pro has hit its monthly usage limit at Ollama (the gateway says "reached your monthly usage limit"). kimi-k3 and kimi-k2.7-code close the socket. Pass 2 of round 2 made no change.
+The model gateway has no kimi-k3.1-pro left: it has hit its monthly usage limit at Ollama (the gateway says "reached your monthly usage limit"). kimi-k3 and kimi-k2.7-code close the socket. Pass 2 of round 2 made no change.
 The review panel also runs on Kimi, so the gate cannot run either.
 State:
 - The C1.4a round 2 work is staged on main ea70019 and uncommitted.
 - Gate round 1 is receipt 5ad4fa69. Its findings are in obj/tmp/REVIEW-R2-1.md.
-- The brief for the next pass is ~/work/gb10/briefs/2428-c1.4a-r2b-fixes.md.
+- The brief for the next pass is 2428-c1.4a-r2d-resume.md.
 Resume:
 1. Run that pass on any available opencode model (or Sonnet/Haiku if the orchestrator allows).
 2. Gate round 2 with answers to 5ad4fa69.
 3. Commit with the Gate line, open a PR and merge it.
 
 ## 2026-11-23T01:00Z checkpoint for the amp001 test boot (manager agent)
-Pass 3 of round 2 (brief ~/work/gb10/briefs/2428-c1.4a-r2c-fixes.md, opencode MiniMax, own XDG_DATA_HOME obj/xdg-c14a-r2c) was STOPPED about 30 minutes in, for the queued test boot. Its edits so far are in the working tree, unstaged (cuda.h, Version.map, cuda-native-info.c, cuda_backend.c, cuda_fake.c, cuda_internal.h, cuda_registry.c, the schema). No report was written yet. Snapshot: /home/mlapointe/work/gb10/cuda-mgr/snap-20261123T0100Z/c14a-staged.patch and c14a-unstaged.patch.
+Pass 3 of round 2 (2428-c1.4a-r2c-fixes.md, opencode MiniMax, own XDG_DATA_HOME obj/xdg-c14a-r2c) was STOPPED about 30 minutes in, for the queued test boot. Its edits so far are in the working tree, unstaged (cuda.h, Version.map, cuda-native-info.c, cuda_backend.c, cuda_fake.c, cuda_internal.h, cuda_registry.c, the schema). No report was written yet. Snapshot: snap-20261123T0100Z/c14a-staged.patch and snap-20261123T0100Z/c14a-unstaged.patch.
 Gate: round 1 5ad4fa69 spent; round 2 not run.
-Resume: rerun the pass with a resume note (keep the edits; finish the six findings; write ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md), review every line, full tests/ suite with main merged, answers file to 5ad4fa69, gate round 2, commit, push, PR.
+Resume: rerun the pass with 2428-c1.4a-r2d-resume.md (keep the edits; finish the six findings; write 2428-r2c/ROUND-REPORT-3.md), review every line, full tests/ suite with main merged, answers file to 5ad4fa69, gate round 2, commit, push, PR.
 
 ## 2026-11-23T02:45Z round 2 pass 3 finished (opencode MiniMax): the gate review's findings
-Finished the six findings of REVIEW-R2-1.md on top of the interrupted run's edits. Those edits did not compile: `visible_append()` took a `const cuda_device *` while the visible array holds `cuda_device *`; the parameter is now non-const.
-What changed: the 65-entry test now asks for 65 fake devices and 65 valid visible indices, so it reaches the visible-list overflow return again, and a mutant that deletes that return is killed; the CLI takes the provider and profile lists from the library's `cudaNative*` queries only; the help prints a copyable profile list and the repeated-device rule; the visibility value is reported as `visibility_filter`, escaped in the text report and in JSON; one Version.map parser (`lib/libcuda/version_map.awk`) feeds both the man links and the proc table; the manual no longer calls the native queries process-independent.
+Finished the six findings of REVIEW-R2-1.md on top of the interrupted run's edits. Those edits did not compile: `visible_append()` took a `const cuda_device *` while the visible array holds `cuda_device *`; the parameter is now non-const. The attempts before the last one died with SseEventTooLarge from 22 GB of opencode state in obj/.
+What changed: the 65-entry test now asks for 65 fake devices and 65 valid visible indices, so it reaches the visible-list overflow return again, and a mutant that deletes that return is killed; the CLI takes the provider and profile lists from the library's `cudaNative*` queries only; the help prints a copyable profile list and the repeated-device rule; the visibility value is reported as `visibility_filter`, escaped in the text report and in JSON; one Version.map parser (`lib/libcuda/version_map.awk`) feeds both the man links and the proc table; the manual no longer calls the native queries process-independent; every finding of gate round 1 (5ad4fa69) is addressed.
 Suite: `sh tests/libcuda_test.sh` -> 176 checks passed, 0 failed (151 before this round).
-Report: ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
-
-## 2026-11-23T02:30Z round 2 pass 3 done (MiniMax; attempts r2d-r2f died with SseEventTooLarge from 22 GB of opencode state in obj/, r2g ran clean)
-All findings of gate round 1 (5ad4fa69) are addressed: one Version.map parser (lib/libcuda/version_map.awk, two modes), the CLI lists from the cudaNative* queries, visibility_filter named for what it holds and escaped in text, JSON and the empty-set diagnostic, the manual wording on the backend query, the 65-device overflow test, the help profile list and the duplicate rule. Test: 176 passed, 0 failed (was 151). Report ~/work/gb10/tmp/2428-r2c/ROUND-REPORT-3.md.
+Report: 2428-r2c/ROUND-REPORT-3.md.
 Next: gate round 2 with answers to 5ad4fa69, commit, merge main, full tests/, PR.
+
+## 2026-11-23T05:25Z C1.4a round 3 (opencode MiniMax): the review-open items of the round-2 commit
+The ten review-open items of the round-2 commit are closed, each one with a check that was red first:
+- the generated proc-address table is a prerequisite of every object flavour of cuda_core, and the recipe generates it instead of a variable that folded its newlines;
+- the environment values in the diagnostics go through the one escaping helper, which now has a bounded buffer form;
+- the six undocumented cudaNative* exports have a synopsis line and a description, and the manual says they resolve through cuGetProcAddress;
+- the library exports cudaNativeProviderTakesFakeProfiles, the CLI asks the library instead of comparing provider names, and a check ties the schema's backend enum to the provider list the library reports;
+- the proc-table version rule is written by hand in the library, not in the Version.map parser;
+- the test's field-based oracle is one shell function now, called from both places;
+- the 64-device limit is documented, it applies with a filter and without one, and the CLI names it when the initialization fails with an invalid value;
+- the registry's release-store is gone: the state transition happens in cuInit only, so the store was dead;
+- the unknown-profile diagnostic joins the choices with ", ", and the help rows line up in one column;
+- this journal's C1.4a entries name their artifacts by file name and hold no home path and no gateway account.
+Chronology of this round: the first pass (03:56Z) had the ten items closed, but the model window closed before the report was written (the 04:06Z checkpoint below); the round was resumed with 2428-c1.4a-r3b-resume.md and finished at 05:25Z. The resumed pass added the checks the interruption had not left in place: the check that the once body of the registry holds no release-store, the one shell function for the field-based Version.map oracle, and the merged journal entries.
+Every item was red first: the implementation was put back into its pre-fix state while the new check stayed, and the check failed.
+Brief: 2428-c1.4a-r3-review-open.md. Resume: 2428-c1.4a-r3b-resume.md.
+Suite: `sh tests/libcuda_test.sh` -> 207 checks passed, 0 failed (201 at the 03:56Z checkpoint, 176 before this round).
+Report: 2428-r3/ROUND-REPORT-4.md.
+Next: gate round 2 with answers to the review, commit, push, PR.
 
 ## 2026-11-22 (native-tools test-boot kit, agent/native-tools-testboot, #2362): PAUSED after the survey, no kit code written; resume at Next 1
 Brief (Mark): "we have native tooling, we need native test results, not going through linux". A one-shot test-boot kit
@@ -775,3 +791,31 @@ then kit round C; then the staged build, make-be dry run and check-be.
 - Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.
 - linux_bridge_test on a built tree (tests/linux_bridge_test.sh work/build/tree): 105 passed, 1 failed after; on cbe6ca3 104 passed, 3 failed. The two that went are check (g), the fresh-archive fuzz 0 apply of every patch ("does not apply with fuzz 0" and "a .rej file was left behind"). The one left is check (i), man/nvidia.4 line 272 `.Xr nvidia-smi 1` (mandoc STYLE "referenced manual not found"), which fails the same way on cbe6ca3.
 - Full suite (every tests/*_test.sh), here and on a cbe6ca3 baseline worktree, same build: the same tests fail on both, with identical FAIL lines. fw_depend and open_dev_failure fail on the nvidia.4 lint above; make_contract on two nvrm man3 links missing from expected.manifest; make_install_flow on a personal path in tests/version_sysctl_test.sh line 15; render_uapi_layout exits 2 on a skipped check. With the default tree argument, linux_bridge_test also reports the tree-2363 module files as missing (no tree-2363 is built here).
+
+## 2026-11-23T04:06Z PAUSED: MiniMax quota (checkpoint, superseded)
+Round 3 (Review-open fixes of 15f7df5; brief 2428-c1.4a-r3-review-open.md, resume 2428-c1.4a-r3b-resume.md) stopped twice. The second run hit "Token Plan usage limit reached (2056)" at 04:04Z; the first run (04:02Z) most likely did too. Partial edits are in the working tree, staged and unstaged, and there is no report. Commits 15f7df5 and b8d471c (the main merge) are local; 15f7df5 is pushed. Resume in the next MiniMax 5-hour window: rerun the r3b resume brief, review, then the full tests/ suite. The gate also waits for a non-Claude voice chain.
+This checkpoint is not a completion record: the round resumed and finished, and the one canonical round-3 entry is the merged one of 05:25Z in the C1.4a section above.
+
+## 2026-11-23T05:25Z the native CUDA round-3 pass finished (opencode MiniMax): merged into the branch journal section
+The pause above is over: the round resumed in the next model window and finished the items of the 03:56Z checkpoint. The canonical record of the round is the merged entry of 05:25Z in the C1.4a section above; this note only points at it. Review round 1 of that round is 2428-r3/REVIEW-R3-1.md and its report is 2428-r3/ROUND-REPORT-4.md.
+
+## 2026-11-23T07:12Z PAUSED 07:12Z: MiniMax Token Plan usage limit reached (about 07:05Z). The running passes were stopped with partial edits on disk. Resume after the next 5-hour window (about 10:01Z). Round 3 pass 2 (brief 2428-c1.4a-r3d-review-r1.md): rerun it. The full suite matches main except three make-install suites, which fail only because obj/ in the worktree makes bmake chdir into it; move obj/ out and rerun them.
+
+## 2026-11-23T07:59Z PARKED 07:59Z for the amp001 drive swap. Nothing of the manager is running. Snapshot of the uncommitted work: snap-20261123T0715Z/c14a-staged.patch and snap-20261123T0715Z/c14a-unstaged.patch (also on zroot; the cloudbsd pool is not writable for this user). Resume: probe MiniMax; if it answers, rerun the pass named in the previous entry.
+
+## 2026-11-24T03:30Z native CUDA round 3 pass 2 (opencode): the gate round 1 findings of the round-3 change
+Brief: 2428-c1.4a-r3d-review-r1.md. Review: 2428-r3/REVIEW-R3-1.md. Report: 2428-r3/ROUND-REPORT-5.md.
+The twenty findings of the gate round 1 review of the round-3 change are closed, each one with a check that was red first:
+- the registry publishes its completed state once and after the data is written: the state has an initializing phase, the completed state is published with a release store, and every reader acquire-loads it. The stress case runs 200 rounds of 32 threads that call cuInit and cuDeviceGetCount at once, and the thread sanitizer build of it is clean;
+- the escaper rejects the C1 controls U+0080 to U+009F, the separators U+2028 and U+2029 and the bidirectional controls, so no terminal control reaches the terminal in the text report or in a JSON document;
+- the device-limit hint is printed for the device-limit reason only. The library reports why the initialization failed through cudaNativeInitFailureReason, so a bad visibility entry gets no limit hint and the overflow still gets one;
+- the profile list the diagnostic prints is a value that CUDA_NATIVE_FAKE_PROFILE accepts;
+- the generated proc table is written to a temporary file and renamed only when the parser succeeds, so a failed generation leaves no include behind;
+- the library names the proc-address introduction version in one constant, and the api_test checks the boundary by behaviour;
+- the CLI takes the provider names, the provider advice and the profile list from the library, and the provider capability is the provider kind, so it cannot drift from the profile handling;
+- the manual, the internal comment and the code state the device-limit policy the same way;
+- the provider query is named cudaNativeProviderTakesFakeProfiles in the header, the version map, the library, the CLI, the manual and the tests;
+- this journal names its artifacts by file name, has one round-3 entry and holds no home path and no gateway account.
+Every check was red first: the pre-fix state of the finding was applied to the tree, the check failed for the reviewed reason, and the tree was put back.
+Suite: `sh tests/libcuda_test.sh` -> 261 checks passed, 0 failed (207 at the round-3 entry of 05:25Z).
+Next: gate round 2 with answers to the review, commit, push, PR.

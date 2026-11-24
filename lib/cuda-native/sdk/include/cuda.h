@@ -99,16 +99,38 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus);
 #define cuGetProcAddress cuGetProcAddress_v2
 
+/* Why the first initialization attempt of the process failed.  The reason is
+ * one of the cuda-native extensions: it tells a caller what the library could
+ * not do, so the caller does not have to guess from a generic error value.
+ * The reason of an initialization that succeeded is CUDA_NATIVE_INIT_OK. */
+typedef enum cudaNativeInitReason_enum {
+	/* The initialization succeeded. */
+	CUDA_NATIVE_INIT_OK = 0,
+	/* The selected backend names no registered provider. */
+	CUDA_NATIVE_INIT_UNKNOWN_PROVIDER,
+	/* More devices are selected than the library exposes. */
+	CUDA_NATIVE_INIT_DEVICE_LIMIT,
+	/* The provider's discovery is not implemented in this release. */
+	CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED,
+	/* The provider reports more devices than the registry holds. */
+	CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT,
+	/* The provider failed for another reason. */
+	CUDA_NATIVE_INIT_PROVIDER_ERROR
+} cudaNativeInitReason;
+
 /* cuda-native extensions; these queries do not initialize a provider. */
 const char *cudaNativeGetBackendName(void);
 const char *cudaNativeDefaultBackend(void);
 int cudaNativeProviderKnown(const char *name);
 unsigned cudaNativeProviderCount(void);
 const char *cudaNativeProviderName(unsigned index);
+int cudaNativeProviderTakesFakeProfiles(const char *name);
+int cudaNativeProviderHint(const char *name, char *buffer, size_t size);
 int cudaNativeFakeProfileKnown(const char *name, size_t length);
 unsigned cudaNativeFakeProfileCount(void);
 const char *cudaNativeFakeProfileName(unsigned index);
 const char *cudaNativeFakeProfileDefault(void);
+cudaNativeInitReason cudaNativeInitFailureReason(void);
 
 #ifdef __cplusplus
 }

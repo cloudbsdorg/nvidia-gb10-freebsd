@@ -287,8 +287,11 @@ fake_attribute(unsigned index, CUdevice_attribute attribute, int *value)
 	return (CUDA_SUCCESS);
 }
 
+/* This provider is the synthetic kind: it takes the fake profiles named by
+ * CUDA_NATIVE_FAKE_PROFILE, and the enumeration below applies them. */
 const cuda_provider cuda_fake_provider = {
 	.backend = "fake",
+	.kind = CUDA_PROVIDER_SYNTHETIC,
 	.enumerate = fake_enumerate,
 	.name = fake_name,
 	.uuid = fake_uuid,

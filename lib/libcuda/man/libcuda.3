@@ -46,10 +46,28 @@ libcuda
 .Fn cuGetProcAddress_v2 "const char *symbol" "void **pfn" "int cudaVersion" "cuuint64_t flags" "CUdriverProcAddressQueryResult *symbolStatus"
 .Ft const char *
 .Fn cudaNativeGetBackendName void
+.Ft const char *
+.Fn cudaNativeDefaultBackend void
 .Ft int
 .Fn cudaNativeProviderKnown "const char *name"
+.Ft unsigned
+.Fn cudaNativeProviderCount void
+.Ft const char *
+.Fn cudaNativeProviderName "unsigned index"
+.Ft int
+.Fn cudaNativeProviderTakesFakeProfiles "const char *name"
+.Ft int
+.Fn cudaNativeProviderHint "const char *name" "char *buffer" "size_t size"
 .Ft int
 .Fn cudaNativeFakeProfileKnown "const char *name" "size_t length"
+.Ft unsigned
+.Fn cudaNativeFakeProfileCount void
+.Ft const char *
+.Fn cudaNativeFakeProfileName "unsigned index"
+.Ft const char *
+.Fn cudaNativeFakeProfileDefault void
+.Ft cudaNativeInitReason
+.Fn cudaNativeInitFailureReason void
 .Sh DESCRIPTION
 The
 .Nm
@@ -89,6 +107,12 @@ fail with
 The nvrm provider is a stub in this release: enumeration returns
 .Dv CUDA_ERROR_NOT_SUPPORTED
 and no device is opened.
+Each provider has one kind, and the kind is what the provider does.
+The fake provider is the synthetic kind: it takes the fake profiles of
+.Ev CUDA_NATIVE_FAKE_PROFILE
+and applies them.
+The nvrm provider is the native kind: it takes no profile, and its discovery
+is not implemented in this release.
 .Pp
 The fake provider defaults to one synthetic GB206 device.
 .Ev CUDA_NATIVE_FAKE_PROFILE
@@ -107,11 +131,78 @@ measurements.
 returns the value of
 .Ev CUDA_NATIVE_BACKEND
 when set, or the library's default provider name otherwise.
+.Fn cudaNativeDefaultBackend
+returns the name of the provider the library selects when the environment
+names none.
 .Fn cudaNativeProviderKnown
 returns nonzero only when its argument names a registered provider.
+.Fn cudaNativeProviderCount
+returns the number of registered providers.
+.Fn cudaNativeProviderName
+returns the name of the provider at the given index, or null past the end of
+the table.
+.Fn cudaNativeProviderTakesFakeProfiles
+returns nonzero only when its argument names a provider that takes the fake
+profiles of
+.Ev CUDA_NATIVE_FAKE_PROFILE ,
+the synthetic GPU profiles and not profiles of any other kind.
+It is how a caller learns that a provider takes fake profiles without knowing
+the provider names.
+The provider kind is the one fact about a provider: the synthetic kind takes
+the profiles and applies them, so the answer of this function cannot drift
+from what the provider does with the variable.
+.Fn cudaNativeProviderHint
+writes into the caller's buffer the advice for a provider whose discovery is
+not implemented in this release, and returns nonzero when it wrote one.
+The advice names the provider and the provider to use instead, both of them
+the names the library itself uses.
+It returns zero and writes nothing for a provider that has no advice, for an
+unknown name, and for a null buffer or a buffer of no size.
 .Fn cudaNativeFakeProfileKnown
 returns nonzero only when the specified byte string names a fake profile in the
 library's profile table.
+.Fn cudaNativeFakeProfileCount
+returns the number of listed fake profiles, the ones the library advertises.
+.Fn cudaNativeFakeProfileName
+returns the name of the listed fake profile at the given index, or null past
+the end of the table.
+The listed profiles are the ones
+.Fn cudaNativeFakeProfileCount
+and
+.Fn cudaNativeFakeProfileName
+report;
+.Fn cudaNativeFakeProfileKnown
+accepts every profile in the library's table, listed or not.
+.Fn cudaNativeFakeProfileDefault
+returns the name of the profile the fake provider uses when
+.Ev CUDA_NATIVE_FAKE_PROFILE
+is unset.
+That name is fixed in the loaded library and is the same whatever backend is
+selected.
+.Pp
+.Fn cudaNativeInitFailureReason
+returns why the first initialization attempt of the process failed, as one of
+the
+.Vt cudaNativeInitReason
+values:
+.Dv CUDA_NATIVE_INIT_OK
+when the initialization succeeded,
+.Dv CUDA_NATIVE_INIT_UNKNOWN_PROVIDER
+when the selected backend names no provider,
+.Dv CUDA_NATIVE_INIT_DEVICE_LIMIT
+when more devices are selected than the library exposes,
+.Dv CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED
+when the provider's discovery is not implemented in this release,
+.Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT
+when the provider reports more devices than the registry holds, and
+.Dv CUDA_NATIVE_INIT_PROVIDER_ERROR
+when the provider failed for any other reason.
+The reason is the reason of one attempt, and it stays the same for the
+lifetime of the process.
+Read it after
+.Fn cuInit
+has returned.
+.Pp
 These cuda-native extensions do not initialize a provider.
 .Fn cudaNativeGetBackendName
 reads the calling process's environment when it is called, so its answer
@@ -120,10 +211,24 @@ follows
 and can change inside one process.
 Provider and profile table membership is fixed by the loaded library and does
 not depend on the environment.
+.Pp
+Every cuda-native extension is an entry point of this library, so
+.Fn cuGetProcAddress
+and
+.Fn cuGetProcAddress_v2
+resolve it by name like every other exported function.
 .Ss Devices
 Device ordinals are contiguous in their visible enumeration order.
 Invalid ordinals return
 .Dv CUDA_ERROR_INVALID_DEVICE .
+The library exposes at most 64 devices at once.
+The limit counts the visible devices, the selected ones.
+A provider may report more devices than the limit: the devices that no filter
+selects are not exposed.
+Without a filter the visible set is every provider device, so a provider that
+reports more devices than the limit is an invalid value.
+A visibility list that selects more devices than the limit is an invalid value
+too, and not a silently shortened list.
 .Fn cuDeviceGetName
 always terminates the destination and truncates a name to fit.
 .Fn cuDeviceTotalMem

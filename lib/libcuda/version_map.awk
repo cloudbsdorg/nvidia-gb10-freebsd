@@ -36,12 +36,11 @@ BEGIN {
 	sub(/^[ \t]+/, "", name)
 	sub(/[ \t]*;.*$/, "", name)
 	if (mode == "include") {
-		if (name == "cuGetProcAddress") {
-			printf "\t{ \"%s\", (void *)&%s_v2,\n", name, name
-			printf "\t    (void *)&%s, 12000 },\n", name
-		} else {
+		# The legacy cuGetProcAddress row is written by hand in cuda_core.c:
+		# it carries the version rule of this library's ABI, not the fact
+		# that the name is exported.
+		if (name != "cuGetProcAddress")
 			printf "\tPROC_ENTRY(%s),\n", name
-		}
 	} else {
 		print name
 	}

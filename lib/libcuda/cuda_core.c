@@ -209,9 +209,23 @@ typedef struct proc_export {
 #define PROC_ENTRY(function) \
 	{ #function, (void *)&function, NULL, 0 }
 
+/* The legacy four-argument query keeps a row of its own.  A caller that asks
+ * for a release before the introduction version gets the four-argument
+ * function; from that version on it gets the five-argument one.  The
+ * introduction version is the driver's own number for CUDA 12.0 (major *
+ * 1000 + minor * 10, the scheme CUDA_VERSION uses), the release that
+ * introduced the _v2 form.  The public Driver API reference reachable from
+ * this environment does not name that introduction version, so the value
+ * follows the release numbering.  The rule lives here, in the library,
+ * because it is a statement about this library's entry points and not about
+ * the exported-name list. */
 /* This table describes the CUDA 13.0 subset, not historical introductions. */
+#define CU_GET_PROC_ADDRESS_V2_MIN_VERSION 12000
+
 static const proc_export proc_exports[] = {
 #include "cuda_exports.inc"
+	{ "cuGetProcAddress", (void *)&cuGetProcAddress_v2,
+	    (void *)&cuGetProcAddress, CU_GET_PROC_ADDRESS_V2_MIN_VERSION },
 };
 
 static CUresult

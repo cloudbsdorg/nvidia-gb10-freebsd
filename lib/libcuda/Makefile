@@ -15,8 +15,6 @@ CLEANFILES=	cuda_exports.inc
 # The man links and the proc-address table share the one exported-name list;
 # both come from the one Version.map parser, in its two modes.
 CUDA_FUNCS!=	awk -f ${VERSION_MAP_AWK} -v mode=names ${VERSION_MAP}
-CUDA_EXPORTS_INC!=	awk -f ${VERSION_MAP_AWK} -v mode=include ${VERSION_MAP}
-.export CUDA_EXPORTS_INC
 .for f in ${CUDA_FUNCS}
 MLINKS+=	libcuda.3 ${f}.3
 .endfor
@@ -31,9 +29,16 @@ LDFLAGS+=	-Wl,-Bsymbolic-functions
 # pthread_once needs libthr in an out-of-tree build; libc's stub is not enough.
 LDADD=		-lthr
 
+# The proc-address table is generated from the exported-name list.  The
+# generated file is a prerequisite of every object flavour of cuda_core.c,
+# which includes it: the plain object, the shared-object one and the profiled
+# ones.  Without those edges a build of one flavour can start before the
+# generated file exists.  The generation writes a temporary file and renames
+# it only after the parser succeeds, so a failed run leaves no include behind
+# and the next build regenerates the whole table.
 ${.OBJDIR}/cuda_exports.inc: ${VERSION_MAP} ${VERSION_MAP_AWK}
-	printf "%s\n" "$$CUDA_EXPORTS_INC" > ${.TARGET}
+	awk -f ${VERSION_MAP_AWK} -v mode=include ${VERSION_MAP} > ${.OBJDIR}/cuda_exports.inc.tmp && mv -f ${.OBJDIR}/cuda_exports.inc.tmp ${.TARGET} || { rm -f ${.OBJDIR}/cuda_exports.inc.tmp; exit 1; }
 
-cuda_core.o cuda_core.pieo: ${.OBJDIR}/cuda_exports.inc
+cuda_core.o cuda_core.pico cuda_core.po cuda_core.pieo: ${.OBJDIR}/cuda_exports.inc
 
 .include <bsd.lib.mk>

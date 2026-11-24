@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -13,11 +14,14 @@
 
 enum registry_init_state {
 	REGISTRY_NOT_STARTED,
+	REGISTRY_INITIALIZING,
 	REGISTRY_STARTED
 };
 
 static pthread_once_t registry_once = PTHREAD_ONCE_INIT;
 static atomic_int registry_state = ATOMIC_VAR_INIT(REGISTRY_NOT_STARTED);
+static atomic_int registry_reason =
+    ATOMIC_VAR_INIT(CUDA_NATIVE_INIT_OK);
 static pthread_mutex_t context_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread CUcontext current_context;
 
@@ -51,6 +55,18 @@ provider_find(const char *backend)
 	return (NULL);
 }
 
+static const cuda_provider *
+provider_by_kind(enum cuda_provider_kind kind)
+{
+	size_t i;
+
+	/* Time: O(providers); Space: O(1). */
+	for (i = 0; i < sizeof(providers) / sizeof(providers[0]); i++)
+		if (providers[i]->kind == kind)
+			return (providers[i]);
+	return (NULL);
+}
+
 int
 cudaNativeProviderKnown(const char *name)
 {
@@ -69,6 +85,41 @@ cudaNativeProviderName(unsigned index)
 	if (index >= sizeof(providers) / sizeof(providers[0]))
 		return (NULL);
 	return (providers[index]->backend);
+}
+
+/* The library knows which provider takes the fake profiles, so a caller does
+ * not have to know the provider names to find out.  The provider kind is the
+ * one fact about a provider: the synthetic kind takes the profiles and
+ * applies them, so the capability cannot drift from the handling. */
+int
+cudaNativeProviderTakesFakeProfiles(const char *name)
+{
+	const cuda_provider *provider = provider_find(name);
+
+	return (provider != NULL && provider->kind == CUDA_PROVIDER_SYNTHETIC);
+}
+
+/* The library's advice for a provider whose discovery is not implemented.  The
+ * text names the provider and the one to use instead, so a caller does not
+ * have to know the provider names to write it. */
+int
+cudaNativeProviderHint(const char *name, char *buffer, size_t size)
+{
+	const cuda_provider *provider, *fallback;
+
+	if (buffer == NULL || size == 0)
+		return (0);
+	buffer[0] = '\0';
+	provider = provider_find(name);
+	if (provider == NULL || provider->kind != CUDA_PROVIDER_NATIVE)
+		return (0);
+	fallback = provider_by_kind(CUDA_PROVIDER_SYNTHETIC);
+	if (fallback == NULL)
+		return (0);
+	snprintf(buffer, size, "%s discovery is not implemented yet; set "
+	    "CUDA_NATIVE_BACKEND=%s for synthetic devices", provider->backend,
+	    fallback->backend);
+	return (1);
 }
 
 static CUresult
@@ -125,12 +176,17 @@ visible_index(const char *token, size_t length, unsigned *physical_index,
 }
 
 /* The library exposes at most CUDA_NATIVE_MAX_DEVICES devices; a further
- * device is an invalid value rather than a silently dropped one. */
+ * device is an invalid value rather than a silently dropped one.  The reason
+ * of the failure is recorded, so a caller can tell this overflow from any
+ * other invalid value. */
 static CUresult
 visible_append(cuda_device *device)
 {
-	if (registry.visible_count == CUDA_NATIVE_MAX_DEVICES)
+	if (registry.visible_count == CUDA_NATIVE_MAX_DEVICES) {
+		atomic_store_explicit(&registry_reason,
+		    CUDA_NATIVE_INIT_DEVICE_LIMIT, memory_order_relaxed);
 		return (CUDA_ERROR_INVALID_VALUE);
+	}
 	registry.visible[registry.visible_count++] = device;
 	return (CUDA_SUCCESS);
 }
@@ -183,6 +239,10 @@ apply_visibility(void)
 	return (CUDA_SUCCESS);
 }
 
+/* The body of pthread_once.  It writes the registry data and the reason of
+ * the outcome; the thread that entered the once publishes the completed state
+ * with a release store after the body has returned, so a reader that sees the
+ * completed state sees the data as well. */
 static void
 registry_initialize_once(void)
 {
@@ -190,20 +250,30 @@ registry_initialize_once(void)
 	unsigned i, count;
 	CUresult result;
 
+	atomic_store_explicit(&registry_reason, CUDA_NATIVE_INIT_OK,
+	    memory_order_relaxed);
 	backend = cudaNativeGetBackendName();
 	registry.provider = provider_find(backend);
 	if (registry.provider == NULL) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
+		atomic_store_explicit(&registry_reason,
+		    CUDA_NATIVE_INIT_UNKNOWN_PROVIDER, memory_order_relaxed);
 		goto out;
 	}
 	count = 0;
 	result = registry.provider->enumerate(&count);
 	if (result != CUDA_SUCCESS) {
 		registry.result = result;
+		atomic_store_explicit(&registry_reason,
+		    result == CUDA_ERROR_NOT_SUPPORTED ?
+		    CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED :
+		    CUDA_NATIVE_INIT_PROVIDER_ERROR, memory_order_relaxed);
 		goto out;
 	}
 	if (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
+		atomic_store_explicit(&registry_reason,
+		    CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT, memory_order_relaxed);
 		goto out;
 	}
 	registry.physical_count = count;
@@ -213,8 +283,13 @@ registry_initialize_once(void)
 		registry.physical[i].primary_state.device = &registry.physical[i];
 	}
 	registry.result = apply_visibility();
+	if (registry.result != CUDA_SUCCESS &&
+	    atomic_load_explicit(&registry_reason, memory_order_relaxed) ==
+	    CUDA_NATIVE_INIT_OK)
+		atomic_store_explicit(&registry_reason,
+		    CUDA_NATIVE_INIT_PROVIDER_ERROR, memory_order_relaxed);
 out:
-	atomic_store_explicit(&registry_state, REGISTRY_STARTED, memory_order_release);
+	return;
 }
 
 CUresult
@@ -222,27 +297,56 @@ cuda_registry_initialize(void)
 {
 	int expected = REGISTRY_NOT_STARTED;
 
-	/* Only cuInit marks initialization started; pthread_once runs it once. */
-	(void)atomic_compare_exchange_strong_explicit(&registry_state, &expected,
-	    REGISTRY_STARTED, memory_order_acq_rel, memory_order_acquire);
-	return (cuda_registry_result());
-}
-
-CUresult
-cuda_registry_result(void)
-{
-	if (atomic_load_explicit(&registry_state, memory_order_acquire) ==
-	    REGISTRY_NOT_STARTED)
-		return (CUDA_ERROR_NOT_INITIALIZED);
-	/* A concurrent observer waits here until every registry write is complete. */
+	/* Only cuInit marks initialization started; pthread_once runs it once.
+	 * The state moves to REGISTRY_INITIALIZING before the body runs, so a
+	 * reader never mistakes an unfinished registry for a finished one:
+	 * the data is written first, the completed state is published with a
+	 * release store afterwards, and every reader acquires that state. */
+	if (atomic_compare_exchange_strong_explicit(&registry_state, &expected,
+	    REGISTRY_INITIALIZING, memory_order_acq_rel, memory_order_acquire)) {
+		if (pthread_once(&registry_once, registry_initialize_once) != 0)
+			return (CUDA_ERROR_UNKNOWN);
+		atomic_store_explicit(&registry_state, REGISTRY_STARTED,
+		    memory_order_release);
+		return (registry.result);
+	}
+	/* Another thread is initializing: wait for the body to finish. */
 	if (pthread_once(&registry_once, registry_initialize_once) != 0)
 		return (CUDA_ERROR_UNKNOWN);
 	return (registry.result);
 }
 
+CUresult
+cuda_registry_result(void)
+{
+	int state;
+
+	/* The acquire load pairs with the release store of the completed
+	 * state. */
+	state = atomic_load_explicit(&registry_state, memory_order_acquire);
+	if (state == REGISTRY_NOT_STARTED)
+		return (CUDA_ERROR_NOT_INITIALIZED);
+	/* The initialization is under way: wait for the body, so the registry
+	 * data is read after it is complete. */
+	if (pthread_once(&registry_once, registry_initialize_once) != 0)
+		return (CUDA_ERROR_UNKNOWN);
+	(void)atomic_load_explicit(&registry_state, memory_order_acquire);
+	return (registry.result);
+}
+
+cudaNativeInitReason
+cudaNativeInitFailureReason(void)
+{
+	return ((cudaNativeInitReason)atomic_load_explicit(&registry_reason,
+	    memory_order_acquire));
+}
+
 unsigned
 cuda_registry_count(void)
 {
+	/* The registry data is read after the initialization completed: the
+	 * acquire load pairs with the release store that published it. */
+	(void)atomic_load_explicit(&registry_state, memory_order_acquire);
 	return (registry.visible_count);
 }
 

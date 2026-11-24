@@ -10,11 +10,16 @@
 
 #include <cuda.h>
 
-/* The number of devices the library exposes at once. */
+/* The number of devices the library exposes at once.  The limit counts the
+ * visible devices, the selected ones.  A provider may report more devices
+ * than the limit; the ones that no filter selects are not exposed.  Without
+ * a filter the visible set is every provider device, so a provider that
+ * reports more devices than the limit is an invalid value. */
 #define CUDA_NATIVE_MAX_DEVICES 64
-/* The number of provider devices the registry can hold; a provider may
- * report more devices than the library exposes, and a visibility list may
- * then name more distinct devices than the library exposes. */
+/* The number of provider devices the registry can hold.  This is a buffer
+ * bound, not the policy limit: a provider may report more devices than the
+ * library exposes, and a visibility list may then name more distinct devices
+ * than the library exposes. */
 #define CUDA_NATIVE_MAX_PHYSICAL_DEVICES 128
 #define CUDA_NATIVE_VERSION_TEXT_MAX 255
 #define CUDA_NATIVE_CONTEXT_MAGIC 0x43545831U
@@ -33,6 +38,17 @@ typedef struct cuda_device_ops cuda_device_ops;
 typedef cuda_device_ops cuda_provider;
 typedef struct cuda_device cuda_device;
 
+/* The kind of a provider.  The kind is the one fact about a provider: it
+ * decides whether the provider takes the fake profiles named by
+ * CUDA_NATIVE_FAKE_PROFILE, and only the synthetic kind applies them. */
+enum cuda_provider_kind {
+	/* A provider of synthetic devices, driven by the fake profiles. */
+	CUDA_PROVIDER_SYNTHETIC,
+	/* A provider of real devices; its discovery is not implemented in
+	 * this release. */
+	CUDA_PROVIDER_NATIVE
+};
+
 struct CUctx_st {
 	unsigned magic;
 	unsigned references;
@@ -47,6 +63,9 @@ struct cuda_device {
 
 struct cuda_device_ops {
 	const char *backend;
+	/* The kind of the provider: it decides whether the provider takes
+	 * the fake profiles. */
+	enum cuda_provider_kind kind;
 	CUresult (*enumerate)(unsigned *count);
 	CUresult (*name)(unsigned index, char *name, int len);
 	CUresult (*uuid)(unsigned index, CUuuid *uuid);
