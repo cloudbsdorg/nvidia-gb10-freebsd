@@ -695,16 +695,24 @@ native_version=$(printf '%d.%d.%d' \
 # The sources are POSIX sh even though the installed names have no suffix.
 # Only the shared library has version placeholders; the tools are copied as-is.
 # Time: O(number of tools).  Space: O(1).
-for tool in nvptxas nvfatbin; do
-	case $tool in nvptxas) public=ptxas ;; nvfatbin) public=fatbinary ;; esac
-	sh -n "$CN/tools/$tool.sh" >"$W/$tool-syntax.out" 2>&1
-	expect_rc "$tool.sh: POSIX shell syntax" $? 0
-	[ -x "$SDK/bin/$tool" ] && [ -x "$SDK/bin/$public" ]
-	expect_rc "mksdk.sh installs executable $tool and $public" $? 0
-	! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/$tool" &&
-	    cmp -s "$SDK/bin/$tool" "$SDK/bin/$public"
-	expect_rc "$tool and $public are identical and have no version placeholder" $? 0
+# nvptxas is the shell tool; nvfatbin and cuda-objdump are C programs.
+# Time: O(number of tools).  Space: O(1).
+sh -n "$CN/tools/nvptxas.sh" >"$W/nvptxas-syntax.out" 2>&1
+expect_rc "nvptxas.sh: POSIX shell syntax" $? 0
+[ -x "$SDK/bin/nvptxas" ] && [ -x "$SDK/bin/ptxas" ]
+expect_rc "mksdk.sh installs executable nvptxas and ptxas" $? 0
+cmp -s "$SDK/bin/nvptxas" "$SDK/bin/ptxas"
+expect_rc "nvptxas and ptxas are the same program" $? 0
+# Time: O(number of C tools).  Space: O(1).
+for tool in nvfatbin fatbinary cuda-objdump; do
+	[ -x "$SDK/bin/$tool" ]
+	expect_rc "mksdk.sh installs executable $tool" $? 0
 done
+cmp -s "$SDK/bin/nvfatbin" "$SDK/bin/fatbinary"
+expect_rc "nvfatbin and fatbinary are the same program" $? 0
+! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/nvfatbin" &&
+    ! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/cuda-objdump"
+expect_rc "the C tools carry no version placeholder" $? 0
 # Time: O(number of installed tool names).  Space: O(1).
 for tool in nvptxas ptxas nvfatbin fatbinary; do
 	"$SDK/bin/$tool" -h >"$W/$tool-help.out" 2>"$W/$tool-help.err"
@@ -755,7 +763,7 @@ work.mkdir()
 ptx = work / "input.ptx"
 elf = work / "input.o"
 ptx.write_text(".target sm_120\n.visible .entry accepted() { ret; }\n", encoding="ascii")
-elf.write_bytes(b"ELF payload\n")
+elf.write_bytes(b"CUDA-NATIVE-STUB-CUBIN 1\narch=sm_120\n---\n")
 for tool, options in accepted.items():
     for index, option in enumerate(options):
         if option in ("-h", "--help", "--version", "--json"):
@@ -777,7 +785,7 @@ for tool, options in accepted.items():
             }.get(option, [option])
             command = [str(Path(sys.argv[4]) / "bin" / tool)] + extra + [
                 "--create", str(output), image]
-            magic = b"CUDA-NATIVE-STUB-FATBIN 1\n"
+            magic = b"\x10\xff\x10\xad"
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert result.returncode == 0, (tool, option, result.stderr.decode("utf-8", "replace"))
         assert output.read_bytes().startswith(magic), (tool, option, "output")
@@ -787,13 +795,22 @@ python3 -I - "$W/nvptxas-help.out" "$W/ptxas-help.out" \
     "$W/nvfatbin-help.out" "$W/fatbinary-help.out" <<'PY'
 import sys
 from pathlib import Path
-for path, canonical in zip(sys.argv[1:], ("nvptxas", "nvptxas", "nvfatbin", "nvfatbin")):
+# The C tools name themselves the way they were invoked; the shell tool
+# keeps its canonical name.
+names = {"nvptxas-help.out": "nvptxas", "ptxas-help.out": "nvptxas",
+         "nvfatbin-help.out": "nvfatbin", "fatbinary-help.out": "fatbinary"}
+for path in sys.argv[1:]:
     first = Path(path).read_text(encoding="utf-8").splitlines()[0]
-    assert first.startswith("usage: " + canonical + " "), (path, first)
+    assert first.startswith("usage: " + names[Path(path).name] + " "), (path, first)
 fatbin = Path(sys.argv[3]).read_text(encoding="utf-8")
 assert "--image3=kind=elf|ptx,sm=NNN,file=INPUT" in fatbin
 PY
-expect_rc "usage uses canonical tool names and nvfatbin advertises elf|ptx" $? 0
+expect_rc "usage names the program the way it was invoked" $? 0
+"$SDK/bin/fatbinary" -64 --create "$W/alias-name.fatbin" \
+    >"$W/alias-name.out" 2>"$W/alias-name.err"
+rc=$?
+[ $rc -eq 2 ] && grep -q '^fatbinary: ' "$W/alias-name.err"
+expect_rc "the fatbinary alias names itself in its diagnostics" $? 0
 
 # Prove that the exact usage assertion is not satisfied by the -g substring in
 # --gpu-name.  The old substring check accepts this mutant; the grammar check
@@ -847,33 +864,42 @@ PY
 	expect_rc "$tool JSON names its tool, four version fields, stub and track" $? 0
 done
 
-# Both installed tools share one helper file, found relative to their own bin/
-# directory rather than through a fixed SDK path.
+# The shell tool and the C tools carry their version data in their own
+# sources; the installed copies hold no placeholder.
 TOOL_LIB=$SDK/share/cuda-native/cuda-native-tool-lib.sh
 ! grep -Fq '@CUDA_NATIVE_' "$CN/tools/nvptxas.sh" &&
-    ! grep -Fq '@CUDA_NATIVE_' "$CN/tools/nvfatbin.sh" &&
     ! grep -Fq '@CUDA_NATIVE_' "$TOOL_LIB" &&
     [ "$(grep -c 's/@CUDA_NATIVE_VERSION@/$rel_version/g' "$CN/mksdk.sh")" -eq 1 ]
-expect_rc "one mksdk substitution serves the only source file with placeholders" $? 0
+expect_rc "one mksdk substitution serves every source file with placeholders" $? 0
 [ -f "$TOOL_LIB" ] && sh -n "$TOOL_LIB" >"$W/tool-lib-syntax.out" 2>&1 &&
     grep -Fq '@CUDA_NATIVE_VERSION@' "$CN/tools/cuda-native-tool-lib.sh" &&
     grep -Fq '@CUDA_NATIVE_VERSION_MAJOR@' "$CN/tools/cuda-native-tool-lib.sh" &&
     ! grep -Fq '@CUDA_NATIVE_VERSION' "$TOOL_LIB" &&
-    grep -Fq '../share/cuda-native/cuda-native-tool-lib.sh' "$CN/tools/nvptxas.sh" &&
-    grep -Fq '../share/cuda-native/cuda-native-tool-lib.sh' "$CN/tools/nvfatbin.sh"
-expect_rc "both tools source the installed shared library relative to bin" $? 0
+    grep -Fq '../share/cuda-native/cuda-native-tool-lib.sh' "$CN/tools/nvptxas.sh"
+expect_rc "the shell tool sources the installed shared library relative to bin" $? 0
+grep -Fq '@CUDA_NATIVE_VERSION@' "$CN/fatbin/nvfatbin.c" &&
+    grep -Fq '@CUDA_NATIVE_VERSION_MAJOR@' "$CN/fatbin/nvfatbin.c" &&
+    grep -Fq '@CUDA_NATIVE_VERSION@' "$CN/fatbin/cuda-objdump.c" &&
+    ! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/nvfatbin" &&
+    ! grep -Fq '@CUDA_NATIVE_VERSION' "$SDK/bin/cuda-objdump"
+expect_rc "the C tools carry the substituted version data" $? 0
 grep -Fq '2427' "$CN/tools/cuda-native-tool-lib.sh" 2>/dev/null &&
     ! grep -Fq '2427' "$CN/tools/nvptxas.sh" &&
-    ! grep -Fq '2427' "$CN/tools/nvfatbin.sh"
-expect_rc "only the shared tool library contains a 2427 literal" $? 0
-python3 -I - "$CN/tools/nvptxas.sh" "$CN/tools/nvfatbin.sh" <<'PY'
+    grep -Fq '2427' "$CN/fatbin/nvfatbin.c" &&
+    ! grep -Fq '2427' "$CN/fatbin/cuda-objdump.c"
+expect_rc "the 2427 literal lives in the version data, not in an option message" $? 0
+python3 -I - "$CN/tools/nvptxas.sh" <<'PY'
 import sys
 for path in sys.argv[1:]:
     with open(path, encoding="utf-8") as f:
         lines = [line.strip() for line in f if "--version" in line and not line.lstrip().startswith("echo ")]
     assert lines == ['[ "${1:-}" = --version ] && handle_version "$@"'], (path, lines)
 PY
-expect_rc "both tools delegate every --version path to the shared helper" $? 0
+expect_rc "the shell tool delegates every --version path to the shared helper" $? 0
+grep -Fq 'CUDA_NATIVE_VERSION_TEXT' "$CN/fatbin/nvfatbin.c" &&
+    grep -Fq 'show_version' "$CN/fatbin/nvfatbin.c" &&
+    ! grep -Fq 'cuda-native-tool-lib.sh' "$CN/fatbin/nvfatbin.c"
+expect_rc "the C tool carries its own version data and no shell helper" $? 0
 cp -R "$SDK" "$W/sdk-tool-lib-relocated"
 "$W/sdk-tool-lib-relocated/bin/ptxas" --version >"$W/relocated-ptxas.out" 2>"$W/relocated-ptxas.err"
 rc=$?
@@ -894,15 +920,16 @@ done
 
 # Dropping the first major-version sed expression used to affect only the
 # placeholder-free tools.  It must now damage the shared library and be seen.
+# Dropping the major-version substitution must be caught: the C tools carry
+# the same placeholders, so the build itself fails without it.
 cp -R "$CN" "$W/cn-substitution"
 awk '!done && /s\/@CUDA_NATIVE_VERSION_MAJOR@/ { done=1; next } { print }' \
     "$W/cn-substitution/mksdk.sh" >"$W/cn-substitution/mksdk.sh.new" &&
     mv "$W/cn-substitution/mksdk.sh.new" "$W/cn-substitution/mksdk.sh"
 sh "$W/cn-substitution/mksdk.sh" "$W/sdk-substitution" >"$W/substitution-mutant.log" 2>&1
 rc=$?
-[ $rc -eq 0 ] && grep -Fq '@CUDA_NATIVE_VERSION_MAJOR@' \
-    "$W/sdk-substitution/share/cuda-native/cuda-native-tool-lib.sh"
-expect_rc "mutant: dropping the shared library's major-version substitution is caught" $? 0
+[ $rc -ne 0 ] && grep -q 'CUDA_NATIVE_VERSION_MAJOR' "$W/substitution-mutant.log"
+expect_rc "mutant: dropping the major-version substitution is caught" $? 0
 
 [ -f "$SDK/lib64/libcudart.so.13" ] && [ -L "$SDK/lib64/libcudart.so" ] &&
     [ "$(readlink "$SDK/lib64/libcudart.so")" = libcudart.so.13 ]
@@ -967,9 +994,10 @@ full_obj full120 --cuda-gpu-arch=sm_120
 expect_rc "launch_main: full compile for sm_120" $? 0
 full_obj fullg -g --cuda-gpu-arch=sm_120
 expect_rc "launch_main: full -g compile for sm_120" $? 0
-[ -f "$W/full120.o" ] && grep -q -a -F 'CUDA-NATIVE-STUB-FATBIN 1' "$W/full120.o" &&
+container_magic=$(printf '\020\377\020\255')
+[ -f "$W/full120.o" ] && grep -q -a -F "$container_magic" "$W/full120.o" &&
     ! grep -q -a -F 'NVFATBIN-STUB-1' "$W/full120.o"
-expect_rc "the full object embeds the cuda-native fatbin magic, not the old NV-prefixed magic" $? 0
+expect_rc "the full object embeds the cuda-native fatbin container, not the old NV-prefixed magic" $? 0
 full_obj full121 --cuda-gpu-arch=sm_121
 expect_rc "launch_main: full compile for sm_121" $? 0
 full_obj fulltwo --cuda-gpu-arch=sm_120 --cuda-gpu-arch=sm_121
@@ -1002,6 +1030,8 @@ assert [r["arch"] for r in pt] == arches
 assert len(fb[0]["images"]) == members
 assert [i["sm"] for i in fb[0]["images"]] == [int(a[3:]) for a in arches for _ in kinds]
 assert [i["kind"] for i in fb[0]["images"]] == kinds * len(arches)
+assert [i["arch"] for i in fb[0]["images"]] == [a for a in arches for _ in kinds]
+assert all(set(i) == {"kind", "sm", "arch", "file"} for i in fb[0]["images"])
 for name, selected in ((pt_name, pt), (fb_name, fb)):
     with open(name, "w", encoding="utf-8") as f:
         for record in selected:
@@ -1063,50 +1093,65 @@ rc=$?
 [ $rc -eq 1 ] && grep -q 'sm_120' "$W/mismatch.err" && grep -q 'sm_121' "$W/mismatch.err" &&
     [ ! -e "$W/mismatch.o" ]
 expect_rc "ptxas refuses a .target that differs from --gpu-name and names both" $? 0
+# A cubin member must be one of our own cubins: a foreign binary is refused
+# and never bundled.
 printf 'ELF_PAYLOAD\n' >"$W/direct.elf"
+"$SDK/bin/fatbinary" -64 --create "$W/foreign.fatbin" \
+    --image3=kind=elf,sm=120,file="$W/direct.elf" \
+    >"$W/foreign.out" 2>"$W/foreign.err"
+rc=$?
+[ $rc -eq 1 ] && [ ! -e "$W/foreign.fatbin" ] &&
+    grep -q 'not a cuda-native cubin' "$W/foreign.err"
+expect_rc "fatbinary refuses a foreign binary instead of bundling it" $? 0
 CUDA_NATIVE_TRACE="$W/direct-fatbin.trace" "$SDK/bin/fatbinary" -64 \
-    --create "$W/direct.fatbin" --image3=kind=elf,sm=120,file="$W/direct.elf" \
+    --create "$W/direct.fatbin" --image3=kind=elf,sm=120,file="$W/direct.o" \
     --image3=kind=ptx,sm=120,file="$W/direct.ptx" >"$W/direct-fatbin.out" 2>&1
 rc=$?
-[ $rc -eq 0 ] && grep -q ELF_PAYLOAD "$W/direct.fatbin" && grep -q 'PTX payload' "$W/direct.fatbin"
-expect_rc "fatbinary keeps both ELF and PTX payloads" $? 0
-elf_size=$(wc -c <"$W/direct.elf" | tr -d '[:space:]')
-ptx_size=$(wc -c <"$W/direct.ptx" | tr -d '[:space:]')
-elf_sha=$(/sbin/sha256 -q "$W/direct.elf")
-ptx_sha=$(/sbin/sha256 -q "$W/direct.ptx")
-{
-	printf 'CUDA-NATIVE-STUB-FATBIN 1\n'
-	printf 'member kind=elf sm=120 size=%s sha256=%s\n' "$elf_size" "$elf_sha"
-	printf 'member kind=ptx sm=120 size=%s sha256=%s\n' "$ptx_size" "$ptx_sha"
-	printf '%s\n' '---'
-	cat "$W/direct.elf" "$W/direct.ptx"
-} >"$W/direct.expected-fatbin"
-cmp -s "$W/direct.expected-fatbin" "$W/direct.fatbin" &&
-    ! grep -q -F 'NVFATBIN-STUB-1' "$W/direct.fatbin"
-expect_rc "fatbinary writes the cuda-native magic, member size/hash lines, --- and ordered bytes" $? 0
-python3 -I - "$CN/tools/nvfatbin.sh" "$W/direct.fatbin" <<'PY'
-import hashlib, sys
+[ $rc -eq 0 ] && [ -s "$W/direct.fatbin" ]
+expect_rc "fatbinary writes a container for the cubin and the PTX" $? 0
+"$SDK/bin/cuda-objdump" --json "$W/direct.fatbin" >"$W/direct.json" 2>&1
+rc=$?
+[ $rc -eq 0 ]
+expect_rc "cuda-objdump reads the container fatbinary wrote" $rc 0
+python3 -I - "$W/direct.json" "$W/direct.o" "$W/direct.ptx" <<'PY'
+import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
-    source = f.read()
-assert 'cp -- "$image_file" "$WORK/img.$index"' in source
-for operation in ('wc -c <"$WORK/img.$index"',
-                  '/sbin/sha256 -q -- "$WORK/img.$index"',
-                  'cat -- "$WORK/img.$index" >>"$payload"'):
-    assert operation in source, operation
-with open(sys.argv[2], "rb") as f:
-    header, payload = f.read().split(b"\n---\n", 1)
-lines = header.split(b"\n")[1:]
-offset = 0
-for line in lines:
-    fields = dict(field.split("=", 1) for field in line.decode("ascii").split(" ") if "=" in field)
-    size = int(fields["size"])
-    member = payload[offset:offset + size]
-    assert len(member) == size
-    assert hashlib.sha256(member).hexdigest() == fields["sha256"]
-    offset += size
-assert offset == len(payload)
+    doc = json.load(f)
+members = doc["members"]
+assert len(members) == 2, members
+assert [m["kind"] for m in members] == ["cubin", "ptx"], members
+assert [m["arch"] for m in members] == ["sm_120", "sm_120"], members
+assert [m["format"] for m in members] == ["nvcubin/1", "ptx"], members
+sizes = [len(open(path, "rb").read()) for path in sys.argv[2:]]
+assert [m["size"] for m in members] == sizes, (members, sizes)
+assert all(len(m["sha256"]) == 64 for m in members), members
 PY
-expect_rc "fatbinary sizes, hashes and appends one private copy of each image" $? 0
+expect_rc "the container keeps both members with their sizes and hashes" $? 0
+# A trace that cannot be written is a failure after the container is in
+# place: the container stays, and the run ends with a diagnostic.
+CUDA_NATIVE_TRACE="$W/no-such-directory/trace" "$SDK/bin/nvfatbin" -64 \
+    --create "$W/trace-failed.fatbin" \
+    --image3=kind=ptx,sm=120,file="$W/direct.ptx" \
+    >"$W/trace-failed.out" 2>"$W/trace-failed.err"
+rc=$?
+[ $rc -eq 1 ] && [ -s "$W/trace-failed.fatbin" ] &&
+    grep -q 'cannot append trace' "$W/trace-failed.err"
+expect_rc "a trace that cannot be written leaves the container in place" $? 0
+"$SDK/bin/cuda-objdump" --extract 0 "$W/direct-extracted.o" "$W/direct.fatbin" \
+    >"$W/direct-extract.out" 2>&1
+rc=$?
+[ $rc -eq 0 ] && cmp -s "$W/direct.o" "$W/direct-extracted.o"
+expect_rc "the container gives the cubin member back byte for byte" $? 0
+python3 -I - "$CN/fatbin/nvfatbin.c" "$CN/fatbin/cnfatbin.c" <<'PY'
+import sys
+nvfatbin = open(sys.argv[1], encoding="utf-8").read()
+cnfatbin = open(sys.argv[2], encoding="utf-8").read()
+# One read per image, and the hash is taken over the bytes that are stored.
+assert nvfatbin.count("read_file(images[i].file") == 1, nvfatbin.count("read_file(images[i].file")
+assert "cnfatbin_sha256_hex(inputs[i].data, inputs[i].size" in cnfatbin
+assert "memcpy(out + members[i].image_offset, inputs[i].data" in cnfatbin
+PY
+expect_rc "fatbinary reads each image once and hashes the bytes it stores" $? 0
 "$SDK/bin/ptxas" --version --json >"$W/ptxas-alias-version.json"
 "$SDK/bin/fatbinary" --version --json >"$W/fatbinary-alias-version.json"
 python3 -I - "$W/direct-ptxas.trace" "$W/direct-fatbin.trace" \
@@ -1178,7 +1223,7 @@ rc=$?
 expect_rc "ptxas accepts valid UTF-8 input and output paths" $? 0
 utf8_elf=$W/imagé.o
 utf8_fatbin=$W/fatbin-é.fatbin
-cp "$W/direct.elf" "$utf8_elf"
+cp "$W/direct.o" "$utf8_elf"
 CUDA_NATIVE_TRACE="$W/utf8-fatbin.trace" "$SDK/bin/fatbinary" -64 \
     --create "$utf8_fatbin" --image3=kind=elf,sm=120,file="$utf8_elf" \
     >"$W/utf8-fatbin.out" 2>"$W/utf8-fatbin.err"
@@ -1218,12 +1263,13 @@ rc=$?
     [ ! -s "$W/invalid-fatbin.trace" ] && grep -q 'invalid UTF-8' "$W/invalid-fatbin.err"
 expect_rc "fatbinary refuses malformed UTF-8 without emitting output or a trace" $? 0
 
-printf 'X' >"$W/-sabc"
+printf 'CUDA-NATIVE-STUB-CUBIN 1\narch=sm_120\n---\n' >"$W/-sabc"
 (cd "$W" && "$SDK/bin/fatbinary" -64 --create dash.fatbin \
     --image3=kind=elf,sm=120,file=-sabc) >"$W/dash-image.out" 2>"$W/dash-image.err"
 rc=$?
 dash_sha=$(cd "$W" && /sbin/sha256 -q -- ./-sabc)
-dash_recorded=$(sed -n '2s/.* sha256=//p' "$W/dash.fatbin" 2>/dev/null)
+dash_recorded=$("$SDK/bin/cuda-objdump" --json "$W/dash.fatbin" 2>/dev/null |
+    python3 -I -c 'import json, sys; print(json.load(sys.stdin)["members"][0]["sha256"])')
 [ $rc -eq 0 ] && [ "$dash_recorded" = "$dash_sha" ]
 expect_rc "fatbinary hashes a dash-prefixed image as a file, not a sha256 option" $? 0
 
@@ -1271,11 +1317,12 @@ expect_rc "after -- every argument is positional and a second input is refused" 
 
 # An option added only to the validator must not leave a second parser spinning.
 cp -R "$CN" "$W/cn-parse-once"
-sed -i '' 's/-64 | -g)/-64 | -g | -v)/' "$W/cn-parse-once/tools/nvfatbin.sh"
+sed -i '' 's/strcmp(arg, "-64") == 0 || strcmp(arg, "-g") == 0/strcmp(arg, "-64") == 0 || strcmp(arg, "-g") == 0 || strcmp(arg, "-v") == 0/' \
+    "$W/cn-parse-once/fatbin/nvfatbin.c"
 sh "$W/cn-parse-once/mksdk.sh" "$W/sdk-parse-once" >"$W/parse-once-mksdk.log" 2>&1
 build_rc=$?
 timeout 5 "$W/sdk-parse-once/bin/fatbinary" -64 -v --create "$W/parse-once.fatbin" \
-    --image3=kind=elf,sm=120,file="$W/direct.elf" \
+    --image3=kind=elf,sm=120,file="$W/direct.o" \
     >"$W/parse-once.out" 2>"$W/parse-once.err"
 rc=$?
 [ $build_rc -eq 0 ] && [ $rc -eq 0 ] && [ -s "$W/parse-once.fatbin" ]
@@ -1287,8 +1334,12 @@ rc=$?
 expect_rc "ptxas rejects an unsupported option with rc 2 and its diagnostic" $? 0
 "$SDK/bin/fatbinary" --unsupported >"$W/fatbin-refuse.out" 2>"$W/fatbin-refuse.err"
 rc=$?
-[ $rc -eq 2 ] && grep -Fqx 'nvfatbin: unsupported option --unsupported; not supported by the cuda-native stub; see nvfatbin(1); use -h for usage' "$W/fatbin-refuse.err"
+[ $rc -eq 2 ] && grep -Fqx 'fatbinary: unsupported option --unsupported; not supported by the cuda-native stub; see nvfatbin(1); use -h for usage' "$W/fatbin-refuse.err"
 expect_rc "fatbinary rejects an unsupported option with rc 2 and its diagnostic" $? 0
+"$SDK/bin/nvfatbin" --unsupported >"$W/nvfatbin-refuse.out" 2>"$W/nvfatbin-refuse.err"
+rc=$?
+[ $rc -eq 2 ] && grep -Fqx 'nvfatbin: unsupported option --unsupported; not supported by the cuda-native stub; see nvfatbin(1); use -h for usage' "$W/nvfatbin-refuse.err"
+expect_rc "nvfatbin names itself in its diagnostics" $? 0
 (
 	CUDA_NATIVE_TOOL=x
 	. "$CN/tools/cuda-native-tool-lib.sh"
@@ -1308,7 +1359,7 @@ expect_rc "ptxas reports a second input as an unexpected argument" $? 0
 "$SDK/bin/fatbinary" -64 --create "$W/stray.fatbin" stray.o \
     --image3=kind=elf,sm=120,file="$W/direct.elf" >"$W/stray.out" 2>"$W/stray.err"
 rc=$?
-[ $rc -eq 2 ] && grep -Fqx 'nvfatbin: unexpected argument stray.o; images are given with --image3=' \
+[ $rc -eq 2 ] && grep -Fqx 'fatbinary: unexpected argument stray.o; images are given with --image3=' \
     "$W/stray.err" && [ ! -e "$W/stray.fatbin" ]
 expect_rc "fatbinary reports a stray operand as an unexpected argument" $? 0
 grep -Fq 'real assembler is Track #2427' "$CN/man/nvptxas.1"
@@ -1460,7 +1511,8 @@ main(int argc, char **argv)
 }
 EOF
 "$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/libcudart-stub" \
-    "$W/trace_setid.c" -o "$W/trace_setid" >"$W/trace-setid-build.log" 2>&1 &&
+    "$W/trace_setid.c" "$CN/fatbin/cnfatbin.c" -lmd \
+    -o "$W/trace_setid" >"$W/trace-setid-build.log" 2>&1 &&
     "$W/trace_setid" "$W/setid-must-not-exist.jsonl" \
     >"$W/trace-setid.out" 2>"$W/trace-setid.err"
 rc=$?
@@ -1473,6 +1525,7 @@ cat >"$W/register_oom.c" <<'EOF'
 /* Copyright (c) 2026 REVYTECH, Inc. */
 /* SPDX-License-Identifier: BSD-2-Clause */
 #include <stdlib.h>
+#include <string.h>
 static void *
 fake_calloc(size_t count, size_t size)
 {
@@ -1485,16 +1538,32 @@ fake_calloc(size_t count, size_t size)
 int
 main(void)
 {
-	static const char good[] = "CUDA-NATIVE-STUB-FATBIN 1\n---\n";
+	static const char ptx[] = ".target sm_120\n";
+	struct cnfatbin_input input;
 	struct cuda_native_fatbin_wrapper wrapper = {
-		CUDA_NATIVE_FATBIN_WRAPPER_MAGIC, 1, good, NULL
+		CUDA_NATIVE_FATBIN_WRAPPER_MAGIC, 1, NULL, NULL
 	};
+	uint8_t *buffer = NULL;
+	size_t size = 0;
 
+	memset(&input, 0, sizeof(input));
+	input.kind = CNFATBIN_KIND_PTX;
+	input.sm = 120;
+	input.data = (const uint8_t *)ptx;
+	input.size = sizeof(ptx) - 1;
+	if (cnfatbin_write(&input, 1, &buffer, &size) != CNFATBIN_OK)
+		return 1;
+	wrapper.data = buffer;
+#if defined(CNFATBIN_HAVE_MAPPING_HOOK)
+	if (cnfatbin_register_mapping(buffer, size) != 0)
+		return 1;
+#endif
 	return __cudaRegisterFatBinary(&wrapper) == NULL ? 0 : 1;
 }
 EOF
 "$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/libcudart-stub" \
-    "$W/register_oom.c" -o "$W/register_oom" >"$W/register-oom-build.log" 2>&1 &&
+    "$W/register_oom.c" "$CN/fatbin/cnfatbin.c" -lmd \
+    -o "$W/register_oom" >"$W/register-oom-build.log" 2>&1 &&
     "$W/register_oom" >"$W/register-oom.out" 2>"$W/register-oom.err"
 rc=$?
 [ $rc -eq 0 ] && [ ! -s "$W/register-oom.out" ] &&
@@ -1535,14 +1604,19 @@ for sym in cudaLaunchKernel __cudaPushCallConfiguration __cudaPopCallConfigurati
 done
 expect_rc "libcudart exports every launch and registration symbol clang emits" $rc 0
 
-PATH="$SDK/bin:$PATH" CUDA_NATIVE_TRACE="$W/registered.trace" \
-    "$CXX" -O0 -g0 -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 \
-    -S -emit-llvm "$K/vector_add.cu" -o "$W/registered.ll" >"$W/registered.log" 2>&1
+# clang's device image for an -emit-llvm compile is an LLVM IR file, and
+# only our own cubins are bundled, so the compile fails.  The real
+# fatbinary runs here: a stub would hide the limitation the manual
+# documents.
+"$CXX" -O0 -g0 -x cuda --cuda-path="$SDK" --cuda-gpu-arch=sm_120 \
+    -S -emit-llvm "$K/vector_add.cu" -o "$W/registered.ll" \
+    >"$W/registered.log" 2>&1
 rc=$?
-[ $rc -eq 0 ] && grep -q '__cuda_fatbin_wrapper.*i32 1180844977, i32 1' "$W/registered.ll" &&
-    grep -q 'call ptr @__cudaRegisterFatBinary' "$W/registered.ll" &&
-    grep -q 'call i32 @__cudaRegisterFunction' "$W/registered.ll"
-expect_rc "generated IR carries clang's fatbin wrapper and registration calls" $? 0
+[ $rc -ne 0 ] && [ ! -e "$W/registered.ll" ] &&
+    grep -q 'not a cuda-native cubin' "$W/registered.log" &&
+    grep -q 'fatbinary command failed' "$W/registered.log"
+expect_rc "the -emit-llvm compile is refused with the named message" $? 0
+sed -n 1,3p "$W/registered.log"
 
 # Pin the call graph behind the manual: main calls push then the generated
 # device stub; that stub pops the configuration before calling the runtime.
@@ -1578,10 +1652,12 @@ cat >"$W/bad_fatbin.c" <<'EOF'
 /* Copyright (c) 2026 REVYTECH, Inc. */
 /* SPDX-License-Identifier: BSD-2-Clause */
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "cnfatbin.h"
 struct wrapper {
 	int magic;
 	int version;
@@ -1592,134 +1668,281 @@ extern void **__cudaRegisterFatBinary(void *);
 extern int __cudaRegisterFunction(void **, const void *, const char *, const char *, int, void *, void *, void *, void *, void *);
 extern void __cudaRegisterFatBinaryEnd(void **);
 extern void __cudaUnregisterFatBinary(void **);
-static char *
-member_header(size_t members)
+static void
+put_le16(uint8_t *p, uint16_t value)
 {
-	static const char magic[] = "CUDA-NATIVE-STUB-FATBIN 1\n";
-	static const char member[] = "member kind=elf sm=120 size=1 sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
-	size_t magic_len = strlen(magic), member_len = strlen(member);
-	size_t size = magic_len + members * member_len + 4, i;
-	char *data, *p;
+	int i;
 
-	data = malloc(size + 1);
-	if (data == NULL)
-		return NULL;
-	memcpy(data, magic, magic_len);
-	p = data + magic_len;
-	/* Time: O(members).  Space: O(1) beyond the allocated header. */
-	for (i = 0; i < members; i++) {
-		memcpy(p, member, member_len);
-		p += member_len;
-	}
-	memcpy(p, "---\n", 4);
-	p[4] = '\0';
-	return data;
+	for (i = 0; i < 2; i++)
+		p[i] = (uint8_t)((value >> (8 * i)) & 0xff);
 }
-static char *
-long_member_header(void)
+static void
+put_le32(uint8_t *p, uint32_t value)
 {
-	static const char magic[] = "CUDA-NATIVE-STUB-FATBIN 1\n";
-	static const char prefix[] = "member kind=elf sm=120 size=";
-	static const char suffix[] = " sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
-	size_t digits = 70000;
-	size_t size = strlen(magic) + strlen(prefix) + digits + strlen(suffix) + 4;
-	char *data = malloc(size + 1), *p;
+	int i;
 
-	if (data == NULL)
-		return NULL;
-	p = data;
-	memcpy(p, magic, strlen(magic));
-	p += strlen(magic);
-	memcpy(p, prefix, strlen(prefix));
-	p += strlen(prefix);
-	memset(p, '0', digits);
-	p += digits;
-	memcpy(p, suffix, strlen(suffix));
-	p += strlen(suffix);
-	memcpy(p, "---\n", 4);
-	p += 4;
-	*p = '\0';
-	return data;
+	for (i = 0; i < 4; i++)
+		p[i] = (uint8_t)((value >> (8 * i)) & 0xff);
 }
-static const char *
-unterminated_header(void)
+static void
+put_le64(uint8_t *p, uint64_t value)
 {
-	static const char text[] = "CUDA-NATIVE-STUB-FATBIN 1\nmember kind=elf";
-	long page_arg = sysconf(_SC_PAGESIZE);
-	size_t page, length = sizeof(text);
-	char *mapping, *data;
+	int i;
 
-	if (page_arg <= 0)
+	for (i = 0; i < 8; i++)
+		p[i] = (uint8_t)((value >> (8 * i)) & 0xff);
+}
+/* One container with one PTX member, written by the writer the runtime uses. */
+static uint8_t *
+good_container(size_t *size)
+{
+	static const char ptx[] = ".target sm_120\n";
+	struct cnfatbin_input input;
+	uint8_t *buffer = NULL;
+
+	memset(&input, 0, sizeof(input));
+	input.kind = CNFATBIN_KIND_PTX;
+	input.sm = 120;
+	input.data = (const uint8_t *)ptx;
+	input.size = sizeof(ptx) - 1;
+	if (cnfatbin_write(&input, 1, &buffer, size) != CNFATBIN_OK)
 		return NULL;
-	page = (size_t)page_arg;
-	if (length > page)
-		return NULL;
-	mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
+	return buffer;
+}
+/* The size of a page, or zero when the host will not say. */
+static size_t
+page_size(void)
+{
+	long value = sysconf(_SC_PAGESIZE);
+
+	return value > 0 ? (size_t)value : 0;
+}
+/*
+ * Two pages, the second one protected, so that a read past the first page
+ * faults.  A container of "size" bytes goes at the end of the first page:
+ * it ends exactly at the boundary between the pages.
+ */
+static char *
+guarded_mapping(size_t page, size_t size, const void **data)
+{
+	char *mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
 	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (mapping == MAP_FAILED || mprotect(mapping + page, page, PROT_NONE) != 0)
+
+	if (mapping == MAP_FAILED)
 		return NULL;
-	data = mapping + page - length;
-	memcpy(data, text, length);
-	return data;
+	if (mprotect(mapping + page, page, PROT_NONE) != 0) {
+		munmap(mapping, page * 2);
+		return NULL;
+	}
+	*data = mapping + page - size;
+	return mapping;
 }
+/*
+ * Tell the reader where the mapping ends, so that it can bound the reads it
+ * makes there.  A container in a mapping of a program's own is in no loaded
+ * object, so without this the reader cannot know how far it may read.
+ */
+static int
+register_mapping(void *base, size_t length)
+{
+#if defined(CNFATBIN_HAVE_MAPPING_HOOK)
+	return cnfatbin_register_mapping(base, length);
+#else
+	(void)base;
+	(void)length;
+	return 0;
+#endif
+}
+/* A complete container that ends at a protected page boundary. */
 static const char *
 guard_page_fatbin(void)
 {
-	static const char text[] =
-	    "CUDA-NATIVE-STUB-FATBIN 1\n"
-	    "member kind=ptx sm=120 size=3 sha256="
-	    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
-	    "---\n"
-	    "PTX";
-	long page_arg = sysconf(_SC_PAGESIZE);
-	size_t page, length = sizeof(text) - 1;
-	char *mapping, *data;
+	size_t size = 0;
+	uint8_t *container = good_container(&size);
+	size_t page = page_size();
+	const void *data;
+	char *mapping;
 
-	if (page_arg <= 0)
+	if (container == NULL || page == 0)
 		return NULL;
-	page = (size_t)page_arg;
-	if (length > page)
+	if (size > page)
 		return NULL;
-	mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
+	mapping = guarded_mapping(page, size, &data);
+	if (mapping == NULL)
+		return NULL;
+	memcpy((void *)data, container, size);
+	free(container);
+	if (register_mapping(mapping, page) != 0)
+		return NULL;
+	return data;
+}
+/*
+ * A container header that lies about its length: it claims a megabyte over
+ * a hundred bytes that end at a protected page.  A reader that trusts the
+ * header reads the string table past the page; a reader that bounds its
+ * reads refuses the container.
+ */
+static const char *
+lying_header_fatbin(size_t page)
+{
+	uint8_t header[100];
+	uint8_t *entry;
+	const void *data;
+	char *mapping;
+
+	mapping = guarded_mapping(page, sizeof(header), &data);
+	if (mapping == NULL)
+		return NULL;
+	memset(header, 0, sizeof(header));
+	header[0] = 0x10;
+	header[1] = 0xff;
+	header[2] = 0x10;
+	header[3] = 0xad;
+	put_le32(header + 4, 2);		/* the version */
+	put_le64(header + 8, 1024 * 1024);	/* the length it claims */
+	put_le64(header + 16, 32);		/* the entries table */
+	put_le64(header + 24, 1);		/* one entry */
+	entry = header + 32;
+	put_le16(entry, 5);			/* a PTX image */
+	put_le16(entry + 2, 2);		/* a CUDA member */
+	put_le64(entry + 8, 1024 * 1024 - 24);	/* the string table */
+	put_le64(entry + 16, 1);		/* one string */
+	put_le64(entry + 24, 0);		/* no image */
+	put_le64(entry + 32, 0);
+	memcpy((void *)data, header, sizeof(header));
+	if (register_mapping(mapping, page) != 0)
+		return NULL;
+	return data;
+}
+/*
+ * A header that ends at a protected page and claims sixteen megabytes with
+ * one entry: the entry table is the first byte of the protected page.
+ */
+static const char *
+page_header_fatbin(size_t page)
+{
+	uint8_t header[32];
+	const void *data;
+	char *mapping;
+
+	mapping = guarded_mapping(page, sizeof(header), &data);
+	if (mapping == NULL)
+		return NULL;
+	memset(header, 0, sizeof(header));
+	header[0] = 0x10;
+	header[1] = 0xff;
+	header[2] = 0x10;
+	header[3] = 0xad;
+	put_le32(header + 4, 2);
+	put_le64(header + 8, 16 * 1024 * 1024);
+	put_le64(header + 16, 32);
+	put_le64(header + 24, 1);
+	memcpy((void *)data, header, sizeof(header));
+	if (register_mapping(mapping, page) != 0)
+		return NULL;
+	return data;
+}
+/*
+ * A container in a mapping of the program's own that the program never
+ * registered: the pointer is in no loaded object, so the reader has no
+ * bound for it and must refuse it rather than read it.
+ */
+static const char *
+unregistered_fatbin(void)
+{
+	size_t size = 0;
+	uint8_t *container = good_container(&size);
+	size_t page = page_size();
+	char *mapping;
+
+	if (container == NULL || page == 0 || size > page) {
+		free(container);
+		return NULL;
+	}
+	mapping = mmap(NULL, page, PROT_READ | PROT_WRITE,
 	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (mapping == MAP_FAILED || mprotect(mapping + page, page, PROT_NONE) != 0)
+	if (mapping == MAP_FAILED) {
+		free(container);
 		return NULL;
-	data = mapping + page - length;
-	memcpy(data, text, length);
+	}
+	memcpy(mapping, container, size);
+	free(container);
+	return mapping;
+}
+/*
+ * Eight bytes before a protected page: not even a whole header fits there,
+ * and the length in the header is not there to be read either.
+ */
+static const char *
+short_mapping_fatbin(size_t page)
+{
+	uint8_t header[8];
+	const void *data;
+	char *mapping;
+
+	mapping = guarded_mapping(page, sizeof(header), &data);
+	if (mapping == NULL)
+		return NULL;
+	memset(header, 0, sizeof(header));
+	header[0] = 0x10;
+	header[1] = 0xff;
+	header[2] = 0x10;
+	header[3] = 0xad;
+	memcpy((void *)data, header, sizeof(header));
+	if (register_mapping(mapping, page) != 0)
+		return NULL;
 	return data;
 }
 int
 main(int argc, char **argv)
 {
-	static const char good[] = "CUDA-NATIVE-STUB-FATBIN 1\n---\n";
-	static const char corrupt[] = "XUDA-NATIVE-STUB-FATBIN 1\n---\n";
-	static const char bad_header[] = "CUDA-NATIVE-STUB-FATBIN 1\nbogus\n---\n";
-	static const char bad_member[] = "CUDA-NATIVE-STUB-FATBIN 1\nmember kind=\n---\n";
-	struct wrapper wrapper = { 0x466243b1, 1, good, NULL };
-	char *allocated = NULL;
+	struct wrapper wrapper = { 0x466243b1, 1, NULL, NULL };
+	uint8_t *container = NULL;
+	size_t size = 0;
 	void **handle;
 
 	if (argc != 2)
 		return 2;
-	if (strcmp(argv[1], "bad-magic") == 0)
-		wrapper.magic = 0;
-	else if (strcmp(argv[1], "bad-data") == 0)
-		wrapper.data = corrupt;
-	else if (strcmp(argv[1], "bad-header") == 0)
-		wrapper.data = bad_header;
-	else if (strcmp(argv[1], "bad-member") == 0)
-		wrapper.data = bad_member;
-	else if (strcmp(argv[1], "null-data") == 0)
+	if (strcmp(argv[1], "null-data") == 0)
 		wrapper.data = NULL;
-	else if (strcmp(argv[1], "too-many-members") == 0)
-		wrapper.data = allocated = member_header(65);
-	else if (strcmp(argv[1], "oversized-header") == 0)
-		wrapper.data = allocated = long_member_header();
-	else if (strcmp(argv[1], "unterminated-header") == 0)
-		wrapper.data = unterminated_header();
 	else if (strcmp(argv[1], "guard-page") == 0)
 		wrapper.data = guard_page_fatbin();
-	else
+	else if (strcmp(argv[1], "lying-header") == 0)
+		wrapper.data = lying_header_fatbin(page_size());
+	else if (strcmp(argv[1], "page-header") == 0)
+		wrapper.data = page_header_fatbin(page_size());
+	else if (strcmp(argv[1], "short-mapping") == 0)
+		wrapper.data = short_mapping_fatbin(page_size());
+	else if (strcmp(argv[1], "unregistered") == 0)
+		wrapper.data = unregistered_fatbin();
+	else if (strcmp(argv[1], "bad-magic") == 0 ||
+	    strcmp(argv[1], "bad-data") == 0 ||
+	    strcmp(argv[1], "bad-header") == 0 ||
+	    strcmp(argv[1], "bad-member") == 0 ||
+	    strcmp(argv[1], "too-many-members") == 0 ||
+	    strcmp(argv[1], "oversized-header") == 0 ||
+	    strcmp(argv[1], "short-size") == 0) {
+		container = good_container(&size);
+		if (container == NULL)
+			return 2;
+		if (strcmp(argv[1], "bad-magic") == 0)
+			wrapper.magic = 0;
+		else if (strcmp(argv[1], "bad-data") == 0)
+			container[1] ^= 0xff;
+		else if (strcmp(argv[1], "bad-header") == 0)
+			put_le32(container + 4, 3);
+		else if (strcmp(argv[1], "bad-member") == 0)
+			container[32] = 1;
+		else if (strcmp(argv[1], "too-many-members") == 0)
+			put_le64(container + 24, 5000);
+		else if (strcmp(argv[1], "oversized-header") == 0)
+			put_le64(container + 8, UINT64_C(1) << 40);
+		else
+			put_le64(container + 8, 0);
+		wrapper.data = container;
+		if (register_mapping(container, size) != 0)
+			return 2;
+	} else
 		return 2;
 	if (wrapper.data == NULL && strcmp(argv[1], "null-data") != 0)
 		return 2;
@@ -1735,25 +1958,34 @@ main(int argc, char **argv)
 		    NULL, NULL, NULL, NULL, NULL);
 		__cudaRegisterFatBinaryEnd(NULL);
 		__cudaUnregisterFatBinary(NULL);
-		free(allocated);
+		free(container);
 		return refused != 0 ? 0 : 1;
 	}
-	free(allocated);
+	free(container);
 	return handle == NULL ? 0 : 1;
 }
 EOF
-"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror "$W/bad_fatbin.c" \
+"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/fatbin" \
+    "$W/bad_fatbin.c" \
     -L"$SDK/lib64" -Wl,-rpath,"$SDK/lib64" -lcudart -o "$W/bad_fatbin" \
     >"$W/bad-fatbin-build.out" 2>&1
 expect_rc "the bad-fatbin refusal fixture links against libcudart-stub" $? 0
 # Time: O(number of bad wrapper cases).  Space: O(one diagnostic).
-for case_name in bad-magic bad-data bad-header bad-member null-data too-many-members oversized-header unterminated-header; do
+for case_name in bad-magic bad-data bad-header bad-member null-data too-many-members oversized-header short-size lying-header page-header short-mapping unregistered; do
 	expected_reason=
 	case $case_name in
-	too-many-members) expected_reason='too many members in cuda-native fatbin' ;;
-	oversized-header) expected_reason='cuda-native fatbin header exceeds 64 KiB' ;;
+	bad-data) expected_reason='invalid cuda-native fatbin data magic' ;;
+	bad-header) expected_reason='unknown container version' ;;
+	bad-member) expected_reason='a member has an image kind other than PTX, cubin or none' ;;
+	too-many-members) expected_reason='too many entries in the container' ;;
+	oversized-header) expected_reason='cuda-native fatbin is larger than the limit' ;;
+	short-size) expected_reason='cuda-native fatbin is shorter than its header' ;;
+	lying-header) expected_reason='container size is larger than the input' ;;
+	page-header) expected_reason='container size is larger than the input' ;;
+	short-mapping) expected_reason='cuda-native fatbin is shorter than its header' ;;
+	unregistered) expected_reason='cuda-native fatbin data is not inside a loaded object' ;;
 	esac
-	"$W/bad_fatbin" "$case_name" >"$W/$case_name.out" 2>"$W/$case_name.err"
+	(ulimit -c 0; "$W/bad_fatbin" "$case_name") >"$W/$case_name.out" 2>"$W/$case_name.err"
 	rc=$?
 	[ $rc -eq 0 ] && [ ! -s "$W/$case_name.out" ] &&
 	    [ "$(wc -l <"$W/$case_name.err")" -eq 1 ] &&
@@ -1775,28 +2007,62 @@ rc=$?
 [ $rc -eq 0 ] && [ ! -s "$W/guard-page.out" ] && [ ! -s "$W/guard-page.err" ]
 expect_rc "a valid fatbin ending at a guard page registers without an overread" $? 0
 
-# An unrecognised parser result must be refused, not treated as success.  Change
-# the too-many-members result without changing its call site; the old default
-# branch accepts it, while an explicit success case rejects it as malformed.
+# The bound is what keeps the stub from reading past the bytes the pointer
+# names.  A stub that takes the length in the header for a bound reads the
+# string table of the lying header out of the protected page and dies on the
+# signal; the stub with the bound refuses it and lives.  Without this the
+# guard-page case above would pass on a stub that reads out of bounds.
+cp -R "$CN" "$W/cn-unbounded"
+sed -i '' 's/bound = cnfatbin_bound(data);/bound = CNFATBIN_MAX_SIZE;/' \
+    "$W/cn-unbounded/libcudart-stub/cudart_stub.c"
+"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$W/cn-unbounded/fatbin" \
+    -I"$W/cn-unbounded/libcudart-stub" "$W/bad_fatbin.c" \
+    "$W/cn-unbounded/libcudart-stub/cudart_stub.c" \
+    "$W/cn-unbounded/fatbin/cnfatbin.c" -lmd \
+    -o "$W/bad_fatbin-unbounded" >"$W/unbounded-build.log" 2>&1
+unbounded_build=$?
+unbounded_rc=99
+if [ $unbounded_build -eq 0 ]; then
+	(ulimit -c 0; "$W/bad_fatbin-unbounded" lying-header) \
+	    >"$W/unbounded.out" 2>"$W/unbounded.err"
+	unbounded_rc=$?
+fi
+# The unbounded stub reads past the mapping and dies on the signal; it never
+# reaches the refusal.  A bound that is only advisory is not a bound.
+[ $unbounded_build -eq 0 ] && [ $unbounded_rc -ge 128 ]
+expect_rc "mutant: a stub that trusts the header length reads out of bounds and dies" $? 0
+
+# The stub must find the bound in the loaded object that holds the pointer,
+# not in the container's own header.  A stub that reads the bound out of the
+# header accepts the lying header; the real one refuses it.
+grep -q 'bound = cnfatbin_bound(data);' "$CN/libcudart-stub/cudart_stub.c" &&
+    ! grep -q 'bound = cnfatbin_bound(data);' \
+        "$W/cn-unbounded/libcudart-stub/cudart_stub.c"
+expect_rc "the stub takes its bound from the object, not from the header" $? 0
+
+# A reader that accepts a container it must refuse must be caught.  Change the
+# reader's own limit check without changing its call site: the old default
+# branch accepts it, while the reader refuses it.
 cp -R "$CN" "$W/cn-extra-header-error"
 awk '
-/if \(count >= CUDA_NATIVE_FATBIN_MEMBER_LIMIT\)/ {
+/if \(entries_count > CNFATBIN_MAX_ENTRIES\)/ {
 	print
 	getline
-	sub(/return .*;/, "return -4;")
+	sub(/return .*;/, "return CNFATBIN_OK;")
 	print
 	next
 }
 { print }
-' "$W/cn-extra-header-error/libcudart-stub/cudart_stub.c" \
-    >"$W/cn-extra-header-error/cudart_stub.c.new" &&
-    mv "$W/cn-extra-header-error/cudart_stub.c.new" \
-    "$W/cn-extra-header-error/libcudart-stub/cudart_stub.c"
+' "$W/cn-extra-header-error/fatbin/cnfatbin.c" \
+    >"$W/cn-extra-header-error/cnfatbin.c.new" &&
+    mv "$W/cn-extra-header-error/cnfatbin.c.new" \
+    "$W/cn-extra-header-error/fatbin/cnfatbin.c"
 sh "$W/cn-extra-header-error/mksdk.sh" "$W/sdk-extra-header-error" \
     >"$W/extra-header-error-mksdk.log" 2>&1
 build_rc=$?
 if [ $build_rc -eq 0 ]; then
-	"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror "$W/bad_fatbin.c" \
+	"$LLVM/bin/clang" -std=c11 -Wall -Wextra -Werror -I"$CN/fatbin" \
+	    "$W/bad_fatbin.c" \
 	    -L"$W/sdk-extra-header-error/lib64" \
 	    -Wl,-rpath,"$W/sdk-extra-header-error/lib64" -lcudart \
 	    -o "$W/bad_fatbin-extra-error" >"$W/extra-header-error-build.log" 2>&1
@@ -1809,16 +2075,15 @@ if [ $build_rc -eq 0 ]; then
 else
 	rc=99
 fi
-[ $build_rc -eq 0 ] && [ $rc -eq 0 ] &&
-    [ "$(wc -l <"$W/extra-header-error.err")" -eq 1 ] &&
-    grep -Fq 'malformed cuda-native fatbin header' "$W/extra-header-error.err"
-expect_rc "mutant: an additional fatbin parser error is refused as malformed" $? 0
+# The mutant accepts the container, so the case no longer refuses it.
+[ $build_rc -eq 0 ] && [ $rc -ne 0 ] && [ ! -s "$W/extra-header-error.err" ]
+expect_rc "mutant: a reader that accepts too many entries is caught" $? 0
 # The two limits have distinct reasons in the machine-readable refusal too.
 # Time: O(two traces).  Space: O(one trace).
 for case_name in too-many-members oversized-header; do
 	case $case_name in
-	too-many-members) expected_reason='too many members in cuda-native fatbin' ;;
-	oversized-header) expected_reason='cuda-native fatbin header exceeds 64 KiB' ;;
+	too-many-members) expected_reason='too many entries in the container' ;;
+	oversized-header) expected_reason='cuda-native fatbin is larger than the limit' ;;
 	esac
 	CUDA_NATIVE_STUB_TRACE=1 "$W/bad_fatbin" "$case_name" \
 	    >"$W/$case_name-trace.out" 2>"$W/$case_name-trace.err"
@@ -1905,7 +2170,7 @@ expect_rc "mutant: changing the launch result to success is caught by the run te
 
 # All three new manual pages, including the runtime ABI caveats, stay clean.
 # Time: O(number of new man pages).  Space: O(lint output).
-for man in nvptxas.1 nvfatbin.1 libcudart-stub.3; do
+for man in nvptxas.1 nvfatbin.1 nvfatbin.5 cuda-objdump.1 libcudart-stub.3; do
 	mandoc -T lint -W warning "$CN/man/$man" >"$W/$man.mandoc" 2>&1
 	rc=$?
 	[ $rc -eq 0 ] && [ ! -s "$W/$man.mandoc" ]

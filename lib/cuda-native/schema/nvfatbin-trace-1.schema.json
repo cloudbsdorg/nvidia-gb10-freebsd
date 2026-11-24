@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:cloudbsd:cuda-native:schema:nvfatbin-trace/1",
   "title": "cuda-native nvfatbin stub trace, schema 1",
-  "description": "One JSON object per successful nvfatbin stub invocation, including invocation through the fatbinary alias. The images array preserves clang's member order and labels; no vendor fatbinary compatibility is claimed. The schema field is the record format; the release version is reported separately by --version.",
+  "description": "One JSON object per successful nvfatbin stub invocation, including invocation through the fatbinary alias. The images array preserves clang's member order and labels; no vendor fatbinary compatibility is claimed. The arch field names the architecture of the image, with its suffix; it is not required, so a record that does not carry it is still valid. The schema field is the record format; the release version is reported separately by --version.",
   "type": "object",
   "additionalProperties": false,
   "required": ["tool", "schema", "output", "images", "stub"],
@@ -25,6 +25,7 @@
       "properties": {
         "kind": { "enum": ["elf", "ptx"] },
         "sm": { "type": "integer", "minimum": 0 },
+        "arch": { "type": "string" },
         "file": { "type": "string" }
       }
     }
