@@ -385,7 +385,144 @@
  }
  
  void NV_API_CALL os_flush_cpu_write_combine_buffer(void)
-@@ -1003,6 +1290,7 @@
+@@ -732,23 +1019,59 @@
+-void* NV_API_CALL os_alloc_rwlock(void)
+-{
+-    struct sx *sx = NULL;
+-
+-    NV_STATUS rmStatus = os_alloc_mem((void *)&sx, sizeof(struct sx));
+-    if (rmStatus != NV_OK)
+-    {
+-        nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate rwlock!\n");
+-        return NULL;
+-    }
+-
+-    sx_init(sx, "os.rwlock_sx");
+-    return sx;
+-}
+-
+-void NV_API_CALL os_free_rwlock(void *pRwLock)
+-{
+-    struct sx *sx = (struct sx *)pRwLock;
+-    if (sx != NULL) {
+-        sx_destroy(sx);
+-        os_free_mem(sx);
+-    }
+-}
++/*
++ * WITNESS keys locks by *name*, not address.  Every rwlock the RM allocates
++ * was named "os.rwlock_sx", so the second sx_xlock() taken while the first is
++ * still held trips WITNESS's "acquiring duplicate lock of same type" check and
++ * fails SysCap object construction (NVRM 0x56, seen on the arm64 WITNESS boot
++ * path).  Give each rwlock a unique, stable name by embedding the name buffer
++ * next to the lock and suffixing a per-instance id, mirroring Linux's
++ * CONFIG_LOCKDEP per-instance lock_class_key.
++ */
++struct os_rwlock {
++    struct sx sx;
++    char     name[32];
++};
++
++static NvU32 nv_rwlock_next_id = 0;
++
++void* NV_API_CALL os_alloc_rwlock(void)
++{
++    struct os_rwlock *rwl = NULL;
++    NvU32 id;
++
++    NV_STATUS rmStatus = os_alloc_mem((void *)&rwl, sizeof(struct os_rwlock));
++    if (rmStatus != NV_OK)
++    {
++        nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate rwlock!\n");
++        return NULL;
++    }
++
++    id = atomic_fetchadd_32(&nv_rwlock_next_id, 1);
++    snprintf(rwl->name, sizeof(rwl->name), "os.rwlock_sx.%u", id);
++    /*
++     * The RM rwlock is a Linux rw_semaphore: readers may be re-acquired
++     * recursively and a writer may upgrade, which a plain (non-reentrant)
++     * sx forbids - the second acquisition of the *same* rwlock then trips
++     * WITNESS's recursion check ("acquiring duplicate lock of same type")
++     * and fails SysCap object construction (NVRM 0x56).  Mark it
++     * recursive, exactly as os_alloc_mutex() does the RM mutex with
++     * SX_RECURSE at the os.lock_sx site above.
++     */
++    sx_init_flags(&rwl->sx, rwl->name, SX_RECURSE);
++
++    return &rwl->sx;
++}
++
++void NV_API_CALL os_free_rwlock(void *pRwLock)
++{
++    struct os_rwlock *rwl;
++
++    if (pRwLock == NULL)
++        return;
++
++    /*
++     * The sx handle is the first member of struct os_rwlock, so the
++     * container-of is the identity cast.
++     */
++    rwl = (struct os_rwlock *)pRwLock;
++    sx_destroy(&rwl->sx);
++    os_free_mem(rwl);
++}
+@@ -842,30 +1165,48 @@
+ void NV_API_CALL os_enable_console_access(void)
+ {
+ }
+ 
++/*
++ * WITNESS keys spin locks by *name*, not address, and the RM re-acquires this
++ * lock within one critical section (tlsEntryGet -> gpumgrGetGpu at
++ * kgspInitRm_IMPL, the 0x56 backtrace).  The shared, non-recursive "os.lock_mtx"
++ * therefore tripped "acquiring duplicate lock of same type" and aborted RM
++ * bring-up.  Give each spin lock a unique name and mark it recursive, mirroring
++ * os_alloc_rwlock() above.
++ */
++struct os_spinlock {
++    struct mtx mtx;
++    char       name[32];
++};
++
++static NvU32 nv_spinlock_next_id = 0;
++
+ NV_STATUS NV_API_CALL os_alloc_spinlock(void **lock)
+ {
+     NV_STATUS status;
+-    struct mtx *mtx;
++    struct os_spinlock *osl;
++    NvU32 id;
+ 
+-    status = os_alloc_mem((void **)&mtx, sizeof(struct mtx));
++    status = os_alloc_mem((void **)&osl, sizeof(struct os_spinlock));
+     if (status != NV_OK)
+         return status;
+ 
+-    mtx_init(mtx, "os.lock_mtx", NULL, MTX_DEF);
++    id = atomic_fetchadd_32(&nv_spinlock_next_id, 1);
++    snprintf(osl->name, sizeof(osl->name), "os.lock_mtx.%u", id);
++    mtx_init(&osl->mtx, osl->name, NULL, MTX_DEF | MTX_RECURSE);
+ 
+-    *lock = (void *)mtx;
++    *lock = (void *)&osl->mtx;
+ 
+     return NV_OK;
+ }
+ 
+ void NV_API_CALL os_free_spinlock(void *lock)
+ {
+     struct mtx *mtx = lock;
+ 
+     if (mtx != NULL) {
+         mtx_assert(mtx, MA_OWNED);
+         mtx_destroy(mtx);
+-        os_free_mem(mtx);
++        os_free_mem((struct os_spinlock *)mtx);
+     }
+ }
+@@ -1003,6 +1317,7 @@
  {
      NvBool write = FLD_TEST_DRF(_LOCK_USER_PAGES, _FLAGS, _WRITE, _YES, flags);
      vm_page_t *user_pages = page_array;
@@ -393,7 +530,7 @@
      NvU32 i;
  
      for (i = 0; i < page_count; i++) {
-@@ -1016,12 +1304,20 @@
+@@ -1016,12 +1331,20 @@
  #endif
  
          if (write) {
@@ -414,4 +551,3 @@
           * we can unconditionally unwire the page since either way it is
           * wired.
           */
-         vm_page_unwire(user_pages[i], PQ_ACTIVE);
