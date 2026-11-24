@@ -61,7 +61,9 @@ NVIDIA's terms require the person installing the driver to accept its licence fi
 `ACCEPT_NVIDIA_LICENSE=1` records acceptance of that licence; `ACCEPT_ALL_LICENSES=1` accepts
 every licence encountered by the install. `YES=1` alone never accepts a licence. Without an
 accept setting, a terminal shows the licence and asks; acceptance is tied to the licence's
-sha256, so a changed licence must be accepted again.
+sha256, so a changed licence must be accepted again. The blocker names the licence it
+requires, by that name and hash, and the one the acceptance on record names: an acceptance
+of another licence text is never carried over to the one now required.
 
 Optional, for Linux binaries only (Steam, the Linux CUDA stack): after `make install` the two
 Linux providers load by module name. They pull in the Linuxulator; native use does not need them.
@@ -77,40 +79,55 @@ sysrc nvidia_linux_mode=AUTO     # rc.d/nvidia_linux loads the providers at boot
 
 ### Installed
 
-A successful install exits 0. Example output (from `scripts/make.sh`), an excerpt of a
-planted install:
+A successful install exits 0. Example output (from `scripts/make.sh`, an excerpt: a
+successful run also prints its prerequisite, build and copying progress):
 
 ```text
-install: done
+install: copying done
 install: installed
 ```
 
 A live install, without a DESTDIR, also lists its next steps, one command per line. Example
 output (from `scripts/make.sh`) for a user who has doas; yours names the root tool you have:
-`sudo`, `su root -c`, no prefix as root, or a note when you have no tool:
+`sudo`, `su root -c`, or no prefix as root. With no root tool at all the commands are
+printed bare, and the line above them says to ask an administrator to run them as root, or
+to open a root shell on the console and run them there.
 
 ```text
-to load the driver at boot instead of the first two next steps, run make configure YES=1 once
 next: doas kenv hw.nvidia.registry.EnableGpuFirmware=1
 next: doas kldload nvidia-drm
 next: kldstat
 next: nvrm-info --json
+To load the driver at boot instead of the firmware setting and the module load, run make configure YES=1 once.
 ```
+
+A staged install, with a DESTDIR, has no next steps: the files are only staged, so nothing
+was loaded and there is nothing to run on this system. Its summary only says where the files
+are. Do not run the load commands below on a staging system: they load a driver that system
+does not have.
 
 The summary lists every installed file and mode. Kernel modules go into `/boot/modules`;
 the devd and rc.d configuration, `nvrm-info`, libnvrm, headers, schema, manual pages and
-licences go under `/usr/local`. Load the driver now: first set the firmware setting as root
-(with doas or sudo, whichever you have), `kenv hw.nvidia.registry.EnableGpuFirmware=1`, then
-run the `kldload` line exactly as `install` printed it. The root tool in that line is the one
-you have, so copy that line. Or configure loading at boot with `make configure`, described
-below, which sets the same firmware value in `/boot/loader.conf`. Then check it without
-assuming a device number:
+licences go under `/usr/local`. For a live install, load the driver now: first set the
+firmware setting as root (with doas or sudo, whichever you have),
+`kenv hw.nvidia.registry.EnableGpuFirmware=1`, then run the `kldload` line exactly as
+`install` printed it. The root tool in that line is the one you have, so copy that line;
+with no root tool at all, ask an administrator to run those two lines as root, or open a
+root shell on the console and run them there. Or configure loading at boot with
+`make configure`, described
+below: it sets the same firmware value in `/boot/loader.conf` and makes the devd rule load
+`nvidia-drm` at boot, so it replaces the firmware setting and the module load above. Then
+check it without assuming a device number:
 
 ```sh
 kldstat
 dmesg | grep -i nvidia
 nvrm-info --json
 ```
+
+With a PREFIX of your own, the last line names the installed tool
+(`'/opt/gb10/sbin/nvrm-info' --json`), because it is not on your PATH. The path is quoted,
+so a prefix with a space in it is still one command.
 
 ### Blocked
 
@@ -121,16 +138,25 @@ acceptance produces this example output (from `scripts/make.sh`; BSD make's own 
 lines follow it):
 
 ```text
-blocked licence: NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it
-fix: make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question
+fix: make install ACCEPT_NVIDIA_LICENSE=1
 install: blocked
 ```
 
-Follow the `fix:` line for each blocker. For the licence, the line names the command you
-ran, so under `make install` it says `make install`, as above; `make preflight` shows the
-same check with `make install-prereqs` in its fix. For a missing kernel change, see
-[`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
-without installing.
+The blocker itself is one long line: it says that NVIDIA's terms ask the person installing
+the driver to read and accept the driver licence before install, that `YES=1` alone does not
+accept it, and the two other ways to accept it: accept every licence this install meets
+with `ACCEPT_ALL_LICENSES=1`, or run the same command on a terminal and answer the licence
+question. The `fix:` line above is that same command with the accept setting added.
+
+Follow the `fix:` line of the licence blocker: it is one command, ready to paste. The other
+blockers name their fix in words, because each of them has more than one way to be fixed.
+For the licence, the line names the command you ran, so under `make install` it says
+`make install`, as above,
+and it keeps the settings that change where the install goes, so a `DESTDIR` or a `PREFIX` you
+gave is in the line too. The other ways to accept the licence are in the blocker's reason:
+add `ACCEPT_ALL_LICENSES=1`, or run the command on a terminal and answer the licence
+question. `make preflight` shows the same checks without installing, with `make install-prereqs`
+in its fix. For a missing kernel change, see [`kernel-patches/README.md`](kernel-patches/README.md).
 
 For machines, `JSON=1` makes preflight or install print one JSON object on stdout; `JSONL=1`
 streams install progress objects followed by the summary and wins when both are set. When a
