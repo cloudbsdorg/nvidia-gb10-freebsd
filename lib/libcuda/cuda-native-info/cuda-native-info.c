@@ -211,22 +211,39 @@ utf8_decode(const unsigned char *p, uint32_t *code)
 }
 
 /* The code points that are written as text instead of being copied through.
- * The C1 controls (U+0080 to U+009F) are control sequences in the UTF-8
- * encoding of a terminal that implements 8-bit controls.  The line and
- * paragraph separators (U+2028, U+2029) are not safe in a JSON document
- * that a program reads as source text.  The bidirectional formatting
- * controls can reorder what a reader sees. */
+ * The table is the one list of them.  The C0 controls and DEL are control
+ * characters in every terminal.  The C1 controls (U+0080 to U+009F) are
+ * control sequences in the UTF-8 encoding of a terminal that implements
+ * 8-bit controls.  The line and paragraph separators (U+2028, U+2029) are
+ * not safe in a JSON document that a program reads as source text.  The
+ * bidirectional formatting controls can reorder what a reader sees, so every
+ * Unicode Bidi_Control code point is in the table: the Arabic letter mark,
+ * the left-to-right and right-to-left marks, the embeddings and the
+ * override, and the isolates. */
+static const struct control_range {
+	uint32_t first;
+	uint32_t last;
+} control_ranges[] = {
+	{ 0x0000, 0x001f },	/* C0 controls */
+	{ 0x007f, 0x007f },	/* DEL */
+	{ 0x0080, 0x009f },	/* C1 controls */
+	{ 0x061c, 0x061c },	/* ARABIC LETTER MARK */
+	{ 0x200e, 0x200f },	/* LEFT-TO-RIGHT MARK, RIGHT-TO-LEFT MARK */
+	{ 0x2028, 0x2029 },	/* LINE SEPARATOR, PARAGRAPH SEPARATOR */
+	{ 0x202a, 0x202e },	/* embeddings and the override */
+	{ 0x2066, 0x2069 }	/* isolates */
+};
+
 static int
 is_control_code(uint32_t code)
 {
-	if (code >= 0x80 && code <= 0x9f)
-		return (1);
-	if (code == 0x2028 || code == 0x2029)
-		return (1);
-	if (code >= 0x202a && code <= 0x202e)
-		return (1);
-	if (code >= 0x2066 && code <= 0x2069)
-		return (1);
+	size_t i;
+
+	/* Time: O(table length); Space: O(1). */
+	for (i = 0; i < sizeof(control_ranges) / sizeof(control_ranges[0]); i++)
+		if (code >= control_ranges[i].first &&
+		    code <= control_ranges[i].last)
+			return (1);
 	return (0);
 }
 
@@ -288,7 +305,7 @@ escape_bytes(escape_sink *sink, const char *text, size_t length)
 			sink_write(sink, "\\\\", 2);
 			break;
 		default:
-			if (p[i] < 0x20 || p[i] == 0x7f) {
+			if (is_control_code(p[i])) {
 				char form[8];
 
 				snprintf(form, sizeof(form), "\\u%04x",
@@ -366,8 +383,12 @@ validate_environment(char *detail, size_t detail_size)
 			join_names(list, sizeof(list), ",",
 			    cudaNativeFakeProfileCount(),
 			    cudaNativeFakeProfileName);
+			/* The value is wrapped in double quotes, the one
+			 * delimiter the escaping helper escapes: a value
+			 * that holds a quote cannot close the quoted
+			 * value and hide what follows it. */
 			snprintf(detail, detail_size,
-			    "CUDA_NATIVE_FAKE_PROFILE: unknown profile '%s%s'; "
+			    "CUDA_NATIVE_FAKE_PROFILE: unknown profile \"%s%s\"; "
 			    "known profiles: %s; give one or several separated by "
 			    "commas", escaped, length > 80 ? "..." : "", list);
 			return (-1);
@@ -603,6 +624,25 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 		    "the library exposes at most %d devices; set "
 		    "CUDA_VISIBLE_DEVICES to select fewer of them",
 		    CUDA_NATIVE_MAX_DEVICES);
+		hint = hint_text;
+	} else if (detail == NULL &&
+	    cudaNativeInitFailureReason() ==
+	    CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT) {
+		/* The provider reported more devices than the registry holds:
+		 * name the bound and the two ways to lower the count. */
+		snprintf(hint_text, sizeof(hint_text),
+		    "the provider reports more devices than the registry holds, "
+		    "at most %d; reduce the device list of the provider, with "
+		    "CUDA_NATIVE_FAKE_PROFILE or CUDA_VISIBLE_DEVICES",
+		    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+		hint = hint_text;
+	} else if (detail == NULL &&
+	    cudaNativeInitFailureReason() == CUDA_NATIVE_INIT_PROVIDER_ERROR) {
+		/* The provider failed for a reason of its own: say what the
+		 * library knows and what the caller can do about it. */
+		snprintf(hint_text, sizeof(hint_text),
+		    "the provider failed to report its devices; check the "
+		    "provider and retry the query");
 		hint = hint_text;
 	}
 	if (mode == MODE_TEXT) {

@@ -148,16 +148,20 @@ profiles of
 the synthetic GPU profiles and not profiles of any other kind.
 It is how a caller learns that a provider takes fake profiles without knowing
 the provider names.
-The provider kind is the one fact about a provider: the synthetic kind takes
-the profiles and applies them, so the answer of this function cannot drift
-from what the provider does with the variable.
+The provider kind is the one fact about a provider: the library applies the
+profile selection under the same kind, so the answer of this function cannot
+drift from what the provider does with the variable.
 .Fn cudaNativeProviderHint
 writes into the caller's buffer the advice for a provider whose discovery is
-not implemented in this release, and returns nonzero when it wrote one.
+not implemented in this release, and returns nonzero when it wrote the whole
+of it.
 The advice names the provider and the provider to use instead, both of them
 the names the library itself uses.
 It returns zero and writes nothing for a provider that has no advice, for an
-unknown name, and for a null buffer or a buffer of no size.
+unknown name, for a null buffer or a buffer of no size, and for a buffer
+that is too small to hold the whole advice.
+A truncated advice is not advice: a caller is never told that it wrote one
+when it wrote part of one, and the buffer of the caller keeps what it had.
 .Fn cudaNativeFakeProfileKnown
 returns nonzero only when the specified byte string names a fake profile in the
 library's profile table.
@@ -196,12 +200,19 @@ when the provider's discovery is not implemented in this release,
 .Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT
 when the provider reports more devices than the registry holds, and
 .Dv CUDA_NATIVE_INIT_PROVIDER_ERROR
-when the provider failed for any other reason.
+when the provider failed for any other reason, and
+.Dv CUDA_NATIVE_INIT_NOT_ATTEMPTED
+when no initialization was attempted yet.
 The reason is the reason of one attempt, and it stays the same for the
 lifetime of the process.
 Read it after
 .Fn cuInit
 has returned.
+Before the first attempt the reason is
+.Dv CUDA_NATIVE_INIT_NOT_ATTEMPTED ,
+which is not a success: a caller that reads it before
+.Fn cuInit
+cannot mistake it for a completed initialization.
 .Pp
 These cuda-native extensions do not initialize a provider.
 .Fn cudaNativeGetBackendName
@@ -223,8 +234,12 @@ Invalid ordinals return
 .Dv CUDA_ERROR_INVALID_DEVICE .
 The library exposes at most 64 devices at once.
 The limit counts the visible devices, the selected ones.
-A provider may report more devices than the limit: the devices that no filter
-selects are not exposed.
+The registry holds at most 128 provider devices.
+A provider that reports more devices than that is an invalid value, and the
+reason of the failure is
+.Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT .
+A provider may report more devices than the limit of 64: the devices that no
+filter selects are not exposed.
 Without a filter the visible set is every provider device, so a provider that
 reports more devices than the limit is an invalid value.
 A visibility list that selects more devices than the limit is an invalid value

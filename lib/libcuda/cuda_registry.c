@@ -20,8 +20,12 @@ enum registry_init_state {
 
 static pthread_once_t registry_once = PTHREAD_ONCE_INIT;
 static atomic_int registry_state = ATOMIC_VAR_INIT(REGISTRY_NOT_STARTED);
+/* The reason of the first initialization attempt.  Before an attempt it is
+ * CUDA_NATIVE_INIT_NOT_ATTEMPTED, which is not a success: a caller that
+ * reads it before cuInit cannot mistake it for a completed
+ * initialization. */
 static atomic_int registry_reason =
-    ATOMIC_VAR_INIT(CUDA_NATIVE_INIT_OK);
+    ATOMIC_VAR_INIT(CUDA_NATIVE_INIT_NOT_ATTEMPTED);
 static pthread_mutex_t context_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread CUcontext current_context;
 
@@ -89,8 +93,9 @@ cudaNativeProviderName(unsigned index)
 
 /* The library knows which provider takes the fake profiles, so a caller does
  * not have to know the provider names to find out.  The provider kind is the
- * one fact about a provider: the synthetic kind takes the profiles and
- * applies them, so the capability cannot drift from the handling. */
+ * one fact about a provider: the registry applies the profile selection
+ * under the same kind, so the advertised capability and the behavior cannot
+ * disagree. */
 int
 cudaNativeProviderTakesFakeProfiles(const char *name)
 {
@@ -101,24 +106,33 @@ cudaNativeProviderTakesFakeProfiles(const char *name)
 
 /* The library's advice for a provider whose discovery is not implemented.  The
  * text names the provider and the one to use instead, so a caller does not
- * have to know the provider names to write it. */
+ * have to know the provider names to write it.  The advice is written whole
+ * or not at all: a buffer that cannot hold all of it gets nothing, so a
+ * caller never reads a truncated remedy as if it were the whole one. */
 int
 cudaNativeProviderHint(const char *name, char *buffer, size_t size)
 {
 	const cuda_provider *provider, *fallback;
+	char advice[256];
+	int length;
 
 	if (buffer == NULL || size == 0)
 		return (0);
-	buffer[0] = '\0';
 	provider = provider_find(name);
 	if (provider == NULL || provider->kind != CUDA_PROVIDER_NATIVE)
 		return (0);
 	fallback = provider_by_kind(CUDA_PROVIDER_SYNTHETIC);
 	if (fallback == NULL)
 		return (0);
-	snprintf(buffer, size, "%s discovery is not implemented yet; set "
-	    "CUDA_NATIVE_BACKEND=%s for synthetic devices", provider->backend,
-	    fallback->backend);
+	length = snprintf(advice, sizeof(advice),
+	    "%s discovery is not implemented yet; set CUDA_NATIVE_BACKEND=%s "
+	    "for synthetic devices", provider->backend, fallback->backend);
+	if (length < 0 || (size_t)length >= sizeof(advice))
+		return (0);
+	/* The caller's buffer holds the whole advice or nothing at all. */
+	if (size <= (size_t)length)
+		return (0);
+	memcpy(buffer, advice, (size_t)length + 1);
 	return (1);
 }
 
@@ -180,11 +194,10 @@ visible_index(const char *token, size_t length, unsigned *physical_index,
  * of the failure is recorded, so a caller can tell this overflow from any
  * other invalid value. */
 static CUresult
-visible_append(cuda_device *device)
+visible_append(cuda_device *device, cudaNativeInitReason *reason)
 {
 	if (registry.visible_count == CUDA_NATIVE_MAX_DEVICES) {
-		atomic_store_explicit(&registry_reason,
-		    CUDA_NATIVE_INIT_DEVICE_LIMIT, memory_order_relaxed);
+		*reason = CUDA_NATIVE_INIT_DEVICE_LIMIT;
 		return (CUDA_ERROR_INVALID_VALUE);
 	}
 	registry.visible[registry.visible_count++] = device;
@@ -192,7 +205,7 @@ visible_append(cuda_device *device)
 }
 
 static CUresult
-apply_visibility(void)
+apply_visibility(cudaNativeInitReason *reason)
 {
 	const char *list, *cursor, *comma;
 	size_t length;
@@ -205,7 +218,8 @@ apply_visibility(void)
 	if (list == NULL) {
 		/* Time: O(physical devices); Space: O(1) besides visible[]. */
 		for (index = 0; index < registry.physical_count; index++) {
-			result = visible_append(&registry.physical[index]);
+			result = visible_append(&registry.physical[index],
+			    reason);
 			if (result != CUDA_SUCCESS)
 				return (result);
 		}
@@ -230,7 +244,7 @@ apply_visibility(void)
 				break;
 		if (i != registry.visible_count)
 			break;
-		result = visible_append(&registry.physical[index]);
+		result = visible_append(&registry.physical[index], reason);
 		if (result != CUDA_SUCCESS)
 			return (result);
 		cursor = comma == NULL ? NULL : comma + 1;
@@ -246,34 +260,43 @@ apply_visibility(void)
 static void
 registry_initialize_once(void)
 {
-	const char *backend;
+	const char *backend, *profiles;
 	unsigned i, count;
 	CUresult result;
+	cudaNativeInitReason reason = CUDA_NATIVE_INIT_NOT_ATTEMPTED;
 
-	atomic_store_explicit(&registry_reason, CUDA_NATIVE_INIT_OK,
-	    memory_order_relaxed);
 	backend = cudaNativeGetBackendName();
 	registry.provider = provider_find(backend);
 	if (registry.provider == NULL) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
-		atomic_store_explicit(&registry_reason,
-		    CUDA_NATIVE_INIT_UNKNOWN_PROVIDER, memory_order_relaxed);
+		reason = CUDA_NATIVE_INIT_UNKNOWN_PROVIDER;
 		goto out;
+	}
+	/* The provider kind is the one fact about a provider: the profile
+	 * selection is applied under the same kind the capability is
+	 * reported from, so the two cannot disagree. */
+	if (registry.provider->kind == CUDA_PROVIDER_SYNTHETIC &&
+	    registry.provider->select != NULL) {
+		profiles = getenv("CUDA_NATIVE_FAKE_PROFILE");
+		result = registry.provider->select(profiles);
+		if (result != CUDA_SUCCESS) {
+			registry.result = result;
+			reason = CUDA_NATIVE_INIT_PROVIDER_ERROR;
+			goto out;
+		}
 	}
 	count = 0;
 	result = registry.provider->enumerate(&count);
 	if (result != CUDA_SUCCESS) {
 		registry.result = result;
-		atomic_store_explicit(&registry_reason,
-		    result == CUDA_ERROR_NOT_SUPPORTED ?
+		reason = result == CUDA_ERROR_NOT_SUPPORTED ?
 		    CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED :
-		    CUDA_NATIVE_INIT_PROVIDER_ERROR, memory_order_relaxed);
+		    CUDA_NATIVE_INIT_PROVIDER_ERROR;
 		goto out;
 	}
 	if (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
-		atomic_store_explicit(&registry_reason,
-		    CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT, memory_order_relaxed);
+		reason = CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT;
 		goto out;
 	}
 	registry.physical_count = count;
@@ -282,13 +305,15 @@ registry_initialize_once(void)
 		registry.physical[i].physical_index = i;
 		registry.physical[i].primary_state.device = &registry.physical[i];
 	}
-	registry.result = apply_visibility();
-	if (registry.result != CUDA_SUCCESS &&
-	    atomic_load_explicit(&registry_reason, memory_order_relaxed) ==
-	    CUDA_NATIVE_INIT_OK)
-		atomic_store_explicit(&registry_reason,
-		    CUDA_NATIVE_INIT_PROVIDER_ERROR, memory_order_relaxed);
+	/* The visibility overflow names its own reason; every other failure
+	 * of the selection is a provider error. */
+	reason = CUDA_NATIVE_INIT_PROVIDER_ERROR;
+	registry.result = apply_visibility(&reason);
+	if (registry.result != CUDA_SUCCESS)
+		goto out;
+	reason = CUDA_NATIVE_INIT_OK;
 out:
+	atomic_store_explicit(&registry_reason, reason, memory_order_relaxed);
 	return;
 }
 

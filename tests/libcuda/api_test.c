@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cuda.h>
 #include "t.h"
@@ -335,7 +337,8 @@ static int
 native_queries_test(void)
 {
 	const char *name, *synthetic = NULL;
-	char hint[256];
+	char hint[256], exact[256];
+	size_t need;
 	unsigned i, count, plain = 0;
 	int count_devices = -1;
 
@@ -361,7 +364,9 @@ native_queries_test(void)
 	CHECK(cudaNativeDefaultBackend() != NULL);
 	/* The advice for a provider the library cannot use names that provider
 	 * and the one to use instead, so a caller needs no provider name of
-	 * its own. */
+	 * its own.  It is written whole or not at all: a buffer that cannot
+	 * hold all of it gets nothing, so a caller never reads a truncated
+	 * remedy as if it were the whole one. */
 	for (i = 0; i < count; i++) {
 		name = cudaNativeProviderName(i);
 		if (cudaNativeProviderTakesFakeProfiles(name))
@@ -369,17 +374,37 @@ native_queries_test(void)
 		CHECK(cudaNativeProviderHint(name, hint, sizeof(hint)) != 0);
 		CHECK(strstr(hint, name) != NULL);
 		CHECK(strstr(hint, synthetic) != NULL);
+		need = strlen(hint);
+		CHECK(need + 1 <= sizeof(hint));
+		/* One byte too small: the advice does not fit, so the
+		 * caller's buffer keeps what it had. */
+		memset(hint, 'S', sizeof(hint));
+		CHECK(cudaNativeProviderHint(name, hint, need) == 0);
+		CHECK(hint[0] == 'S');
+		/* Exactly the size of the advice: it is written whole. */
+		memset(exact, 0, sizeof(exact));
+		CHECK(cudaNativeProviderHint(name, exact, sizeof(exact)) != 0);
+		memset(hint, 'S', sizeof(hint));
+		CHECK(cudaNativeProviderHint(name, hint, need + 1) != 0);
+		CHECK(strcmp(hint, exact) == 0);
 	}
-	CHECK(cudaNativeProviderHint("fake", hint, sizeof(hint)) == 0);
+	/* A provider with no advice, an unknown name and a null buffer get
+	 * nothing written and a zero answer. */
+	memset(hint, 'S', sizeof(hint));
+	CHECK(cudaNativeProviderHint(synthetic, hint, sizeof(hint)) == 0);
+	CHECK(hint[0] == 'S');
+	memset(hint, 'S', sizeof(hint));
 	CHECK(cudaNativeProviderHint("not-a-provider", hint, sizeof(hint)) == 0);
+	CHECK(hint[0] == 'S');
 	CHECK(cudaNativeProviderHint(NULL, hint, sizeof(hint)) == 0);
 	CHECK(cudaNativeProviderHint("fake", NULL, 0) == 0);
 	CHECK(cudaNativeFakeProfileCount() > 0);
 	CHECK(cudaNativeFakeProfileName(0) != NULL);
 	CHECK(cudaNativeFakeProfileName(cudaNativeFakeProfileCount()) == NULL);
 	CHECK(cudaNativeFakeProfileDefault() != NULL);
-	/* No initialization has run, so there is no failure to report. */
-	CHECK_EQ(cudaNativeInitFailureReason(), CUDA_NATIVE_INIT_OK);
+	/* No initialization has run, so there is no failure to report: the
+	 * reason is "not attempted", which is not a success. */
+	CHECK_EQ(cudaNativeInitFailureReason(), CUDA_NATIVE_INIT_NOT_ATTEMPTED);
 	CHECK_EQ(cuDeviceGetCount(&count_devices), CUDA_ERROR_NOT_INITIALIZED);
 	return (t_done("api native queries"));
 }
@@ -766,8 +791,12 @@ init_observer_test(void)
 
 /* Many threads call cuInit and cuDeviceGetCount at once, again and again.
  * Every thread must see the same device count: the registry data is
- * published before a reader can see that the initialization completed. */
+ * published before a reader can see that the initialization completed.
+ * Every round runs in a child process, so every round initializes a
+ * registry of its own: the registry of one process is initialized once, and
+ * a second round in the same process would only call the completed one. */
 #define INIT_STRESS_THREADS 32
+#define INIT_STRESS_ROUNDS 200
 
 struct stress_case {
 	CUresult init;
@@ -785,33 +814,65 @@ stress_thread(void *arg)
 	return (NULL);
 }
 
+/* One round: the threads call cuInit at once and must all see the same
+ * device count.  The number of failed checks is the answer, so a child
+ * process can report it. */
 static int
-init_stress_test(void)
+stress_round(void)
 {
 	struct stress_case cases[INIT_STRESS_THREADS];
 	pthread_t threads[INIT_STRESS_THREADS];
-	unsigned round;
 	int i, first;
 
-	/* Time: O(200 * threads); Space: O(threads). */
-	for (round = 0; round < 200; round++) {
-		memset(cases, 0, sizeof(cases));
-		/* Time: O(threads); Space: O(1). */
-		for (i = 0; i < INIT_STRESS_THREADS; i++)
-			CHECK_EQ(pthread_create(&threads[i], NULL, stress_thread,
-			    &cases[i]), 0);
-		first = -1;
-		/* Time: O(threads); Space: O(1). */
-		for (i = 0; i < INIT_STRESS_THREADS; i++) {
-			CHECK_EQ(pthread_join(threads[i], NULL), 0);
-			CHECK_EQ(cases[i].init, CUDA_SUCCESS);
-			CHECK_EQ(cases[i].count_result, CUDA_SUCCESS);
-			if (first == -1)
-				first = cases[i].count;
-			/* Every thread sees the same device count. */
-			CHECK_EQ(cases[i].count, first);
-			CHECK_EQ(cases[i].count, 2);
+	memset(cases, 0, sizeof(cases));
+	/* Time: O(threads); Space: O(1). */
+	for (i = 0; i < INIT_STRESS_THREADS; i++)
+		CHECK_EQ(pthread_create(&threads[i], NULL, stress_thread,
+		    &cases[i]), 0);
+	first = -1;
+	/* Time: O(threads); Space: O(1). */
+	for (i = 0; i < INIT_STRESS_THREADS; i++) {
+		CHECK_EQ(pthread_join(threads[i], NULL), 0);
+		CHECK_EQ(cases[i].init, CUDA_SUCCESS);
+		CHECK_EQ(cases[i].count_result, CUDA_SUCCESS);
+		if (first == -1)
+			first = cases[i].count;
+		/* Every thread sees the same device count. */
+		CHECK_EQ(cases[i].count, first);
+		CHECK_EQ(cases[i].count, 2);
+	}
+	return (t_fails);
+}
+
+static int
+init_stress_test(void)
+{
+	unsigned round;
+	pid_t pid;
+	int status;
+
+	/* Time: O(rounds * threads); Space: O(threads). */
+	for (round = 0; round < INIT_STRESS_ROUNDS; round++) {
+		/* A child process has a registry of its own, so this round
+		 * initializes it for the first time. */
+		pid = fork();
+		if (pid < 0) {
+			CHECK(pid >= 0);
+			break;
 		}
+		if (pid == 0) {
+			/* The registry of this process was never
+			 * initialized: the reason says so before the
+			 * first cuInit. */
+			CHECK_EQ(cudaNativeInitFailureReason(),
+			    CUDA_NATIVE_INIT_NOT_ATTEMPTED);
+			CHECK_EQ(stress_round(), 0);
+			fflush(NULL);
+			_exit(0);
+		}
+		CHECK_EQ(waitpid(pid, &status, 0), pid);
+		CHECK(WIFEXITED(status));
+		CHECK_EQ(WEXITSTATUS(status), 0);
 	}
 	return (t_done("api concurrent cuInit and count, 32 threads, 200 rounds"));
 }
@@ -846,33 +907,41 @@ providers_test(void)
 }
 
 /* The reason of the first initialization attempt, as a stable name. */
+static const char *
+reason_name(cudaNativeInitReason reason)
+{
+	switch (reason) {
+	case CUDA_NATIVE_INIT_OK:
+		return ("ok");
+	case CUDA_NATIVE_INIT_UNKNOWN_PROVIDER:
+		return ("unknown-provider");
+	case CUDA_NATIVE_INIT_DEVICE_LIMIT:
+		return ("device-limit");
+	case CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED:
+		return ("provider-unsupported");
+	case CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT:
+		return ("provider-device-limit");
+	case CUDA_NATIVE_INIT_NOT_ATTEMPTED:
+		return ("not-attempted");
+	default:
+		return ("provider-error");
+	}
+}
+
 static int
 init_reason_test(void)
 {
-	const char *reason;
-
 	(void)cuInit(0);
-	switch (cudaNativeInitFailureReason()) {
-	case CUDA_NATIVE_INIT_OK:
-		reason = "ok";
-		break;
-	case CUDA_NATIVE_INIT_UNKNOWN_PROVIDER:
-		reason = "unknown-provider";
-		break;
-	case CUDA_NATIVE_INIT_DEVICE_LIMIT:
-		reason = "device-limit";
-		break;
-	case CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED:
-		reason = "provider-unsupported";
-		break;
-	case CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT:
-		reason = "provider-device-limit";
-		break;
-	default:
-		reason = "provider-error";
-		break;
-	}
-	printf("reason %s\n", reason);
+	printf("reason %s\n", reason_name(cudaNativeInitFailureReason()));
+	return (0);
+}
+
+/* The reason before any initialization attempt: it is its own state and it
+ * is not the state of a successful initialization. */
+static int
+preinit_reason_test(void)
+{
+	printf("reason %s\n", reason_name(cudaNativeInitFailureReason()));
 	return (0);
 }
 
@@ -977,7 +1046,8 @@ static int
 mode_usage(void)
 {
 	fprintf(stderr, "usage: api_test core|native-queries|profiles|threads|"
-	    "init-race|init-stress|init-observer|init-reason|providers|"
+	    "init-race|init-stress|init-observer|init-reason|preinit-reason|"
+	    "providers|"
 	    "proc-preinit|proc-version|proc-from-stdin|attribute-error|"
 	    "visibility-cap|nvrm|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
@@ -1004,6 +1074,7 @@ DEFINE_SIMPLE_MODE(init_stress_mode, init_stress_test)
 DEFINE_SIMPLE_MODE(init_observer_mode, init_observer_test)
 DEFINE_SIMPLE_MODE(providers_mode, providers_test)
 DEFINE_SIMPLE_MODE(init_reason_mode, init_reason_test)
+DEFINE_SIMPLE_MODE(preinit_reason_mode, preinit_reason_test)
 DEFINE_SIMPLE_MODE(proc_preinit_mode, proc_preinit_test)
 DEFINE_SIMPLE_MODE(proc_version_mode, proc_version_test)
 DEFINE_SIMPLE_MODE(proc_from_stdin_mode, proc_from_stdin_test)
@@ -1054,6 +1125,7 @@ main(int argc, char **argv)
 		{ "init-stress", init_stress_mode },
 		{ "init-observer", init_observer_mode },
 		{ "init-reason", init_reason_mode },
+		{ "preinit-reason", preinit_reason_mode },
 		{ "providers", providers_mode },
 		{ "proc-preinit", proc_preinit_mode },
 		{ "proc-version", proc_version_mode },

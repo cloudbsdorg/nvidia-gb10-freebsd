@@ -63,9 +63,16 @@ struct cuda_device {
 
 struct cuda_device_ops {
 	const char *backend;
-	/* The kind of the provider: it decides whether the provider takes
-	 * the fake profiles. */
+	/* The kind of the provider: it is the one fact about a provider.
+	 * The registry applies the profile selection under this kind, and
+	 * the library reports the capability from it, so the capability and
+	 * the handling cannot disagree. */
 	enum cuda_provider_kind kind;
+	/* The provider applies the profile selection the registry hands it:
+	 * the comma-separated list of profile names, or null when the
+	 * environment names none.  A provider that takes no profile has no
+	 * selection call. */
+	CUresult (*select)(const char *list);
 	CUresult (*enumerate)(unsigned *count);
 	CUresult (*name)(unsigned index, char *name, int len);
 	CUresult (*uuid)(unsigned index, CUuuid *uuid);

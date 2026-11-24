@@ -25,8 +25,10 @@ unset CUDA_NATIVE_FAKE_UNSUPPORTED_COOPERATIVE
 
 PASS=0
 FAIL=0
+SKIP=0
 ok() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
+skip() { SKIP=$((SKIP + 1)); printf 'skip %s\n' "$1"; }
 expect_rc() {
 	if [ "$2" -eq "$3" ]; then ok "$1"; else bad "$1 (rc=$2, want $3)"; fi
 }
@@ -187,36 +189,75 @@ rc=$?
 expect_rc "the generated proc-table include is the parser's include output" "$rc" 0
 # The generated table is included by cuda_core.c, so every object flavour of
 # that file needs it: the plain object, the shared-object one and the
-# profiled ones.  A fresh object directory builds the shared-object flavour
-# on its own, and that build fails when the edge is missing.
-FO=$W/fresh-obj
-mkdir -p "$FO"
-(cd "$L" && MAKEOBJDIR="$FO" make obj) >"$W/fresh-obj.log" 2>&1
-rc=$?
-expect_rc "a fresh object directory is created" "$rc" 0
-(cd "$L" && MAKEOBJDIR="$FO" make cuda_core.pico) >"$W/fresh-pico.log" 2>&1
-rc=$?
-expect_rc "the shared-object flavour builds in a fresh object directory" "$rc" 0
-[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/fresh-pico.log"
+# profiled ones.  Each flavour is built in an object directory of its own,
+# with no earlier build that would leave the generated file behind: a build
+# of one flavour must generate the table itself.  The edge of each flavour
+# is load-bearing: a Makefile without it cannot build that flavour in a
+# fresh object directory.
+for flavour in o pico po pieo; do
+	FD=$W/fresh-obj.$flavour
+	mkdir -p "$FD"
+	(cd "$L" && MAKEOBJDIR="$FD" make "cuda_core.$flavour") \
+	    >"$W/fresh-$flavour.log" 2>&1
+	rc=$?
+	expect_rc "the $flavour flavour builds in a fresh object directory" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/fresh-$flavour.log"
+	[ -s "$FD/cuda_exports.inc" ]
+	rc=$?
+	expect_rc "the $flavour flavour generated the table itself" "$rc" 0
+	MM=$W/no-edge.$flavour
+	mkdir -p "$MM"
+	cp "$L"/*.c "$L"/*.h "$L/Version.map" "$L/version_map.awk" "$MM/"
+	sed "s/cuda_core\.$flavour//" "$L/Makefile" >"$MM/Makefile"
+	if grep -q "cuda_core\.$flavour" "$MM/Makefile"; then
+		bad "the $flavour edge is gone from the copied Makefile"
+	else
+		ok "the $flavour edge is gone from the copied Makefile"
+	fi
+	FD2=$W/no-edge-obj.$flavour
+	mkdir -p "$FD2"
+	(cd "$MM" && MAKEOBJDIR="$FD2" make "cuda_core.$flavour") \
+	    >"$W/no-edge-$flavour.log" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		ok "the $flavour flavour needs the edge to the generated table"
+	else
+		bad "the $flavour flavour needs the edge to the generated table (rc=$rc)"
+	fi
+done
+FO=$W/fresh-obj.pico
 awk '!/^\tPROC_ENTRY\([A-Za-z_][A-Za-z0-9_]*\),$/ { bad = 1 }
     END { exit bad }' "$FO/cuda_exports.inc"
 rc=$?
 expect_rc "the generated include holds one table entry per line" "$rc" 0
 # A failed generation leaves no include behind: the recipe writes a
 # temporary file and renames it only when the parser succeeds, so the next
-# build regenerates the whole table instead of compiling an empty one.
+# build regenerates the whole table instead of compiling an empty one.  The
+# include of an earlier good run is stale after a failed run, and it must be
+# gone too.
 SI=$W/stale-include
 mkdir -p "$SI"
-cp "$L/Makefile" "$L/Version.map" "$SI/"
-cp "$L/version_map.awk" "$SI/version_map.awk"
-printf 'BEGIN { exit 1 }\n' >"$SI/version_map.awk"
+cp "$L"/*.c "$L"/*.h "$L/Makefile" "$L/Version.map" "$L/version_map.awk" "$SI/"
 (cd "$SI" && MAKEOBJDIR="$SI" make "$SI/cuda_exports.inc") \
-    >"$SI/fail.log" 2>&1
+    >"$SI/first.log" 2>&1
+rc=$?
+expect_rc "the good parser generates the include" "$rc" 0
+[ -s "$SI/cuda_exports.inc" ]
+rc=$?
+expect_rc "the generated include is there before the failure" "$rc" 0
+printf 'BEGIN { exit 1 }\n' >"$SI/version_map.awk"
+# The rule runs again when a prerequisite is newer than the include.  The
+# file system keeps the time of a file to a second, so the wait is one
+# second.
+sleep 1
+touch "$SI/Version.map"
+(cd "$SI" && MAKEOBJDIR="$SI" make) >"$SI/fail.log" 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then
-	ok "a failing parser fails the generation"
+	ok "the build fails when the generation fails"
 else
-	bad "a failing parser fails the generation (rc=$rc)"
+	bad "the build fails when the generation fails (rc=$rc)"
+	sed -n '1,20p' "$SI/fail.log"
 fi
 [ ! -e "$SI/cuda_exports.inc" ]
 rc=$?
@@ -224,6 +265,18 @@ expect_rc "a failed generation leaves no include behind" "$rc" 0
 [ ! -e "$SI/cuda_exports.inc.tmp" ]
 rc=$?
 expect_rc "a failed generation leaves no temporary file behind" "$rc" 0
+# Every path the recipe expands is quoted: an object directory that carries
+# a shell command is a path and not a command.  The object directory is
+# made first, so that the creation of it is not what is measured.
+IJ=$W/injection
+mkdir -p "$IJ/obj; touch $IJ/pwned #"
+cp "$L/Makefile" "$L/Version.map" "$L/version_map.awk" "$IJ/"
+(cd "$IJ" && MAKEOBJDIR="$IJ/obj; touch $IJ/pwned #" make \
+    "#/cuda_exports.inc") >"$IJ/log" 2>&1
+rc=$?
+[ ! -e "$IJ/pwned" ]
+rc=$?
+expect_rc "an object directory that carries a command does not run it" "$rc" 0
 cp "$L/version_map.awk" "$SI/version_map.awk"
 (cd "$SI" && MAKEOBJDIR="$SI" make "$SI/cuda_exports.inc") \
     >"$SI/ok.log" 2>&1
@@ -301,9 +354,29 @@ expect_rc "api_test compiles against the shared library" "$rc" 0
 # so the publication order of the registry is checked with a race detector
 # too.  The library sources are compiled into the test binary, so the
 # detector sees the registry itself and not only the test.
-if cc $CFLAGS -fsanitize=thread -pthread -I"$W" -I"$O/lib" -I"$L" -I"$SDK" \
-    -I"$T" "$T/api_test.c" "$L"/cuda_*.c -lthr -o "$W/bin/api_test_tsan" \
-    >"$W/build-tsan.log" 2>&1; then
+#
+# The support of the compiler for the flag is probed on its own.  A compiler
+# without the flag is a skip, said with the reason; a build of the project
+# sources that fails is a failure.  The two are never the same answer.
+tsan_build() {	# tsan_build CC LOG ARGS...; 0 built, 1 no flag, 2 build failed
+	_cc=$1
+	_log=$2
+	shift 2
+	printf 'int main(void) { return 0; }\n' >"$W/tsan-probe.c"
+	if ! "$_cc" -fsanitize=thread "$W/tsan-probe.c" -o "$W/tsan-probe" \
+	    >"$_log.probe" 2>&1; then
+		return 1
+	fi
+	if "$_cc" -fsanitize=thread "$@" >"$_log" 2>&1; then
+		return 0
+	fi
+	return 2
+}
+tsan_build cc "$W/build-tsan.log" -pthread -I"$W" -I"$O/lib" -I"$L" \
+    -I"$SDK" -I"$T" "$T/api_test.c" "$L"/cuda_*.c -lthr \
+    -o "$W/bin/api_test_tsan"
+case $? in
+0)
 	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
 	    "$W/bin/api_test_tsan" init-stress >"$W/tsan-stress.out" 2>&1
 	rc=$?
@@ -314,10 +387,38 @@ if cc $CFLAGS -fsanitize=thread -pthread -I"$W" -I"$O/lib" -I"$L" -I"$SDK" \
 	else
 		ok "the thread sanitizer reports no data race in the registry"
 	fi
-else
-	ok "the base compiler has no thread sanitizer: the race check is skipped"
-	ok "the thread sanitizer reports no data race in the registry"
-fi
+	;;
+1)
+	skip "the base compiler has no thread sanitizer: the race check is skipped"
+	sed -n '1,5p' "$W/build-tsan.log.probe"
+	;;
+2)
+	bad "the thread sanitizer build of the project sources fails"
+	sed -n '1,20p' "$W/build-tsan.log"
+	;;
+esac
+# The classification of a sanitizer build is checked on its own: a compiler
+# that takes the flag but fails on the project sources is a failure and not a
+# skip.  The wrapper below takes the flag and compiles the probe alone.
+cat >"$W/tsan-broken-cc" <<'EOF'
+#!/bin/sh
+# A compiler that accepts the sanitizer flag and fails on every source of
+# the project: the probe compiles alone, the build of the test does not.
+for arg in "$@"; do
+	case $arg in
+	*tsan-probe.c) ;;
+	*.c) exit 1 ;;
+	esac
+done
+exec cc "$@"
+EOF
+chmod +x "$W/tsan-broken-cc"
+tsan_build "$W/tsan-broken-cc" "$W/build-tsan-broken.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_broken"
+rc=$?
+[ "$rc" -eq 2 ]
+rc=$?
+expect_rc "a sanitizer build that fails on the project sources is a failure, not a skip" "$rc" 0
 cc $CFLAGS -I"$L" -I"$SDK" -I"$T" "$T/version_test.c" "$L/cuda_version.c" \
     -o "$W/bin/version_test" >"$W/build-version.log" 2>&1
 rc=$?
@@ -446,6 +547,14 @@ expect_rc "the reason query runs after a successful initialization" "$rc" 0
 grep -q '^reason ok$' "$W/reason-ok.out"
 rc=$?
 expect_rc "the library reports no reason for a successful initialization" "$rc" 0
+# Before any initialization is attempted the reason is its own state, and it
+# is not the state of a successful initialization.
+"$API" preinit-reason >"$W/reason-preinit.out" 2>&1
+rc=$?
+expect_rc "the reason query runs before any initialization" "$rc" 0
+grep -q '^reason not-attempted$' "$W/reason-preinit.out"
+rc=$?
+expect_rc "the library says that no initialization was attempted yet" "$rc" 0
 profiles64=$(python3 -I -c 'print(",".join(["gb206"] * 64))')
 profiles65=$(python3 -I -c 'print(",".join(["gb206"] * 65))')
 visibility64=$(python3 -I -c 'print(",".join(str(i) for i in range(64)))')
@@ -501,13 +610,20 @@ if grep -q 'at most 64 devices' "$W/provider-limit.err"; then
 else
 	ok "a failure that is not the device limit prints no device-limit hint"
 fi
+# The capacity failure of the provider has its own reason and says what to
+# do next: the bound of the registry and the two ways to lower the count.
+grep -q '128' "$W/provider-limit.err" &&
+    grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$W/provider-limit.err" &&
+    grep -q 'CUDA_VISIBLE_DEVICES' "$W/provider-limit.err"
+rc=$?
+expect_rc "the provider capacity diagnostic names the bound and the remedy" "$rc" 0
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" "$API" \
     init-reason >"$W/reason-provider.out" 2>&1
 rc=$?
 expect_rc "the reason query runs for a failing provider" "$rc" 0
-grep -q '^reason provider-error$' "$W/reason-provider.out"
+grep -q '^reason provider-device-limit$' "$W/reason-provider.out"
 rc=$?
-expect_rc "the library names the provider failure as the reason" "$rc" 0
+expect_rc "the library names the provider device limit as the reason" "$rc" 0
 # A visibility entry that names no device ends the list; it is not a count
 # overflow and gets no device-limit hint.
 for bad in not-an-index 999 0,0; do
@@ -722,6 +838,117 @@ PY
 rc=$?
 expect_rc "JSON preserves UTF-8, replaces invalid bytes and escapes controls" "$rc" 0
 
+# Every code point the library refuses to copy through is escaped: the raw
+# bytes are absent and the escape is present.  One case per code point, in
+# the text diagnostic and in the JSON document.  The list of code points is
+# built from the ranges of the one table of the tool, so a code point that
+# is added to the table is added to the test.
+control_points() {
+	for range in 0000:001f 007f:007f 0080:009f 061c:061c 200e:200f \
+	    2028:2029 202a:202e 2066:2069; do
+		first=$((0x${range%:*}))
+		last=$((0x${range#*:}))
+		i=$first
+		while [ "$i" -le "$last" ]; do
+			# A NUL cannot travel through the environment.
+			if [ "$i" -ne 0 ]; then
+				printf '%04x\n' "$i"
+			fi
+			i=$((i + 1))
+		done
+	done
+}
+# The UTF-8 bytes of a code point as the octal escapes of printf: the shell
+# of the test has no \u in its printf.
+utf8_escapes() {	# utf8_escapes CODEPOINT
+	_n=$((0x$1))
+	if [ "$_n" -lt 128 ]; then
+		printf '\\%03o' "$_n"
+	elif [ "$_n" -lt 2048 ]; then
+		printf '\\%03o\\%03o' $((0xC0 | (_n >> 6))) \
+		    $((0x80 | (_n & 0x3F)))
+	elif [ "$_n" -lt 65536 ]; then
+		printf '\\%03o\\%03o\\%03o' $((0xE0 | (_n >> 12))) \
+		    $((0x80 | ((_n >> 6) & 0x3F))) $((0x80 | (_n & 0x3F)))
+	else
+		printf '\\%03o\\%03o\\%03o\\%03o' $((0xF0 | (_n >> 18))) \
+		    $((0x80 | ((_n >> 12) & 0x3F))) \
+		    $((0x80 | ((_n >> 6) & 0x3F))) $((0x80 | (_n & 0x3F)))
+	fi
+}
+control_case() {	# control_case CODEPOINT
+	_cp=$1
+	_raw=$(printf "x$(utf8_escapes "$_cp")y")
+	env CUDA_NATIVE_BACKEND="$_raw" "$INFO" \
+	    >"$W/control.out" 2>"$W/control.err"
+	rc=$?
+	if [ "$rc" -eq 1 ]; then
+		ok "the control code point U+$_cp is refused"
+	else
+		bad "the control code point U+$_cp is refused (rc=$rc)"
+	fi
+	if grep -qF "\\u$_cp" "$W/control.err"; then
+		ok "the text diagnostic escapes U+$_cp"
+	else
+		bad "the text diagnostic escapes U+$_cp"
+	fi
+	case $_cp in
+	0009|000a|000d)
+		# A white space control is in the output itself, so only the
+		# escape can be checked.
+		;;
+	*)
+		if grep -qF "$_raw" "$W/control.err"; then
+			bad "the text diagnostic holds no raw U+$_cp"
+		else
+			ok "the text diagnostic holds no raw U+$_cp"
+		fi
+		;;
+	esac
+	env CUDA_NATIVE_BACKEND="$_raw" "$INFO" --json \
+	    >"$W/control.json" 2>"$W/control-json.err"
+	rc=$?
+	if [ "$rc" -eq 1 ] && grep -qF "\\u$_cp" "$W/control.json"; then
+		ok "the JSON document escapes U+$_cp"
+	else
+		bad "the JSON document escapes U+$_cp (rc=$rc)"
+	fi
+}
+profile_control_case() {	# profile_control_case CODEPOINT
+	_cp=$1
+	_raw=$(printf "gb$(utf8_escapes "$_cp")")
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$_raw" "$INFO" \
+	    >"$W/profile-control.out" 2>"$W/profile-control.err"
+	rc=$?
+	if [ "$rc" -eq 1 ] && grep -qF "\\u$_cp" "$W/profile-control.err"; then
+		ok "the profile diagnostic escapes U+$_cp"
+	else
+		bad "the profile diagnostic escapes U+$_cp (rc=$rc)"
+	fi
+}
+for cp in $(control_points); do
+	control_case "$cp"
+done
+# The bidirectional controls are the ones a reader cannot see, so they are
+# checked in the profile diagnostic too.
+for cp in 061c 200e 200f 202a 202b 202c 202d 202e 2066 2067 2068 2069; do
+	profile_control_case "$cp"
+done
+# The profile diagnostic wraps the bad value in the delimiter it escapes: a
+# value that holds a quote cannot close the value and hide what follows it.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="a'b" "$INFO" \
+    >"$W/quote-profile.out" 2>"$W/quote-profile.err"
+rc=$?
+expect_rc "a profile with a quote in it is refused" "$rc" 1
+python3 -I - "$W/quote-profile.err" <<'PY'
+import sys
+text = open(sys.argv[1], errors="replace").read()
+assert 'unknown profile "a\'b"' in text, text
+assert "unknown profile 'a'b'" not in text, text
+PY
+rc=$?
+expect_rc "the profile diagnostic escapes the quote it uses as a delimiter" "$rc" 0
+
 # A changed library default must change the CLI's reported backend too.
 DB=$W/default-backend
 mkdir -p "$DB"
@@ -769,7 +996,7 @@ PY
 	    2>"$DB/bad-profile.err"
 	rc=$?
 	expect_rc "CLI validates profiles against a patched fake default" "$rc" 1
-	grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'" \
+	grep -q 'CUDA_NATIVE_FAKE_PROFILE: unknown profile "gb100"' \
 	    "$DB/bad-profile.err"
 	rc=$?
 	expect_rc "patched fake default retains the named profile diagnostic" "$rc" 0
@@ -865,7 +1092,7 @@ if [ "$rc" -eq 0 ]; then
 	    2>"$SP/error.txt"
 	rc=$?
 	expect_rc "a renamed provider still gives the named-profile diagnostic" "$rc" 1
-	grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'" "$SP/error.txt"
+	grep -q 'CUDA_NATIVE_FAKE_PROFILE: unknown profile "gb100"' "$SP/error.txt"
 	rc=$?
 	expect_rc "the renamed provider reaches the named-profile diagnostic" "$rc" 0
 	# The provider that takes the profiles applies them: the reported
@@ -901,14 +1128,31 @@ PY
 	expect_rc "the unsupported-provider advice comes from the library" "$rc" 0
 fi
 
-# A provider that takes the profiles but ignores them is caught by the check
-# above: the reported device follows the selected profile.
+# The capability the library reports and the behavior of the provider are
+# one fact: a provider that the library says takes the fake profiles applies
+# them, so the reported device follows the selected profile.
+env CUDA_NATIVE_BACKEND="$library_synthetic" CUDA_NATIVE_FAKE_PROFILE=gb10 \
+    "$INFO" --json >"$W/capability.json" 2>"$W/capability.err"
+rc=$?
+expect_rc "a provider that takes the fake profiles applies them" "$rc" 0
+python3 -I - "$W/capability.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["devices"][0]["name"] == "cuda-native fake GB10", d["devices"][0]["name"]
+PY
+rc=$?
+expect_rc "the reported device follows the selected profile" "$rc" 0
+# A registry that does not apply the selection leaves the provider with its
+# own default, while the library still reports that the provider takes the
+# profiles: the mutant must be killed, and a build that fails must be a
+# failure and not a skipped check.
 PI=$W/profile-ignored-mutant
 mkdir -p "$PI"
 cp "$L"/*.c "$L"/*.h "$PI/"
-sed -i '' 's/list = getenv("CUDA_NATIVE_FAKE_PROFILE");/list = NULL;/' \
-    "$PI/cuda_fake.c"
-grep -q 'list = NULL;' "$PI/cuda_fake.c"
+sed -i '' 's/registry\.provider->kind == CUDA_PROVIDER_SYNTHETIC/registry.provider->kind != CUDA_PROVIDER_SYNTHETIC/' \
+    "$PI/cuda_registry.c"
+grep -q 'registry.provider->kind != CUDA_PROVIDER_SYNTHETIC' \
+    "$PI/cuda_registry.c"
 rc=$?
 expect_rc "the profile-ignoring mutant changed the library" "$rc" 0
 (
@@ -937,6 +1181,9 @@ PY
 	else
 		bad "mutant SURVIVED: a provider that ignores the fake profiles"
 	fi
+else
+	bad "the profile-ignoring mutant was not exercised: the build failed"
+	sed -n '1,40p' "$PI/build.log"
 fi
 
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 CUDA_VISIBLE_DEVICES=1,0 \
@@ -1080,7 +1327,7 @@ env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb100 "$INFO" \
     >"$W/bad-profile.out" 2>"$W/bad-profile.err"
 rc=$?
 expect_rc "an unknown fake profile environment value returns 1" "$rc" 1
-grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile 'gb100'; known profiles: $library_profiles; give one or several separated by commas" \
+grep -q "CUDA_NATIVE_FAKE_PROFILE: unknown profile \"gb100\"; known profiles: $library_profiles; give one or several separated by commas" \
     "$W/bad-profile.err"
 rc=$?
 expect_rc "profile diagnostics name the variable, value and valid profiles" "$rc" 0
@@ -1106,7 +1353,7 @@ if [ "$rc" -eq 0 ]; then
 else
 	ok "no escape byte reaches the unknown-profile diagnostic"
 fi
-grep -q -F "unknown profile 'gb\u001b[2J'" "$W/evil-profile.err"
+grep -q -F 'unknown profile "gb\u001b[2J"' "$W/evil-profile.err"
 rc=$?
 expect_rc "the unknown-profile diagnostic carries the escaped value" "$rc" 0
 # A C1 control in its UTF-8 encoding is a control sequence in a terminal
@@ -1133,7 +1380,7 @@ if grep -q "$(printf '\302\233')" "$W/c1-profile.err"; then
 else
 	ok "no C1 control reaches the unknown-profile diagnostic"
 fi
-grep -q -F "unknown profile 'gb\u009b'" "$W/c1-profile.err"
+grep -q -F 'unknown profile "gb\u009b"' "$W/c1-profile.err"
 rc=$?
 expect_rc "the unknown-profile diagnostic carries the escaped C1 control" "$rc" 0
 env CUDA_NATIVE_BACKEND="$c1" "$INFO" --json >"$W/c1-backend.json" \
@@ -1183,7 +1430,7 @@ providers = sys.argv[3]
 profiles = sys.argv[4]
 assert "CUDA_NATIVE_BACKEND=not-a-provider" in backend["error"]["message"]
 assert "use one of: " + providers in backend["error"]["message"]
-assert "unknown profile 'gb100'" in profile["error"]["message"]
+assert 'unknown profile "gb100"' in profile["error"]["message"]
 assert "known profiles: " + profiles in profile["error"]["message"]
 PY
 rc=$?
@@ -1534,5 +1781,9 @@ PY
 rc=$?
 expect_rc "every new source, script, Makefile and man page has BSD-2-Clause provenance" "$rc" 0
 
-printf 'SUMMARY: %d checks passed, %d failed\n' "$PASS" "$FAIL"
+printf 'SUMMARY: %d checks passed, %d failed' "$PASS" "$FAIL"
+if [ "$SKIP" -gt 0 ]; then
+	printf ', %d skipped' "$SKIP"
+fi
+printf '\n'
 [ "$FAIL" -eq 0 ]

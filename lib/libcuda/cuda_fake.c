@@ -85,6 +85,10 @@ static const fake_profile profiles[] = {
 
 static const fake_profile *selected[CUDA_NATIVE_MAX_PHYSICAL_DEVICES];
 static unsigned selected_count;
+/* The count of the selection, even when the selection names more devices
+ * than the array above holds: the registry refuses such a count, and the
+ * devices are never addressed. */
+static unsigned selected_total;
 
 static const fake_profile *
 profile_find(const char *name, size_t length)
@@ -143,24 +147,68 @@ cudaNativeFakeProfileDefault(void)
 	return (default_profile);
 }
 
+/* The provider applies the profile selection the registry hands it.  The
+ * selection is the comma-separated list of profile names, or null when the
+ * environment names none; then the provider uses its own default.  The
+ * provider reports how many devices the selection names, even when that
+ * number is above the number of devices the registry holds: the registry
+ * refuses the count and names the reason, so the failure is not reported as
+ * a provider error. */
+static CUresult
+fake_select(const char *list)
+{
+	const fake_profile *profile;
+	const char *cursor, *comma;
+	size_t length;
+	unsigned count = 0;
+
+	if (list == NULL)
+		list = default_profile;
+	if (*list == '\0')
+		return (CUDA_ERROR_INVALID_VALUE);
+	selected_count = 0;
+	cursor = list;
+	/* Time: O(profile-list bytes); Space: O(1). */
+	for (;;) {
+		comma = strchr(cursor, ',');
+		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
+		profile = profile_find(cursor, length);
+		if (profile == NULL)
+			return (CUDA_ERROR_INVALID_VALUE);
+		count++;
+		if (comma == NULL)
+			break;
+		cursor = comma + 1;
+	}
+	selected_total = count;
+	if (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES)
+		return (CUDA_SUCCESS);
+	cursor = list;
+	selected_count = 0;
+	/* Time: O(profile-list bytes); Space: O(1) besides selected[]. */
+	for (;;) {
+		comma = strchr(cursor, ',');
+		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
+		profile = profile_find(cursor, length);
+		if (profile == NULL)
+			return (CUDA_ERROR_INVALID_VALUE);
+		selected[selected_count++] = profile;
+		if (comma == NULL)
+			break;
+		cursor = comma + 1;
+	}
+	return (CUDA_SUCCESS);
+}
+
 static CUresult
 fake_enumerate(unsigned *count)
 {
-	const char *list, *cursor, *comma;
-	const fake_profile *profile;
-	size_t length;
 #ifdef CUDA_NATIVE_TESTING
 	const char *delay;
 #endif
 
 	if (count == NULL)
 		return (CUDA_ERROR_INVALID_VALUE);
-	list = getenv("CUDA_NATIVE_FAKE_PROFILE");
-	if (list == NULL)
-		list = default_profile;
-	if (*list == '\0')
-		return (CUDA_ERROR_INVALID_VALUE);
-	selected_count = 0;
 #ifdef CUDA_NATIVE_TESTING
 	delay = getenv("CUDA_NATIVE_FAKE_ENUM_DELAY_MS");
 	if (delay != NULL && *delay != '\0') {
@@ -173,20 +221,7 @@ fake_enumerate(unsigned *count)
 		nanosleep(&request, NULL);
 	}
 #endif
-	cursor = list;
-	/* Time: O(profile-list bytes); Space: O(1) besides selected[]. */
-	for (;;) {
-		comma = strchr(cursor, ',');
-		length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
-		profile = profile_find(cursor, length);
-		if (profile == NULL || selected_count == CUDA_NATIVE_MAX_PHYSICAL_DEVICES)
-			return (CUDA_ERROR_INVALID_VALUE);
-		selected[selected_count++] = profile;
-		if (comma == NULL)
-			break;
-		cursor = comma + 1;
-	}
-	*count = selected_count;
+	*count = selected_total;
 	return (CUDA_SUCCESS);
 }
 
@@ -287,11 +322,14 @@ fake_attribute(unsigned index, CUdevice_attribute attribute, int *value)
 	return (CUDA_SUCCESS);
 }
 
-/* This provider is the synthetic kind: it takes the fake profiles named by
- * CUDA_NATIVE_FAKE_PROFILE, and the enumeration below applies them. */
+/* This provider is the synthetic kind: the registry hands it the profiles
+ * named by CUDA_NATIVE_FAKE_PROFILE, and it applies them.  The provider
+ * itself reads no environment variable, so the capability the library
+ * reports and the selection the provider applies cannot drift apart. */
 const cuda_provider cuda_fake_provider = {
 	.backend = "fake",
 	.kind = CUDA_PROVIDER_SYNTHETIC,
+	.select = fake_select,
 	.enumerate = fake_enumerate,
 	.name = fake_name,
 	.uuid = fake_uuid,

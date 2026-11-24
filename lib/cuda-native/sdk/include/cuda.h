@@ -102,7 +102,9 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
 /* Why the first initialization attempt of the process failed.  The reason is
  * one of the cuda-native extensions: it tells a caller what the library could
  * not do, so the caller does not have to guess from a generic error value.
- * The reason of an initialization that succeeded is CUDA_NATIVE_INIT_OK. */
+ * The reason of an initialization that succeeded is CUDA_NATIVE_INIT_OK.
+ * Before any initialization is attempted the reason is
+ * CUDA_NATIVE_INIT_NOT_ATTEMPTED, which is not a success. */
 typedef enum cudaNativeInitReason_enum {
 	/* The initialization succeeded. */
 	CUDA_NATIVE_INIT_OK = 0,
@@ -115,7 +117,10 @@ typedef enum cudaNativeInitReason_enum {
 	/* The provider reports more devices than the registry holds. */
 	CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT,
 	/* The provider failed for another reason. */
-	CUDA_NATIVE_INIT_PROVIDER_ERROR
+	CUDA_NATIVE_INIT_PROVIDER_ERROR,
+	/* No initialization was attempted yet.  The value is last so that
+	 * the values before it keep their numbers. */
+	CUDA_NATIVE_INIT_NOT_ATTEMPTED
 } cudaNativeInitReason;
 
 /* cuda-native extensions; these queries do not initialize a provider. */
