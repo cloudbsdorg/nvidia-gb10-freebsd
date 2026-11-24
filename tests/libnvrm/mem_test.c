@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2394,6 +2395,79 @@ test_fork_generation(void)
 	expect_clean("fork generation");
 }
 
+/* nvrm_client_stats grew (live_channels, channels_created) after NVRM_1.1: a
+ * caller built against NVRM_1.1 passes the old size and gets only that much,
+ * so the bytes after it stay as the caller left them. */
+static void
+test_stats_v11_size(void)
+{
+	const size_t v11 = offsetof(nvrm_client_stats, live_channels);
+	union {
+		nvrm_client_stats	st;
+		unsigned char		raw[sizeof(nvrm_client_stats) + 16];
+	} u;
+	nvrm_client_stats full = { .size = sizeof(full) };
+	nvrm_open_opts o = { sizeof(o), NVRM_OPEN_ALLOW_MAP, 0, 0 };
+	nvrm_chan_params cp = { .engines = NVRM_ENG_COMPUTE, .entries = 8 };
+	nvrm_client *cl = NULL;
+	nvrm_chan *ch = NULL;
+	char err[200];
+	size_t i;
+
+	setup("discrete", NULL);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &cl, err,
+	    sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_chan_create(cl, &cp, &ch), NVRM_OK);
+	CHECK_EQ(stats_get(cl, &full), NVRM_OK);
+	CHECK_EQ(full.live_channels, 1);
+	CHECK_EQ(full.channels_created, 1);
+	memset(&u, 0xcc, sizeof(u));
+	u.st.size = (uint32_t)v11;
+	CHECK_EQ(stats_get(cl, &u.st), NVRM_OK);
+	CHECK_EQ(u.st.size, v11);
+	CHECK(memcmp(&u.st.reserved, &full.reserved, v11 - sizeof(uint32_t)) ==
+	    0);
+	CHECK_EQ(u.st.live_mem, full.live_mem);
+	CHECK_EQ(u.st.failed_releases, full.failed_releases);
+	for (i = v11; i < sizeof(u.raw); i++)
+		CHECK_EQ(u.raw[i], 0xcc);
+	CHECK_STR(nvrm_client_errmsg(cl), "");
+	/* size 0 is the whole structure: a caller that zero-inits the
+	 * structure gets every member, the channel counts included */
+	memset(&u, 0, sizeof(u));
+	u.st.size = 0;
+	CHECK_EQ(stats_get(cl, &u.st), NVRM_OK);
+	CHECK_EQ(u.st.size, sizeof(u.st));
+	CHECK_EQ(u.st.live_channels, 1);
+	CHECK_EQ(u.st.channels_created, 1);
+	u.st.size = (uint32_t)v11 + 8;
+	CHECK_EQ(stats_get(cl, &u.st), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "NVRM_1.1 size") != NULL);
+	nvrm_chan_destroy(ch);
+	nvrm_client_close(cl);
+	teardown();
+}
+
+/* Closing a client destroys the channels it still holds: the close loop. */
+static void
+test_close_with_channel(void)
+{
+	nvrm_open_opts o = { sizeof(o), NVRM_OPEN_ALLOW_MAP, 0, 0 };
+	nvrm_chan_params cp = { .engines = NVRM_ENG_COMPUTE, .entries = 8 };
+	nvrm_client *cl = NULL;
+	nvrm_chan *a = NULL, *b = NULL;
+	char err[200];
+
+	setup("discrete", NULL);
+	CHECK_EQ(nvrm_client_open(nvrm_device_get(ctx, 0), &o, &cl, err,
+	    sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_chan_create(cl, &cp, &a), NVRM_OK);
+	CHECK_EQ(nvrm_chan_create(cl, &cp, &b), NVRM_OK);
+	nvrm_client_close(cl);
+	expect_clean("channel close");
+	teardown();
+}
+
 #define MEM_TESTS(X, N)						\
 	X("va", test_va_basic) \
 	X("va", test_va_fixed_and_free) \
@@ -2427,7 +2501,9 @@ test_fork_generation(void)
 	X("fork", test_orphan_count) \
 	X("share", test_same_client_import) \
 	X("share", test_user_pages_twice) \
-	X("fork", test_fork_generation)
+	X("fork", test_fork_generation) \
+	X("stats", test_stats_v11_size) \
+	X("channel", test_close_with_channel)
 
 T_TABLE(tests, MEM_TESTS);
 

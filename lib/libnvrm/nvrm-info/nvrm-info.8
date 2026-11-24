@@ -107,16 +107,22 @@ A failed control gives reason
 When the RM does not run on the GPU System Processor, or does not mark its
 firmware version valid, the reason is
 .Li rm_not_supported .
-While an RM client holds a GPU open, the OS layer exposes the same values as
-the
+The
 .Va hw.nvidia.gpus.N.vbios_*
 and
 .Va hw.nvidia.gpus.N.firmware_*
-sysctls.
-With no client holding the GPU open, those sysctls read
+sysctls are created by the
+.Xr nvidia 4
+kernel module
+.Pq see Sx SYSCTL VARIABLES No in Xr nvidia 4 ;
+a module that predates them does not have them, and
+.Dl sysctl hw.nvidia.gpus.N.vbios_major
+then reports an unknown oid.
+While an RM client holds a GPU open, they show the same values.
+With no client holding the GPU open, the firmware sysctls read
 .Li N/A
-or
-.Li ?? .
+and the VBIOS sysctls read
+.Li ??.??.??.??.?? .
 .Pp
 .Li rm_sm_version
 is the raw RM SM version code, and

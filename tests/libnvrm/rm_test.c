@@ -44,6 +44,7 @@
 #include <ctrl/ctrl2080/ctrl2080mc.h>
 
 #include "nvrm_internal.h"
+#include "nvrm_rm_priv.h"
 #include "nvrm_rm_sys.h"
 #include "t.h"
 #include "t_version.h"
@@ -1016,6 +1017,33 @@ test_misc(void)
 	nvrm_rm_set_sys(&scripted);
 }
 
+/* The running version takes the driver version's reason through the one
+ * id helper: every reason id survives, an unknown or missing one is reported
+ * as os_not_reported. */
+static void
+test_running_reason_ids(void)
+{
+	nvrm_backend be;
+	int r;
+
+	memset(&be, 0, sizeof(be));
+	for (r = 1; r < NVRM_R__COUNT; r++) {
+		be.driver.reason = nvrm_reason_id(r);
+		nvrm_rm_sync_running_version(&be);
+		CHECK_EQ(be.running.reason, r);
+	}
+	be.driver.reason = "not_a_reason";
+	nvrm_rm_sync_running_version(&be);
+	CHECK_EQ(be.running.reason, NVRM_R_OS_NOT_REPORTED);
+	be.driver.reason = NULL;
+	nvrm_rm_sync_running_version(&be);
+	CHECK_EQ(be.running.reason, NVRM_R_OS_NOT_REPORTED);
+	be.driver.available = 1;
+	be.driver.reason = nvrm_reason_id(NVRM_R_OS_CALL_FAILED);
+	nvrm_rm_sync_running_version(&be);
+	CHECK_EQ(be.running.reason, NVRM_R_NONE);
+}
+
 int
 main(void)
 {
@@ -1033,5 +1061,6 @@ main(void)
 	test_alloc_and_real_calls();
 	test_least_privilege();
 	test_misc();
+	test_running_reason_ids();
 	return (t_done("rm_test"));
 }

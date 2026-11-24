@@ -268,7 +268,8 @@ query_gpu_class(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	if (!nvrm_compute_from_table(info)) {
 		int reason = NVRM_R_INPUT_MISSING;
 
-		if (NVRM_HAVE(raw_sm) && NVRM_HAVE(info->architecture) &&
+		/* the table reads architecture and implementation only */
+		if (NVRM_HAVE(info->architecture) &&
 		    NVRM_HAVE(info->implementation))
 			reason = NVRM_R_FAMILY_UNKNOWN;
 		unavail(&info->compute_capability_major, reason, NVRM_S_DERIVED);
