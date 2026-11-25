@@ -125,9 +125,13 @@ static struct {
 	NvU32		surf_attr, surf_space;	/* surface info answers, or NOVERRIDE */
 	uint64_t	surf_size;
 	int		map_dev_null;	/* /dev/nvidiaN is a node that cannot be mapped */
+	int		ctl_dev_null;	/* /dev/nvidiactl is a node that cannot be mapped */
+	int		ctl_dev_null_n;	/* the Nth /dev/nvidiactl cannot be mapped */
 	int		fail_map_open;	/* opening /dev/nvidiaN fails */
 	int		map_dev_null_n;	/* the Nth /dev/nvidiaN cannot be mapped */
 	int		fail_map_open_n;	/* the Nth /dev/nvidiaN cannot be opened */
+	int		fail_ctl_open;	/* opening /dev/nvidiactl fails */
+	int		fail_ctl_open_n;	/* the Nth /dev/nvidiactl cannot be opened */
 	/* hand out a descriptor limited already to less than the library
 	 * limits it to, so that its limit fails (rights only narrow) */
 	int		prelimit_session, prelimit_map;
@@ -143,6 +147,9 @@ static struct {
 	int		nversion, ndevice, nvaspace, nvirtual, nvid, nsys, nos;
 	int		nmapdma, nunmapdma, nmapmem, nunmapmem, nmunmap;
 	int		nexport, nimport, nsurf, nmine_free, map_opens, open_calls;
+	int		ctl_fds[128];	/* the control-device descriptors */
+	int		nctl_fds;
+	int		ctl_opens;	/* the control device opened this often */
 	NVOS46_PARAMETERS last46;
 	NV_MEMORY_ALLOCATION_PARAMS last_alloc;
 	char		last_map_path[64];
@@ -358,27 +365,46 @@ status_now(int nr)
 	return (M.status_val);
 }
 
+/* The control device: the RM keeps the mapping of system memory on it, so
+ * the kernel must know which descriptors are control-device ones. */
 static int
-m_open(const char *path, int flags)
+m_open_ctl(int flags)
+{
+	int fd;
+
+	M.ctl_opens++;
+	if (M.fail_ctl_open || M.fail_ctl_open_n == M.ctl_opens) {
+		errno = EACCES;
+		return (-1);
+	}
+	fd = k_open("/dev/nvidiactl", flags);
+	if (fd >= 0 && (M.ctl_dev_null || M.ctl_dev_null_n == M.ctl_opens)) {
+		/* the control device cannot be mapped */
+		close(fd);
+		fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	}
+	if (M.enum_fd < 0)
+		M.enum_fd = fd;
+	else if (M.prelimit_session && fd >= 0) {
+		cap_rights_t r;
+
+		M.prelimit_session = 0;
+		cap_rights_init(&r, CAP_READ);
+		if (cap_rights_limit(fd, &r) != 0)
+			bad("cannot pre-limit a session descriptor");
+	}
+	if (fd >= 0 && M.nctl_fds < (int)nitems(M.ctl_fds))
+		M.ctl_fds[M.nctl_fds++] = fd;
+	return (fd);
+}
+
+/* The GPU's own device node: the RM maps video memory through it. */
+static int
+m_open_dev(const char *path, int flags)
 {
 	char want[32];
 	int fd;
 
-	M.open_calls++;
-	if (strcmp(path, "/dev/nvidiactl") == 0) {
-		fd = k_open(path, flags);
-		if (M.enum_fd < 0)
-			M.enum_fd = fd;
-		else if (M.prelimit_session && fd >= 0) {
-			cap_rights_t r;
-
-			M.prelimit_session = 0;
-			cap_rights_init(&r, CAP_READ);
-			if (cap_rights_limit(fd, &r) != 0)
-				bad("cannot pre-limit a session descriptor");
-		}
-		return (fd);
-	}
 	snprintf(want, sizeof(want), "/dev/nvidia%u", GPU_MINOR);
 	snprintf(M.last_map_path, sizeof(M.last_map_path), "%s", path);
 	if (strcmp(path, want) != 0)
@@ -404,6 +430,15 @@ m_open(const char *path, int flags)
 			bad("cannot pre-limit a device node");
 	}
 	return (fd);
+}
+
+static int
+m_open(const char *path, int flags)
+{
+	M.open_calls++;
+	if (strcmp(path, "/dev/nvidiactl") == 0)
+		return (m_open_ctl(flags));
+	return (m_open_dev(path, flags));
 }
 
 /* ---- allocations ---------------------------------------------------------- */
@@ -643,6 +678,7 @@ chan_alloc_engine(int fd, NVOS21_PARAMETERS *p, int slot)
 static void
 chan_alloc(int fd, NVOS21_PARAMETERS *p)
 {
+	mobj *o;
 	int slot;
 
 	if (p->hClass == NV20_SUBDEVICE_0)
@@ -660,7 +696,11 @@ chan_alloc(int fd, NVOS21_PARAMETERS *p)
 		p->status = NV_ERR_INVALID_CLASS;
 		return;
 	}
-	add(fd, p->hObjectNew, p->hClass);
+	o = add(fd, p->hObjectNew, p->hClass);
+	/* The usermode page is in system memory, so its CPU mapping belongs
+	 * to the control device. */
+	if (p->hClass == CLS_USERMODE)
+		o->attr = DRF_DEF(OS32, _ATTR, _LOCATION, _PCI);
 }
 
 static void
@@ -837,6 +877,28 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 	}
 }
 
+/* Is the object system memory?  The RM's own word for it: the location in
+ * the allocation's attributes. */
+static int
+is_sysmem(const mobj *o)
+{
+	return (DRF_VAL(OS32, _ATTR, _LOCATION, o->attr) ==
+	    NVOS32_ATTR_LOCATION_PCI);
+}
+
+/* Is the descriptor one of the control device's? */
+static int
+is_ctl_fd(int fd)
+{
+	int i;
+
+	/* Time: O(the descriptors of the test).  Space: O(1). */
+	for (i = 0; i < M.nctl_fds; i++)
+		if (M.ctl_fds[i] == fd)
+			return (1);
+	return (0);
+}
+
 /* ---- the escapes ------------------------------------------------------------- */
 
 /* #lizard forgives -- the scripted kernel mirrors the escape switch, one case per escape */
@@ -965,12 +1027,27 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 	}
 	case NV_ESC_RM_MAP_MEMORY: {
 		nv_ioctl_nvos33_parameters_with_fd *p = arg;
+		mobj *mem;
 
 		if (IOCPARM_LEN(cmd) != sizeof(*p) || p->params.hClient !=
 		    CLIENT || find(fd, p->params.hMemory) == NULL ||
 		    p->fd < 0 || p->params.length == 0)
 			bad("CPU map parameters");
+		mem = find(fd, p->params.hMemory);
 		M.nmapmem++;
+		/*
+		 * The RM's rule: a CPU mapping of system memory belongs to
+		 * the control device and one of video memory to the GPU's
+		 * device node.  The RM maps the memory either way, and the
+		 * OS layer then refuses to keep the mapping on any other
+		 * file, so the RM undoes the map and answers
+		 * NV_ERR_INVALID_ARGUMENT.
+		 */
+		if (is_sysmem(mem) != is_ctl_fd(p->fd)) {
+			M.nunmapmem++;
+			p->params.status = NV_ERR_INVALID_ARGUMENT;
+			return (0);
+		}
 		/* The descriptor the mapping was made on: the test maps it
 		 * too, as the GPU would. */
 		if (M.nmaps < MAPS_MAX) {
@@ -1626,8 +1703,10 @@ test_map_cpu(void)
 	M.fail_nr = NV_ESC_RM_MAP_MEMORY;
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p), NVRM_E_IO);
 	/* the RM side mapped but the mmap(2) fails: the RM side is undone,
-	 * and the mmap error is the one reported */
-	M.map_dev_null = 1;
+	 * and the mmap error is the one reported.  A mapping of system
+	 * memory is made on the control device, so that is the node that
+	 * cannot be mapped here. */
+	M.ctl_dev_null = 1;
 	nvrm_client_close(cl);
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	CHECK_EQ(alloc(cl, NVRM_MEM_SYSMEM, 64 * KiB, 0, &m), NVRM_OK);
@@ -1639,6 +1718,17 @@ test_map_cpu(void)
 	M.status_val = NV_ERR_INVALID_OBJECT;
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p), NVRM_E_IO);
 	HAS(cl, "mmap of the device failed");
+	M.ctl_dev_null = 0;
+	nvrm_client_close(cl);
+	/* and the same for a mapping of video memory, which is made on the
+	 * device node */
+	M.map_dev_null = 1;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 0, &m), NVRM_OK);
+	M.nunmapmem = 0;
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p), NVRM_E_IO);
+	HAS(cl, "mmap of the device failed");
+	CHECK_EQ(M.nunmapmem, 1);
 	M.map_dev_null = 0;
 	nvrm_client_close(cl);
 	/* an unmap the RM refuses, or whose call fails */
@@ -1657,6 +1747,72 @@ test_map_cpu(void)
 	CHECK_EQ(not_freed_explicitly(), 0);
 	nvrm_client_close(cl);
 	down("map cpu");
+}
+
+/*
+ * The request the RM refused on the GPU: a CPU mapping of system memory
+ * named on the GPU's device node.  The RM maps the memory, the OS layer then
+ * refuses to keep the mapping on that file, so the RM undoes the map and
+ * answers NV_ERR_INVALID_ARGUMENT (0x1f).  A mapping of system memory
+ * belongs to the control device; a mapping of video memory belongs to the
+ * device node.
+ */
+static void
+test_map_cpu_kind(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	void *p;
+	nv_ioctl_nvos33_parameters_with_fd mp;
+	int devfd, maps;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	CHECK_EQ(alloc(cl, NVRM_MEM_SYSMEM, 64 * KiB, 0, &m), NVRM_OK);
+	/* The exact request RM rejected, sent by hand. */
+	devfd = m_open("/dev/nvidia1", O_RDWR);
+	CHECK(devfd >= 0);
+	memset(&mp, 0, sizeof(mp));
+	mp.params.hClient = CLIENT;
+	mp.params.hDevice = S[sess_index(M.session_fd)].device;
+	mp.params.hMemory = nvrm_rmm_handle(m->b);
+	mp.params.length = 64 * KiB;
+	mp.fd = devfd;
+	CHECK_EQ(m_ioctl(M.session_fd, IOC_MAP_MEMORY_T, &mp), 0);
+	CHECK_EQ(mp.params.status, NV_ERR_INVALID_ARGUMENT);
+	CHECK_EQ(M.nmapmem, 1);		/* the RM mapped it */
+	CHECK_EQ(M.nunmapmem, 1);	/* and undid the map */
+	/* The library's own mapping of the same object: the control device. */
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p),
+	    NVRM_OK);
+	CHECK_EQ(M.nmapmem, 2);
+	CHECK_EQ(M.nmaps, 1);
+	CHECK(is_ctl_fd(M.maps[0].fd));
+	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+	nvrm_mem_free(m);
+	/* A mapping of video memory is made on the device node. */
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 0, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &p),
+	    NVRM_OK);
+	CHECK_EQ(M.nmapmem, 3);
+	CHECK_EQ(M.nmaps, 2);
+	CHECK(!is_ctl_fd(M.maps[1].fd));
+	/* The RM refuses the other way round as well: video memory named on
+	 * the control device. */
+	memset(&mp, 0, sizeof(mp));
+	mp.params.hClient = CLIENT;
+	mp.params.hDevice = S[sess_index(M.session_fd)].device;
+	mp.params.hMemory = nvrm_rmm_handle(m->b);
+	mp.params.length = 64 * KiB;
+	mp.fd = M.session_fd;
+	maps = M.nmaps;
+	CHECK_EQ(m_ioctl(M.session_fd, IOC_MAP_MEMORY_T, &mp), 0);
+	CHECK_EQ(mp.params.status, NV_ERR_INVALID_ARGUMENT);
+	CHECK_EQ(M.nmaps, maps);
+	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	down("map cpu kind");
 }
 
 /* ---- sharing ------------------------------------------------------------------- */
@@ -2289,9 +2445,11 @@ test_chan_ctl_fail(void)
 	down("chan control fail");
 }
 
-/* A create whose device node cannot be opened: the create is refused,
+/* A create whose descriptor cannot be opened: the create is refused,
  * nothing is left behind, and the message says what failed.  n is the
- * device node the backend opens (0 = the first one). */
+ * control device the backend opens (0 = the first one).  The channel's
+ * pages are in system memory, so their mappings are made on the control
+ * device. */
 static void
 chan_open_fails(int n, const char *text)
 {
@@ -2303,20 +2461,20 @@ chan_open_fails(int n, const char *text)
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	fd = M.session_fd;
 	if (n == 0)
-		M.fail_map_open = 1;
+		M.fail_ctl_open = 1;
 	else
-		M.fail_map_open_n = M.map_opens + n;
+		M.fail_ctl_open_n = M.ctl_opens + n;
 	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
 	CHECK(ch == NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
 	CHECK_EQ(live_in_session(fd), 2);
-	M.fail_map_open = 0;
-	M.fail_map_open_n = 0;
+	M.fail_ctl_open = 0;
+	M.fail_ctl_open_n = 0;
 	nvrm_client_close(cl);
 }
 
 /* A create whose mapping fails: the create is refused and nothing is left
- * behind.  n is the device node the backend opens. */
+ * behind.  n is the control device the backend opens. */
 static void
 chan_mmap_fails(int n, const char *text)
 {
@@ -2327,12 +2485,12 @@ chan_mmap_fails(int n, const char *text)
 
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	fd = M.session_fd;
-	M.map_dev_null_n = M.map_opens + n;
+	M.ctl_dev_null_n = M.ctl_opens + n;
 	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
 	CHECK(ch == NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
 	CHECK_EQ(live_in_session(fd), 2);
-	M.map_dev_null_n = 0;
+	M.ctl_dev_null_n = 0;
 	nvrm_client_close(cl);
 }
 
@@ -2357,12 +2515,12 @@ test_chan_map_fail(void)
 	M.status_nr = -1;
 	nvrm_client_close(cl);
 
-	/* the device node of the GPU cannot be opened: the usermode page
-	 * cannot be mapped */
-	chan_open_fails(0, "cannot open /dev/nvidia1");
-	/* the mapping of the userd page fails: the second device node the
+	/* the control device cannot be opened: the usermode page cannot be
+	 * mapped */
+	chan_open_fails(0, "cannot open /dev/nvidiactl");
+	/* the mapping of the userd page fails: the second control device the
 	 * backend opens is the one of the userd page */
-	chan_open_fails(2, "cannot open /dev/nvidia1");
+	chan_open_fails(2, "cannot open /dev/nvidiactl");
 	/* the mmap of the usermode page fails */
 	chan_mmap_fails(1, "mmap of the device failed");
 	/* the mmap of the userd page fails */
@@ -2560,6 +2718,7 @@ test_chan_two_clients(void)
 	X("alloc-sysmem", test_alloc_sysmem) \
 	X("map-gpu", test_map_gpu) \
 	X("map-cpu", test_map_cpu) \
+	X("map-cpu-kind", test_map_cpu_kind) \
 	X("share", test_share) \
 	X("chan", test_chan_create) \
 	X("chan", test_chan_copy) \

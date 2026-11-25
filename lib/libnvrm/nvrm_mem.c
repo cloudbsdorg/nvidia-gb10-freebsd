@@ -168,11 +168,22 @@ pool_take(nvrm_client *cl, int kind, int *fd)
 	if (in_capmode())
 		return (fail(cl, NVRM_E_NOSLOT, "no spare %s descriptor is "
 		    "left and none can be opened in capability mode (raise "
-		    "nvrm_open_opts.%s)", kind == NVRM_DESC_MAP ? "mapping" :
-		    "export", kind == NVRM_DESC_MAP ? "map_slots" :
-		    "export_slots"));
+		    "nvrm_open_opts.%s)", kind == NVRM_DESC_EXPORT ? "export" :
+		    "mapping", kind == NVRM_DESC_EXPORT ? "export_slots" :
+		    "map_slots"));
 	return (cl->mops->desc_open(cl->bc, kind, fd, cl->errmsg,
 	    sizeof(cl->errmsg)));
+}
+
+/*
+ * The descriptor a CPU mapping of memory in this place is made on: the RM
+ * maps video memory through the GPU's device node and system memory through
+ * the control device (nvrm_internal.h, NVRM_DESC_MAP).
+ */
+static int
+map_desc_kind(int place)
+{
+	return (place == NVRM_PLACE_SYSMEM ? NVRM_DESC_MAP_CTL : NVRM_DESC_MAP);
 }
 
 /* ---- client -------------------------------------------------------------- */
@@ -294,6 +305,8 @@ nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
 	cl->va_end = vi.end;
 	rc = pool_fill(cl, NVRM_DESC_MAP, cfg.map_slots);
 	if (rc == NVRM_OK)
+		rc = pool_fill(cl, NVRM_DESC_MAP_CTL, cfg.map_slots);
+	if (rc == NVRM_OK)
 		rc = pool_fill(cl, NVRM_DESC_EXPORT, cfg.export_slots);
 	if (rc != NVRM_OK) {
 		set_err(err, errlen, cl->errmsg);
@@ -369,7 +382,7 @@ nvrm_client_stats_get(nvrm_client *cl, nvrm_client_stats *st)
 	cl->errmsg[0] = '\0';
 	full.size = (uint32_t)want;
 	full.spare_descriptors = cl->pool[NVRM_DESC_MAP].n +
-	    cl->pool[NVRM_DESC_EXPORT].n;
+	    cl->pool[NVRM_DESC_MAP_CTL].n + cl->pool[NVRM_DESC_EXPORT].n;
 	memcpy(st, &full, want);
 	return (NVRM_OK);
 }
@@ -882,7 +895,7 @@ nvrm_mem_map_cpu(nvrm_mem *m, unsigned prot, void **addr)
 		    "NVRM_CPU_READ and/or NVRM_CPU_WRITE"));
 	if (m->cpu_addr != NULL)
 		return (fail(cl, NVRM_E_BUSY, "the object is mapped already"));
-	rc = pool_take(cl, NVRM_DESC_MAP, &fd);
+	rc = pool_take(cl, map_desc_kind(m->place), &fd);
 	if (rc != NVRM_OK)
 		return (rc);
 	rc = cl->mops->map_cpu(m->b, fd, prot, &m->cpu_addr, cl->errmsg,

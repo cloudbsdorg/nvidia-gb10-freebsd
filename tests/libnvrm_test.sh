@@ -414,7 +414,7 @@ mutant device-width nvrm_mem.c 's/while (w > len || ((uintptr_t)p \& (w - 1)) !=
 mutant size-zero nvrm_mem.c 's/return (size == 0 || size == want);/return (size == want);/' mem_test
 mutant fake-sparse nvrm_fake_mem.c 's/memset(p, 0, n);/(void)0;/' mem_test
 mutant fake-exported nvrm_fake_mem.c 's/ || !o->exported//' mem_test
-mutant fake-spare-limit nvrm_fake_mem.c 's/	    export_spare_limit(\*fd);/	    NVRM_OK;/' mem_test
+mutant fake-spare-limit nvrm_fake_mem.c 's/export_spare_limit(\*fd) :/NVRM_OK :/' mem_test
 mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
 mutant fake-obj-leak nvrm_fake_mem.c '/^fk_mem_free/,/^}/s/		obj_unref(m->o);//' mem_test
 mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,$/	return (1 ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,/' rm_mem_test

@@ -824,7 +824,10 @@ On it: VA reservations (sparse or not), video and system memory with a chosen pa
 64 KiB, 2 MiB, 512 MiB), registered user pages, GPU mappings at fixed addresses, CPU mappings,
 and sharing by descriptor (export, import). CPU mapping needs `NVRM_OPEN_ALLOW_MAP`: the client then
 opens spare descriptors of this GPU's own device node (`/dev/nvidiaN`, N reported by the driver), so
-it keeps working after `cap_enter()`; each CPU mapping or export uses one. The
+it keeps working after `cap_enter()`; each CPU mapping or export uses one. A CPU mapping of video
+memory is made on the device node and a CPU mapping of system memory on the control device
+(`/dev/nvidiactl`), because the RM keeps the mapping of system memory on the control device and
+refuses any other descriptor with `NV_ERR_INVALID_ARGUMENT`. The
 CPU attribute of a mapping follows the rule in `nvrm(7)` (on arm64, video memory is Device unless the
 OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()` obey it. A release the
 RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a

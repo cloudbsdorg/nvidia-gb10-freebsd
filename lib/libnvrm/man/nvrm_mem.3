@@ -123,7 +123,12 @@ With it, the client opens
 .Pf ( Pa /dev/nvidia Ns Ar N ,
 with
 .Ar N
-reported by the driver) at once.
+reported by the driver) at once, and as many spare descriptors of the
+control device
+.Pf ( Pa /dev/nvidiactl ) .
+A CPU mapping of video memory is made on the device node and a CPU mapping of
+system memory on the control device, because the RM keeps the mapping of
+system memory on the control device and refuses any other descriptor.
 Every client opens
 .Va export_slots
 (0 means 4) spare export descriptors.

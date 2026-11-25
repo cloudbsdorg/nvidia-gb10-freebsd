@@ -185,8 +185,20 @@ typedef struct nvrm_bclient nvrm_bclient;	/* backend: one client on one GPU */
 typedef struct nvrm_bmem nvrm_bmem;		/* backend: one memory object */
 typedef struct nvrm_bres nvrm_bres;		/* backend: one VA reservation */
 
-/* The kinds of spare descriptor a client pre-opens. */
-enum { NVRM_DESC_MAP = 1, NVRM_DESC_EXPORT, NVRM_DESC__COUNT };
+/*
+ * The kinds of spare descriptor a client pre-opens.
+ *
+ * NVRM_DESC_MAP is the GPU's own device node (/dev/nvidiaN): a CPU mapping
+ * of video memory is made on it, because the RM maps video memory through
+ * the GPU's BAR aperture.
+ *
+ * NVRM_DESC_MAP_CTL is the control device (/dev/nvidiactl): a CPU mapping of
+ * system memory is made on it, because the RM associates a system-memory
+ * mapping with the control device and refuses any other descriptor
+ * (NV_ERR_INVALID_ARGUMENT).  See the README, "CPU mappings".
+ */
+enum { NVRM_DESC_MAP = 1, NVRM_DESC_MAP_CTL, NVRM_DESC_EXPORT,
+    NVRM_DESC__COUNT };
 
 typedef struct nvrm_open_cfg {
 	int		allow_map;

@@ -477,13 +477,13 @@ test_client_open(void)
 	o = (nvrm_open_opts){ sizeof(o), NVRM_OPEN_ALLOW_MAP, 0, 2 };
 	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
-	CHECK_EQ(st.spare_descriptors, NVRM_MAP_SLOTS_DEFAULT + 2);
+	CHECK_EQ(st.spare_descriptors, NVRM_MAP_SLOTS_DEFAULT * 2 + 2);
 	nvrm_client_close(cl);
 	st.size = sizeof(st);
 	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 3, 0 };
 	CHECK_EQ(nvrm_client_open(d, &o, &cl, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
-	CHECK_EQ(st.spare_descriptors, 3 + NVRM_EXPORT_SLOTS_DEFAULT);
+	CHECK_EQ(st.spare_descriptors, 3 * 2 + NVRM_EXPORT_SLOTS_DEFAULT);
 	nvrm_client_close(cl);
 	/* a pool bigger than one growth step (8 descriptors) */
 	o = (nvrm_open_opts){ 0, NVRM_OPEN_ALLOW_MAP, 20, 0 };
@@ -1165,14 +1165,16 @@ test_cpu_map(void)
 	CHECK_EQ(st.live_gpu_maps, 0);
 
 	/* two descriptors were pre-opened (map_slots 2): a third mapping is opened on
-	 * demand when the process is not in capability mode, and refused when it is */
+	 * demand when the process is not in capability mode, and refused when it is.
+	 * The two mappings are of system memory, so they took the control-device
+	 * descriptors; the device-node ones are all left, and the export one. */
 	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
 	m2 = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
 	m3 = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
 	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_OK);
 	CHECK_EQ(nvrm_mem_map_cpu(m2, NVRM_CPU_READ, &addr), NVRM_OK);
 	stats_get(cl, &st);
-	CHECK_EQ(st.spare_descriptors, 1);	/* only the export one is left */
+	CHECK_EQ(st.spare_descriptors, 3);	/* the export one and the two of the node */
 	CHECK_EQ(nvrm_mem_map_cpu(m3, NVRM_CPU_READ, &addr), NVRM_OK);	/* opened on demand */
 	nvrm_mem_unmap_cpu(m3);
 	capmode = 1;

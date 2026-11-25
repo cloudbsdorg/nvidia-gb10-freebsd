@@ -381,7 +381,9 @@ fk_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 	int rc;
 
 	INJECT(NVRM_FAKE_OP_DESC, err, errlen);
-	if (kind == NVRM_DESC_MAP)
+	/* A mapping descriptor is the software GPU's own node, whichever kind
+	 * it is: the fake GPU has one node for both. */
+	if (kind == NVRM_DESC_MAP || kind == NVRM_DESC_MAP_CTL)
 		*fd = dup(c->dev->fd);
 	else
 		*fd = shm_open(SHM_ANON, O_RDWR, 0600);
@@ -399,8 +401,8 @@ fk_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 		close(*fd);
 		return (NVRM_E_IO);
 	}
-	rc = kind == NVRM_DESC_MAP ? nvrm_cap_limit_desc(*fd, kind) :
-	    export_spare_limit(*fd);
+	rc = kind == NVRM_DESC_EXPORT ? export_spare_limit(*fd) :
+	    nvrm_cap_limit_desc(*fd, kind);
 	if (injected(NVRM_FAKE_OP_LIMIT))
 		rc = NVRM_E_CAPSICUM;
 	if (rc != NVRM_OK) {

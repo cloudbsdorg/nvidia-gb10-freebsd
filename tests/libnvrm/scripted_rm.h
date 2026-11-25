@@ -10,6 +10,8 @@
 #ifndef _SCRIPTED_RM_H_
 #define _SCRIPTED_RM_H_
 
+#include <sys/mman.h>
+
 #define CLIENT		0xc1100001u
 #define MAXOBJ		64
 
@@ -133,7 +135,16 @@ k_open(const char *path, int flags)
 		K.nfd++;
 		return (pp[0]);
 	}
-	fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	/*
+	 * The control device is a node a mapping can be made of: the RM
+	 * keeps the CPU mapping of system memory on it (the OS layer's
+	 * nvidia_mmap_ctl_single), so the scripted node must be one.
+	 */
+	fd = shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600);
+	if (fd >= 0 && ftruncate(fd, 64 * 1024 * 1024) != 0) {
+		close(fd);
+		fd = -1;
+	}
 	if (fd >= 0)
 		K.nfd++;
 	return (fd);

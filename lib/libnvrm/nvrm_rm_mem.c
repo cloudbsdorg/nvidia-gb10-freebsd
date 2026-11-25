@@ -17,11 +17,18 @@
  *   system memory    NV01_MEMORY_SYSTEM, location PCI, cached
  *   user pages       NV01_MEMORY_SYSTEM_OS_DESCRIPTOR, a virtual address
  *   GPU map          NV_ESC_RM_MAP_MEMORY_DMA at a fixed DMA offset
- *   CPU map          NV_ESC_RM_MAP_MEMORY with the descriptor of
- *                    /dev/nvidiaN, then mmap(2) of that descriptor.  The OS
- *                    layer keeps one mapping context per descriptor
+ *   CPU map          NV_ESC_RM_MAP_MEMORY with the descriptor the mapping is
+ *                    made on, then mmap(2) of that descriptor.  The OS layer
+ *                    keeps one mapping context per descriptor
  *                    (nvidia_mmap_dev_single), so every CPU mapping consumes
  *                    one descriptor; the core keeps spares for capability mode.
+ *                    The descriptor's kind follows the memory: a video-memory
+ *                    mapping is made on /dev/nvidiaN (the RM maps it through
+ *                    the GPU's BAR aperture), a system-memory mapping on
+ *                    /dev/nvidiactl, because the RM associates a
+ *                    system-memory mapping with the control device and
+ *                    refuses any other descriptor with NV_ERR_INVALID_ARGUMENT
+ *                    (nvrm_internal.h, NVRM_DESC_MAP).
  *   export / import  NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD with the
  *                    descriptor of a second /dev/nvidiactl (the spare), and
  *                    ..._IMPORT_OBJECT_FROM_FD on the receiving client
@@ -256,8 +263,9 @@ rmm_client_close(nvrm_bclient *c)
 	free(c);
 }
 
-/* The spare descriptors: a mapping one is /dev/nvidiaN, an export one is
- * another /dev/nvidiactl.  Each is limited at once to what it is for. */
+/* The spare descriptors: a mapping one is /dev/nvidiaN, a control-device
+ * mapping one is another /dev/nvidiactl, an export one is another
+ * /dev/nvidiactl.  Each is limited at once to what it is for. */
 static int
 rmm_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 {

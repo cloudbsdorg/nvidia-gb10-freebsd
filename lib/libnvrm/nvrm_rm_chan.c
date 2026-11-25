@@ -111,7 +111,8 @@ fetch_classes(nvrm_bclient *c, char *err, size_t errlen)
 }
 
 /* The usermode page: the only device mapping the backend makes.  The
- * doorbell is one aligned store in it. */
+ * doorbell is one aligned store in it.  The page is in system memory, so the
+ * mapping is made on a control-device descriptor. */
 static int
 map_usermode(nvrm_bclient *c, char *err, size_t errlen)
 {
@@ -119,8 +120,8 @@ map_usermode(nvrm_bclient *c, char *err, size_t errlen)
 	int rc;
 
 	c->usermode_fd = -1;
-	rc = nvrm_rm_mem_ops.desc_open(c, NVRM_DESC_MAP, &c->usermode_fd, err,
-	    errlen);
+	rc = nvrm_rm_mem_ops.desc_open(c, NVRM_DESC_MAP_CTL, &c->usermode_fd,
+	    err, errlen);
 	if (rc != NVRM_OK)
 		return (rc);
 	rc = nvrm_rmm_map_handle(c, c->usermode, NVC361_NV_USERMODE__SIZE,
@@ -197,7 +198,9 @@ pick_class(nvrm_bchan *b, const nvrm_bchan_cfg *cfg, nvrm_bchan_info *out,
 }
 
 /* A page of system memory the GPU reads: the userd page of the channel or
- * the error notifier.  The page is mapped on a descriptor of its own. */
+ * the error notifier.  The page is mapped on a descriptor of its own, a
+ * control-device one: the RM associates a system-memory mapping with the
+ * control device. */
 static int
 alloc_page(nvrm_bchan *b, nvrm_bmem **mp, int *fdp, void **cp, unsigned prot,
     char *err, size_t errlen)
@@ -214,7 +217,8 @@ alloc_page(nvrm_bchan *b, nvrm_bmem **mp, int *fdp, void **cp, unsigned prot,
 	rc = nvrm_rm_mem_ops.mem_alloc(b->c, &a, mp, &bi, err, errlen);
 	if (rc != NVRM_OK)
 		return (rc);
-	rc = nvrm_rm_mem_ops.desc_open(b->c, NVRM_DESC_MAP, &fd, err, errlen);
+	rc = nvrm_rm_mem_ops.desc_open(b->c, NVRM_DESC_MAP_CTL, &fd, err,
+	    errlen);
 	if (rc != NVRM_OK)
 		return (rc);
 	rc = nvrm_rm_mem_ops.map_cpu(*mp, fd, prot, cp, err, errlen);
