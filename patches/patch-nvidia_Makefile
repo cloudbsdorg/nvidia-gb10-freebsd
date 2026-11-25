@@ -1,6 +1,6 @@
 --- nvidia/Makefile.orig
 +++ nvidia/Makefile
-@@ -13,12 +13,75 @@
+@@ -13,12 +13,80 @@
  include nvidia-sources.mk
  
  SRCS=		${NVIDIA_SOURCES}
@@ -72,6 +72,11 @@
 +		nvUvmInterfaceInitAccessCntrInfo nvUvmInterfaceDestroyAccessCntrInfo \
 +		nvUvmInterfaceEnableAccessCntr nvUvmInterfaceDisableAccessCntr \
 +		nvUvmInterfaceReportFatalError
++.else
++# FreeBSD 16 bsd.kmod.mk defaults EXPORT_SYMS to NO, which writes an
++# empty export_syms and objcopy-strips every global. amd64 modules
++# export every global symbol.
++EXPORT_SYMS=	YES
 +.endif
 +
  include ../common/optional-cflags.mk

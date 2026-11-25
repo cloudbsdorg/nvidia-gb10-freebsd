@@ -53,6 +53,13 @@
 #       explanation; ACCEPT_NVIDIA_LICENSE=1 and ACCEPT_ALL_LICENSES=1
 #       accept and record it; a changed licence asks again; preflight and
 #       help say so
+# The DRM modules are architecture-dependent (uname -p).  On amd64 drm.ko
+# and dmabuf.ko come from FreeBSD's drm-kmod packages: this repository
+# does not install them, so the tests plant a packaged drm.ko and
+# dmabuf.ko in DESTDIR/boot/modules the way `pkg install drm-kmod` would,
+# expect the install to keep them and to leave them out of our manifest,
+# and compare with the expected manifest without them.  On aarch64 this
+# tree installs both and today's expectations stand.
 # The MK_* switches of a calling make (make test YES=1) are cleared first.
 # The planted build, source tarball and pinned-looking trees keep every
 # automatic install-prereqs run offline.  Scratch files live under WORK/tmp
@@ -124,6 +131,37 @@ mk() (
 	sh "$repo/scripts/make.sh" "$@"
 )
 me=$(id -un):$(id -gn)
+
+# The DRM modules are architecture-dependent.  On amd64 drm.ko and
+# dmabuf.ko come from FreeBSD's drm-kmod packages and this repository
+# does not install them; on aarch64 this tree installs both, unless a
+# foreign drm.ko is already in place.
+arch=$(uname -p)
+case "$arch" in
+amd64)	drm_ours=no ;;
+aarch64)	drm_ours=yes ;;
+*)	drm_ours=yes
+	printf 'note: unknown architecture %s, keeping the aarch64 expectations\n' "$arch" ;;
+esac
+
+# plant_packaged_drm DESTDIR: leave the DRM modules in
+# DESTDIR/boot/modules the way `pkg install drm-kmod` leaves them.  On
+# amd64 the install has to find a packaged DRM module there, must keep
+# it and must not put it in our manifest; on aarch64 this tree installs
+# its own, so nothing is planted.  A module that is already there (a
+# foreign one) is left alone.
+plant_packaged_drm() {
+	[ "$drm_ours" = no ] || return 0
+	_p=$1
+	mkdir -p "$_p/boot/modules"
+	for _m in drm dmabuf; do
+		if [ ! -e "$_p/boot/modules/$_m.ko" ]; then
+			printf 'packaged %s\n' "$_m" > "$_p/boot/modules/$_m.ko"
+			chmod 555 "$_p/boot/modules/$_m.ko"
+		fi
+	done
+	return 0
+}
 
 # (a) help and purpose under both makes
 for m in make gmake; do
@@ -226,6 +264,10 @@ printf '#define __FreeBSD_version %s\n' "$(sysctl -n kern.osreldate)" > "$W/src/
 MK_WORK=$W mk _build-stamp > "$W/build/stamp"
 D=$S/dest
 mkdir -p "$D/boot/modules" "$D/usr/local/etc" "$D/etc"
+# the packaged DRM modules are there before the snapshot: the install
+# must keep them, the manifest must not claim them and the deinstall
+# must leave them alone
+plant_packaged_drm "$D"
 snap() { (cd "$1" && find . | sort); }
 snap "$D" > "$S/before.list"
 
@@ -233,6 +275,7 @@ snap "$D" > "$S/before.list"
 # needed.  Use a separate destination so (d) still tests a first install.
 DC=$S/dest-no-yes
 mkdir -p "$DC/boot/modules" "$DC/usr/local/etc" "$DC/etc"
+plant_packaged_drm "$DC"
 (MK_WORK=$W MK_DESTDIR=$DC MK_YES=0 mk install < /dev/null) > "$S/c.out" 2>&1
 rc=$?
 if [ "$rc" = 0 ] && [ -f "$DC/boot/modules/nvidia.ko" ] \
@@ -269,15 +312,44 @@ if [ "$rc" = 0 ] && [ -f "$M" ]; then
 	    "/usr/local/share/man/man4/nvidia.4 444 $me" "/usr/local/lib/libnvrm.so.1 444 $me" \
 	    "/usr/local/sbin/nvrm-info 555 $me" "/usr/local/share/man/man8/nvrm-info.8 444 $me" \
 	    "/usr/local/lib/libnvrm.so link -> libnvrm.so.1" "/usr/local/share/man/man3/nvrm_enumerate.3 link -> nvrm.3" \
-	    "/usr/local/etc/devd/nvidia_gb10.conf 444 $me" "/boot/modules/drm.ko 555 $me" "/boot/modules/dmabuf.ko 555 $me" \
+	    "/usr/local/etc/devd/nvidia_gb10.conf 444 $me" \
 	    "/usr/local/share/licenses/nvidia-gb10-freebsd/NVIDIA-LICENSE 444 $me" \
 	    "/var/db/nvidia-gb10-freebsd dir" "/usr/local/include/nvrm dir" "/usr/local/etc/rc.d dir"; do
 		grep -q "^$want" "$M" || bad "manifest lacks: $want"
 	done
+	# the DRM modules are ours on aarch64 and FreeBSD's on amd64
+	if [ "$drm_ours" = yes ]; then
+		for want in "/boot/modules/drm.ko 555 $me" "/boot/modules/dmabuf.ko 555 $me"; do
+			grep -q "^$want" "$M" || bad "manifest lacks: $want"
+		done
+	else
+		if grep -q '^/boot/modules/drm.ko ' "$M"; then
+			bad "manifest claims drm.ko, which comes from drm-kmod on $arch"
+		fi
+		if grep -q '^/boot/modules/dmabuf.ko ' "$M"; then
+			bad "manifest claims dmabuf.ko, which comes from drm-kmod on $arch"
+		fi
+	fi
 	grep -q '^/boot/modules dir' "$M" && bad "manifest claims /boot/modules, which existed before"
 	got=$(awk '$1 ~ /^\/boot\/modules\// { sub(/.*\//, "", $1); print $1 }' "$M" | sort)
-	want=$(printf '%s\n' $mods drm.ko dmabuf.ko | sed 's|.*/||' | sort)
+	if [ "$drm_ours" = yes ]; then
+		want=$(printf '%s\n' $mods drm.ko dmabuf.ko | sed 's|.*/||' | sort)
+	else
+		want=$(printf '%s\n' $mods | sed 's|.*/||' | grep -E -v '(^|/)drm\.ko$|(^|/)dmabuf\.ko$' | sort)
+	fi
 	[ "$got" = "$want" ] && ok "install: the modules are the module list" || bad "modules: $got"
+	if [ "$drm_ours" = no ]; then
+		# the packaged DRM modules stay as they are and are not ours
+		if [ -f "$D/boot/modules/drm.ko" ] && [ -f "$D/boot/modules/dmabuf.ko" ] \
+		    && [ "$(cat "$D/boot/modules/drm.ko")" = "packaged drm" ] \
+		    && [ "$(cat "$D/boot/modules/dmabuf.ko")" = "packaged dmabuf" ] \
+		    && ! grep -q '^/boot/modules/drm.ko ' "$M" \
+		    && ! grep -q '^/boot/modules/dmabuf.ko ' "$M"; then
+			ok "the packaged drm.ko and dmabuf.ko are kept and are not in the manifest"
+		else
+			bad "the packaged DRM modules were replaced or claimed by the install"
+		fi
+	fi
 	n=$(awk '$2 ~ /^[0-7]+$/' "$M" | wc -l | tr -d ' ')
 	ns=$(find "$W/stage" -type f | wc -l | tr -d ' ')
 	[ "$n" = $((ns + 1)) ] && ok "install: $n files (the stage and the manifest)" || bad "install: $n files, stage $ns"
@@ -289,6 +361,7 @@ fi
 # avoid the live root install that the discarded DESTDIR would request.
 D9=$S/dest9
 mkdir -p "$D9/boot/modules" "$D9/etc"
+plant_packaged_drm "$D9"
 if [ "$(cd "$repo" && env DESTDIR="$D9" make -V DESTDIR)" = "$D9" ] \
     && [ "$(cd "$repo" && env PREFIX=/opt/gb10 make -V PREFIX)" = /opt/gb10 ]; then
 	(cd "$repo" && env DESTDIR="$D9" PREFIX=/opt/gb10 make install YES=1 ACCEPT_NVIDIA_LICENSE=1 \
@@ -310,6 +383,7 @@ fi
 # removes every file by using the prefix recorded at install time.
 D10=$S/dest10
 mkdir -p "$D10/boot/modules" "$D10/usr/local/etc" "$D10/etc"
+plant_packaged_drm "$D10"
 inst "$D10" "$S/z1.out"
 rc1=$?
 M10=$D10/var/db/nvidia-gb10-freebsd/installed.manifest
@@ -342,6 +416,7 @@ inst "$D" "$S/e.out" && ok "reinstall over the previous install" || bad "reinsta
 # (f) a foreign file is never replaced
 D2=$S/dest2
 mkdir -p "$D2/boot/modules"
+plant_packaged_drm "$D2"
 printf 'foreign\n' > "$D2/boot/modules/nvidia.ko"
 inst "$D2" "$S/f.out"
 rc=$?
@@ -478,6 +553,7 @@ fi
 # (n) a path planted in the stage is refused, and nothing is written
 D4=$S/dest4
 mkdir -p "$D4"
+plant_packaged_drm "$D4"
 cp -Rp "$W/stage" "$S/stage-evil"
 mkdir -p "$S/stage-evil/etc/rc.d"
 printf '#!/bin/sh\n' > "$S/stage-evil/etc/rc.d/evil"
@@ -557,6 +633,7 @@ rc=$?
 D5=$S/dest5
 mkdir -p "$D5/boot/modules"
 printf 'foreign drm\n' > "$D5/boot/modules/drm.ko"
+plant_packaged_drm "$D5"
 inst "$D5" "$S/s.out"
 rc=$?
 M5=$D5/var/db/nvidia-gb10-freebsd/installed.manifest
@@ -573,6 +650,7 @@ deinst "$D5" "$S/s2.out"
 # and deinstall still removes everything
 D6=$S/dest6
 mkdir -p "$D6/boot/modules" "$D6/usr/local/etc" "$D6/etc"
+plant_packaged_drm "$D6"
 snap "$D6" > "$S/t.before"
 inst "$D6" "$S/t1.out" || bad "(t) install: $(tail -n 2 "$S/t1.out")"
 mkdir -p "$D6/usr/local/share/nvidia-gb10-freebsd"
@@ -638,8 +716,15 @@ else
 	bad "(v) arbitrary manifest path (rc $rc): $(tail -n 3 "$S/v.out")"
 fi
 
-# (u) every module of the module table is a path install may write
-bad_paths=$(printf '%s\n' $mods | sed 's|.*/|/boot/modules/|' | while read -r pth; do
+# (u) every module of the module table is a path install may write.  The
+# DRM modules are not ours on amd64, so they are not in the table we
+# expect to find installed.
+if [ "$drm_ours" = yes ]; then
+	modlist=$mods
+else
+	modlist=$(printf '%s\n' $mods | grep -E -v '(^|/)drm\.ko$|(^|/)dmabuf\.ko$')
+fi
+bad_paths=$(printf '%s\n' $modlist | sed 's|.*/|/boot/modules/|' | while read -r pth; do
 	grep -q "^$pth " "$S/q.manifest" || echo "$pth"
 done)
 [ -z "$bad_paths" ] && ok "every module of the module table is installed" || bad "not installed: $bad_paths"
@@ -648,7 +733,15 @@ done)
 # (owners as a root install sets them)
 awk '$1 ~ /^@/ || $2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, "root:wheel" }' \
     "$S/q.manifest" 2>/dev/null | sort > "$S/q.got"
-grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF' | sort > "$S/q.want"
+grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF' | sort > "$S/q.want.all"
+if [ "$drm_ours" = yes ]; then
+	cp "$S/q.want.all" "$S/q.want"
+else
+	# on amd64 the DRM modules come from FreeBSD's drm-kmod packages:
+	# this repository does not install them, so the expected list drops
+	# them (the file itself is not ours to edit here)
+	awk '$1 != "/boot/modules/drm.ko" && $1 != "/boot/modules/dmabuf.ko"' "$S/q.want.all" > "$S/q.want"
+fi
 [ -s "$S/q.got" ] && cmp -s "$S/q.got" "$S/q.want" && ok "tests/install-e2e/expected.manifest matches what install writes" \
     || bad "expected.manifest differs: $(diff "$S/q.want" "$S/q.got" | head -4 | tr '\n' ' ')"
 

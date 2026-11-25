@@ -1,9 +1,15 @@
-# NVIDIA driver for FreeBSD on arm64
+# NVIDIA driver for FreeBSD on arm64 and amd64
 
-NVIDIA ships a FreeBSD driver only for x86-64. This repository builds it for **arm64
-(aarch64)**: NVIDIA's FreeBSD OS layer, patched for arm64, linked to NVIDIA's open GPU kernel
-module core (open-gpu-kernel-modules, MIT) compiled for aarch64 instead of NVIDIA's prebuilt
-x86-64 object. Driver version **580.178.04**.
+NVIDIA ships a FreeBSD driver only for x86-64, with a prebuilt `nv-kernel.o` for that
+architecture. This repository builds the same native driver for **arm64 (aarch64) and
+amd64**: NVIDIA's FreeBSD OS layer, linked to NVIDIA's open GPU kernel module core
+(open-gpu-kernel-modules, MIT, 580.178.04) compiled for the running architecture
+(`TARGET_ARCH=aarch64` or `x86_64`). The shipped RM core objects are
+`nv-kernel-aarch64.o` and `nv-kernel-amd64.o`. On amd64 we still rebuild that open
+core rather than linking NVIDIA's prebuilt `nv-kernel.o`, so both architectures take
+the same path, from the same pinned source, and the kernel modules are linked with
+the base system's `ld.lld` (the build refuses a module that LLD did not link).
+Driver version **580.178.04**.
 
 NVIDIA's sources and binaries are not stored here. The scripts fetch them and check them
 against the pins in [`SOURCES`](SOURCES) (a sha256 for the FreeBSD tarball, a tag and commit
@@ -13,8 +19,8 @@ small source files of our own, and the tests.
 
 ## Install
 
-Use this path on a stock **FreeBSD arm64** installation: 16.0-CURRENT or 15.1-RELEASE or
-later. On a fresh system, run this one-time setup as root:
+Use this path on a stock **FreeBSD arm64 or amd64** installation: 16.0-CURRENT or
+15.1-RELEASE or later. On a fresh system, run this one-time setup as root:
 
 ```sh
 pkg install -y doas git
@@ -181,19 +187,23 @@ The prerequisite phase does all of this without separate manual steps:
   when there is one. A kernel you built from your own tree names no commit: then set
   `SYSDIR=/path/to/that/tree/sys`.
 - fetches drm-kmod at the tag pinned in `SOURCES` for your kernel (drm_v6.12.110_1 for
-  16.0-CURRENT and 15.1). FreeBSD's drm-kmod packages are amd64-only, so on arm64 `make build`
-  builds `drm.ko` and `dmabuf.ko` from that tree and `make install` installs them, unless a
-  `drm.ko` from somewhere else is already in `/boot/modules` (then nvidia-drm is built against
-  `DRMKMODDIR=`, which must be that drm.ko's source).
+  16.0-CURRENT and 15.1). FreeBSD's drm-kmod packages are amd64-only. On amd64, `make
+  build` does not build our own `drm.ko`: preflight asks you to install FreeBSD's
+  `drm-kmod` packages, and `nvidia-drm` is built against that installed `drm.ko`. On
+  arm64 `make build` builds `drm.ko` and `dmabuf.ko` from the pinned tree and `make
+  install` installs them, unless a `drm.ko` from somewhere else is already in
+  `/boot/modules` (then nvidia-drm is built against `DRMKMODDIR=`, which must be that
+  drm.ko's source).
 
 What `make install` writes (listed with mode, owner and sha256 in
 `/var/db/nvidia-gb10-freebsd/installed.manifest`; it never replaces a file it did not write,
 or one that changed since it wrote it):
 
 - `/boot/modules`: `nvidia_gsp_ga10x_fw.ko` (the GSP firmware), `nvidia.ko`,
-  `nvidia-modeset.ko`, `nvidia-drm.ko`, `nvidia_linux.ko`, `nvidia_modeset_linux.ko`, and
-  `drm.ko`, `dmabuf.ko`; then `kldxref /boot/modules`, so the stock loader and `kldload` find
-  them and their dependencies by name.
+  `nvidia-modeset.ko`, `nvidia-drm.ko`, `nvidia_linux.ko`, `nvidia_modeset_linux.ko`;
+  on arm64 also `drm.ko` and `dmabuf.ko` (on amd64 those come from FreeBSD's drm-kmod
+  packages, not from this install); then `kldxref /boot/modules`, so the stock loader
+  and `kldload` find them and their dependencies by name.
 - under `/usr/local`: `etc/rc.d/nvidia_linux`, `etc/devd/nvidia_gb10.conf`, the manual pages
   nvidia(4), nvidia_drm_render(4), nvidia_linux(4), nvrm(3), nvrm(7), nvrm-info(8), `lib/libnvrm`,
   `include/nvrm/nvrm.h`, `sbin/nvrm-info` and its JSON schema, and the licences in

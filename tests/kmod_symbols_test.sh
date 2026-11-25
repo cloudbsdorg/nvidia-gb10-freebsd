@@ -2,18 +2,26 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# kmod_symbols_test.sh - static load check for the arm64 nvidia.ko
-# (TREE/nvidia/nvidia.ko). No kldload(8), no root:
-#   (a) the ELF header says AArch64 and type DYN (shared object):
+# kmod_symbols_test.sh - static load check for the nvidia.ko
+# (TREE/nvidia/nvidia.ko) on aarch64 and on amd64. No kldload(8), no root:
+#   (a) the ELF header says the machine of THIS architecture and the type
+#       this architecture's build produces. The architecture comes from
+#       `uname -p` (aarch64 or amd64; Track #2475):
+#       on aarch64: machine AArch64 and type DYN (shared object) -
 #       bsd.kmod.mk links nvidia.ko from the REL nvidia.kld with
 #       `ld -Bshareable`, the same type as the system's own kmods;
+#       on amd64: machine X86-64 (FreeBSD's readelf prints
+#       "Advanced Micro Devices X86-64") and type REL (relocatable) or
+#       DYN - with LLD 21.1.8 the amd64 .ko files come out as ELF64 REL,
+#       not DYN, so DYN alone must not be required there;
 #   (b) every undefined symbol (nm -u) is defined in the running kernel
 #       ($(sysctl -n kern.bootfile)) or in a module nvidia.ko depends on
-#       (mem and the GSP firmware modules, see (c); the Linuxulator modules
-#       are no longer dependencies of the core since Track #2363), looked up
-#       in the running kernel's own directory; mem is a dependency but its
-#       interface symbols live in the kernel, and the firmware modules
-#       (Track #2417) export no symbols.
+#       (mem, io on amd64, and the GSP firmware modules, see (c); the
+#       Linuxulator modules are no longer dependencies of the core since
+#       Track #2363), looked up in the running kernel's own directory; mem
+#       is a dependency but its interface symbols live in the kernel, io
+#       is the same on amd64 when io.ko is compiled into the kernel, and
+#       the firmware modules (Track #2417) export no symbols.
 #       Only GLOBAL defined symbols count as resolvers: the kernel linker
 #       never resolves a module's undefined symbols against STB_LOCAL
 #       symbols (kern/link_elf.c:1589-1590, 1705), so a local kernel
@@ -34,18 +42,23 @@
 #       _m_depend_on_<dep> (/usr/src/sys/sys/module.h:120-127), so
 #       "nm nvidia.ko | grep _depend_on_" yields the dependency list.
 #       Asserted: the set is EXACTLY {mem} (Track #2363: the Linux bridge is
-#       the separate nvidia_linux.ko) plus the GSP firmware modules (Track
-#       #2417: nvidia_gsp_ga10x_fw_fw, and nvidia_gsp_tu10x_fw_fw on amd64)
-#       - a membership
+#       the separate nvidia_linux.ko) plus io on amd64 only (x86 port I/O;
+#       the io(4) device exists only on x86, and NVIDIA's MODULE_DEPEND on
+#       io is wrapped that way by patches/patch-nvidia_nvidia_pci.c) plus
+#       the GSP firmware modules (Track #2417: nvidia_gsp_ga10x_fw_fw, and
+#       nvidia_gsp_tu10x_fw_fw on amd64). A membership
 #       check ("mem present, nvidia_gsp_ga10x_fw_fw present, linux64elf absent") would let a
 #       regression like MODULE_DEPEND(nvidia, linux) through, and no such
-#       module exists on arm64, so kldload would fail; io(4) is x86-only
-#       (/usr/src/sys/modules/Makefile:780 inside an x86 block).
+#       module exists on arm64, so kldload would fail; io must not appear
+#       on aarch64 (/usr/src/sys/modules/Makefile:780 inside an x86 block).
 #   (d) $WORK/build/nv-kernel-gb10.o (the partially linked core + stubs
 #       object that build-shim.sh links in as nv-kernel.o) carries the
 #       AArch64 GNU property note with BTI and PAC: FreeBSD 16 arm64
 #       links every kmod with -zbti-report=error, and ld -r only emits
 #       GNU_PROPERTY_AARCH64_FEATURE_1_BTI when every input has it.
+#       That note is an arm64 requirement, so it is required on aarch64
+#       only; on amd64 the notes are not present and are not required -
+#       there the object must be an x86-64 ELF and nothing else.
 #   (e) freshness: the nvidia.ko checked here must come from the CURRENT
 #       patches. TREE/.prepared must say "state done" (line 2), every
 #       entry of its manifest (each applied patch's name and sha256, and
@@ -92,9 +105,13 @@
 #            are declared here because nvidia-drm calls into them.
 #       (g2) every undefined symbol resolves in the kernel or in the file
 #            of one of those dependencies, and only against their
-#            EXPORTED symbols: dmabuf is dmabuf.ko, drmn is drm.ko (both
-#            in the running kernel's directory), linuxkpi is
-#            linuxkpi.ko, nvidia is TREE/nvidia/nvidia.ko and
+#            EXPORTED symbols: dmabuf is dmabuf.ko, drmn is drm.ko and
+#            linuxkpi is linuxkpi.ko - each one looked up in the running
+#            kernel's own directory first and in the packaged modules
+#            directory (/boot/modules) second, because on amd64 this repo
+#            uses the packaged drm-kmod, which installs dmabuf.ko and
+#            drm.ko there and not in /boot/kernel; nvidia is
+#            TREE/nvidia/nvidia.ko and
 #            nvidia_modeset is TREE/nvidia-modeset/nvidia-modeset.ko.
 #            The kernel linker resolves a module's undefined symbols only
 #            from the kernel and from the module's DIRECT dependencies,
@@ -170,6 +187,76 @@ REPO=$(CDPATH= cd -- "$TESTSDIR/.." && pwd)
 fail() {
 	echo "FAIL: $*" >&2
 	exit 1
+}
+
+# The architecture the modules are built for, from `uname -p` (aarch64
+# on the arm64 product, amd64 on the x86 build). The ELF header and the
+# GNU property notes differ per architecture (Track #2475), so the
+# checks below are architecture-aware: an unknown architecture is a
+# failure, never a silently skipped check.
+ARCH=$(uname -p)
+case "$ARCH" in
+aarch64|amd64) ;;
+*) fail "unknown architecture '$ARCH' from uname -p (this test knows aarch64 and amd64)" ;;
+esac
+
+# The machine string readelf prints on this architecture, and the type
+# the modules must have.
+#   aarch64: AArch64, DYN (shared object) - bsd.kmod.mk links the
+#            intermediate nvidia.kld (REL, from `ld -r`) into nvidia.ko
+#            with `ld -Bshareable`, exactly like the system's own
+#            modules (linux64.ko, zfs.ko are DYN).
+#   amd64:   X86-64 (FreeBSD's readelf prints "Advanced Micro Devices
+#            X86-64"), and REL (relocatable): with LLD 21.1.8 the amd64
+#            .ko files are ELF64 REL, not DYN, so DYN alone must not be
+#            required there; DYN is still accepted.
+case "$ARCH" in
+aarch64)
+	ELF_MACHINE=AArch64
+	;;
+amd64)
+	ELF_MACHINE=X86-64
+	;;
+esac
+
+# elf_header <prefix> <file>: check the ELF header of the module <file>
+# and print the summary line "<prefix>: <machine>, <type>".
+#   <prefix> the prefix of the summary line ("elf", "modeset elf",
+#            "drm elf");
+#   <file>   the .ko to read; its basename names the module in the
+#            failure messages.
+# The machine must be the one of this architecture, and the type the
+# one this architecture's build produces (DYN on aarch64; REL or DYN on
+# amd64). The summary line names the type that was found, so it says
+# DYN when an amd64 module is a DYN and REL when it is a REL.
+# Time:  O(1) per module (one readelf and two greps).
+# Space: O(H) lines for the H lines of the header.
+elf_header() {
+	_eh_prefix=$1
+	_eh_file=$2
+	_eh_label=$(basename "$_eh_file")
+	readelf -h "$_eh_file" > "$TMPD/eh-hdr" || fail "readelf -h failed on $_eh_file"
+	case "$ARCH" in
+	aarch64)
+		grep -q 'Machine:.*AArch64' "$TMPD/eh-hdr" ||
+			fail "$_eh_label machine is not AArch64"
+		grep -q 'Type:.*DYN' "$TMPD/eh-hdr" ||
+			fail "$_eh_label type is not DYN (shared object; bsd.kmod.mk links kmods with ld -Bshareable)"
+		_eh_type=DYN
+		;;
+	amd64)
+		grep -q 'Machine:.*X86-64' "$TMPD/eh-hdr" ||
+			fail "$_eh_label machine is not X86-64"
+		if grep -q 'Type:.*REL' "$TMPD/eh-hdr"; then
+			_eh_type=REL
+		elif grep -q 'Type:.*DYN' "$TMPD/eh-hdr"; then
+			_eh_type=DYN
+		else
+			fail "$_eh_label type is neither REL (relocatable) nor DYN (shared object)"
+		fi
+		;;
+	esac
+	echo "$_eh_prefix: $ELF_MACHINE, $_eh_type"
 }
 
 [ -f "$KO" ] || fail "no $KO: run scripts/build-shim.sh first"
@@ -343,19 +430,26 @@ case $_fr_out in
 *) fail "(e-control-3) a hand-edited copy is not named by the freshness check (rc $_fr_rc): $_fr_out" ;;
 esac
 
-# (a) ELF header: AArch64 machine, DYN (shared object) type. The .ko is
-# DYN, not REL: bsd.kmod.mk links the intermediate nvidia.kld (REL, from
-# `ld -r`) into nvidia.ko with `ld -Bshareable`, exactly like the
-# system's own modules (linux64.ko, zfs.ko are DYN on this host).
-readelf -h "$KO" > "$TMPD/hdr"
-grep -q 'Machine:.*AArch64' "$TMPD/hdr" || fail "nvidia.ko machine is not AArch64"
-grep -q 'Type:.*DYN' "$TMPD/hdr" || fail "nvidia.ko type is not DYN (shared object; bsd.kmod.mk links kmods with ld -Bshareable)"
-echo "elf: AArch64, DYN"
+# (a) ELF header: the machine of this architecture and the type this
+# architecture's build produces. On aarch64 the .ko is DYN, not REL:
+# bsd.kmod.mk links the intermediate nvidia.kld (REL, from `ld -r`) into
+# nvidia.ko with `ld -Bshareable`, exactly like the system's own modules
+# (linux64.ko, zfs.ko are DYN on this host). On amd64 the .ko comes out
+# of LLD 21.1.8 as ELF64 REL, so REL is accepted there.
+elf_header "elf" "$KO"
 
 # (b) every undefined symbol resolves in the kernel or a declared
 # dependency module.
 KERNEL=$(sysctl -n kern.bootfile)
 KDIR=$(dirname "$KERNEL")
+# The directory the PACKAGED kernel modules live in. A module the kernel
+# itself ships lives in KDIR (linuxkpi.ko); a module a package installs
+# lives in MODDIR: on amd64 this repo uses the packaged drm-kmod, which
+# installs dmabuf.ko and drm.ko in /boot/modules, not in /boot/kernel.
+# /boot/modules is on the kernel's own module search path
+# (kern.module_path), so a module found there loads exactly like one from
+# KDIR would.
+MODDIR=/boot/modules
 # nm runs into a file first: in a pipe an nm failure would be hidden and
 # read as "no undefined symbols", silently passing this section.
 nm -u "$KO" > "$TMPD/nm-undef" || fail "nm -u failed on $KO"
@@ -378,6 +472,24 @@ awk '{print $NF}' < "$TMPD/nm-undef" | sort -u > "$TMPD/undef"
 append_defined_syms() {
 	nm "$1" > "$TMPD/nm-syms" || fail "nm failed on $1"
 	awk 'NF == 3 && ($2 ~ /^[A-TV-Z]$/ || $2 == "i") {print $3}' < "$TMPD/nm-syms" >> "$2"
+}
+
+# dep_ko <name>: the file of the module <name>, or NOTHING when the
+# module is in neither place. The running kernel's own directory comes
+# first (that is where a module the kernel ships lives), the packaged
+# modules directory second (that is where the packaged drm-kmod installs
+# dmabuf.ko and drm.ko on amd64). aarch64 keeps the kernel's own
+# directory first, so nothing changes there.
+# The file is still REQUIRED: a dependency whose file is in neither
+# place is a failure at the call site, never a silently skipped check.
+# Time:  O(1) per module (two file tests).
+# Space: O(1).
+dep_ko() {
+	if [ -f "$KDIR/$1.ko" ]; then
+		printf '%s\n' "$KDIR/$1.ko"
+	elif [ -f "$MODDIR/$1.ko" ]; then
+		printf '%s\n' "$MODDIR/$1.ko"
+	fi
 }
 
 nm "$KERNEL" > /dev/null 2>&1 || fail "cannot read symbols of running kernel $KERNEL"
@@ -408,13 +520,18 @@ echo "deps: $(tr '\n' ' ' < "$TMPD/deps")"
 # missing one must both fail here, before kldload could.
 # The GSP firmware modules are dependencies too (Track #2417,
 # patches/patch-zz-nvidia_fw_depend_pci.c): ga10x on every architecture,
-# tu10x on amd64 only. The kernel names a firmware module after its file
-# with _fw appended, so the module nvidia_gsp_ga10x_fw.ko registers is
-# nvidia_gsp_ga10x_fw_fw.
+# tu10x on amd64 only. On amd64, nvidia.ko also depends on io (x86 port
+# I/O; MODULE_DEPEND in nvidia_pci.c, guarded to amd64/i386). The kernel
+# names a firmware module after its file with _fw appended, so the
+# module nvidia_gsp_ga10x_fw.ko registers is nvidia_gsp_ga10x_fw_fw.
+# aarch64 stays {mem, nvidia_gsp_ga10x_fw_fw}: no io, no tu10x.
 {
 	printf 'mem\n'
 	printf 'nvidia_gsp_ga10x_fw_fw\n'
-	[ "$(uname -p)" = amd64 ] && printf 'nvidia_gsp_tu10x_fw_fw\n'
+	if [ "$ARCH" = amd64 ]; then
+		printf 'io\n'
+		printf 'nvidia_gsp_tu10x_fw_fw\n'
+	fi
 } | sort > "$TMPD/deps-want"
 if cmp -s "$TMPD/deps" "$TMPD/deps-want"; then
 	echo "deps ok: exactly {$(paste -s -d ' ' "$TMPD/deps-want")}"
@@ -428,7 +545,8 @@ fi
 # arm64 kernel the module name linux64elf is registered by linux64.ko
 # (sys/arm64/linux/linux_sysvec.c: DECLARE_MODULE_TIED(linux64elf, ...));
 # any other name is <name>.ko. A dependency with no file must be compiled
-# into the kernel (mem is, in GENERIC), so its symbols are the kernel's.
+# into the kernel (mem is, in GENERIC; io may be, on x86), so its symbols
+# are the kernel's.
 # Time:  O(P) loop iterations for P declared dependencies.
 # Space: O(1) in this shell.
 while IFS= read -r dep; do
@@ -442,7 +560,7 @@ while IFS= read -r dep; do
 	esac
 	if [ -f "$KDIR/$f.ko" ]; then
 		append_defined_syms "$KDIR/$f.ko" "$TMPD/defined"
-	elif [ "$dep" != mem ]; then
+	elif [ "$dep" != mem ] && [ "$dep" != io ]; then
 		fail "no $KDIR/$f.ko for declared dependency $dep"
 	fi
 done < "$TMPD/deps"
@@ -462,14 +580,28 @@ echo "unresolved: 0"
 # (d) BTI/PAC GNU property note on the core+stubs object.
 # Time:  O(N) for N readelf note lines (two grep passes).
 # Space: O(N) in the scratch file.
+# The AArch64 GNU property notes are an arm64 requirement (FreeBSD 16
+# arm64 links every kmod with -zbti-report=error): they are required on
+# aarch64 only. On amd64 the notes are not present and must not be
+# required; there the object must be an x86-64 ELF and nothing more.
 GB10OBJ=$WORK/build/nv-kernel-gb10.o
 [ -f "$GB10OBJ" ] || fail "no $GB10OBJ: run scripts/build-stubs.sh first"
 readelf -n "$GB10OBJ" > "$TMPD/notes"
-grep -i 'AArch64 feature' "$TMPD/notes" | grep -q 'BTI' ||
-	fail "nv-kernel-gb10.o lacks GNU_PROPERTY_AARCH64_FEATURE_1_BTI (build the core and stubs with -mbranch-protection=standard and keep .note.gnu.property)"
-grep -i 'AArch64 feature' "$TMPD/notes" | grep -q 'PAC' ||
-	fail "nv-kernel-gb10.o lacks the PAC GNU property (build with -mbranch-protection=standard)"
-echo "property: nv-kernel-gb10.o has AArch64 feature BTI+PAC"
+case "$ARCH" in
+aarch64)
+	grep -i 'AArch64 feature' "$TMPD/notes" | grep -q 'BTI' ||
+		fail "nv-kernel-gb10.o lacks GNU_PROPERTY_AARCH64_FEATURE_1_BTI (build the core and stubs with -mbranch-protection=standard and keep .note.gnu.property)"
+	grep -i 'AArch64 feature' "$TMPD/notes" | grep -q 'PAC' ||
+		fail "nv-kernel-gb10.o lacks the PAC GNU property (build with -mbranch-protection=standard)"
+	echo "property: nv-kernel-gb10.o has AArch64 feature BTI+PAC"
+	;;
+amd64)
+	readelf -h "$GB10OBJ" > "$TMPD/gb10-hdr" || fail "readelf -h failed on $GB10OBJ"
+	grep -q 'Machine:.*X86-64' "$TMPD/gb10-hdr" ||
+		fail "nv-kernel-gb10.o machine is not X86-64"
+	echo "property: the AArch64 BTI+PAC notes are an arm64 requirement: not checked on amd64"
+	;;
+esac
 
 # (f) the nvidia-modeset module. It is checked when it has been built, and
 # always when --modeset was given (then a missing module is a failure).
@@ -491,12 +623,7 @@ if [ ! "$MSKO" -nt "$TREE/.prepared" ]; then
 	fail "stale artifacts: $MSKO is not newer than $TREE/.prepared: it predates the prepared tree"
 fi
 
-readelf -h "$MSKO" > "$TMPD/ms-hdr"
-grep -q 'Machine:.*AArch64' "$TMPD/ms-hdr" ||
-	fail "nvidia-modeset.ko machine is not AArch64"
-grep -q 'Type:.*DYN' "$TMPD/ms-hdr" ||
-	fail "nvidia-modeset.ko type is not DYN (shared object; kmod.mk links kmods with ld -Bshareable)"
-echo "modeset elf: AArch64, DYN"
+elf_header "modeset elf" "$MSKO"
 
 # (f1) the declared dependency set. MODULE_DEPEND(9) makes each
 # MODULE_DEPEND(m, dep) emit a linker-set symbol
@@ -638,12 +765,7 @@ if [ ! "$DRMKO" -nt "$TREE/.prepared" ]; then
 	fail "stale artifacts: $DRMKO is not newer than $TREE/.prepared: it predates the prepared tree"
 fi
 
-readelf -h "$DRMKO" > "$TMPD/drm-hdr"
-grep -q 'Machine:.*AArch64' "$TMPD/drm-hdr" ||
-	fail "nvidia-drm.ko machine is not AArch64"
-grep -q 'Type:.*DYN' "$TMPD/drm-hdr" ||
-	fail "nvidia-drm.ko type is not DYN (shared object; kmod.mk links kmods with ld -Bshareable)"
-echo "drm elf: AArch64, DYN"
+elf_header "drm elf" "$DRMKO"
 
 # (g1) the declared dependency set: exactly {dmabuf, drmn, linuxkpi,
 # nvidia, nvidia_modeset} plus the kernel itself. "kernel" is not a
@@ -673,15 +795,31 @@ echo "deps ok: exactly dmabuf drmn linuxkpi nvidia nvidia_modeset (plus the kern
 # The files the declared dependencies live in. drmn is the module name
 # drm.ko registers itself under (sys/modules/drm: MODULE_VERSION or the
 # DECLARE_MODULE in drm.c); dmabuf, drm and linuxkpi are modules of the
-# running kernel's own directory.
-for _drm_file in "$KDIR/dmabuf.ko" "$KDIR/drm.ko" "$KDIR/linuxkpi.ko"; do
-	[ -f "$_drm_file" ] ||
-		fail "no $_drm_file for a declared dependency of nvidia-drm.ko"
+# running kernel's own directory - or of the packaged drm-kmod on amd64,
+# which installs dmabuf.ko and drm.ko in /boot/modules and not in
+# /boot/kernel. dep_ko resolves each one: the kernel's own directory
+# first, the packaged directory second.
+# The file is REQUIRED: a dependency whose file is in neither place is a
+# failure, exactly as before - the resolution only widens the search, it
+# never drops the requirement.
+DRM_DMABUF_KO=$(dep_ko dmabuf)
+DRM_DRM_KO=$(dep_ko drm)
+DRM_LINUXKPI_KO=$(dep_ko linuxkpi)
+for _drm_dep in dmabuf drm linuxkpi; do
+	case $_drm_dep in
+	dmabuf) _drm_file=$DRM_DMABUF_KO ;;
+	drm) _drm_file=$DRM_DRM_KO ;;
+	linuxkpi) _drm_file=$DRM_LINUXKPI_KO ;;
+	esac
+	[ -n "$_drm_file" ] ||
+		fail "no $KDIR/$_drm_dep.ko nor $MODDIR/$_drm_dep.ko for a declared dependency of nvidia-drm.ko"
 done
 
 # drm_resolvers <out>: the EXPORTED symbols of the kernel and of every
 # dependency of nvidia-drm.ko except the modeset module: the kernel
 # itself, dmabuf.ko, drm.ko, linuxkpi.ko and TREE/nvidia/nvidia.ko.
+# The three dependency files are the ones resolved above (the kernel's
+# own directory or the packaged one).
 # Only GLOBAL defined symbols count (the kernel linker never resolves a
 # module's undefined symbols against STB_LOCAL ones).
 # Time:  O(S) per file (one nm + awk pass each).
@@ -689,9 +827,9 @@ done
 drm_resolvers() {
 	: > "$1"
 	append_defined_syms "$KERNEL" "$1"
-	append_defined_syms "$KDIR/dmabuf.ko" "$1"
-	append_defined_syms "$KDIR/drm.ko" "$1"
-	append_defined_syms "$KDIR/linuxkpi.ko" "$1"
+	append_defined_syms "$DRM_DMABUF_KO" "$1"
+	append_defined_syms "$DRM_DRM_KO" "$1"
+	append_defined_syms "$DRM_LINUXKPI_KO" "$1"
 	append_defined_syms "$KO" "$1"
 	sort -u "$1" -o "$1"
 }
@@ -740,8 +878,13 @@ echo "drm unresolved: 0 (except __this_linker_file, which the kernel linker supp
 # out with nm whether nvidia-drm.ko needs one: if it does, that is a
 # real defect - nvidia-drm.ko would have to declare linuxkpi_video as
 # a dependency - and the test says so instead of papering over it.
-if [ -f "$KDIR/linuxkpi_video.ko" ]; then
-	append_defined_syms "$KDIR/linuxkpi_video.ko" "$TMPD/lkv-defined"
+# linuxkpi_video.ko is optional here: it is looked up in the running
+# kernel's own directory and in the packaged modules directory (the
+# packaged drm-kmod installs it in /boot/modules on amd64), and the check
+# is skipped only when it is in neither place.
+LKV_KO=$(dep_ko linuxkpi_video)
+if [ -n "$LKV_KO" ]; then
+	append_defined_syms "$LKV_KO" "$TMPD/lkv-defined"
 	sort -u "$TMPD/lkv-defined" -o "$TMPD/lkv-defined"
 	comm -12 "$TMPD/drm-unresolved-real" "$TMPD/lkv-defined" > "$TMPD/drm-needs-lkv"
 	if [ -s "$TMPD/drm-needs-lkv" ]; then
@@ -751,7 +894,7 @@ if [ -f "$KDIR/linuxkpi_video.ko" ]; then
 	fi
 	echo "drm linuxkpi_video: no symbol of nvidia-drm.ko comes only from linuxkpi_video.ko"
 else
-	echo "drm linuxkpi_video: no $KDIR/linuxkpi_video.ko: nothing to check"
+	echo "drm linuxkpi_video: no $KDIR/linuxkpi_video.ko nor $MODDIR/linuxkpi_video.ko: nothing to check"
 fi
 
 # (g-control) Falsifiability: a nvidia-modeset.ko that does NOT export

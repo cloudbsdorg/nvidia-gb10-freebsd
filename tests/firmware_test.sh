@@ -2,10 +2,12 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# firmware_test.sh - prove the arm64 GSP firmware module that
+# firmware_test.sh - prove the GSP firmware module that
 # scripts/build-firmware.sh builds from TREE/firmware/gsp_ga10x is what
 # nvidia.ko asks firmware(9) for. No kldload(8), no root:
-#   (a) the .ko is AArch64: readelf -h says "AArch64";
+#   (a) the .ko is an ELF of the architecture it was built for: the
+#       RUNNING architecture - readelf -h says "AArch64" on aarch64 and
+#       "Advanced Micro Devices X86-64" on amd64 (Track #2475);
 #   (b) the image embedded in the .ko is byte-identical to NVIDIA's
 #       gsp_ga10x.bin. FIRMWS= gsp_ga10x.bin:nvidia_gsp_ga10x_fw is
 #       assembled by sys/kern/firmw.S, which puts the file in .rodata
@@ -13,10 +15,16 @@
 #       _binary_gsp_ga10x_bin_end (FIRMW_START/FIRMW_END over
 #       FIRMW_SYMBOL; bsd.kmod.mk maps [-./@] in the file name to _).
 #       The test does not hard-code that guess: it finds the single
-#       _binary_*_start symbol with nm(1), maps its address to a file
-#       offset through the readelf -SW section that contains it, cuts
+#       _binary_*_start symbol with nm(1), maps the WHOLE [start, end)
+#       range (end = the _binary_*_end address) to a file offset through
+#       the readelf -SW section that contains that WHOLE range, cuts
 #       start..end out of the .ko and compares sha256 against
-#       gsp_ga10x.bin. Falsifiability control: the SAME
+#       gsp_ga10x.bin. The whole range, not just the start address: in
+#       a REL (amd64) module every PROGBITS section has sh_addr 0, so
+#       the first section containing the start address is .text and the
+#       image was cut from the wrong offset - a false sha256 MISMATCH
+#       on a byte-perfect image (Track #2475). Falsifiability
+#       control: the SAME
 #       extraction-and-compare function, run on a scratch copy of the
 #       .ko with one byte flipped inside the embedded image (file
 #       offset image-start+1000), must report a MISMATCH;
@@ -66,6 +74,16 @@ NAME=nvidia_gsp_ga10x_fw
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BUILD="$TESTSDIR/../scripts/build-firmware.sh"
+
+# The architecture the module under test is built for: the RUNNING
+# architecture, resolved exactly as scripts/build-firmware.sh resolves it
+# - the test hook GB10_TEST_ARCH, read from the environment only with
+# GB10_TEST_HOOKS=1, otherwise the host's `uname -p`. The build script
+# inherits this environment, so the module it builds and the
+# expectation below always agree.
+. "$TESTSDIR/../scripts/lib.sh"
+HOSTARCH=$(uname -p) || HOSTARCH=''
+ARCH=$(test_hook firmware-test GB10_TEST_ARCH "$HOSTARCH") || ARCH=''
 
 PASSED=0
 FAILED=0
@@ -145,11 +163,24 @@ else
 	exit 1
 fi
 
-# (a) AArch64 ELF.
-if readelf -h "$KO" | grep -q 'AArch64'; then
-	ok "(a) $NAME.ko is AArch64 (readelf -h)"
-else
-	fail "(a) readelf -h does not say AArch64: $(readelf -h "$KO" | grep -i machine)"
+# (a) ELF machine of the module: it must be the architecture the module
+# was built for (the running architecture, or the hook's), never a fixed
+# one. FreeBSD readelf(1) prints "AArch64" for an aarch64 object and
+# "Advanced Micro Devices X86-64" for an amd64 one.
+case $ARCH in
+aarch64) WANT_ELF_MACHINE=AArch64 ;;
+amd64)   WANT_ELF_MACHINE=X86-64 ;;
+*)
+	fail "(a) unsupported architecture: $ARCH (aarch64 or amd64)"
+	WANT_ELF_MACHINE=''
+	;;
+esac
+if [ -n "$WANT_ELF_MACHINE" ]; then
+	if readelf -h "$KO" | grep -q "$WANT_ELF_MACHINE"; then
+		ok "(a) $NAME.ko is $WANT_ELF_MACHINE (readelf -h)"
+	else
+		fail "(a) readelf -h does not say $WANT_ELF_MACHINE: $(readelf -h "$KO" | grep -i machine)"
+	fi
 fi
 
 # (b) Embedded image is byte-identical to gsp_ga10x.bin.
@@ -180,27 +211,53 @@ section_rows() {
 	}'
 }
 
-# file_offset_of <decaddr> <ko> - print the file offset of a virtual
-# address (sh_offset + addr - sh_addr of the PROGBITS section that
-# contains it), or nothing when no section contains it.
+# file_offset_of <decstart> <decend> <ko> - print the file offset of the
+# start of the virtual range [start, end) inside the .ko, i.e.
+# sh_offset + start - sh_addr of the PROGBITS section that contains the
+# WHOLE range, and fail when the range does not fit in exactly one such
+# section:
+#   exit 1  no PROGBITS section contains the whole range
+#   exit 2  more than one PROGBITS section contains it (ambiguous)
+# The WHOLE range must fit, not just its first byte. In a REL
+# (relocatable) kernel module - amd64, FreeBSD's kld linker - every
+# PROGBITS section has sh_addr 0, so the start address alone does not
+# identify the section that holds the image: the FIRST section
+# containing the start address is .text (size 0x1000), and cutting
+# "length" bytes from there produced a wrong sha256 for a byte-perfect
+# image (Track #2475). The image lives in the section that spans the
+# whole [start, end) range - .rodata on amd64 (size 0x478e000) - so
+# the range test finds it. The same rule stays correct on an ET_DYN
+# (aarch64) module, where the section virtual addresses are unique and
+# the start symbol already lands in the one section that spans the
+# range. No architecture is special-cased and no offset is hard-coded.
 # Time:  O(N) for N PROGBITS sections (a few dozen), one shell pass.
-# Space: O(1).
+# Space: O(1) in this shell.
 file_offset_of() {
-	_a=$1
-	section_rows "$2" | while read -r _haddr _hoff _hsize; do
+	_fs=$1
+	_fe=$2
+	# Every PROGBITS section that wholly contains [start, end) offers a
+	# candidate offset; a whole-range match is required, so a section
+	# that only covers the first byte of the range is not a candidate.
+	_cands=$(section_rows "$3" | while read -r _haddr _hoff _hsize; do
 		_saddr=$((0x$_haddr))
 		_soff=$((0x$_hoff))
 		_ssize=$((0x$_hsize))
-		if [ "$_saddr" -le "$_a" ] && [ "$_a" -lt "$((_saddr + _ssize))" ]; then
-			echo $((_soff + _a - _saddr))
-			break
+		if [ "$_saddr" -le "$_fs" ] && [ "$_fe" -le "$((_saddr + _ssize))" ]; then
+			echo $((_soff + _fs - _saddr))
 		fi
-	done
+	done)
+	_n=$(printf '%s' "$_cands" | awk 'NF { n++ } END { print n + 0 }')
+	case "$_n" in
+	1)	printf '%s\n' "$_cands" ;;
+	0)	return 1 ;;
+	*)	return 2 ;;
+	esac
 }
 
 # check_embedded_image <ko> - locate the firmware image embedded in <ko>
 # (the single _binary_*_start symbol from nm(1), its _end partner, and
-# the file offset of the PROGBITS section containing the start address),
+# the file offset of the PROGBITS section that contains the WHOLE
+# [start, end) range - see file_offset_of),
 # cut start..end out of <ko> and compare sha256 against gsp_ga10x.bin.
 # Prints exactly one result line:
 #   MATCH <sha256> <len> <fileoff> <start-sym>/<end-sym>
@@ -234,13 +291,21 @@ check_embedded_image() {
 		return 1
 	fi
 	_clen=$((_cea - _csa))
-	_coff=$(file_offset_of "$_csa" "$_cko")
+	_lrc=0
+	_coff=$(file_offset_of "$_csa" "$_cea" "$_cko") || _lrc=$?
 	if [ "$_clen" -ne "$(stat -f %z "$BIN")" ]; then
 		echo "MISMATCH embedded length $_clen != gsp_ga10x.bin size $(stat -f %z "$BIN")"
 		return 1
 	fi
-	if [ -z "$_coff" ]; then
-		echo "MISMATCH no PROGBITS section contains address $_csa"
+	if [ "$_lrc" -ne 0 ]; then
+		case "$_lrc" in
+		1)
+			echo "MISMATCH no PROGBITS section contains the whole range [$_csa, $_cea) of $_cstart/$_cend"
+			;;
+		*)
+			echo "MISMATCH ambiguous: more than one PROGBITS section contains the range [$_csa, $_cea) of $_cstart/$_cend"
+			;;
+		esac
 		return 1
 	fi
 	_cext=$(mktemp "$TMPD/embedded.XXXXXX")
@@ -261,8 +326,9 @@ case "$res_b" in
 MATCH*)
 	_bsha=$(printf '%s\n' "$res_b" | awk '{print $2}')
 	_blen=$(printf '%s\n' "$res_b" | awk '{print $3}')
+	_boff=$(printf '%s\n' "$res_b" | awk '{print $4}')
 	_bsym=$(printf '%s\n' "$res_b" | awk '{print $5}')
-	ok "(b) embedded image byte-identical to gsp_ga10x.bin (sha256 $_bsha, $_blen bytes, symbols $_bsym)"
+	ok "(b) embedded image byte-identical to gsp_ga10x.bin (sha256 $_bsha, $_blen bytes, symbols $_bsym, file offset $_boff)"
 	;;
 *)
 	fail "(b) $res_b"

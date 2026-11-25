@@ -1,6 +1,6 @@
 --- nvidia-modeset/Makefile.orig
 +++ nvidia-modeset/Makefile
-@@ -6,6 +6,21 @@
+@@ -6,6 +6,26 @@
  NVIDIA_MODESET_KERNEL = nv-modeset-kernel.o
  
  OBJS += ${NVIDIA_MODESET_KERNEL}
@@ -18,6 +18,11 @@
 +		nvKmsKapiF32Div \
 +		nvKmsKapiF32ToUI32RMinMag \
 +		nvKmsKapiUI32ToF32
++.else
++# FreeBSD 16 bsd.kmod.mk defaults EXPORT_SYMS to NO, which writes an
++# empty export_syms and objcopy-strips every global. amd64 modules
++# export every global symbol.
++EXPORT_SYMS=	YES
 +.endif
  NO_OBJ = true
  

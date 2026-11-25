@@ -581,7 +581,12 @@ else
 	if ! (
 		mkdir -p "$BW/build" "$BW/logs" "$BW/tmp" &&
 		ln -s "$WORK/sources" "$BW/sources" &&
-		cp "$WORK/build/nv-kernel-gb10.o" "$WORK/build/nv-modeset-kernel-aarch64.o" "$BW/build/" &&
+		_nt_arch=$(uname -p)
+		case $_nt_arch in
+		x86_64) _nt_arch=amd64 ;;
+		arm64) _nt_arch=aarch64 ;;
+		esac
+		cp "$WORK/build/nv-kernel-gb10.o" "$WORK/build/nv-modeset-kernel-${_nt_arch}.o" "$BW/build/" &&
 		stage_step prepare-tree env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/prepare-tree.sh" &&
 		stage_step build-nvidia env -u NV_CORE_LINUX_COMPAT -u NVKMS_CORE_LINUX_COMPAT GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-shim.sh" &&
 		stage_step build-firmware env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-firmware.sh" &&

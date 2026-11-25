@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # build-rmcore.sh - build NVIDIA's open RM core (src/nvidia of
-# open-gpu-kernel-modules 580.178.04, MIT) as an aarch64 FreeBSD object, to
-# replace the prebuilt amd64 nv-kernel.o in the OS-layer tree. The same
-# script builds the open modeset core (src/nvidia-modeset), which
-# replaces NVIDIA's prebuilt amd64 nv-modeset-kernel.o.
+# open-gpu-kernel-modules 580.178.04, MIT) as a FreeBSD object for the
+# running architecture (aarch64 or amd64), to replace the prebuilt
+# nv-kernel.o in the OS-layer tree. The same script builds the open
+# modeset core (src/nvidia-modeset), which replaces NVIDIA's prebuilt
+# nv-modeset-kernel.o.
 #
 # Usage: scripts/build-rmcore.sh [--core=nvidia|nvidia-modeset] [OUT] [LOG]
 #   --core   the core to build: nvidia (the RM core, the default) or
@@ -14,8 +15,9 @@
 #            named by its bare word as the first argument
 #            (nvidia-modeset), the form the README's build recipe uses.
 #   OUT   where to copy the built object; defaults to
-#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/nv-kernel-aarch64.o (nvidia)
-#         or .../build/nv-modeset-kernel-aarch64.o (nvidia-modeset)
+#         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/build/nv-kernel-<arch>.o (nvidia)
+#         or .../build/nv-modeset-kernel-<arch>.o (nvidia-modeset), where
+#         <arch> is aarch64 or amd64, the architecture built for
 #   LOG   gmake output log; defaults to
 #         ${GB10_WORK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/work}/logs/build-rmcore-<core>-<UTC>.log
 #
@@ -24,7 +26,7 @@
 #             be an ABSOLUTE path (the build cd's into the copied tree
 #             before it writes the marker and OUT)
 #   GB10_TEST_HOOKS
-#             set to 1 to let the three test hooks below be taken from the
+#             set to 1 to let the four test hooks below be taken from the
 #             environment; without it they are ignored and the repo's own
 #             SOURCES, ogkm patches and the fixed gmake are used
 #   SOURCES   test hook: pin file with ogkm_commit; defaults to <repo>/SOURCES
@@ -33,6 +35,12 @@
 #               build copy; defaults to <repo>/patches/ogkm, whose required
 #               patch-src_nvidia_Makefile must be present (a patch dir
 #               without it exits 1)
+#   GB10_TEST_ARCH
+#             test hook: architecture to build for, aarch64 or amd64;
+#             honoured only with GB10_TEST_HOOKS=1, and when it is unset
+#             (or the hooks are off) the host's `uname -p` decides. Any
+#             other architecture is refused with exit 1, never a fallback
+#             to aarch64
 #
 # A hook in use must be one word of [A-Za-z0-9_./-] and is announced on
 # stderr as "build-rmcore: test hook <NAME> in use".
@@ -57,25 +65,32 @@
 # prepare-tree.sh does). This run's scratch is an unpredictable mktemp(1)
 # directory under $GB10_WORK/tmp and TMPDIR points at it. Then builds
 # src/$CORE with TARGET_OS=FreeBSD
-# TARGET_ARCH=aarch64 (the core's own aarch64 kernel flags), CFLAGS passed
-# through the environment as '-Wall -mbranch-protection=standard' so every
-# core object carries the BTI/PAC GNU property note (see the gmake call
-# below for why it must be the environment), and a neutral build stamp,
+# and TARGET_ARCH set for the architecture resolved below (aarch64 stays
+# aarch64; amd64 is built as OGKM's x86_64), CFLAGS passed
+# through the environment as '-Wall -mbranch-protection=standard' on
+# aarch64, so every core object carries the BTI/PAC GNU property note (see
+# the gmake call below for why it must be the environment), and as just
+# '-Wall' on amd64, where the branch-protection flag does not apply, plus
+# a neutral build stamp,
 # NV_BUILD_USER=cloudbsd and
 # NV_BUILD_HOST=build (both `?=` in utils.mk), so no internal user or host
 # name is embedded in the object, and copies
-# _out/FreeBSD_aarch64/$COREOBJ
+# _out/FreeBSD_aarch64/$COREOBJ (aarch64) or
+# _out/FreeBSD_x86_64/$COREOBJ (amd64)
 # to OUT. Prints OUT's size and sha256, and — when a prepared OS-layer tree
 # with objects exists ($GB10_WORK/build/tree/$CORE/*.o) — the number of
 # symbols undefined in OUT that the OS layer does not define (for the
 # modeset core the tree's own nv-modeset-kernel.o is one of those objects
 # once the tree has been built against the core, so the number then reads
 # 0). Exits 1 if
-# gmake fails, produces no object, or produces an object WITHOUT the
+# gmake fails, produces no object, or — on aarch64 only — produces an
+# object WITHOUT the
 # AArch64 BTI property note (FreeBSD 16 arm64 links every kmod with
 # -zbti-report=error, so such an object can never link into nvidia.ko:
 # the check happens here, before the marker says "state done", not later
-# in another script). Nothing is written outside $GB10_WORK
+# in another script). An unsupported architecture is refused with exit 1
+# as well; it never falls back to aarch64. Nothing is written outside
+# $GB10_WORK
 # (and an explicit OUT/LOG) and /tmp is never used.
 
 set -eu
@@ -163,14 +178,12 @@ case $CORE in
 nvidia)
 	COREDIR=src/nvidia
 	COREOBJ=nv-kernel.o
-	OUTDEF=$WORK/build/nv-kernel-aarch64.o
 	OSOBJDIR=$WORK/build/tree/nvidia
 	REQPATCH=patch-src_nvidia_Makefile
 	;;
 nvidia-modeset)
 	COREDIR=src/nvidia-modeset
 	COREOBJ=nv-modeset-kernel.o
-	OUTDEF=$WORK/build/nv-modeset-kernel-aarch64.o
 	OSOBJDIR=$WORK/build/tree/nvidia-modeset
 	REQPATCH=
 	;;
@@ -196,6 +209,58 @@ GMAKE=$(test_hook build-rmcore GMAKE /usr/local/bin/gmake) || exit 1
 # GB10_TEST_HOOKS=1, validated and announced by test_hook. Without it the
 # repo's own patches are used, whatever the environment says.
 OGKMPATCHDIR=$(test_hook build-rmcore OGKM_PATCHES "$REPO/patches/ogkm") || exit 1
+# GB10_TEST_ARCH decides the architecture the core is built for, so it is
+# a test hook like SOURCES and GMAKE: taken from the environment only with
+# GB10_TEST_HOOKS=1, validated and announced by test_hook. Without it the
+# host's own architecture decides, whatever the environment says.
+HOSTARCH=$(uname -p) || {
+	echo "build-rmcore: cannot read the host architecture with uname -p" >&2
+	exit 1
+}
+ARCH=$(test_hook build-rmcore GB10_TEST_ARCH "$HOSTARCH") || exit 1
+# aarch64 and amd64 are the two architectures FreeBSD names this way (see
+# uname -p). Anything else is refused outright: a silent fallback to
+# aarch64 would build the wrong object and call it right.
+case $ARCH in
+aarch64|amd64) ;;
+*)
+	echo "build-rmcore: unsupported architecture: $ARCH (aarch64 or amd64)" >&2
+	exit 1
+	;;
+esac
+# The default OUT names the object by the architecture it was built for:
+# nv-kernel-amd64.o / nv-modeset-kernel-amd64.o on amd64,
+# nv-kernel-aarch64.o / nv-modeset-kernel-aarch64.o on aarch64.
+case $CORE in
+nvidia) OUTDEF=$WORK/build/nv-kernel-$ARCH.o ;;
+nvidia-modeset) OUTDEF=$WORK/build/nv-modeset-kernel-$ARCH.o ;;
+esac
+# The build settings that differ between the two architectures.
+# TARGET_ARCH is OGKM's own name for the architecture: amd64 is built as
+# x86_64, and the object then lands in _out/FreeBSD_x86_64/. On aarch64
+# every core object must carry the BTI/PAC property note, which is what
+# -mbranch-protection=standard puts there; on amd64 the flag has no
+# meaning, so CFLAGS carries only -Wall.
+# LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64 tells utils.mk which emulation
+# ld.lld must use: utils.mk has entries for FreeBSD/x86 and
+# FreeBSD/x86_64 but none for FreeBSD/aarch64, so the ld.lld -r
+# --format=binary link of the modeset core's shader blobs would fail with
+# "target emulation unknown". It is passed for the nvidia core too, which
+# has no such link: harmless. On amd64 it is not passed at all: utils.mk
+# already carries FreeBSD_x86_64/elf_x86_64_fbsd, and the aarch64 flag
+# has nothing to say there.
+case $ARCH in
+aarch64)
+	OGKM_TARGET_ARCH=aarch64
+	OGKM_OUTDIR=FreeBSD_aarch64
+	OGKM_CFLAGS='-Wall -mbranch-protection=standard'
+	;;
+amd64)
+	OGKM_TARGET_ARCH=x86_64
+	OGKM_OUTDIR=FreeBSD_x86_64
+	OGKM_CFLAGS='-Wall'
+	;;
+esac
 # The ogkm Makefile patch is load-bearing for the nvidia core: it drops the
 # objcopy step that removes .note.gnu.property, without which the BTI/PAC
 # property notes this build exists to produce are stripped back out of the
@@ -345,26 +410,34 @@ cd "$BUILDDIR/$COREDIR"
 # CFLAGS goes through the environment, never the gmake command line:
 # utils.mk is `CFLAGS ?= -Wall` with `+=` appends after it, so an
 # environment CFLAGS keeps every core flag and adds
-# -mbranch-protection=standard (BTI+PAC property notes in every object,
-# which the -zbti-report=error kmod link on FreeBSD 16 arm64 requires),
-# while a command-line CFLAGS would replace all of NVIDIA's flags.
-# LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64 tells utils.mk which emulation
-# ld.lld must use: it has entries for FreeBSD/x86 and FreeBSD/x86_64 but
-# none for FreeBSD/aarch64, so the ld.lld -r --format=binary link of the
-# modeset core's shader blobs would fail with "target emulation unknown".
-# It is passed for the nvidia core too, which has no such link: harmless.
+# -mbranch-protection=standard on aarch64 (BTI+PAC property notes in every
+# object, which the -zbti-report=error kmod link on FreeBSD 16 arm64
+# requires), while a command-line CFLAGS would replace all of NVIDIA's
+# flags. On amd64 CFLAGS is just '-Wall': the branch-protection flag is an
+# AArch64 notion and has no meaning there.
+# The AArch64 emulation flag (see the per-architecture settings above)
+# travels as a gmake variable, and only on aarch64: utils.mk already
+# carries FreeBSD_x86_64/elf_x86_64_fbsd for amd64, so the aarch64 flag
+# has nothing to say there. It is left out of the argument list on amd64
+# rather than passed empty - an empty gmake argument is an error ("make:
+# *** empty variable name"). $1 and $2 were consumed by the argument
+# parsing above and are not used again, so the list may be rebuilt here.
+set --
+if [ "$ARCH" = aarch64 ]; then
+	set -- "LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf"
+fi
 if ! env -u MAKEFLAGS -u GNUMAKEFLAGS -u MFLAGS -u MAKELEVEL \
-	CFLAGS='-Wall -mbranch-protection=standard' \
+	CFLAGS="$OGKM_CFLAGS" \
 	nice -n 10 "$GMAKE" -j"$JOBS" \
-	TARGET_OS=FreeBSD TARGET_ARCH=aarch64 \
+	TARGET_OS=FreeBSD TARGET_ARCH="$OGKM_TARGET_ARCH" \
 	CC=cc CXX=c++ LD=ld.lld OBJCOPY=llvm-objcopy \
 	NV_BUILD_USER=cloudbsd NV_BUILD_HOST=build \
-	LD_TARGET_EMULATION_FLAG_FreeBSD_aarch64=aarch64elf > "$LOG" 2>&1; then
+	"$@" > "$LOG" 2>&1; then
 	echo "build-rmcore: gmake failed; see $LOG" >&2
 	exit 1
 fi
 
-OBJ=_out/FreeBSD_aarch64/$COREOBJ
+OBJ=_out/$OGKM_OUTDIR/$COREOBJ
 if [ ! -f "$OBJ" ]; then
 	echo "build-rmcore: gmake exited 0 but $BUILDDIR/$COREDIR/$OBJ is missing; see $LOG" >&2
 	exit 1
@@ -377,10 +450,13 @@ fi
 # surface in another script, after this one had already claimed the core
 # was ready. The note is checked case-insensitively: readelf prints it as
 # "aarch64 feature: BTI, PAC, GCS" (LLVM 21) or "AArch64 feature: ..."
-# (older tools), and both spellings must be accepted.
-if ! readelf -n "$OBJ" 2>/dev/null | grep -qi 'AArch64 feature: BTI'; then
-	echo "build-rmcore: $OBJ lacks the AArch64 BTI property note; rebuild with -mbranch-protection=standard and keep .note.gnu.property" >&2
-	exit 1
+# (older tools), and both spellings must be accepted. The check belongs to
+# aarch64 alone: amd64 objects carry no such note and need none.
+if [ "$ARCH" = aarch64 ]; then
+	if ! readelf -n "$OBJ" 2>/dev/null | grep -qi 'AArch64 feature: BTI'; then
+		echo "build-rmcore: $OBJ lacks the AArch64 BTI property note; rebuild with -mbranch-protection=standard and keep .note.gnu.property" >&2
+		exit 1
+	fi
 fi
 
 # The build copy is complete: rewrite the marker to "state done" via a temp

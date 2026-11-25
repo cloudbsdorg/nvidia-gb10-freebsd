@@ -6,8 +6,8 @@
 # project-makefile-contract).  The Makefile passes its switches as MK_*
 # variables and one target name; this script does the work in sh(1), so the
 # Makefile stays portable between bmake and GNU make.  It is written for any
-# user on a stock FreeBSD arm64 install: nothing on the machine is assumed
-# beyond the base system.
+# user on a stock FreeBSD arm64 or amd64 install: nothing on the machine is
+# assumed beyond the base system.
 #
 # Usage: sh scripts/make.sh TARGET
 #   preflight [--json] [--purpose NAME]
@@ -63,6 +63,10 @@
 # [A-Za-z0-9_./-].  An accepted hook says so on stderr, and so does a refused
 # one (pkgs_needed_list passes those notices on; they are never part of a
 # package list or a failure reason).  Only the tests set them:
+#   GB10_TEST_OS            the operating system the run reports, instead of
+#                           the one uname -s names
+#   GB10_TEST_ARCH          the architecture the run reports, instead of the
+#                           one uname -p names
 #   GB10_TEST_ROOT_METHOD   root, doas, sudo, su or none: the root method
 #   GB10_TEST_PKG_NEEDED    a package name added to the packages to install
 #   GB10_TEST_PKG_FAIL      one word: the package query fails with that reason
@@ -271,6 +275,35 @@ mk_hook() {
 		fi
 	fi
 	test_hook make.sh "$_mh_name" "$2"
+}
+
+# HookOS: the operating system this run reports: the value of the
+# GB10_TEST_OS hook when the test hooks are on and the hook is accepted,
+# else the running system.  hookarch: the same for the architecture
+# (GB10_TEST_ARCH, else uname -p).  A hook value is one word of
+# [A-Za-z0-9_./-]; anything else is ignored and the running system is
+# reported.  The hook is read on every call, so each call says on stderr
+# that it is in use.
+HookOS() {
+	_ho=$(uname -s)
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ]; then
+		_ho=$(mk_hook GB10_TEST_OS "$_ho") || _ho=$(uname -s)
+	fi
+	case $_ho in
+	'' | *[!A-Za-z0-9_./-]*) _ho=$(uname -s) ;;
+	esac
+	printf '%s' "$_ho"
+}
+
+hookarch() {
+	_ha=$(uname -p 2>/dev/null || uname -m)
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ]; then
+		_ha=$(mk_hook GB10_TEST_ARCH "$_ha") || _ha=$(uname -p 2>/dev/null || uname -m)
+	fi
+	case $_ha in
+	'' | *[!A-Za-z0-9_./-]*) _ha=$(uname -p 2>/dev/null || uname -m) ;;
+	esac
+	printf '%s' "$_ha"
 }
 
 # --- root -----------------------------------------------------------------
@@ -537,13 +570,13 @@ kernel_patch_items() {
 collect_preflight() {
 	setup
 	items=
-	_os=$(uname -s)
-	_arch=$(uname -p 2>/dev/null || uname -m)
+	_os=$(HookOS)
+	_arch=$(hookarch)
 	_run=$(running_osreldate)
-	if [ "$_os" = FreeBSD ] && [ "$_arch" = aarch64 ]; then
+	if [ "$_os" = FreeBSD ] && { [ "$_arch" = aarch64 ] || [ "$_arch" = amd64 ]; }; then
 		add_item platform ok "FreeBSD $(uname -r) $_arch" ""
 	else
-		add_item platform missing "$_os $_arch: this repository builds the FreeBSD arm64 (aarch64) driver" "on amd64, NVIDIA's FreeBSD driver: pkg install nvidia-driver"
+		add_item platform missing "$_os $_arch: this repository builds the FreeBSD driver for aarch64 and amd64" "run this on FreeBSD aarch64 or amd64"
 	fi
 	if ! _tt=$(tool_table) || [ -z "$_tt" ]; then
 		add_item tools missing "the tool table could not be read" "fix scripts/make.sh: tool_table must name the tools this install needs"
@@ -606,6 +639,8 @@ EOF
 	fi
 	if foreign_drm "$DESTDIR"; then
 		add_item drm.ko ok "$DESTDIR/boot/modules/drm.ko is installed by someone else: nvidia-drm builds against DRMKMODDIR, which must be its source" ""
+	elif [ "$_arch" = amd64 ]; then
+		add_item drm.ko missing "no drm.ko in $DESTDIR/boot/modules: on amd64 the DRM module comes from FreeBSD's drm-kmod packages, not from this repository" "pkg install drm-kmod (FreeBSD's drm-kmod packages provide drm.ko and dmabuf.ko)"
 	else
 		add_item drm.ko ok "make install installs drm.ko and dmabuf.ko built from $DRMKMODDIR (FreeBSD's drm-kmod packages are amd64-only)" ""
 	fi
@@ -1122,9 +1157,35 @@ module_list() {
 }
 
 # drm_wanted: build and install our drm.ko and dmabuf.ko unless someone
-# else's drm.ko is installed.
+# else's drm.ko is installed.  On amd64 we never build them: FreeBSD's
+# drm-kmod packages provide the DRM module there.
 drm_wanted() {
+	_dw_arch=$(hookarch)
+	if [ "$_dw_arch" = amd64 ]; then
+		return 1
+	fi
 	! foreign_drm "$DESTDIR"
+}
+
+# lld_check FILE: fail the build unless FILE was linked by LLD.  The
+# .comment section names the linker only on some hosts: older FreeBSD
+# wrote "Linker: LLD" there, while FreeBSD 16 with LLD 21.1.8 writes only
+# "FreeBSD clang version 21.1.8" (ld.lld -r and /usr/bin/ld alike).  So
+# the historic signal passes, a module linked by GNU ld never passes, and
+# when .comment says nothing about the linker the base linker this tree
+# requires decides.
+lld_check() {
+	_lc=$(readelf -p .comment "$1" 2>/dev/null || true)
+	if printf '%s\n' "$_lc" | grep -q 'Linker: LLD'; then
+		return 0
+	fi
+	if printf '%s\n' "$_lc" | grep -qi 'GNU ld'; then
+		die "$1 was linked by GNU ld, not by LLD"
+	fi
+	if /usr/bin/ld --version 2>/dev/null | grep -q LLD; then
+		return 0
+	fi
+	die "$1 was not linked by LLD"
 }
 
 do_build() {
@@ -1152,12 +1213,31 @@ do_build() {
 			;;
 		nvidia)
 			step rmcore sh "$repo/scripts/build-rmcore.sh"
-			# Pass 1 compiles the OS layer; it must fail at the
-			# link with exit 3 (no aarch64 RM core linked yet).
-			note "build: shim pass 1 (expected exit 3)"
+			# Pass 1 compiles the OS layer.  On aarch64 it must fail
+			# at the link with exit 3 (no aarch64 RM core linked yet:
+			# NVIDIA's prebuilt nv-kernel.o is an x86-64 object).  On
+			# amd64 that prebuilt object is an amd64 object, so the
+			# link may succeed (exit 0); that is only a compile check.
+			# build-stubs.sh and the second shim pass below must run
+			# either way, so the finished nvidia.ko is linked against
+			# the open core (nv-kernel-gb10.o) and not left on the
+			# prebuilt blob.
+			_shim_arch=$(hookarch)
+			if [ "$_shim_arch" = amd64 ]; then
+				_shim_want='0 or 3'
+			else
+				_shim_want='3'
+			fi
+			note "build: shim pass 1 (expected exit $_shim_want)"
 			_rc=0
 			sh "$repo/scripts/build-shim.sh" > "$LOGDIR/shim-pass1.log" 2>&1 || _rc=$?
-			[ "$_rc" = 3 ] || { tail -n 20 "$LOGDIR/shim-pass1.log" >&2; die "shim pass 1 exited $_rc, not 3; log $LOGDIR/shim-pass1.log"; }
+			# exit 3 is the aarch64 result and is allowed everywhere;
+			# exit 0 is allowed on amd64 only.
+			_shim_ok=0
+			case $_shim_arch:$_rc in
+			amd64:0 | *:3) _shim_ok=1 ;;
+			esac
+			[ "$_shim_ok" = 1 ] || { tail -n 20 "$LOGDIR/shim-pass1.log" >&2; die "shim pass 1 exited $_rc, not $_shim_want; log $LOGDIR/shim-pass1.log"; }
 			step stubs sh "$repo/scripts/build-stubs.sh"
 			step nvidia sh "$repo/scripts/build-shim.sh"
 			;;
@@ -1176,18 +1256,22 @@ EOF
 	build_libnvrm
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || die "missing after the build: $TREE/$_ko"
-		readelf -p .comment "$TREE/$_ko" 2>/dev/null | grep -q 'Linker: LLD' \
-		    || die "$TREE/$_ko was not linked by LLD"
+		lld_check "$TREE/$_ko"
 	done
 	build_stamp > "$WORK/build/stamp"
 	note "build: OK (logs in $LOGDIR)"
 }
 
 # drm.ko and dmabuf.ko from DRMKMODDIR (only those two of drm-kmod: the
-# GPU drivers in it are not needed), objects under WORK.  They are always
-# built (nvidia-drm.ko is built against the same tree); stage() leaves them
-# out when someone else's drm.ko is installed where make install writes.
+# GPU drivers in it are not needed), objects under WORK.  They are built
+# only when drm_wanted says so; otherwise the DRM modules already
+# installed are used (FreeBSD's drm-kmod packages on amd64, or a drm.ko
+# installed by someone else), so nothing is built, checked or copied here.
 build_drm() {
+	if ! drm_wanted; then
+		note "build: the packaged drm.ko is used; drm.ko and dmabuf.ko are not built here"
+		return 0
+	fi
 	mkdir -p -- "$DRMOBJ"
 	step drm-obj env MAKEOBJDIRPREFIX="$DRMOBJ" /usr/bin/make -C "$DRMKMODDIR" \
 	    SYSDIR="$SYSDIR" KMODS="dmabuf drm" WITHOUT_CTF=yes DEBUG_FLAGS= obj
@@ -1196,7 +1280,7 @@ build_drm() {
 	for _k in drm dmabuf; do
 		_f=$(find "$DRMOBJ" -name "$_k.ko" -type f | sed -n 1p)
 		[ -n "$_f" ] || die "build: $_k.ko not found under $DRMOBJ"
-		readelf -p .comment "$_f" 2>/dev/null | grep -q 'Linker: LLD' || die "$_f was not linked by LLD"
+		lld_check "$_f"
 		cp -- "$_f" "$WORK/build/$_k.ko"
 	done
 }
@@ -1236,12 +1320,24 @@ do_test() {
 	for _t in "$repo"/tests/*_test.sh; do
 		_b=$(basename "$_t" .sh)
 		_n=$((_n + 1))
-		if (cd "$repo" && sh "$_t") > "$_d/$_b.log" 2>&1; then
+		# The exit status is what counts: 77 is the conventional skip
+		# status (autotools), so a test that skipped itself is not a
+		# failure.  The status is captured with "|| _rc=$?" because
+		# set -e would stop the run at the first non-zero test.
+		_rc=0
+		(cd "$repo" && sh "$_t") > "$_d/$_b.log" 2>&1 || _rc=$?
+		case $_rc in
+		0)
 			printf 'ok    %s\n' "$_b"
-		else
+			;;
+		77)
+			printf 'skip  %s\n' "$_b"
+			;;
+		*)
 			printf 'FAIL  %s (log %s)\n' "$_b" "$_d/$_b.log"
 			_fail=$((_fail + 1))
-		fi
+			;;
+		esac
 	done
 	note "test: $_n run, $_fail failed"
 	[ "$_fail" = 0 ]
@@ -2779,10 +2875,14 @@ do_test_install() {
 	[ -n "$_url" ] || _url=$(git -C "$repo" remote get-url origin 2>/dev/null || echo https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git)
 	_ref=${MK_E2E_REF:-}
 	[ -n "$_ref" ] || _ref=$(git -C "$repo" rev-parse HEAD) || die "test-install: cannot resolve checkout HEAD"
+	# the architecture defaults to the running one, so the test runs
+	# where make runs; MK_E2E_ARCH still names another one
+	_arch=${MK_E2E_ARCH:-}
+	[ -n "$_arch" ] || _arch=$(hookarch)
 	set -- --repo-url "$_url" \
 	    --installed-manifest "$STATEDIR/installed.manifest" \
 	    --expected-manifest tests/install-e2e/expected.manifest --load nvidia-drm \
-	    --os "${MK_E2E_OS:-16.0-CURRENT}" --arch "${MK_E2E_ARCH:-aarch64}" --backend "${MK_E2E_BACKEND:-vmm}"
+	    --os "${MK_E2E_OS:-16.0-CURRENT}" --arch "$_arch" --backend "${MK_E2E_BACKEND:-vmm}"
 	set -- "$@" --ref "$_ref"
 	[ -z "${MK_E2E_SSH:-}" ] || set -- "$@" --ssh "$MK_E2E_SSH"
 	# the licence settings reach the guest's make install-prereqs only when
