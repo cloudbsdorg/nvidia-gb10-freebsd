@@ -92,6 +92,14 @@ The text of the report is escaped by one rule: a code point of the table of
 the control code points is written as a \(rsuXXXX escape, a quote and a
 backslash are written as escapes, and every other code point is copied
 through byte for byte.
+The table of the control code points is the C0 controls and DEL, U+0000 to
+U+001F and U+007F, the C1 controls, U+0080 to U+009F, the Arabic letter
+mark, U+061C, the left-to-right and right-to-left marks, U+200E and
+U+200F, the line and paragraph separators, U+2028 and U+2029, the
+embeddings and the override, U+202A to U+202E, and the isolates, U+2066 to
+U+2069.
+So the DEL is written as \(rsu007f , a quote as \(rs" and a backslash as
+\(rs\\ , and the euro sign is copied through unchanged.
 A byte that is not part of a valid UTF-8 sequence is not copied through: it
 is written as the escape of the replacement character, \(rsufffd , so that
 the output is text.

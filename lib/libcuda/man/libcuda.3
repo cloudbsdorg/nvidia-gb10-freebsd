@@ -252,7 +252,9 @@ reason of the failure is
 For that reason the count of the provider is refused before the visibility
 filter is applied, so
 .Ev CUDA_VISIBLE_DEVICES
-cannot lower it: the device list of the provider is what has to change.
+cannot lower it.
+No setting of this library changes that count: the provider itself has to
+report at most 128 devices.
 A provider may report more devices than the limit of 64: the devices that no
 filter selects are not exposed.
 Without a filter the visible set is every provider device, so a provider that

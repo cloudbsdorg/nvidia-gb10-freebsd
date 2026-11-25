@@ -29,6 +29,14 @@ static atomic_int registry_reason =
 static pthread_mutex_t context_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread CUcontext current_context;
 
+/* The provider the registry selected, published for the readers that ask
+ * which provider is in use.  The publication is atomic: a reader that asks
+ * while the first initialization runs sees either no provider or the one
+ * that was selected, and never a pointer that is written under it.  The
+ * provider is a static object, so the pointer is the whole of the answer. */
+static _Atomic(const cuda_provider *) registry_provider =
+    ATOMIC_VAR_INIT(NULL);
+
 static struct {
 	CUresult result;
 	const cuda_provider *provider;
@@ -127,8 +135,14 @@ cudaNativeProviderTakesFakeProfiles(const char *name)
 const char *
 cudaNativeProviderInUse(void)
 {
-	return (registry.provider != NULL ? registry.provider->backend :
-	    NULL);
+	const cuda_provider *provider;
+
+	/* The provider is read once, with an acquire load that pairs with the
+	 * release store of the selection: the reader sees the provider the
+	 * registry selected, and never a pointer that is written under it. */
+	provider = atomic_load_explicit(&registry_provider,
+	    memory_order_acquire);
+	return (provider != NULL ? provider->backend : NULL);
 }
 
 /* The library's advice for a provider whose discovery is not implemented.  The
@@ -294,6 +308,12 @@ registry_initialize_once(void)
 
 	backend = cudaNativeGetBackendName();
 	registry.provider = provider_find(backend);
+	/* The provider is published for the readers that ask which provider
+	 * is in use.  The publication is atomic and it is paired with the
+	 * acquire load of the getter, so a reader that asks while the
+	 * initialization runs sees the provider or none. */
+	atomic_store_explicit(&registry_provider, registry.provider,
+	    memory_order_release);
 	if (registry.provider == NULL) {
 		registry.result = CUDA_ERROR_INVALID_VALUE;
 		reason = CUDA_NATIVE_INIT_UNKNOWN_PROVIDER;

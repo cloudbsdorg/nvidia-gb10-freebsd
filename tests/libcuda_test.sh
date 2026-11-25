@@ -111,7 +111,7 @@ awk '{ printf "\t\"%s\",\n", $0 }' "$W/map-exports.sorted" \
 [ -s "$W/map-exports.sorted" ] && [ -s "$W/cuda_test_exports.inc" ]
 rc=$?
 expect_rc "Version.map exports were extracted for documentation checks" "$rc" 0
-python3 -I - "$SRC/README.md" "$W/map-exports.sorted" <<'PY'
+cat >"$W/readme-count.py" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
 count = len(open(sys.argv[2]).read().splitlines())
@@ -119,8 +119,22 @@ match = re.search(r"libcuda\.so\.1[^\n]*\bwith ([0-9]+) [^\n]* calls", text)
 assert match is not None, "README libcuda export count is missing"
 assert int(match.group(1)) == count, (match.group(1), count)
 PY
+python3 -I "$W/readme-count.py" "$SRC/README.md" "$W/map-exports.sorted"
 rc=$?
 expect_rc "README call count is derived from Version.map" "$rc" 0
+# The check of the README has teeth: a README that claims another count is
+# refused by it.  The count of the wrong README is derived from the count of
+# the exports, so the test holds no literal of its own.
+wrong=$(($(wc -l <"$W/map-exports.sorted") + 1))
+sed "s/with [0-9][0-9]* device/with $wrong device/" "$SRC/README.md" \
+    >"$W/readme-wrong.md"
+if python3 -I "$W/readme-count.py" "$W/readme-wrong.md" \
+    "$W/map-exports.sorted" >"$W/readme-wrong.log" 2>&1; then
+	bad "the README count check refuses a README that claims another count"
+	cat "$W/readme-wrong.log"
+else
+	ok "the README count check refuses a README that claims another count"
+fi
 cmp -s "$W/exports.actual" "$W/exports.sorted"
 rc=$?
 expect_rc "dynamic exports match Version.map exactly" "$rc" 0
@@ -422,7 +436,7 @@ tsan_build() {	# tsan_build CC LOG ARGS...
 	if ! "$_cc" -fsanitize=thread -c "$W/tsan-probe.c" \
 	    -o "$W/tsan-probe.o" >"$_log.flag" 2>&1; then
 		cat "$_log.flag" >>"$_log.probe"
-		if grep -qiE 'unrecognized|unknown|unsupported|invalid|not supported|not recognised' \
+		if grep -qiE 'unrecogni[sz]ed|not recogni[sz]ed|unknown|unsupported|invalid|not supported' \
 		    "$_log.flag" &&
 		    grep -qiE 'fsanitize|option|argument|flag|command-line' \
 		    "$_log.flag"; then
@@ -455,6 +469,22 @@ case $? in
 		bad "the thread sanitizer reports no data race in the registry"
 	else
 		ok "the thread sanitizer reports no data race in the registry"
+	fi
+	# The provider that is in use is read while the first initialization
+	# runs: the getter and the selection of the provider must not race.
+	# The enumeration of the fake provider waits, so the two threads are
+	# in flight together.
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_ENUM_DELAY_MS=50 \
+	    "$W/bin/api_test_tsan" provider-race >"$W/tsan-provider.out" 2>&1
+	rc=$?
+	cat "$W/tsan-provider.out"
+	expect_rc "the thread sanitizer build of the provider race case is clean" \
+	    "$rc" 0
+	if grep -q 'WARNING: ThreadSanitizer' "$W/tsan-provider.out"; then
+		bad "the thread sanitizer reports no data race in the provider in use"
+		sed -n '1,40p' "$W/tsan-provider.out"
+	else
+		ok "the thread sanitizer reports no data race in the provider in use"
 	fi
 	;;
 1)
@@ -523,8 +553,9 @@ cat >"$W/tsan-no-link-cc" <<'EOF'
 #!/bin/sh
 # A compiler that takes the sanitizer flag and compiles, but cannot link the
 # sanitizer runtime: the link of the probe fails.  The compile branch drops
-# the sanitizer flag, so the case does not depend on the host compiler
-# supporting the sanitizer at all.
+# the sanitizer flag and keeps the compile-only flag, so the case does not
+# depend on the host compiler supporting the sanitizer at all, and the
+# compile branch compiles and does not link.
 mode=link
 count=$#
 index=0
@@ -532,7 +563,7 @@ while [ "$index" -lt "$count" ]; do
 	arg="$1"
 	shift
 	case $arg in
-	-c) mode=compile ;;
+	-c) mode=compile; set -- "$@" "-c" ;;
 	-fsanitize=*) ;;
 	*) set -- "$@" "$arg" ;;
 	esac
@@ -551,6 +582,56 @@ rc=$?
 [ "$rc" -eq 3 ]
 rc=$?
 expect_rc "a compiler that cannot link the sanitizer runtime is a failure, not a skip" "$rc" 0
+# The case above has teeth: the compile branch of the fake compiler has to
+# keep the compile-only flag.  A host compiler that compiles and does not
+# link refuses a link, so a fake compiler that drops the flag fails the
+# probe of the compile and the case reports the wrong answer.
+real_cc=$(command -v cc)
+mkdir -p "$W/compile-only"
+cat >"$W/compile-only/cc" <<EOF
+#!/bin/sh
+# A host compiler that compiles and does not link: it succeeds only when
+# the compile-only flag is there.
+for arg in "\$@"; do
+	case \$arg in
+	-c) exec "$real_cc" "\$@" ;;
+	esac
+done
+echo "cc: error: this compiler compiles and does not link" >&2
+exit 1
+EOF
+chmod +x "$W/compile-only/cc"
+PATH="$W/compile-only:$PATH" tsan_build "$W/tsan-no-link-cc" \
+    "$W/build-tsan-nolink-compile.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_nolink"
+rc=$?
+[ "$rc" -eq 3 ]
+rc=$?
+expect_rc "the fake compiler keeps the compile-only flag" "$rc" 0
+# A compiler that does not know the flag says it in the spelling of the
+# compiler of the host: the probe has to recognize both spellings, or it
+# reports a build failure where the answer is a skip.
+cat >"$W/tsan-unknown-flag-cc" <<'EOF'
+#!/bin/sh
+# A compiler that does not know the sanitizer flag, in the spelling of the
+# compiler of the host.
+for arg in "$@"; do
+	case $arg in
+	-fsanitize=*)
+		echo "cc: error: option '$arg' is not recognized" >&2
+		exit 1
+		;;
+	esac
+done
+exec cc "$@"
+EOF
+chmod +x "$W/tsan-unknown-flag-cc"
+tsan_build "$W/tsan-unknown-flag-cc" "$W/build-tsan-unknown.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_unknown"
+rc=$?
+[ "$rc" -eq 1 ]
+rc=$?
+expect_rc "a compiler that does not recognize the sanitizer flag is a skip" "$rc" 0
 cat >"$W/tsan-dead-cc" <<'EOF'
 #!/bin/sh
 # A compiler that cannot compile anything: the probe of the sanitizer flag
@@ -657,6 +738,13 @@ run_case "the proc-address version boundary returns the two forms" env \
 run_case "a concurrent observer never sees partial initialization" env \
     CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 \
     CUDA_NATIVE_FAKE_ENUM_DELAY_MS=100 "$API" init-observer
+# The provider that is in use is read while the first initialization runs:
+# the getter and the selection of the provider must not race, and the answer
+# is always a provider the library knows.  The thread sanitizer build of the
+# same case is the one that sees the race.
+run_case "the provider in use is safe under a concurrent initialization" env \
+    CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_ENUM_DELAY_MS=50 "$API" \
+    provider-race
 run_case "an NVRM observer never sees false success during initialization" env \
     CUDA_NATIVE_BACKEND=nvrm "$API" init-observer
 run_case "NVRM provider is a not-supported stub" env CUDA_NATIVE_BACKEND=nvrm "$API" nvrm
@@ -843,29 +931,25 @@ rc=$?
 expect_rc "the provider in use without an environment name is the default one" \
     "$rc" 0
 # The advice for a provider that takes no profile names a step that can be
-# taken: the device list of the provider has to be shorter.  The mutant is
-# a provider that reports more devices than the registry holds and takes no
-# profile: the registry refuses the count, and the advice must be the one
-# of that provider.
+# taken: no setting of this library changes the count of such a provider, so
+# the advice says so instead of naming a setting that does not exist.  The
+# provider of the mutant reports more devices than the registry holds and
+# takes no profile, and the advice of the production code is the one that
+# is read.  The mutant is derived from the source of the library: the helper
+# replaces the body of the enumeration of the native provider, so the test
+# holds no copy of the production text.
+mkdir -p "$W/bodies"
 MP=$W/native-limit-mutant
 mkdir -p "$MP"
 cp "$L"/*.c "$L"/*.h "$MP/"
-python3 -I - "$MP/cuda_nvrm.c" <<'PYEOF'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-old = """	if (count == NULL)
-		return (CUDA_ERROR_INVALID_VALUE);
-	return (CUDA_ERROR_NOT_SUPPORTED);
-}"""
-new = """	if (count == NULL)
+cat >"$W/bodies/native-limit.body" <<'EOF'
+	if (count == NULL)
 		return (CUDA_ERROR_INVALID_VALUE);
 	*count = CUDA_NATIVE_MAX_PHYSICAL_DEVICES + 1;
 	return (CUDA_SUCCESS);
-}"""
-assert old in text, "the enumeration of the native provider is not in the source"
-open(path, "w").write(text.replace(old, new, 1))
-PYEOF
+EOF
+python3 -I "$T/mutants.py" function-body "$MP/cuda_nvrm.c" nvrm_enumerate \
+    "$W/bodies/native-limit.body"
 rc=$?
 expect_rc "the native provider over the registry mutant changed the library" \
     "$rc" 0
@@ -892,10 +976,10 @@ if [ "$rc" -eq 0 ]; then
 	expect_rc "a provider over the limit of the registry fails" "$rc" 1
 	grep -q "the $library_native provider reports more devices" \
 	    "$MP/error.txt" &&
-	    grep -q 'reduce the number of devices the provider reports' \
+	    grep -q 'no setting of this library changes that count' \
 	    "$MP/error.txt"
 	rc=$?
-	expect_rc "the advice names the provider in use and a step that can be taken" \
+	expect_rc "the advice names the provider in use and the step that can be taken" \
 	    "$rc" 0
 	if grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$MP/error.txt" ||
 	    grep -q 'CUDA_VISIBLE_DEVICES' "$MP/error.txt"; then
@@ -910,20 +994,18 @@ fi
 # registry selected: with the fake provider in use the advice would name
 # the default provider and would not name the setting that lowers the count
 # of the fake provider.  The case fails when the mutant is not caught, and
-# the evidence is the advice of the mutant with the status of the run.
+# the evidence is the advice of the mutant with the status of the run.  The
+# mutant is derived from the source of the library: the helper replaces the
+# body of the function that answers the question, so the test holds no copy
+# of the production text.
 MU=$W/provider-in-use-mutant
 mkdir -p "$MU"
 cp "$L"/*.c "$L"/*.h "$MU/"
-python3 -I - "$MU/cuda_registry.c" <<'PYEOF'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-old = """	return (registry.provider != NULL ? registry.provider->backend :
-	    NULL);"""
-new = """	return (cudaNativeDefaultBackend());"""
-assert old in text, "the provider in use is not answered in the registry"
-open(path, "w").write(text.replace(old, new, 1))
-PYEOF
+cat >"$W/bodies/provider-in-use.body" <<'EOF'
+	return (cudaNativeDefaultBackend());
+EOF
+python3 -I "$T/mutants.py" function-body "$MU/cuda_registry.c" \
+    cudaNativeProviderInUse "$W/bodies/provider-in-use.body"
 rc=$?
 expect_rc "the provider in use mutant changed the library" "$rc" 0
 if [ "$rc" -eq 0 ]; then
@@ -959,6 +1041,69 @@ if [ "$rc" -eq 0 ]; then
 		sed -n '1,10p' "$MU/provider.err"
 	fi
 fi
+# The derivation of a mutant survives a refactor of the source: a rename of
+# a private name changes no behavior, and the mutant is derived from the
+# renamed source and is still caught.  A test that holds a copy of the
+# production text fails this case on a rename that changes nothing.
+RN=$W/renamed-registry
+mkdir -p "$RN"
+cp "$L"/*.c "$L"/*.h "$RN/"
+python3 -I "$T/mutants.py" rename-member "$RN/cuda_registry.c" registry \
+    provider selected
+rc=$?
+expect_rc "the renamed registry changed the library" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	cc $CFLAGS -pthread -I"$W" -I"$O/lib" -I"$RN" -I"$SDK" -I"$T" \
+	    "$T/api_test.c" "$RN"/*.c -lthr -o "$RN/api_test" \
+	    >"$RN/build.log" 2>&1
+	rc=$?
+	expect_rc "the renamed registry builds" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$RN/build.log"
+fi
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND="$library_synthetic" \
+	    CUDA_NATIVE_FAKE_PROFILE=gb206,gb10 "$RN/api_test" init-reason \
+	    >"$RN/reason.out" 2>&1
+	rc=$?
+	expect_rc "the renamed registry answers the provider in use" "$rc" 0
+	grep -q "^provider-in-use $library_synthetic$" "$RN/reason.out"
+	rc=$?
+	expect_rc "the rename of a private name changes no behavior" "$rc" 0
+fi
+# The mutant is derived from the renamed source, and the case above is
+# still the one that catches it.
+python3 -I "$T/mutants.py" function-body "$RN/cuda_registry.c" \
+    cudaNativeProviderInUse "$W/bodies/provider-in-use.body"
+rc=$?
+expect_rc "the mutant is derived from a source that was renamed" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	(
+	    cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
+		-Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$RN" -I"$SDK" \
+		"$RN"/*.c -lthr -o "$RN/libcuda.so.1" &&
+	    ln -s libcuda.so.1 "$RN/libcuda.so" &&
+	    cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
+		"$L/cuda-native-info/cuda-native-info.c" \
+		"$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
+		"$L/cuda_uuid.c" -L"$RN" -lcuda -lthr -o "$RN/cuda-native-info"
+	) >"$RN/build-mutant.log" 2>&1
+	rc=$?
+	expect_rc "the renamed registry with the mutant builds" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$RN/build-mutant.log"
+fi
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND="$library_synthetic" \
+	    CUDA_NATIVE_FAKE_PROFILE="$profiles129" LD_LIBRARY_PATH="$RN" \
+	    "$RN/cuda-native-info" >"$RN/provider.out" 2>"$RN/provider.err"
+	rc=$?
+	expect_rc "the mutant of the renamed registry fails" "$rc" 1
+	if grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$RN/provider.err"; then
+		bad "the advice keys on the provider that is in use after a rename"
+		sed -n '1,10p' "$RN/provider.err"
+	else
+		ok "the advice keys on the provider that is in use after a rename"
+	fi
+fi
 # The registry refuses a selection that names more devices than it holds,
 # and it names the reason of the refusal.  The case asks the library
 # itself, not the tool.
@@ -972,18 +1117,14 @@ rc=$?
 expect_rc "the refusal names the reason of the provider limit" "$rc" 0
 # The case has teeth: a registry that accepts the count of the provider
 # over the limit is caught by it.  The mutant removes the refusal, so the
-# selection over the limit is accepted.
+# selection over the limit is accepted.  The mutant is derived from the
+# source of the library: the helper replaces the condition of the refusal,
+# so the test holds no copy of the production text.
 RL=$W/limit-mutant
 mkdir -p "$RL"
 cp "$L"/*.c "$L"/*.h "$RL/"
-python3 -I - "$RL/cuda_registry.c" <<'PY'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-old = "\tif (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES) {"
-assert old in text, "the refusal of the count of the provider is not in the registry"
-open(path, "w").write(text.replace(old, "\tif (0) {", 1))
-PY
+python3 -I "$T/mutants.py" if-condition "$RL/cuda_registry.c" \
+    registry_initialize_once CUDA_NATIVE_MAX_PHYSICAL_DEVICES "0"
 rc=$?
 expect_rc "the registry without the refusal mutant changed the library" "$rc" 0
 if [ "$rc" -eq 0 ]; then
@@ -2455,6 +2596,68 @@ else
 	bad "the escaping of the table of the control code points is not checked"
 fi
 
+# ---- the bounds of the escaping -------------------------------------------
+# The decoder of UTF-8 reads no byte past the length it is given: a
+# sequence that the buffer ends in the middle of is not a sequence, and the
+# byte that is not there is not read.  The bytes of every case are in an
+# allocation of their exact size, so the address sanitizer of the build sees
+# a read past the end of the input as the overflow it is.  The bounded
+# buffer holds the whole of the escaped text or nothing at all: a value
+# that does not fit leaves the buffer empty, so a caller never reads a
+# spliced or a shortened value as if it were the whole one.
+cc $CFLAGS -fsanitize=address -I"$O/info" -I"$L" -I"$L/cuda-native-info" \
+    -I"$SDK" -I"$T" "$T/escape_bounds_test.c" \
+    "$L/cuda-native-info/escape.c" -o "$W/bin/escape_bounds_test" \
+    >"$W/build-escape-bounds.log" 2>&1
+rc=$?
+expect_rc "the bounds test of the escaping compiles with the address sanitizer" \
+    "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-escape-bounds.log"
+if [ -x "$W/bin/escape_bounds_test" ]; then
+	"$W/bin/escape_bounds_test" >"$W/escape-bounds.out" 2>&1
+	rc=$?
+	cat "$W/escape-bounds.out"
+	expect_rc "the escaping reads no byte past the input it is given" "$rc" 0
+	if grep -q 'AddressSanitizer' "$W/escape-bounds.out"; then
+		bad "the address sanitizer reports no read past the input of the escaping"
+		sed -n '1,40p' "$W/escape-bounds.out"
+	else
+		ok "the address sanitizer reports no read past the input of the escaping"
+	fi
+else
+	bad "the bounds test of the escaping is not built"
+fi
+# The header of the escaping promises what the code does: the buffer holds
+# the whole of the escaped text or nothing at all.  A header that promises
+# the opposite would be a lie the reader of the header believes.
+grep -q 'the whole of the escaped text or' "$L/cuda-native-info/escape.h" &&
+    grep -q 'nothing at all' "$L/cuda-native-info/escape.h"
+rc=$?
+expect_rc "the header of the escaping states the whole or nothing rule" "$rc" 0
+if grep -q 'is dropped whole' "$L/cuda-native-info/escape.h"; then
+	bad "the header of the escaping does not promise a dropped piece"
+else
+	ok "the header of the escaping does not promise a dropped piece"
+fi
+# The manual names the code points that its rule covers: a reader cannot
+# tell from the rule alone whether a character is written as text.
+grep -q 'U+0000 to' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+001F' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+007F' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+009F' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+061C' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+200E' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+200F' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+2028' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+2029' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+202A to' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+202E' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+2066 to' "$L/cuda-native-info/cuda-native-info.1" &&
+    grep -q 'U+2069' "$L/cuda-native-info/cuda-native-info.1"
+rc=$?
+expect_rc "the manual names every range of the table of the control code points" \
+    "$rc" 0
+
 # ---- the count of the profiles of the fake provider -----------------------
 # The array of the selected profiles holds a bounded number of them, so a
 # selection that names more must not write past the array.  The count of the
@@ -2500,27 +2703,21 @@ mkdir -p "$AS"
 cp "$L"/*.c "$L"/*.h "$AS/"
 # The counter that has overflowed: the count of the selection saturates at
 # the limit plus one, so the registry refuses it and no profile is written
-# past the array.
+# past the array.  The mutant is derived from the source of the fake
+# provider: the helper replaces the initializer of the counter, so the test
+# holds no copy of the production text.
 AO=$W/asan-overflow
 mkdir -p "$AO"
 cp "$L"/*.c "$L"/*.h "$AO/"
-python3 -I - "$AO/cuda_fake.c" <<'PYEOF'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-marker = "fake_select(const char *list)"
-head, sep, tail = text.partition(marker)
-assert sep, "the selection of the fake provider is not in the source"
-patched = tail.replace("unsigned count = 0;", "unsigned count = UINT_MAX;", 1)
-assert patched != tail, "the count of the selection is not in fake_select"
-text = text.replace(head + sep + tail, head + sep + patched, 1)
-if "#include <limits.h>" not in text:
-    text = text.replace("#include <stdlib.h>",
-        "#include <limits.h>\n#include <stdlib.h>", 1)
-open(path, "w").write(text)
-PYEOF
+python3 -I "$T/mutants.py" initializer "$AO/cuda_fake.c" fake_select count \
+    UINT_MAX
 rc=$?
 expect_rc "the overflowing counter mutant changed the fake provider" "$rc" 0
+grep -q '#include <limits.h>' "$AO/cuda_fake.c" ||
+    python3 -I "$T/mutants.py" include "$AO/cuda_fake.c" limits.h
+rc=$?
+expect_rc "the overflowing counter mutant has the limits of the counter" \
+    "$rc" 0
 # The write without its bound: the check that stops the write of a selected
 # profile at the bound of the array is removed, so the write steps past the
 # array of the selected profiles.  The mutant removes the one check that
@@ -2629,22 +2826,13 @@ fi
 # of the round is swallowed.  The mutant is a copy of the test program whose
 # child drops the result of the round: the production program fails the
 # disturbed round and the mutant swallows it, so the case above has teeth.
+# The mutant is derived from the source of the test: the helper replaces the
+# check of the result, so the test holds no copy of the source text.
 SM=$W/stress-mutant
 mkdir -p "$SM"
 cp "$T/api_test.c" "$SM/"
-python3 -I - "$SM/api_test.c" <<'PYEOF'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-# The mutant drops the check on the result of the round: the failure of the
-# round is then not in the count of the checks of the child, and the child
-# exits with a success.  The result is still read, so the mutant compiles
-# and the change is one substitution.
-checked = "rc = stress_round();\n\t\t\tCHECK_EQ(rc, 0);"
-assert checked in text, "the check on the result of the round is not in the child"
-text = text.replace(checked, "rc = stress_round();\n\t\t\t(void)rc;", 1)
-open(path, "w").write(text)
-PYEOF
+python3 -I "$T/mutants.py" drop-check "$SM/api_test.c" init_stress_test \
+    CHECK_EQ rc
 rc=$?
 expect_rc "the child that drops the result of the round mutant changed the test" \
     "$rc" 0

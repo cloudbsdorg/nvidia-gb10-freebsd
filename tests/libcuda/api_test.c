@@ -907,6 +907,98 @@ init_stress_test(void)
 	return (t_done("api concurrent cuInit and count, 32 threads, 200 rounds"));
 }
 
+/* The provider that is in use, read while the first initialization runs.
+ * The getter and the selection of the provider must not race: the answer is
+ * either no provider or a registered one, and the thread sanitizer of the
+ * build sees no race between the reader and the initialization. */
+#define PROVIDER_RACE_MAX_READS 20000000
+
+struct provider_race_case {
+	CUresult init_result;
+	int observations;
+	int unknown;
+};
+
+static pthread_mutex_t provider_race_lock = PTHREAD_MUTEX_INITIALIZER;
+static int provider_race_done;
+
+static void *
+provider_race_init_thread(void *arg)
+{
+	struct provider_race_case *race = arg;
+
+	race->init_result = cuInit(0);
+	/* The initialization is over: the reader may stop.  The flag is
+	 * written under the lock, so the reader and this thread do not race
+	 * over it either. */
+	pthread_mutex_lock(&provider_race_lock);
+	provider_race_done = 1;
+	pthread_mutex_unlock(&provider_race_lock);
+	return (NULL);
+}
+
+static void *
+provider_race_reader_thread(void *arg)
+{
+	struct provider_race_case *race = arg;
+	const char *name;
+	int i, done;
+
+	/* Time: O(reads); Space: O(1). */
+	for (i = 0; i < PROVIDER_RACE_MAX_READS; i++) {
+		name = cudaNativeProviderInUse();
+		if (name != NULL) {
+			race->observations++;
+			/* The answer names a provider the library knows:
+			 * a name that the library does not know would be
+			 * a torn or a stale answer. */
+			if (!cudaNativeProviderKnown(name))
+				race->unknown++;
+		}
+		/* The reader stops when the initialization is over, so the
+		 * two threads are in flight together.  The flag is read
+		 * under the lock. */
+		if ((i & 63) == 0) {
+			pthread_mutex_lock(&provider_race_lock);
+			done = provider_race_done;
+			pthread_mutex_unlock(&provider_race_lock);
+			if (done)
+				break;
+		}
+	}
+	return (NULL);
+}
+
+static int
+provider_race_test(void)
+{
+	struct provider_race_case race;
+	pthread_t initializer, reader;
+	const char *name;
+
+	memset(&race, 0, sizeof(race));
+	provider_race_done = 0;
+	/* The reader reads first: it is reading while the initialization
+	 * selects the provider and publishes it. */
+	CHECK_EQ(pthread_create(&reader, NULL, provider_race_reader_thread,
+	    &race), 0);
+	CHECK_EQ(pthread_create(&initializer, NULL, provider_race_init_thread,
+	    &race), 0);
+	CHECK_EQ(pthread_join(initializer, NULL), 0);
+	CHECK_EQ(pthread_join(reader, NULL), 0);
+	CHECK_EQ(race.init_result, CUDA_SUCCESS);
+	/* Every answer of the reader was a provider the library knows. */
+	CHECK_EQ(race.unknown, 0);
+	CHECK(race.observations > 0);
+	/* The provider that is in use after the initialization is the one
+	 * the registry selected. */
+	name = cudaNativeProviderInUse();
+	CHECK(name != NULL);
+	if (name != NULL)
+		CHECK(cudaNativeProviderKnown(name));
+	return (t_done("api provider in use under a concurrent initialization"));
+}
+
 /* The names the library reports.  A caller and a test take the provider and
  * the profile lists from here, not from a literal of their own. */
 static int mode_usage(void);
@@ -1111,7 +1203,7 @@ mode_usage(void)
 {
 	fprintf(stderr, "usage: api_test core|native-queries|profiles|threads|"
 	    "init-race|init-stress|init-observer|init-reason|preinit-reason|"
-	    "providers|limit-refusal|"
+	    "providers|limit-refusal|provider-race|"
 	    "proc-preinit|proc-version|proc-from-stdin|attribute-error|"
 	    "visibility-cap|nvrm|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
@@ -1136,6 +1228,7 @@ DEFINE_SIMPLE_MODE(threads_mode, threads_test)
 DEFINE_SIMPLE_MODE(init_race_mode, init_race_test)
 DEFINE_SIMPLE_MODE(init_stress_mode, init_stress_test)
 DEFINE_SIMPLE_MODE(init_observer_mode, init_observer_test)
+DEFINE_SIMPLE_MODE(provider_race_mode, provider_race_test)
 DEFINE_SIMPLE_MODE(providers_mode, providers_test)
 DEFINE_SIMPLE_MODE(limit_refusal_mode, limit_refusal_test)
 DEFINE_SIMPLE_MODE(init_reason_mode, init_reason_test)
@@ -1189,6 +1282,7 @@ main(int argc, char **argv)
 		{ "init-race", init_race_mode },
 		{ "init-stress", init_stress_mode },
 		{ "init-observer", init_observer_mode },
+		{ "provider-race", provider_race_mode },
 		{ "init-reason", init_reason_mode },
 		{ "preinit-reason", preinit_reason_mode },
 		{ "providers", providers_mode },

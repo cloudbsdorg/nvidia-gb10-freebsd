@@ -43,8 +43,9 @@ void escaped_string(const char *text);
 
 /* The escaped form of a string in a bounded buffer: the same table,
  * without the quotes.  The buffer holds the whole of the escaped text or
- * nothing at all: a piece that does not fit is dropped whole, so an
- * escape sequence is never cut in half. */
+ * nothing at all: if a piece does not fit, the buffer is left empty, so an
+ * escape sequence is never cut in half and two pieces are never spliced
+ * together into a value that was never in the input. */
 void escaped_buffer(char *buffer, size_t size, const char *text, size_t length);
 
 #endif

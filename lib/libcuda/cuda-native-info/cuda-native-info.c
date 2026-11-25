@@ -475,8 +475,11 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 		 * library answers with the provider the registry selected
 		 * and not with the name the environment held.  The step it
 		 * names can be taken: a provider that takes the fake
-		 * profiles is shortened by naming fewer of them, and any
-		 * other provider is shortened by its own device list. */
+		 * profiles is shortened by naming fewer of them, and a
+		 * provider that takes none is shortened by the provider
+		 * itself.  No setting of this library changes the count of
+		 * such a provider, and the advice says so instead of naming
+		 * a setting that does not exist. */
 		if (cudaNativeProviderTakesFakeProfiles(provider))
 			snprintf(hint_text, sizeof(hint_text),
 			    "the %s provider reports more devices than the "
@@ -486,11 +489,10 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 		else
 			snprintf(hint_text, sizeof(hint_text),
 			    "the %s provider reports more devices than the "
-			    "registry holds, at most %d; reduce the number of "
-			    "devices the provider reports: its device list has "
-			    "to name at most %d of them",
-			    provider, CUDA_NATIVE_MAX_PHYSICAL_DEVICES,
-			    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+			    "registry holds, at most %d; no setting of this "
+			    "library changes that count, so the provider itself "
+			    "has to report fewer devices",
+			    provider, CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
 		hint = hint_text;
 	} else if (detail == NULL &&
 	    cudaNativeInitFailureReason() == CUDA_NATIVE_INIT_PROVIDER_ERROR) {
