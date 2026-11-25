@@ -66,6 +66,41 @@ GUARD_LINUX_RE='linux|(^|/)(lkpi|lindebugfs|linsysfs|linprocfs|drm|dmabuf|ttm|am
 # driver of the card it finds.  Its command "probe" loads nothing.  It is the only service the kit names.
 GUARD_HWPROBE=cloudbsd_hwprobe
 
+# guard_kld_deps <scratch dir> <module file>: the names of the modules this file depends on, one per line.  kldxref
+# reads a directory, so the file is copied into one of its own.  A file that cannot be copied is an error (2).
+guard_kld_deps()
+{
+	_gd=$1; _gf=$2
+	rm -rf "$_gd"; mkdir -p "$_gd" 2> /dev/null || return 2
+	cp "$_gf" "$_gd/" 2> /dev/null || return 2
+	kldxref -d -v "$_gd" 2> /dev/null | sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' | sort -u
+}
+
+# guard_linux_modules <scratch dir> <module dir>...: the names (without .ko) of the modules of these directories that
+# depend on the Linux layer, one per line.  devmatch loads a driver of its own when it sees the device of it (a Wi-Fi
+# card in the host brings a LinuxKPI driver with it), so a module that pulls the Linux layer in has to be blocked in
+# a boot environment without the driver.  The modules of the kit (nvidia*) are never named: the kit loads its own
+# nvidia.ko and refuses every other one.
+guard_linux_modules()
+{
+	_gd=$1; shift
+	for _gdir in "$@"; do
+		[ -d "$_gdir" ] || continue
+		for _gko in "$_gdir"/*.ko; do
+			[ -f "$_gko" ] || continue
+			_gname=${_gko##*/}; _gname=${_gname%.ko}
+			case $_gname in nvidia*) continue ;; esac
+			for _gdep in $(guard_kld_deps "$_gd" "$_gko"); do
+				if guard_layer_name "$_gdep"; then
+					printf '%s\n' "$_gname"
+					break
+				fi
+			done
+		done
+	done
+	rm -rf "$_gd"
+}
+
 # The loader of a module is not always the loader list: an enabled rc.d service with a required_modules entry loads a
 # module by itself (drm_ready loads amdgpu, and the base BE has it enabled), and a devd hotplug rule can start such a
 # service (cloudbsd_hwprobe loads the KMS driver of the card it finds).  The helpers below read the rc.conf of a tree

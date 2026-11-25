@@ -837,6 +837,53 @@ EOF
 	[ "$(sysrc -f "$R/etc/rc.conf" -n kld_list)" = filemon ] && ok "make-be.sh: amdgpu and linux64 are stripped from kld_list" || no "make-be.sh: kld_list is $(sysrc -f "$R/etc/rc.conf" -n kld_list)"
 	sysrc -f "$R/etc/rc.conf" -n devmatch_blocklist | grep -q 'amdgpu .*linuxkpi' && ok "make-be.sh: devmatch_blocklist is set in rc.conf" || no "make-be.sh: no devmatch_blocklist in rc.conf"
 	grep -q '^devmatch_blocklist=".*amdgpu' "$R/boot/loader.conf" && ok "make-be.sh: devmatch_blocklist kenv in loader.conf" || no "make-be.sh: no devmatch_blocklist kenv"
+	# A module of the clone that depends on the Linux layer must be blocked: devmatch loads a driver of its own when
+	# it sees the device of it (Track #2437: a Wi-Fi card in the host brought if_rtw89.ko, which pulled in
+	# linuxkpi_wlan.ko).  The stub of kldxref reads the name of the file it is given.
+	mkdir -p "$T/blkstub"
+	cat > "$T/blkstub/kldxref" <<'EOF'
+#!/bin/sh
+for _d do :; done
+for _k in "$_d"/*; do
+	_n=${_k##*/}; printf '  module %s\n' "${_n%.ko}"
+	case $_n in
+	if_rtw89.ko) printf '    depends on kernel.\n    depends on linuxkpi_wlan.1\n' ;;
+	nvidia_linux.ko) printf '    depends on kernel.\n    depends on linux64elf.1\n' ;;
+	*) printf '    depends on kernel.\n' ;;
+	esac
+done
+EOF
+	chmod 0755 "$T/blkstub/kldxref"
+	mkclone "$T/clone-blk/root"
+	: > "$T/clone-blk/root/boot/modules/if_rtw89.ko"
+	printf 'devmatch_blocklist="basewifi"\n' >> "$T/clone-blk/root/etc/rc.conf"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-blk/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 NVNT_TEST_PATH="$T/blkstub" GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990121 -m "$STAGE" > "$T/mb-blk.out" 2>&1
+	expect 0 $? "make-be.sh builds the fake clone with a module that depends on the Linux layer"
+	_RB=$T/clone-blk/root
+	_blkv=$(sysrc -f "$_RB/etc/rc.conf" -n devmatch_blocklist 2> /dev/null)
+	case "$_blkv" in *if_rtw89*) ok "make-be.sh: the module that depends on the Linux layer is blocked" ;; *) no "make-be.sh: if_rtw89 is not in the blocklist: '$_blkv'" ;; esac
+	case "$_blkv" in *basewifi*) ok "make-be.sh: the blocklist entry of the base is kept" ;; *) no "make-be.sh: the blocklist entry of the base is gone: '$_blkv'" ;; esac
+	# the blocklist of this clone is the list of the kit, the entry of the base and the discovered module, and nothing else
+	_blkkit=$(sysrc -f "$R/etc/rc.conf" -n devmatch_blocklist 2> /dev/null)
+	printf '%s\n' $_blkkit basewifi if_rtw89 | tr ' ' '\n' | sort -u > "$T/blkexpect"
+	printf '%s\n' $_blkv | tr ' ' '\n' | sort -u > "$T/blkgot"
+	cmp -s "$T/blkexpect" "$T/blkgot" && ok "make-be.sh: the blocklist is the list of the kit, the entry of the base and the discovered module" || no "make-be.sh: the blocklist is not that list: $(tr '\n' ' ' < "$T/blkgot")"
+	grep -q '^blocked if_rtw89' "$T/mb-blk.out" && ok "make-be.sh: the blocked module is printed" || no "make-be.sh: the blocked module is not printed: $(grep -c '^blocked' "$T/mb-blk.out") blocked lines"
+	grep -q '^devmatch_blocklist=".*if_rtw89' "$_RB/boot/loader.conf" && ok "make-be.sh: the loader.conf kenv names the blocked module" || no "make-be.sh: the loader.conf kenv does not name if_rtw89"
+	# the modules of the kit are never blocked: the kit loads its own nvidia.ko and refuses every other one
+	mkdir -p "$T/blkmods"; : > "$T/blkmods/if_rtw89.ko"; : > "$T/blkmods/nvidia_linux.ko"
+	_lkm=$( ( PATH="$T/blkstub:$PATH"; export PATH; guard_linux_modules "$T/blkscr" "$T/blkmods" ) )
+	case "$_lkm" in *if_rtw89*) ok "guard_linux_modules: the module that depends on the Linux layer is named" ;; *) no "guard_linux_modules: if_rtw89 is not named: '$_lkm'" ;; esac
+	case "$_lkm" in *nvidia*) no "guard_linux_modules: an nvidia module is named: '$_lkm'" ;; *) ok "guard_linux_modules: no nvidia module is named" ;; esac
+	# check-be.sh: the blocked module of the clone passes, and it is a FAIL that names it when it is not blocked
+	env TMPDIR="$T" NVNT_TEST_PATH="$T/blkstub" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$_RB" -U -s "$SHAFILE" > "$T/cb-blk.out" 2>&1
+	grep -q '^ok   rc.conf: devmatch_blocklist names every module that depends on the Linux layer' "$T/cb-blk.out" && ok "check-be.sh: the module of the clone that depends on the Linux layer and is blocked passes the blocklist check" || no "check-be.sh: the blocklist check of the clone did not pass: $(grep -c '^FAIL' "$T/cb-blk.out") FAIL lines"
+	_cbf2=$(grep '^FAIL' "$T/cb-blk.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf2" ] && ok "check-be.sh: the clone whose module that depends on the Linux layer is blocked passes every check but the commit comparison" || no "check-be.sh on the clone with the blocked module: $_cbf2"
+	_blkv2=$(sysrc -f "$_RB/etc/rc.conf" -n devmatch_blocklist 2> /dev/null | tr ' ' '\n' | grep -v '^if_rtw89$' | tr '\n' ' ')
+	sysrc -f "$_RB/etc/rc.conf" devmatch_blocklist="${_blkv2% }" > /dev/null 2>&1
+	env TMPDIR="$T" NVNT_TEST_PATH="$T/blkstub" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$_RB" -U -s "$SHAFILE" > "$T/cb-blkmiss.out" 2>&1
+	grep -q '^FAIL rc.conf: devmatch_blocklist does not name if_rtw89' "$T/cb-blkmiss.out" && ok "check-be.sh: a module that depends on the Linux layer and is not blocked is a FAIL that names it" || no "check-be.sh: the module that is not blocked is not reported: $(grep '^FAIL' "$T/cb-blkmiss.out" | head -3 | tr '\n' ' ')"
 	grep -q '^other_testboot_enable="NO"' "$R/etc/rc.conf" && ok "make-be.sh: another kit is turned off" || no "make-be.sh: the other kit is still on"
 	# an enabled rc.d service that loads a forbidden module by itself must be turned off in the clone
 	[ "$(sysrc -f "$R/etc/rc.conf" -n drm_ready_enable)" = NO ] && ok "make-be.sh: the service whose required_modules loads amdgpu is turned off" || no "make-be.sh: drm_ready_enable is $(sysrc -f "$R/etc/rc.conf" -n drm_ready_enable)"
