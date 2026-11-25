@@ -267,6 +267,16 @@ returns a one-line explanation for the channel's client.
 .Fn nvrm_chan_destroy
 returns no value and accepts
 .Dv NULL .
+.Sh EXAMPLES
+The live proof of these calls is the channel probe of the test-boot kit:
+.Pa tests/libnvrm/chan_probe.c
+creates a compute channel, pushes a semaphore release through it and reads the
+payload the GPU wrote back, measures the latency of a thousand releases, runs
+a stress loop, and shows that a push at an address that is not mapped kills
+one channel while another one keeps working.
+.Pp
+.Pa tests/libnvrm/mem_probe.c
+measures the memory calls of the same kit.
 .Sh ERRORS
 .Bl -tag -width ".Fn nvrm_chan_status_get"
 .It Fn nvrm_chan_create

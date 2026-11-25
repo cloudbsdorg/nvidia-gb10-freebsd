@@ -511,13 +511,13 @@ SUMM="/usr/local/bin/python3 -I $KIT/summarize.py"
 VALID="/usr/local/bin/python3 -I $repo/tests/libnvrm/schema_validate.py $KIT/native-tools-summary.schema.json"
 rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 planned=$($SUMM --planned)
-[ "$(echo $planned | wc -w | tr -d ' ')" = 34 ] && ok "summarize --planned lists the 34 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
+[ "$(echo $planned | wc -w | tr -d ' ')" = 37 ] && ok "summarize --planned lists the 37 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
 mkrun() {	# mkrun <dir> <status of the static rows>
 	mkdir -p "$1"; : > "$1/results.jsonl"
 	for _r in $planned; do
 		case $_r in
 		done) _s=info ;;
-		uvm-* | prime-import | render-uapi | nvrm-s2-memory) _s=$2 ;;
+		uvm-* | prime-import | render-uapi) _s=$2 ;;
 		*) _s=pass ;;
 		esac
 		printf '{"row":"%s","status":"%s","detail":"d"}\n' "$_r" "$_s" >> "$1/results.jsonl"
@@ -544,6 +544,87 @@ $SUMM "$T/r7" > /dev/null; [ "$(rowf "$T/r7/summary.json" load-nvidia status)" =
 mkrun "$T/r6" pass; grep -v '"row":"gpu-verify"' "$T/r6/results.jsonl" > "$T/r6/x"; mv "$T/r6/x" "$T/r6/results.jsonl"; $SUMM "$T/r6" > /dev/null; expect 1 $? "summarize: a planned row missing with no earlier failure fails"
 [ "$(rowf "$T/r6/summary.json" gpu-verify status)" = error ] && ok "summarize: the missing row is an error" || no "summarize: the missing row is not an error"
 
+# (d2) the S2 memory row of the rc one-shot: the row function itself, driven with a fixture
+sed -n '/^row()/,/^}/p; /^s2_memory_row()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/s2.sh"
+if [ -s "$T/s2.sh" ]; then
+	s2case() {	# s2case <line of results.txt> [content of mem_probe.txt]
+		rm -rf "$T/s2"; mkdir -p "$T/s2/nvrm-info"
+		printf '%s\n' "$1" > "$T/s2/nvrm-info/results.txt"
+		if [ -n "${2:-}" ]; then printf '%s\n' "$2" > "$T/s2/nvrm-info/mem_probe.txt"; fi
+		OUT=$T/s2
+		( . "$T/s2.sh"; s2_memory_row ) > "$T/s2.out" 2>&1
+	}
+	s2summary() {	# the row the one-shot wrote, read through summarize.py like any other run
+		rm -rf "$T/s2run"; mkdir -p "$T/s2run"
+		mkrun "$T/s2run" pass
+		grep -v '"row":"nvrm-s2-memory"' "$T/s2run/results.jsonl" > "$T/s2run/x"
+		cat "$T/s2/results.jsonl" >> "$T/s2run/x"
+		mv "$T/s2run/x" "$T/s2run/results.jsonl"
+		$SUMM "$T/s2run" > "$T/s2run.out" 2>&1
+	}
+	s2case 'PASS mem_probe: every memory step passed on every GPU' 'PASS gpu 0 (0000:01:00.0) client_open: ok
+PASS gpu 0 (0000:01:00.0) nothing_left: ok'
+	s2summary
+	_s2s=$(rowf "$T/s2run/summary.json" nvrm-s2-memory status)
+	[ "$_s2s" = pass ] && ok "the S2 memory row: a probe that passed every step is a pass" || no "the S2 memory row: the pass fixture gave $_s2s"
+	_s2d=$(rowf "$T/s2run/summary.json" nvrm-s2-memory detail)
+	printf '%s' "$_s2d" | grep -q '2 GPU' && ok "the S2 memory row: the detail counts the GPUs the probe measured" || no "the S2 memory row: the detail does not count the GPUs: $_s2d"
+	s2case 'FAIL mem_probe exited 3 (nvrm-info/mem_probe.txt)'
+	s2summary
+	_s2s=$(rowf "$T/s2run/summary.json" nvrm-s2-memory status)
+	[ "$_s2s" = fail ] && ok "the S2 memory row: a probe that failed is a fail" || no "the S2 memory row: the fail fixture gave $_s2s"
+	_s2d=$(rowf "$T/s2run/summary.json" nvrm-s2-memory detail)
+	printf '%s' "$_s2d" | grep -q 'FAIL mem_probe exited 3' && ok "the S2 memory row: the detail holds the FAIL line" || no "the S2 memory row: the detail does not hold the FAIL line: $_s2d"
+else
+	no "the S2 memory row: the row function of the rc script could not be read"
+fi
+
+# (d3) the S3 channel row of the rc one-shot: the row function itself, driven with a fixture
+sed -n '/^row()/,/^}/p; /^s3_channel_row()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/s3.sh"
+if [ -s "$T/s3.sh" ]; then
+	s3case() {	# s3case <line of results.txt> [content of chan_probe.txt]
+		rm -rf "$T/s3"; mkdir -p "$T/s3/nvrm-info"
+		printf '%s\n' "$1" > "$T/s3/nvrm-info/results.txt"
+		if [ -n "${2:-}" ]; then printf '%s\n' "$2" > "$T/s3/nvrm-info/chan_probe.txt"; fi
+		OUT=$T/s3
+		( . "$T/s3.sh"; s3_channel_row ) > "$T/s3.out" 2>&1
+	}
+	s3summary() {	# the row the one-shot wrote, read through summarize.py like any other run
+		rm -rf "$T/s3run"; mkdir -p "$T/s3run"
+		mkrun "$T/s3run" pass
+		grep -v '"row":"nvrm-s3-channel"' "$T/s3run/results.jsonl" > "$T/s3run/x"
+		cat "$T/s3/results.jsonl" >> "$T/s3run/x"
+		mv "$T/s3run/x" "$T/s3run/results.jsonl"
+		$SUMM "$T/s3run" > "$T/s3run.out" 2>&1
+	}
+	# every step passed: the row is a pass and the detail holds the latency and the stress
+	s3case 'PASS chan_probe: every channel step passed on every GPU' 'INFO gpu 0 (0000:01:00.0) latency_ns: p50 6000 ns, p99 6400 ns, max 9000 ns
+PASS gpu 0 (0000:01:00.0) stress: done 100000/100000 in 3 s, every wait returned 0
+PASS gpu 0 (0000:01:00.0) isolation: the second channel died (state dead, error 31, gp_get 0, gp_put 2, submitted 1, completed 0)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	[ "$_s3s" = pass ] && ok "the S3 channel row: a probe that passed every step is a pass" || no "the S3 channel row: the pass fixture gave $_s3s"
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	printf '%s' "$_s3d" | grep -q 'p50 6000 ns' && ok "the S3 channel row: the detail holds the latency line" || no "the S3 channel row: the detail does not hold the latency line: $_s3d"
+	printf '%s' "$_s3d" | grep -q 'done 100000/100000' && ok "the S3 channel row: the detail holds the stress line" || no "the S3 channel row: the detail does not hold the stress line: $_s3d"
+	# a FAIL line of the probe: the row is a fail and the detail holds it
+	s3case 'FAIL chan_probe exited 1 (nvrm-info/chan_probe.txt)' 'FAIL gpu 0 (0000:01:00.0) release: wait: the channel is dead (state dead, error 31)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	[ "$_s3s" = fail ] && ok "the S3 channel row: a probe that failed is a fail" || no "the S3 channel row: the fail fixture gave $_s3s"
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	printf '%s' "$_s3d" | grep -q 'FAIL gpu 0' && ok "the S3 channel row: the detail holds the FAIL line" || no "the S3 channel row: the detail does not hold the FAIL line: $_s3d"
+	# a channel that timed out: the row is a fail and the status is in the detail
+	s3case 'FAIL chan_probe exited 1 (nvrm-info/chan_probe.txt)' 'FAIL gpu 0 (0000:01:00.0) isolation: the second channel is alive (state alive, error 0, gp_get 0, gp_put 2, submitted 1, completed 0)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	if [ "$_s3s" = fail ] && printf '%s' "$_s3d" | grep -q 'state alive'; then ok "the S3 channel row: a channel that did not die is a fail and the detail holds its status"
+	else no "the S3 channel row: the timeout fixture gave $_s3s: $_s3d"; fi
+else
+	no "the S3 channel row: the row function of the rc script could not be read"
+fi
+
 # (e) make-be.sh with the hooks and a fake clone.  The stage belongs to this run, not to a previous build.
 stage_error=
 stage_file() {
@@ -564,7 +645,7 @@ stage_step() {
 stage_hashes() {
 	_sh_out=$1
 	: > "$_sh_out" || { echo "cannot write the stage hash list $_sh_out"; return 1; }
-	for _sh_f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
+	for _sh_f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		_sh_hash=$(sha256 -q "$STAGE/$_sh_f" 2> /dev/null); _sh_s=$?
 		[ "$_sh_s" = 0 ] || { echo "sha256 failed for $STAGE/$_sh_f (exit $_sh_s)"; return 1; }
 		[ -n "$_sh_hash" ] || { echo "sha256 printed nothing for $STAGE/$_sh_f"; return 1; }
@@ -573,7 +654,7 @@ stage_hashes() {
 }
 mkdir -p "$STAGE"
 if [ -n "${NVNT_STAGE:-}" ]; then
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do stage_file "$NVNT_STAGE/$_f"; done
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do stage_file "$NVNT_STAGE/$_f"; done
 else
 	# A prepared build/tree may predate the checkout.  Prepare and build this checkout in scratch instead; only the
 	# expensive, already-built RM core objects and the pinned sources come from GB10_WORK.
@@ -611,6 +692,10 @@ else
 		else
 			stage_file "$T/obj/lib/libnvrm.so.1"
 			stage_file "$T/obj/info/nvrm-info"
+		fi
+		# the probes of the S2 and S3 rows, built against the library that was just built: the same line as the suite's
+		if ! stage_step probes sh "$repo/tests/libnvrm/build-probes.sh" "$T/obj/lib" "$STAGE"; then
+			stage_error="$stage_error probes-build-failed"
 		fi
 	fi
 fi
@@ -725,7 +810,12 @@ EOF
 	_own=$(sed -n 's/^nvidia_native_tools_testboot_owner="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
 	[ -n "$_own" ] && ok "make-be.sh: the owner of the run directory is recorded ($_own)" || no "make-be.sh: no owner of the run directory is recorded"
 	[ "$_own" = "$(stat -f %Su "$WORK/logs" 2> /dev/null)" ] && ok "make-be.sh: the recorded owner is the owner of the copy-out parent ($_own)" || no "make-be.sh: the recorded owner is '$_own', the copy-out parent is owned by $(stat -f %Su "$WORK/logs" 2> /dev/null)"
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
+	# the two channel knobs of the one-shot, with their defaults
+	_cst=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_cst" = 100000 ] && ok "make-be.sh: the channel stress count is written to rc.conf.d ($_cst)" || no "make-be.sh: the channel stress count is '${_cst:-unset}', wanted 100000"
+	_css=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress_seconds="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_css" = 300 ] && ok "make-be.sh: the channel stress seconds are written to rc.conf.d ($_css)" || no "make-be.sh: the channel stress seconds are '${_css:-unset}', wanted 300"
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		cmp -s "$STAGE/$_f" "$R/boot/modules.nvnative-test/$_f" && ok "make-be.sh: $_f is installed" || no "make-be.sh: $_f is not installed"
 	done
 	[ "$(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null)" = "$UVM_WANT" ] && ok "make-be.sh: the uvm row is $UVM_WANT" || no "make-be.sh: the uvm row is $(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null), wanted $UVM_WANT"
@@ -766,6 +856,14 @@ EOF
 	# pass for a work tree installed with NVNT_NO_GIT_CHECK; every other check must
 	_cbf=$(grep '^FAIL' "$T/cb.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
 	[ -z "$_cbf" ] && ok "check-be.sh: every check but the commit comparison passes on the fake clone ($(grep -c '^ok' "$T/cb.out") ok)" || no "check-be.sh on the fake clone: $_cbf"
+	# the clone holds seven staged files: the hash list counts seven and the probes are two of them
+	grep -q '^ok   the list holds seven entries' "$T/cb.out" && ok "check-be.sh: the hash list of the clone holds seven entries" || no "check-be.sh: the list of the clone does not hold seven entries: $(grep 'entries' "$T/cb.out")"
+	grep -q '^ok   mem_probe is ' "$T/cb.out" && ok "check-be.sh: mem_probe is checked in the clone" || no "check-be.sh: mem_probe is not checked in the clone: $(grep 'mem_probe' "$T/cb.out")"
+	grep -q '^ok   chan_probe is ' "$T/cb.out" && ok "check-be.sh: chan_probe is checked in the clone" || no "check-be.sh: chan_probe is not checked in the clone: $(grep 'chan_probe' "$T/cb.out")"
+	# a list of six files is refused: the kit stages seven
+	head -6 "$SHAFILE" > "$T/SHA256.six"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$T/SHA256.six" > "$T/cb-six.out" 2>&1
+	grep -q 'does not hold exactly seven SHA256 entries' "$T/cb-six.out" && ok "check-be.sh: a hash list of six files is refused" || no "check-be.sh: a hash list of six files is not refused: $(grep 'entries' "$T/cb-six.out")"
 	# the clone with the service that loads amdgpu by itself enabled again: check-be.sh must refuse it, naming the
 	# service and the module, and the fixed clone must pass
 	sysrc -f "$R/etc/rc.conf" drm_ready_enable=YES > /dev/null
@@ -881,6 +979,13 @@ EOF
 	expect 2 $? "make-be.sh refuses a copy-out whose parent is owned by root when nobody says who the user is"
 	grep -q 'is root and neither DOAS_USER nor SUDO_USER is set' "$T/mb-owner.out" && ok "make-be.sh: the refusal of the root-owned copy-out parent says why" || no "make-be.sh: the refusal is not clear: $(head -2 "$T/mb-owner.out")"
 	[ "$(wc -l < "$T/bectl.log" 2> /dev/null || echo 0)" = "$_bcl" ] && ok "make-be.sh: the refused run created no boot environment" || no "make-be.sh: the refused run still called bectl"
+	# the channel knobs of the one-shot: -c and -C reach rc.conf.d
+	mkclone "$T/clone-chan/root"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-chan/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990103 -m "$STAGE" -c 500 -C 10 > "$T/mb-chan.out" 2>&1
+	expect 0 $? "make-be.sh builds the fake clone with the channel knobs"
+	_cst=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress="\(.*\)"$/\1/p' "$T/clone-chan/root/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	_css=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress_seconds="\(.*\)"$/\1/p' "$T/clone-chan/root/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_cst" = 500 ] && [ "$_css" = 10 ] && ok "make-be.sh: -c and -C reach rc.conf.d ($_cst releases, $_css seconds)" || no "make-be.sh: -c and -C wrote '$_cst' and '$_css' to rc.conf.d, wanted 500 and 10"
 	# a later rc.conf file that enables the service again: make-be.sh cannot turn it off and must refuse the base
 	mkclone "$T/clone-drmready/root"; printf 'drm_ready_enable="YES"\n' > "$T/clone-drmready/root/etc/rc.conf.local"
 	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-drmready/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990109 -m "$STAGE" > "$T/mb-drmready.out" 2>&1
@@ -1054,7 +1159,7 @@ EOF
 	# (f) the rc one-shot, foreground, stubbed system commands
 	S=$T/stubs; mkdir -p "$S" "$T/dev" "$T/kitroot/static-rows" "$T/mods" "$T/copyout"
 	ln -s /dev/null "$T/dev/nvidia1"; ln -s /dev/null "$T/dev/nvidiactl"; ln -s /dev/null "$T/dev/nvidia-modeset"
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do cp "$STAGE/$_f" "$T/mods/"; done
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do cp "$STAGE/$_f" "$T/mods/"; done
 	cp "$SHAFILE" "$T/kitroot/SHA256.txt"
 	for _f in guard.sh summarize.py gpu-detect.sh; do cp "$KIT/$_f" "$T/kitroot/"; done
 	mkdir -p "$T/kitroot/repo"; ( cd "$repo" && tar -cf - tests/libnvrm SOURCES lib/libnvrm/schema ) | tar -xf - -C "$T/kitroot/repo"
@@ -1123,14 +1228,16 @@ EOF
 	grep -q '"row":"deadman","status":"pass","detail":".*stubbed shutdown .* is used' "$RUN/results.jsonl" 2> /dev/null && ok "G3 control: the same stub on a hand run (onestart) is used (decided: a stub cannot reboot)" || no "G3 control: the stub on a hand run was not used: $(grep '"row":"deadman"' "$RUN/results.jsonl" 2> /dev/null)"
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
 		_n=$(st nvrm-info); case $_n in pass | fail) ok "rc one-shot: nvrm-info ran (status $_n; no driver on the host, so fail is expected here)" ;; *) no "rc one-shot: nvrm-info is $_n" ;; esac
+		_n2=$(st nvrm-s2-memory); case $_n2 in pass | fail) ok "rc one-shot: nvrm-s2-memory ran (status $_n2; the memory probe needs the driver, so fail is expected here)" ;; *) no "rc one-shot: nvrm-s2-memory is $_n2" ;; esac
+		_n3=$(st nvrm-s3-channel); case $_n3 in pass | fail) ok "rc one-shot: nvrm-s3-channel ran (status $_n3; the channel probe needs the driver, so fail is expected here)" ;; *) no "rc one-shot: nvrm-s3-channel is $_n3" ;; esac
 		grep -q 'pass .*/mods/nvrm-info is a FreeBSD-branded ELF' "$RUN/nvrm-info.execs" && ok "rc one-shot: the trace checked nvrm-info itself" || no "rc one-shot: nvrm-info is not in nvrm-info.execs"
 		grep -q 'selected_node": "'"$T"'/dev/nvidia1"' "$RUN/gpu-detect.json" && ok "rc one-shot: gpu-detect chose nvidia1 (the BMC and the AMD card excluded)" || no "rc one-shot: gpu-detect did not choose nvidia1"
-		[ "$(cat "$T/returned" 2> /dev/null)" = "testboot-return cloudbsd-rx7600" ] && ok "rc one-shot: testboot-return is called with the normal BE" || no "rc one-shot: testboot-return was not called"
+		[ "$(cat "$T/returned" 2> /dev/null)" = "testboot-return cloudbsd-current" ] && ok "rc one-shot: testboot-return is called with the normal BE" || no "rc one-shot: testboot-return was not called: $(cat "$T/returned" 2> /dev/null)"
 		_c=$T/copyout/$(basename "$RUN")
 		[ -f "$_c/summary.json" ] && ok "rc one-shot: the run is copied out" || no "rc one-shot: the run is not copied out"
 		[ -f "$_c/testboot-return.txt" ] && grep -q 'testboot-return exit' "$_c/rc.log" && ok "rc one-shot: testboot-return.txt and the full rc.log reach the copy-out" || no "rc one-shot: the return record is not in the copy-out"
@@ -1428,6 +1535,7 @@ fi
 for _f in make-be.sh check-be.sh bare-shutdown-check.sh guard.sh nvidia_native_tools_testboot gpu-detect.sh testboot-return; do
 	sh -n "$KIT/$_f" && ok "$_f is valid sh" || no "$_f has a syntax error"
 done
+sh -n "$repo/tests/libnvrm/build-probes.sh" && ok "build-probes.sh is valid sh" || no "build-probes.sh has a syntax error"
 /usr/local/bin/python3 -I -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], \"exec\")" "$KIT/summarize.py" 2> /dev/null && ok "summarize.py compiles" || no "summarize.py does not compile"
 grep -v '^[[:space:]]*#' "$KIT/nvidia_native_tools_testboot" | grep -E 'kldload[^"]*linux|kldunload|bectl activate' > /dev/null && no "the rc script loads a linux module, unloads a module or activates a BE" || ok "the rc script loads no linux module, unloads nothing, activates no BE"
 # the README states the rule of the guard, not the history of the change that made it
