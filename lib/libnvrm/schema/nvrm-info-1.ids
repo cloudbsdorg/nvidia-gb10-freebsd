@@ -1,7 +1,7 @@
 # Copyright (c) 2026 REVYTECH, Inc.
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# nvrm-info schema 1: the frozen identifiers.  Format: KIND NUMBER NAME MINOR,
+# nvrm-info: the frozen identifiers.  Format: KIND NUMBER NAME MINOR,
 # MINOR being the schema minor that introduced the identifier.  Identifiers may
 # be ADDED here (append a line that names the new schema minor, and raise the
 # schema minor); a line may never be removed, renamed or renumbered: that is a
@@ -14,6 +14,12 @@
 # (the old lines stay as they are, the new ids get the schema minor), after
 # raising SCHEMA_MINOR.  The first schema of the interface is minor 0; nothing
 # earlier was released.
+#
+# This is the baseline of the identifiers of the interface, and schema major 2
+# (nvrm-info-2.schema.json) carries the same identifiers as major 1: what
+# changed with the major is the value of the family of a GPU, not an
+# identifier.  The file keeps its name so that the frozen check finds the
+# earlier copy of it at the base revision.
 source 0 rm 0
 source 1 os 0
 source 2 derived 0

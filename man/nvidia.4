@@ -28,10 +28,27 @@ started, on the first open of
 .Pa /dev/nvidia Ns Ar N ,
 and it is shut down again when the last open closes.
 .Pp
-For now the driver attaches to Ampere (RTX 30) and later GPUs only.
-The architecture names it knows are Turing, Volta, Pascal and Maxwell;
+For now the driver attaches to GA10x (RTX 30) and later GPUs only.
+The architecture names it knows, one per chip family, are
+TU10x, GV11x, GV10x, GP10x, GM20x and GM10x;
 a card of an earlier generation has no name in that table, and its
 message gives the architecture number instead.
+.Pp
+The chip families and the chips they cover:
+.Bl -column "family" "chips" "product" -offset indent
+.It family Ta chips Ta product
+.It GM10x Ta GM100 Ta the M40
+.It GM20x Ta GM200 Ta the M60
+.It GP10x Ta GP104 Ta the GTX 1080
+.It GV10x Ta GV100 Ta the V100
+.It GV11x Ta GV110 Ta the P100
+.It TU10x Ta TU104, TU106 Ta the RTX 20 series
+.It GA10x Ta GA100, GA102, GA104 Ta the RTX 30 series, the A100
+.It GH100 Ta GH100 Ta the H100
+.It AD10x Ta AD102 Ta the RTX 40 series
+.It GB10x Ta GB100 Ta the B200
+.It GB20x Ta GB200, GB206 Ta the RTX 50 series
+.El
 When it probes a device it reads the identification registers
 .Dv PMC_BOOT_0
 and
@@ -115,13 +132,13 @@ The GPU runs on GSP firmware, which the driver gets from
 .Xr firmware 9 .
 The images live in firmware modules.
 .Nm nvidia_gsp_ga10x_fw
-serves Ampere (other than GA100), Ada, Hopper and Blackwell GPUs on every
-architecture.
+serves GA10x (other than GA100), AD10x, GH100, GB10x and GB20x GPUs on
+every architecture.
 .Nm nvidia_gsp_tu10x_fw
 serves the GA100 and exists on amd64 only; the arm64 build refuses a GA100 when
 it probes it.
-The driver attaches to nothing older than Ampere, so no Turing GPU needs the
-image.
+The driver attaches to nothing older than GA10x (RTX 30), so no TU10x GPU
+needs the image.
 .Pp
 .Nm
 depends on the modules built for its architecture, so
@@ -344,7 +361,7 @@ have the same meanings and availability rules as the corresponding
 .Va hw.nvidia.version
 variables.
 .Pp
-The driver attaches to Ampere and later GPUs (the architecture named by
+The driver attaches to GA10x (RTX 30) and later GPUs (the architecture named by
 .Va hw.nvidia.min_architecture_name ) .
 A GPU it refuses has no
 .Va dev.nvidia.N
@@ -353,12 +370,15 @@ tree, so the refusals are listed here:
 .It Va hw.nvidia.min_architecture
 The lowest
 .Dv PMC_BOOT_42
-architecture value the driver attaches to, as an integer: 23 (0x17) for Ampere.
+architecture value the driver attaches to, as an integer: 23 (0x17) for
+GA10x (RTX 30).
 The architecture values are not in the order of the generations, but every
-Ampere or later value is at least 23 and every earlier one is below it.
+GA10x (RTX 30) or later value is at least 23 and every earlier one is below it.
 .It Va hw.nvidia.min_architecture_name
 The name of that architecture, for example
-.Qq Ampere .
+.Qq GA10x .
+That is the chip family of that generation, the same name the driver
+uses in its own messages.
 .It Va hw.nvidia.refused_count
 The number of GPUs refused at probe, as an integer: the ones listed in
 .Va hw.nvidia.refused
@@ -437,14 +457,15 @@ or
 .Dq NVIDIA GPU
 when it has none, and the parenthesis holds the PCI device id.
 .Bl -tag -width indent
-.It Dq vgapciN: nvidia: ... is Ar architecture ; this driver supports Ampere (RTX 30) and later
-The GPU is of an earlier architecture: Turing, Volta, Pascal or Maxwell.
-.It Dq vgapciN: nvidia: ... is architecture 0x Ns Ar NN , older than Ampere; this driver supports Ampere (RTX 30) and later
+.It Dq vgapciN: nvidia: ... is Ar architecture ; this driver supports GA10x (RTX 30) and later
+The GPU is of an earlier architecture:
+TU10x, GV11x, GV10x, GP10x, GM20x or GM10x.
+.It Dq vgapciN: nvidia: ... is architecture 0x Ns Ar NN , older than GA10x; this driver supports GA10x (RTX 30) and later
 The same, for an earlier architecture the driver has no name for: the table
-has no name for the generations before Maxwell.
-.It Dq vgapciN: nvidia: ... reports unknown architecture 0x Ns Ar NN ; this driver supports Ampere (RTX 30) and later
+has no name for the generations before GM10x.
+.It Dq vgapciN: nvidia: ... reports unknown architecture 0x Ns Ar NN ; this driver supports GA10x (RTX 30) and later
 The architecture value is at or above the floor but not one the driver knows.
-.It Dq vgapciN: nvidia: ... is Ampere GA100, which needs the gsp_tu10x firmware; only the amd64 build carries it
+.It Dq vgapciN: nvidia: ... is GA10x GA100, which needs the gsp_tu10x firmware; only the amd64 build carries it
 The GA100 runs the
 .Dq tu10x
 firmware image, which only the amd64 build carries.

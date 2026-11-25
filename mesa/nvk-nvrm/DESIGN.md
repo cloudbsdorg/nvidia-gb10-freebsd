@@ -322,7 +322,7 @@ One `nvkmd_ctx` with any of `COPY`, `2D`, `3D`, `M2MF` or `COMPUTE` becomes:
 - a **TSG** (`KEPLER_CHANNEL_GROUP_A`, 0xa06c) on the client's VA space, with
   engine type graphics (which covers 3D, compute, 2D and I2M) or copy;
 - one **GPFIFO channel** in it (`BLACKWELL_CHANNEL_GPFIFO_B` 0xca6f on GB20x, `_A`
-  0xc96f on GB10; libnvrm picks it from `cls_gpfifo` in its generation table).
+  0xc96f on GB10x; libnvrm picks it from `cls_gpfifo` in its chip family table).
   The channel has:
   - `NV_CHANNEL_ALLOC_PARAMS` with `hVASpace`;
   - `hUserdMemory` in system memory, CPU-mapped (uvm-bsd already uses sysmem USERD);
@@ -331,9 +331,9 @@ One `nvkmd_ctx` with any of `COPY`, `2D`, `3D`, `M2MF` or `COMPUTE` becomes:
 - the **engine objects** bound to fixed subchannels, the way NVK's push code
   expects: 3D `BLACKWELL_B` 0xce97, compute `BLACKWELL_COMPUTE_B` 0xcec0, I2M
   `BLACKWELL_INLINE_TO_MEMORY_A` 0xcd40 and 2D (class from the class list),
-  each `_A` on GB10. NVK already emits the `SET_OBJECT` methods in its init
+  each `_A` on GB10x. NVK already emits the `SET_OBJECT` methods in its init
   push, so libnvrm only allocates the RM objects;
-- **copy** (`BLACKWELL_DMA_COPY_B` 0xcab5, `_A` on GB10): a context that asks
+- **copy** (`BLACKWELL_DMA_COPY_B` 0xcab5, `_A` on GB10x): a context that asks
   for `COPY` only gets a TSG and channel on a copy engine. Whether a channel
   on the graphics runlist can also host the copy class, which NVK's graphics
   queue uses in the same push stream, is **not known**. The S3 spike answers
@@ -513,7 +513,7 @@ native timeline sync type**, `nvkmd_nvrm_sync`:
   row checks that a GPU release wakes a CPU waiter within T_wake with the
   slice at 10 s. Mesa's copy of `clc96f.h` and the RM copy
   are both trimmed: they carry no `ACQ_CIRC_GEQ` and no 64-bit payload value.
-  Both are in `clc86f.h`, and the Blackwell values are **to be verified** in the
+  Both are in `clc86f.h`, and the GB10x and GB20x values are **to be verified** in the
   S3 spike (a fake-backend decode test plus one hardware release).
 - **GPU wait:** semaphore acquire on the 64-bit value. The acquire in
   `clc86f.h` is `ACQ_CIRC_GEQ`, a wraparound compare: it passes when
@@ -523,7 +523,7 @@ native timeline sync type**, `nvkmd_nvrm_sync`:
   - `maxTimelineSemaphoreValueDifference` is reported as at most `2^63 - 1`.
 
   If the S3 spike finds a strict (non-circular) 64-bit GEQ acquire on
-  Blackwell, it may replace this, with the CPU side changed to match. Fake
+  GB10x and GB20x, it may replace this, with the CPU side changed to match. Fake
   decode tests, with the GPU acquire and the CPU wait checked separately:
   - `current = 0`, `wanted = 2^63 - 1` (inside the advertised difference):
     both must **not** pass (the in-range check);
@@ -598,12 +598,12 @@ S3 exit measures it.
 | `type` | `SOC` only on a positive signal, otherwise `DIS` (note 6.1) |
 | `pci.{domain,bus,dev,func,revision_id}`, `device_id` | `pci_*` |
 | `chipset` | `architecture` + `implementation` (e.g. 0x1b0 + 0x6 = GB206). Check against the NVK chipset table |
-| `device_name`, `chipset_name` | **gap (#2439)**: the RM marketing name (`NV2080_CTRL_CMD_GPU_GET_NAME_STRING`) and a family name from the generation table |
+| `device_name`, `chipset_name` | **gap (#2439)**: the RM marketing name (`NV2080_CTRL_CMD_GPU_GET_NAME_STRING`) and a family name from the chip family table |
 | `sm` | `sm_version_major * 10 + minor` (120 / 121) |
 | `gpc_count`, `tpc_count` | `gpc_count`, `tpc_count` |
-| `mp_per_tpc`, `max_warps_per_mp`, `max_blocks_per_mp` | **gap (#2439)**: `NV2080_CTRL_CMD_GR_GET_INFO` indices, or the generation table |
+| `mp_per_tpc`, `max_warps_per_mp`, `max_blocks_per_mp` | **gap (#2439)**: `NV2080_CTRL_CMD_GR_GET_INFO` indices, or the chip family table |
 | `cls_gpfifo`, `cls_compute`, `cls_eng3d`, `cls_copy` | as is |
-| `cls_eng2d`, `cls_m2mf`, `cls_vdec` | **gap (#2439)**: pick from `classes` (2D `FERMI_TWOD_A` 0x902d, I2M 0xcd40, NVDEC) in the generation table |
+| `cls_eng2d`, `cls_m2mf`, `cls_vdec` | **gap (#2439)**: pick from `classes` (2D `FERMI_TWOD_A` 0x902d, I2M 0xcd40, NVDEC) in the chip family table |
 | `has_transfer_queue` | `cls_copy != 0` |
 | `has_video` | false in V0/V1 |
 | `nc_atom_size_B` | **gap (#2439)**: the host CPU cache line size, read at run time (note 6.3) |
@@ -625,7 +625,7 @@ is sysmem only. On GB10 there is one heap, device-local and host-visible
 Notes:
 
 - **6.1 `type`.** `SOC` needs a positive signal: the GB10 architecture and
-  implementation in the generation table, or an RM SoC/C2C flag. A discrete
+  implementation in the chip family table, or an RM SoC/C2C flag. A discrete
   chip that reports 0 VRAM (for example because the FB query failed) is
   **refused**, rather than given the GB10 heap layout, since that layout would
   put host-visible maps on BAR memory. Fake test: the `discrete` profile with
@@ -745,7 +745,7 @@ and the hardware-preflight-and-verify skill (by PCI address or UUID), never by
 | Device info fields NVK needs (section 6), the SoC signal | #2439 (S1 and S2 extensions) |
 | PTE kind and compression on alloc; fixed-address and second CPU mapping; replace-first overmap; `mem_info.handle`; unmap by VA | #2439 |
 | TSG, GPFIFO, USERD, engine objects, token, doorbell and both barriers, GP_GET tracking with the E - 2 batch bound, splitting and arrival order, progress-semaphore entry, the copy-engine question, mapped error notifiers, torn-free GPU timestamp, fake GPFIFO | **#2437** (libnvrm S3) |
-| Verify the Blackwell host-class semaphore fields (64-bit payload, `ACQ_CIRC_GEQ`, any strict GEQ), the non-stall interrupt method after a release, the copy class on a graphics channel, and the chipset value against the NVK chipset table | #2437 (S3 spike) |
+| Verify the GB10x and GB20x host-class semaphore fields (64-bit payload, `ACQ_CIRC_GEQ`, any strict GEQ), the non-stall interrupt method after a release, the copy class on a graphics channel, and the chipset value against the NVK chipset table | #2437 (S3 spike) |
 | Semaphore pool, per-export `NV_SEMAPHORE_SURFACE` syncs with the class check on import, per-(thread, device) event descriptors bound at device level, SET_TRIGGER wake, the fixed wait loop, CPU-side waits for imported syncs, CPU wait (spin then poll, kevent after `d_kqfilter`), device-loss events | **#2438** (libnvrm S4) |
 | Check against `vk_queue.c` that the section 5 feature set selects immediate submit with no `vk_sync_timeline` emulation | #2379 |
 | Re-pin S2: done at `4a745c7` (section 1) | #2379 |

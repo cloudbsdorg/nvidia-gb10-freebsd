@@ -262,7 +262,7 @@ not scrub on free, so it also covers memory the RM recycled itself.
   is `EPERM`: a PRIME export and `DRM_IOCTL_GEM_FLINK` alike (and a guessed flink name never
   opens it). An import never yields one. The kernel MAY give such a BO a reservation shared with the VM, so
   its fences are not visible to other files.
-- **`tile_mode`** is never interpreted on Blackwell. Block-linear layout is chosen by user
+- **`tile_mode`** is never interpreted on GB10x and GB20x. Block-linear layout is chosen by user
   space (Mesa's `nil`); the GPU's MMU takes only the PTE kind. The value is stored and returned
   so a second process importing the BO through GEM_INFO can read the layout, and it must be
   the same in every GEM_INFO after.
@@ -273,7 +273,7 @@ not scrub on free, so it also covers memory the RM recycled itself.
   every compressed kind is `EINVAL`, even though a `VRAM` request is otherwise placed in system
   memory. A compressed kind **forces video memory placement**: with `VRAM|GART` the
   system-memory fallback is not taken and the call is `ENOMEM` when video memory is short.
-  An unknown kind is `EINVAL`. Kinds that are valid only on pre-Turing GPUs (`GENERIC_16BX2`,
+  An unknown kind is `EINVAL`. Kinds that are valid only on pre-TU10x GPUs (`GENERIC_16BX2`,
   0xfe) are `EINVAL`: no supported device has them. VM_BIND's `pte_kind` check uses the
   placement actually made.
 

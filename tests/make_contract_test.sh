@@ -188,7 +188,8 @@ rc=$?
 if python3 -I - "$S/pf.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema_version"] == "1.0" and d["tool"] == "preflight"
+assert d["schema_version"] == "2.0" and d["tool"] == "preflight"
+assert d["schema_major"] == 2 and d["schema_minor"] == 0
 assert d["purpose"] == "application"
 assert d["device"] in ("no NVIDIA device", "NVIDIA device present", "device check unavailable")
 assert isinstance(d["status"], list) and isinstance(d["items"], list)

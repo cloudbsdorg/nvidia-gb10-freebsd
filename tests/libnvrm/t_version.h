@@ -141,7 +141,7 @@ t_check_common_device(const nvrm_device_info *info)
 			    (uintmax_t)field->value, (uintmax_t)want[n].value);
 		CHECK_EQ(field->value, want[n].value);
 	}
-	CHECK_STR(info->family.value, "blackwell-b");
+	CHECK_STR(info->family.value, "GB20x");
 }
 
 #endif

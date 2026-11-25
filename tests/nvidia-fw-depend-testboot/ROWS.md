@@ -71,4 +71,4 @@ NULL+0x19f8 in `RmDisableAdapter`).
 - GSP log images (`gsp_log_*`) are not firmware modules of this repository and are not
   dependencies: the driver requests one only when firmware logs are enabled, and the RM treats
   its absence as non-fatal (tests/fw_depend_test.sh checks both against the pinned source).
-- Turing and GA100 on arm64: unsupported; no module is built for them there.
+- TU10x and GA100 on arm64: unsupported; no module is built for them there.

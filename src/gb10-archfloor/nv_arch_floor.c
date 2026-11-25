@@ -5,7 +5,7 @@
  * The architecture floor of nvidia.ko (Track #2457).  nvidia_pci_probe()
  * calls nv_arch_floor_probe(), which reads PMC_BOOT_0 and PMC_BOOT_42 from
  * BAR0 the way NVIDIA's own attach path does a little later, and refuses
- * every GPU older than Ampere with ENXIO, so the device stays unattached and
+ * every GPU older than GA10x (RTX 30) with ENXIO, so the device stays unattached and
  * has no dev.nvidia tree.  Each refused device is recorded once and listed in
  * hw.nvidia.refused; the decision itself is a pure function (see the header).
  */
@@ -200,6 +200,12 @@ nv_arch_floor_decide(uint32_t boot_0, uint32_t boot_42,
 	}
 }
 
+/*
+ * The architecture name as the messages print it.  Every name in the table
+ * is a chip family (GA10x, GH100, GB20x), never a marketing name, so a
+ * message prints the same string the values carry: there is one name per
+ * row and no second name for the floor.
+ */
 void
 nv_arch_floor_format(const struct nv_arch_floor_decision *decision,
     const char *name, uint16_t device_id, char *buf, size_t len)
@@ -213,7 +219,8 @@ nv_arch_floor_format(const struct nv_arch_floor_decision *decision,
 		if (decision->architecture_name != NULL)
 			snprintf(buf, len, "%s (0x%04x) is %s; "
 			    "this driver supports %s and later", who,
-			    (unsigned)device_id, decision->architecture_name,
+			    (unsigned)device_id,
+			    decision->architecture_name,
 			    NV_ARCH_FLOOR_MIN_ARCHITECTURE_LABEL);
 		else
 			snprintf(buf, len, "%s (0x%04x) is architecture "
@@ -517,12 +524,14 @@ nv_arch_floor_sysctl_init(struct sysctl_ctx_list *ctx,
 	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(parent), OID_AUTO,
 	    "min_architecture", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_DYN,
 	    &nv_arch_floor_min_architecture, 0,
-	    "Lowest PMC_BOOT_42 architecture value the driver attaches to");
+	    "Lowest PMC_BOOT_42 NVIDIA GPU architecture value the driver "
+	    "attaches to");
 	SYSCTL_ADD_STRING(ctx, SYSCTL_CHILDREN(parent), OID_AUTO,
 	    "min_architecture_name", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_DYN,
 	    nv_arch_floor_min_architecture_name,
 	    sizeof(nv_arch_floor_min_architecture_name),
-	    "Name of the oldest GPU architecture the driver attaches to");
+	    "Name of the oldest NVIDIA GPU architecture the driver attaches "
+	    "to");
 	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(parent), OID_AUTO,
 	    "refused_count", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_DYN,
 	    &nv_arch_floor_refused_count, 0,

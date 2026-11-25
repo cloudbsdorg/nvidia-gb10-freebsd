@@ -132,7 +132,7 @@ void	nvrm_owner_fork_seam(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
-/* Generation table (nvrm_table.c). */
+/* Chip family table (nvrm_table.c). */
 typedef struct nvrm_family {
 	const char	*name;
 	uint32_t	cls_gpfifo, cls_compute, cls_eng3d, cls_copy;
@@ -479,6 +479,11 @@ int	*nvrm_field_reason(nvrm_device_info *info, const nvrm_field *f);
 
 extern const nvrm_field nvrm_fields[];
 extern const unsigned nvrm_nfields;
+/* The JSON schema of a field (nvrm_json.c): the shape of its value.  It
+ * comes from the kind of the field and its chip family flag, never from its
+ * name: a string field named "family" in another group is a string like any
+ * other. */
+const char *nvrm_field_schema(const nvrm_field *f);
 /* The rows nvrm_info_field() returned at NVRM_1.0 (the table's first rows, in
  * their 1.0 order; every later row is after them).  nvrm_compat.c serves
  * exactly these to a caller bound to the NVRM_1.0 symbols. */

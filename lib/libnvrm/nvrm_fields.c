@@ -23,8 +23,10 @@
 
 #include "nvrm_internal.h"
 
-#define F(g, n, k, d) { g, #n, k, offsetof(nvrm_device_info, n), 0, d }
-#define FH(g, n, k, d) { g, #n, k, offsetof(nvrm_device_info, n), 1, d }
+#define F(g, n, k, d) { g, #n, k, offsetof(nvrm_device_info, n), 0, d, 0 }
+#define FH(g, n, k, d) { g, #n, k, offsetof(nvrm_device_info, n), 1, d, 0 }
+/* FF: the value is one of the published chip family names */
+#define FF(g, n, k, d) { g, #n, k, offsetof(nvrm_device_info, n), 0, d, 1 }
 
 /* CPD-OFF -- the field table: one row per field */
 const nvrm_field nvrm_fields[] = {
@@ -54,7 +56,7 @@ const nvrm_field nvrm_fields[] = {
 	FH("gpu", cls_eng3d, NVRM_K_U64, "3D class"),
 	FH("gpu", cls_copy, NVRM_K_U64, "copy engine class"),
 	FH("gpu", classes, NVRM_K_LIST, "every class the GPU supports"),
-	F("gpu", family, NVRM_K_STR, "generation table row"),
+	FF("gpu", family, NVRM_K_STR, "chip family table row"),
 	F("memory", vram_size, NVRM_K_U64,
 	    "local video memory in bytes (0 on unified-memory parts)"),
 	F("memory", bar1_size, NVRM_K_U64, "BAR1 virtual range in bytes"),

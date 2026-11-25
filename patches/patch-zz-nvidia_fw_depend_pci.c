@@ -22,6 +22,6 @@
 + */
 +MODULE_DEPEND(nvidia, nvidia_gsp_ga10x_fw_fw, 1, 1, 1);
 +#if defined(__amd64__)
-+/* Turing and GA100 run gsp_tu10x; arm64 builds do not carry it yet */
++/* TU10x and GA100 run gsp_tu10x; arm64 builds do not carry it yet */
 +MODULE_DEPEND(nvidia, nvidia_gsp_tu10x_fw_fw, 1, 1, 1);
 +#endif

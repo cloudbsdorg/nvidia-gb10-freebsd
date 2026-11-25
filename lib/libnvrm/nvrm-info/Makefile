@@ -13,9 +13,11 @@ CFLAGS+=	-I${.CURDIR}/../include -std=gnu11 -Wall -Wextra -Werror
 LDFLAGS+=	-L${LIBNVRM_OBJ}
 LDADD=		-lnvrm
 DPADD=		${LIBNVRM_OBJ}/libnvrm.a
-SCHEMA=		${.CURDIR}/../schema/nvrm-info-1.schema.json
+SCHEMA=		${.CURDIR}/../schema/nvrm-info-2.schema.json
 
-FILES=		${SCHEMA}
+# The schema of major 1 is installed beside the current one: a consumer of
+# the old contract (the generation names) needs the file that describes it.
+FILES=		${SCHEMA} ${.CURDIR}/../schema/nvrm-info-1.schema.json
 FILESDIR=	${SHAREDIR}/nvrm/schema
 
 all: schema-check

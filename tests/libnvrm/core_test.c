@@ -604,34 +604,34 @@ test_model_unknown_and_sparse(void)
 	nvrm_close(ctx);
 }
 
-/* The Ada row and the families that have no class of a kind. */
+/* The AD10x row and the families that have no class of a kind. */
 static void
-test_model_ada(void)
+test_model_ad10x(void)
 {
 	nvrm_ctx *ctx;
 	const nvrm_device_info *i;
-	static const uint32_t ada[] = { 0xc56f, 0xc9c0, 0xc997, 0xc7b5 };
-	static const uint32_t ada_nocopy[] = { 0xc56f, 0xc9c0, 0xc997 };
+	static const uint32_t ad10x[] = { 0xc56f, 0xc9c0, 0xc997, 0xc7b5 };
+	static const uint32_t ad10x_nocopy[] = { 0xc56f, 0xc9c0, 0xc997 };
 
-	/* the Ada row: its copy class is the one of the generation before,
+	/* the AD10x row: its copy class is the one of the generation before,
 	 * so the family reports it available, from the table */
 	reset_env();
-	nvrm_fake_inject_classes(ada, 4);
+	nvrm_fake_inject_classes(ad10x, 4);
 	ctx = must_enum("discrete");
 	i = info_of(ctx, 0);
-	CHECK_STR(i->family.value, "ada");
+	CHECK_STR(i->family.value, "AD10x");
 	CHECK(NVRM_HAVE(i->cls_eng3d));
 	CHECK(NVRM_HAVE(i->cls_copy));
 	CHECK_EQ(i->cls_copy.value, 0xC7B5);
 	CHECK(i->cls_copy.source == NVRM_S_FAMILY);
 	nvrm_close(ctx);
-	/* an Ada GPU whose class list lacks the copy class: absent, and not
+	/* an AD10x GPU whose class list lacks the copy class: absent, and not
 	 * "the family has none" (that statement would be false) */
 	reset_env();
-	nvrm_fake_inject_classes(ada_nocopy, 3);
+	nvrm_fake_inject_classes(ad10x_nocopy, 3);
 	ctx = must_enum("discrete");
 	i = info_of(ctx, 0);
-	CHECK_STR(i->family.value, "ada");
+	CHECK_STR(i->family.value, "AD10x");
 	CHECK(!NVRM_HAVE(i->cls_copy));
 	CHECK_EQ(i->cls_copy.reason, NVRM_R_CLASS_ABSENT);
 	nvrm_close(ctx);
@@ -761,7 +761,7 @@ test_model_injections(void)
 	CHECK(NVRM_HAVE(i->cls_copy));
 	nvrm_close(ctx);
 
-	test_model_ada();
+	test_model_ad10x();
 	reset_env();
 }
 
@@ -1452,25 +1452,50 @@ test_fake_direct(void)
 	reset_env();
 }
 
+/* The schema of a field comes from its kind and its flag, not from its
+ * name: a string field named "family" in another group is a string. */
+static void
+test_field_schema(void)
+{
+	nvrm_field f;
+
+	memset(&f, 0, sizeof(f));
+	f.group = "memory";
+	f.name = "family";
+	f.kind = NVRM_K_STR;
+	CHECK_STR(nvrm_field_schema(&f), "text");
+	f.chip_family = 1;
+	CHECK_STR(nvrm_field_schema(&f), "chip_family");
+	f.chip_family = 0;
+	f.kind = NVRM_K_U64;
+	CHECK_STR(nvrm_field_schema(&f), "u64");
+	f.kind = NVRM_K_LIST;
+	CHECK_STR(nvrm_field_schema(&f), "list");
+	f.kind = NVRM_K_VERSION;
+	CHECK_STR(nvrm_field_schema(&f), "version");
+	/* the family of a GPU is the one field that is a chip family */
+	CHECK_STR(nvrm_field_schema(&nvrm_fields[0]), "u64");
+}
+
 static void
 test_public_versions(void)
 {
 	static const uint32_t built_for[] = { 580, 178, 4 };
-	static const uint32_t library[] = { 1, 3, 0 };
-	static const uint32_t symbols[] = { 1, 3 };
-	static const uint32_t schema[] = { 1, 3 };
+	static const uint32_t library[] = { 2, 0, 0 };
+	static const uint32_t symbols[] = { 2, 0 };
+	static const uint32_t schema[] = { 2, 4 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
-	CHECK_EQ(NVRM_API_MAJOR, 1);
-	CHECK_EQ(NVRM_API_MINOR, 3);
+	CHECK_EQ(NVRM_API_MAJOR, 2);
+	CHECK_EQ(NVRM_API_MINOR, 0);
 	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
 	    "");
-	t_check_version(nvrm_library_version(), "1.3.0", library, 3, "");
+	t_check_version(nvrm_library_version(), "2.0.0", library, 3, "");
 	v = nvrm_symbol_version();
-	t_check_version(v, "NVRM_1.3", symbols, 2, "");
+	t_check_version(v, "NVRM_2.0", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.3", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "2.4", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1510,7 +1535,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":3") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":4") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1522,13 +1547,13 @@ test_json(void)
 	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
 	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library\":{\"available\":true,"
-	    "\"string\":\"1.3.0\",\"major\":1,\"minor\":3,\"patch\":0,"
-	    "\"parts\":[1,3,0],\"source\":\"derived\"}") != NULL);
+	    "\"string\":\"2.0.0\",\"major\":2,\"minor\":0,\"patch\":0,"
+	    "\"parts\":[2,0,0],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
-	    "\"string\":\"NVRM_1.3\",\"major\":1,\"minor\":3,\"patch\":0,"
-	    "\"parts\":[1,3],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.3\","
-	    "\"major\":1,\"minor\":3,\"patch\":0,\"parts\":[1,3],"
+	    "\"string\":\"NVRM_2.0\",\"major\":2,\"minor\":0,\"patch\":0,"
+	    "\"parts\":[2,0],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"2.4\","
+	    "\"major\":2,\"minor\":4,\"patch\":0,\"parts\":[2,4],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1633,8 +1658,8 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	fp = open_memstream(&buf, &len);
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
-	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 3") != NULL);
+	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/2") != NULL);
+	CHECK(strstr(buf, "major version 2, minor 4") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "
@@ -1744,6 +1769,7 @@ test_boot_select(void)
 	X("cap", test_cap_helper) \
 	X("fake", test_fake_direct) \
 	X("version", test_public_versions) \
+	X("json", test_field_schema) \
 	X("json", test_json)
 
 T_TABLE(tests, CORE_TESTS);

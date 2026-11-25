@@ -8,8 +8,9 @@ repository root and check its result before continuing.
 
 - FreeBSD 16.0-CURRENT on arm64 and the source for the running kernel (`/usr/src/sys` by
   default; override it with `SYSDIR=`).
-- An Ampere-generation or newer NVIDIA GPU (RTX 30 series and later, and data-centre parts of
-  the same generations). Turing needs `gsp_tu10x`, which this build does not produce.
+- A GPU of the GA10x (RTX 30) generation or newer (the RTX 30 series and later, and data-centre parts of
+  the same generations). The GA100 requires `gsp_tu10x`, and this build does not carry that image, so it
+  refuses a GA100 when it probes it.
 - `git`, `gmake` and `zstd`, plus the base system's `clang` and `ld.lld`:
 
   ```sh

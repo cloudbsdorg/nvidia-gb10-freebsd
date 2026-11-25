@@ -1012,9 +1012,12 @@ _bf=$(sh "$repo/tests/libnvrm/boot_fixture_test.sh" "$T" 2>&1); _bfrc=$?
 
 # the documented standalone run (no argument) works on a fresh checkout, which has no tmp/, and says so when it cannot
 _fc=$T/fresh-checkout
-mkdir -p "$_fc/tests/libnvrm" "$_fc/tests/data"
+mkdir -p "$_fc/tests/libnvrm" "$_fc/tests/data" "$_fc/lib/libnvrm"
 cp "$repo/tests/libnvrm/boot_fixture_test.sh" "$repo/tests/libnvrm/boot_compare.py" "$repo/tests/libnvrm/board-amp001.env" "$_fc/tests/libnvrm/"
 cp -R "$repo/tests/data/nvrm-info-boot-20261122T095018Z" "$_fc/tests/data/"
+# the chip family table: the boot fixture test translates the recorded family
+# value to the chip family this table gives for the classes of the capture
+cp "$repo/lib/libnvrm/nvrm_table.c" "$_fc/lib/libnvrm/"
 cp "$repo/SOURCES" "$_fc/"
 _fo=$(cd "$_fc" && sh tests/libnvrm/boot_fixture_test.sh 2>&1); _forc=$?
 [ "$_forc" = 0 ] && [ -d "$_fc/tmp" ] && printf '%s\n' "$_fo" | grep -q '^== boot_fixture_test: 0 failures' && ok "boot_fixture_test.sh with no argument on a checkout without tmp/ runs and exits 0" || no "boot_fixture_test.sh with no argument on a fresh checkout: rc=$_forc: $(printf '%s\n' "$_fo" | tail -2)"

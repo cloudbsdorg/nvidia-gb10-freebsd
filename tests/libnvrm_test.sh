@@ -86,7 +86,7 @@ rc=$?
 expect_rc "libnvrm.so.1 was linked by LLD" $rc 0
 INFO=$O/info/nvrm-info
 export LD_LIBRARY_PATH=$O/lib
-SCHEMA=$L/schema/nvrm-info-1.schema.json
+SCHEMA=$L/schema/nvrm-info-2.schema.json
 VAL="python3 -I $T/schema_validate.py $SCHEMA"
 
 # drift mutant: change a field description in the table; the build must fail
@@ -435,8 +435,8 @@ mutant rm-give-back nvrm_rm_mem.c '/^give_back/,/^}/s/	(void)nvrm_rm_free(c->s, 
 mutant rm-writeback-text nvrm_rm_mem.c 's/(uintmax_t)(a->page_size >> 10));/(uintmax_t)(a->page_size >> 11));/' rm_mem_test
 mutant rm-leak nvrm_rm.c 's/		nvrm_rm_free(g->be, g->device, g->subdevice);//' rm_test
 # merge-review fixes (Opus A R1 R6, Opus B 1-10): each has a mutant that must die
-mutant ada-copy nvrm_table.c 's/0xC997, 0xC7B5,/0xC997, 0,/' core_test
-mutant ada-copy-wrong nvrm_table.c 's/0xC997, 0xC7B5,/0xC997, 0xC6B5,/' core_test
+mutant ad10x-copy nvrm_table.c 's/0xC997, 0xC7B5,/0xC997, 0,/' core_test
+mutant ad10x-copy-wrong nvrm_table.c 's/0xC997, 0xC7B5,/0xC997, 0xC6B5,/' core_test
 mutant unknown-gpfifo nvrm.c 's/unavail(&info->cls_gpfifo, reason, NVRM_S_FAMILY);/unavail(\&info->cls_gpfifo, NVRM_R_INPUT_MISSING, NVRM_S_FAMILY);/' core_test
 mutant unknown-compute nvrm.c 's/unavail(&info->cls_compute, reason, NVRM_S_FAMILY);/unavail(\&info->cls_compute, NVRM_R_INPUT_MISSING, NVRM_S_FAMILY);/' core_test
 mutant unknown-eng3d nvrm.c 's/unavail(&info->cls_eng3d, reason, NVRM_S_FAMILY);/unavail(\&info->cls_eng3d, NVRM_R_INPUT_MISSING, NVRM_S_FAMILY);/' core_test
@@ -582,7 +582,7 @@ m = copy.deepcopy(good); del m["devices"][0]["identity"]["uuid"]; dump("missing"
 m = copy.deepcopy(good); m["devices"][0]["gpu"]["extra"] = 1; dump("extra", m)
 m = copy.deepcopy(good); m["devices"][0]["gpu"]["sm_count"]["value"] = "36"; dump("type", m)
 m = copy.deepcopy(good); m["devices"][0]["memory"]["numa_node"]["reason_id"] = "made_up"; dump("reason", m)
-m = copy.deepcopy(good); m["schema"] = "nvrm-info/2"; dump("schema", m)
+m = copy.deepcopy(good); m["schema"] = "nvrm-info/1"; dump("schema", m)
 m = copy.deepcopy(good); m["devices"][0]["gpu"]["sm_count"]["value"] = -1; dump("negative", m)
 m = copy.deepcopy(good); m["versions"]["driver"]["major"] = 4294967295; dump("max-boundary", m)
 m = copy.deepcopy(good); m["versions"]["driver"]["major"] = 4294967296; dump("maximum", m)
@@ -627,7 +627,7 @@ expect_rc "identifiers: the schema the built tool prints and the frozen baseline
 minor_ok() {	# minor_ok DIR (nvrm_json.c, schema/, man/nvrm.7): 0 when they agree
 	_m=$(sed -n 's/^#define SCHEMA_MINOR[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1/nvrm_json.c")
 	[ -n "$_m" ] || return 1
-	_s=$(sed -n 's/.*"schema_minor": { "const": \([0-9]*\) }.*/\1/p' "$1/schema/nvrm-info-1.schema.json" | sort -u)
+	_s=$(sed -n 's/.*"schema_minor": { "const": \([0-9]*\) }.*/\1/p' "$1/schema/nvrm-info-2.schema.json" | sort -u)
 	[ "$_s" = "$_m" ] && grep -q "^minor $_m;\$" "$1/man/nvrm.7"
 }
 minor_ok "$L"; rc=$?
@@ -642,7 +642,7 @@ minor_plant() {	# minor_plant NAME WANT(ok|bad) [lib|schema|man]...: bump that f
 	for _f in "$@"; do
 		case $_f in
 		lib) sed -i '' "s/^#define SCHEMA_MINOR\([[:space:]]*\)$MINOR/#define SCHEMA_MINOR\1$_n/" "$_p/nvrm_json.c" ;;
-		schema) sed -i '' "s/\"schema_minor\": { \"const\": $MINOR }/\"schema_minor\": { \"const\": $_n }/" "$_p/schema/nvrm-info-1.schema.json" ;;
+		schema) sed -i '' "s/\"schema_minor\": { \"const\": $MINOR }/\"schema_minor\": { \"const\": $_n }/" "$_p/schema/nvrm-info-2.schema.json" ;;
 		man) sed -i '' "s/^minor $MINOR;\$/minor $_n;/" "$_p/man/nvrm.7" ;;
 		esac
 	done
@@ -700,7 +700,12 @@ base = open(sys.argv[2]).read().splitlines()
 open(w + "/ids-empty.txt", "w").write("# nothing\n")
 open(w + "/ids-nocap.txt", "w").write("\n".join(l for l in base if not l.startswith("capability ")) + "\n")
 open(w + "/ids-extra.txt", "w").write("\n".join(base + ["reason 15 never_existed 0"]) + "\n")
-open(w + "/ids-new-m0.txt", "w").write("\n".join(base + ["reason 15 a_new_reason %d" % CUR]) + "\n")
+# an id added without raising the minor names the highest minor the
+# baseline already has (TOP), not the current one: the check refuses a
+# line that is not above every earlier one
+TOP = max(int(l.split()[3]) for l in base
+          if len(l.split()) == 4 and l.split()[0] in ("source", "reason", "error", "capability"))
+open(w + "/ids-new-m0.txt", "w").write("\n".join(base + ["reason 15 a_new_reason %d" % TOP]) + "\n")
 open(w + "/ids-new-m1.txt", "w").write("\n".join(base + ["reason 15 a_new_reason %d" % NEXT]) + "\n")
 open(w + "/ids-renamed.txt", "w").write("\n".join(l.replace("family_unknown", "no_family_entry") for l in base) + "\n")
 def bump(x):
@@ -989,19 +994,19 @@ grep -q 'takes no --backend' "$W/u2.err"; rc=$?
 expect_rc "--schema with --backend: the message says why" $rc 0
 NVRM_FAKE_PROFILE=discrete $INFO >"$W/text.out"; rc=$?
 expect_rc "text mode rc" $rc 0
-grep -q 'sm_count  *36' "$W/text.out" && grep -q 'family  *blackwell-b' "$W/text.out"
+grep -q 'sm_count  *36' "$W/text.out" && grep -q 'family  *GB20x' "$W/text.out"
 rc=$?
 expect_rc "text mode shows the values" $rc 0
 grep -q 'built for RM 580.178.04, running RM 580.178.04' "$W/text.out"; rc=$?
 expect_rc "text mode shows the built-for and the running RM version" $rc 0
-for v in 'RM API version 580.178.04' 'library version 1.3.0' 'library symbol version NVRM_1.3' 'schema version 1.3'; do
+for v in 'RM API version 580.178.04' 'library version 2.0.0' 'library symbol version NVRM_2.0' 'schema version 2.4'; do
 	grep -Fqx "$v" "$W/text.out"; rc=$?
 	expect_rc "text mode shows the version string: $v" $rc 0
 done
 grep -q 'vbios  *96\.06\.1e\.00\.4a (rm)' "$W/text.out" && grep -q 'gsp_firmware  *580\.178\.04 (rm)' "$W/text.out"; rc=$?
 expect_rc "text mode shows the VBIOS and GSP firmware version strings" $rc 0
 $INFO --help >"$W/help.out"
-grep -Fq '  --json      one JSON document (schema nvrm-info/1); versions are' "$W/help.out" && grep -Fqx '              strings plus integer parts' "$W/help.out" && grep -Fq '  --jsonl     JSON Lines: header, one record per GPU, end record;' "$W/help.out" && grep -Fqx '              versions are strings plus integer parts' "$W/help.out"
+grep -Fq '  --json      one JSON document (schema nvrm-info/2); versions are' "$W/help.out" && grep -Fqx '              strings plus integer parts' "$W/help.out" && grep -Fq '  --jsonl     JSON Lines: header, one record per GPU, end record;' "$W/help.out" && grep -Fqx '              versions are strings plus integer parts' "$W/help.out"
 rc=$?
 expect_rc "--help folds version strings and integer parts into both JSON descriptions" $rc 0
 grep -q 'pci_bus  *13 ' "$W/text.out"; rc=$?
@@ -1425,9 +1430,25 @@ expect_rc "boot script: documents that the test BE must disable linux_enable" $r
 sh "$T/lint_core.sh" "$L" 2>"$W/lint.err"; rc=$?
 expect_rc "core and build files name no chip and no Linux layer" $rc 0
 M=$W/mut-lint
-mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && printf '/* plant */ int x = 0xcec0; /* Blackwell */\n' >>"$M/libnvrm/nvrm.c"
+mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && printf '/* plant */ int x = 0xcec0; /* GB20x */\n' >>"$M/libnvrm/nvrm.c"
 sh "$T/lint_core.sh" "$M/libnvrm" >/dev/null 2>&1; rc=$?
 if [ $rc -ne 0 ]; then ok "lint plant: a chip name in nvrm.c is caught"; else bad "lint plant: not caught"; fi
+# the naming rule again: a marketing name of a generation in a core file is
+# refused (before the fix the lint let it through)
+M=$W/mut-lint-marketing
+mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && printf '/* plant */ /* Ampere */\n' >>"$M/libnvrm/nvrm.c"
+sh "$T/lint_core.sh" "$M/libnvrm" >/dev/null 2>&1; rc=$?
+if [ $rc -ne 0 ]; then ok "lint plant: a marketing name in nvrm.c is caught"; else bad "lint plant: a marketing name was not caught"; fi
+# an ordinary identifier that holds the same letters is not a chip
+M=$W/mut-lint-identifier
+mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && printf '/* plant */ int read1024; int payload123;\n' >>"$M/libnvrm/nvrm.c"
+sh "$T/lint_core.sh" "$M/libnvrm" >/dev/null 2>&1; rc=$?
+if [ $rc -eq 0 ]; then ok "lint plant: an ordinary identifier is not a chip"; else bad "lint plant: an ordinary identifier was refused"; fi
+# the published values: a marketing name in the family table is refused
+M=$W/mut-lint-value
+mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && sed -i '' 's/{ "GB20x", 0xCA6F/{ "blackwell-b", 0xCA6F/' "$M/libnvrm/nvrm_table.c"
+sh "$T/lint_core.sh" "$M/libnvrm" >/dev/null 2>&1; rc=$?
+if [ $rc -ne 0 ]; then ok "lint plant: a marketing name in a published family value is caught"; else bad "lint plant: a marketing name in a published value was not caught"; fi
 M=$W/mut-newfile
 mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && printf 'int x = 0xcec0;\n' >"$M/libnvrm/nvrm_new.c"
 sh "$T/lint_core.sh" "$M/libnvrm" >/dev/null 2>&1; rc=$?
@@ -1479,29 +1500,64 @@ cmp -s "$W/exported.txt" "$W/declared.txt"; rc=$?
 expect_rc "the library exports exactly the functions its public headers declare" $rc 0
 [ $rc -eq 0 ] || diff "$W/exported.txt" "$W/declared.txt"
 # symbol versions: discovery is NVRM_1.0, memory and VA NVRM_1.1, version
-# numbers NVRM_1.2, channels NVRM_1.3, and each version's calls are the ones its
-# man page documents
+# numbers NVRM_1.2, channels NVRM_1.3, the version numbers that moved with
+# the major NVRM_2.0, and each version's calls are the ones its man page
+# documents
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.0$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported10.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.1$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported11.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.2$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported12.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.3$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported13.txt"
-[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ -s "$W/exported13.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" "$W/exported13.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
-expect_rc "every export is in NVRM_1.0, NVRM_1.1, NVRM_1.2 or NVRM_1.3, and all are used" $rc 0
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_2\.0$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported20.txt"
+[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ -s "$W/exported13.txt" ] && [ -s "$W/exported20.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" "$W/exported13.txt" "$W/exported20.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
+expect_rc "every export is in NVRM_1.0, NVRM_1.1, NVRM_1.2, NVRM_1.3 or NVRM_2.0, and all are used" $rc 0
 readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_chan_create@@NVRM_1\.3'; rc=$?
 expect_rc "readelf: discovery, memory and channel symbol versions" $rc 0
 # (LLD does not write the parent of a version node into the object, so the
 # inheritance is checked where it is declared)
-grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map" && grep -q '^} NVRM_1\.2;$' "$L/Version.map"; rc=$?
-expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0, NVRM_1.2 NVRM_1.1 and NVRM_1.3 NVRM_1.2" $rc 0
-for v in NVRM_1.0 NVRM_1.1 NVRM_1.2 NVRM_1.3; do
+grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map" && grep -q '^} NVRM_1\.2;$' "$L/Version.map" && grep -q '^} NVRM_1\.3;$' "$L/Version.map"; rc=$?
+expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0, NVRM_1.2 NVRM_1.1, NVRM_1.3 NVRM_1.2 and NVRM_2.0 NVRM_1.3" $rc 0
+for v in NVRM_1.0 NVRM_1.1 NVRM_1.2 NVRM_1.3 NVRM_2.0; do
 	objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q "$v" || readelf -V "$O/lib/libnvrm.so.1" | grep -q "$v"
 	rc=$?
 	expect_rc "symbols carry the version $v" $rc 0
 done
-for f in nvrm_driver_version nvrm_rm_api_version nvrm_built_for_version nvrm_library_version nvrm_symbol_version nvrm_schema_version; do
+for f in nvrm_driver_version nvrm_rm_api_version nvrm_built_for_version; do
 	readelf -Ws "$O/lib/libnvrm.so.1" | grep -Eq "$f@+NVRM_1[.]2([[:space:]]|$)"; rc=$?
 	expect_rc "$f is exported at NVRM_1.2" $rc 0
 done
+# the calls that report the version of the interface moved to the new major
+for f in nvrm_library_version nvrm_symbol_version nvrm_schema_version; do
+	readelf -Ws "$O/lib/libnvrm.so.1" | grep -Eq "$f@+NVRM_2[.]0([[:space:]]|$)"; rc=$?
+	expect_rc "$f is exported at NVRM_2.0" $rc 0
+done
+
+# ---- one family table --------------------------------------------------------
+# The chip family names are published twice: by the driver (the architecture
+# table of src/gb10-archfloor/nv_arch_floor.h, whose names hw.nvidia and the
+# preflight JSON carry) and by the library (the rows of the chip family table,
+# whose names nvrm-info publishes).  They must be the same names: a consumer
+# that compares the family of a GPU with the driver's name compares them as
+# they are, with no table of its own.  A family the library publishes that the
+# driver does not know is a failure here.
+FLOORHDR=$SRC/src/gb10-archfloor/nv_arch_floor.h
+sed -n 's/^	ROW(0x[0-9a-f]*, "\([^"]*\)".*/\1/p' "$FLOORHDR" | sort -u > "$W/families-driver.txt"
+sed -n 's/^	{ "\([^"]*\)".*/\1/p' "$L/nvrm_table.c" | sort -u > "$W/families-libnvrm.txt"
+_fam_missing=$(comm -13 "$W/families-driver.txt" "$W/families-libnvrm.txt")
+if [ -z "$_fam_missing" ]; then
+	ok "the chip families the library publishes are the families the driver publishes"
+else
+	bad "the chip families the library publishes that the driver does not know: $(printf '%s' "$_fam_missing" | tr '\n' ' ')"
+fi
+# the plant: a family the driver does not know is refused
+M=$W/mut-family
+mkdir -p "$M" && cp -R "$L" "$M/libnvrm" && sed -i '' 's/{ "GA10x", 0xC56F, 0xC7C0/{ "GA11x", 0xC56F, 0xC7C0/' "$M/libnvrm/nvrm_table.c"
+sed -n 's/^	{ "\([^"]*\)".*/\1/p' "$M/libnvrm/nvrm_table.c" | sort -u > "$W/families-plant.txt"
+_fam_plant=$(comm -13 "$W/families-driver.txt" "$W/families-plant.txt")
+if [ -n "$_fam_plant" ]; then
+	ok "family plant: a family the driver does not know is refused"
+else
+	bad "family plant: a family the driver does not know was not refused"
+fi
 
 # ---- man pages ---------------------------------------------------------------
 for m in "$L/man/nvrm.3" "$L/man/nvrm_chan.3" "$L/man/nvrm.7" "$L/nvrm-info/nvrm-info.8"; do
@@ -1529,10 +1585,10 @@ for f in NVRM_ENUM_ALLOW_ALLOC; do
 done
 grep -qi "zero-initialize" "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) tells callers to zero-initialize the options" $rc 0
-cat "$W/exported10.txt" "$W/exported12.txt" | sort >"$W/exported10_12.txt"
+cat "$W/exported10.txt" "$W/exported12.txt" "$W/exported20.txt" | sort >"$W/exported10_12.txt"
 for pg in nvrm:10_12:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS nvrm_chan:13:NVRM_CHAN_FUNCS; do
 	_page=${pg%%:*}; _rest=${pg#*:}; _v=${_rest%%:*}; _var=${_rest#*:}
-	case $_v in 10_12) _lbl="NVRM_1.0 and NVRM_1.2" ;; *) _lbl="NVRM_1.${_v#1}" ;; esac
+	case $_v in 10_12) _lbl="NVRM_1.0, NVRM_1.2 and NVRM_2.0" ;; *) _lbl="NVRM_1.${_v#1}" ;; esac
 	sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$L/man/$_page.3" | grep -oE '^\.Fn nvrm_[a-z_0-9]+' | awk '{print $2}' | sort -u >"$W/man-fn-$_page.txt"
 	grep -oE '^\.Nm nvrm_[a-z_0-9]+' "$L/man/$_page.3" | awk '{print $2}' | sort -u >"$W/man-nm-$_page.txt"
 	(cd "$L" && make -V "$_var" OGKM=$OGKM) | tr ' ' '\n' | grep '^nvrm_' | sort -u >"$W/mk-$_page.txt"
@@ -1556,8 +1612,8 @@ for f in nvrm_version nvrm_version_parse nvrm_version_find nvrm_version_format; 
 done
 grep -q 'versions' "$L/man/nvrm.3" && grep -q 'parts' "$L/man/nvrm.3" && grep -q 'source' "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) documents the JSON version object and its integer parts" $rc 0
-grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 3;' "$L/man/nvrm.7"; rc=$?
-expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 3" $rc 0
+grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 4;' "$L/man/nvrm.7"; rc=$?
+expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 4" $rc 0
 for s in version_string version_major version_minor version_patch version_suffix version_available; do
 	grep -q "hw.nvidia.$s" "$L/nvrm-info/nvrm-info.8"; rc=$?
 	expect_rc "nvrm-info(8) documents hw.nvidia.$s" $rc 0
@@ -1660,11 +1716,11 @@ expect_rc "libnvrm installs" $rc 0
 (cd "$L/nvrm-info" && MAKEOBJDIR=$O/info LIBNVRM_OBJ=$O/lib make install DESTDIR=$D $OWN >"$W/inst2.log" 2>&1)
 rc=$?
 expect_rc "nvrm-info installs" $rc 0
-for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/include/nvrm/nvrm_version.h usr/include/nvrm/nvrm_chan.h usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man3/nvrm_chan.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
+for f in usr/lib/libnvrm.so.1 usr/lib/libnvrm.a usr/sbin/nvrm-info usr/include/nvrm/nvrm.h usr/include/nvrm/nvrm_version.h usr/include/nvrm/nvrm_chan.h usr/share/nvrm/schema/nvrm-info-2.schema.json usr/share/nvrm/schema/nvrm-info-1.schema.json usr/share/man/man3/nvrm.3.gz usr/share/man/man3/nvrm_chan.3.gz usr/share/man/man7/nvrm.7.gz usr/share/man/man8/nvrm-info.8.gz; do
 	[ -f "$D/$f" ]; rc=$?
 	expect_rc "installed: $f" $rc 0
 done
-cmp -s "$D/usr/share/nvrm/schema/nvrm-info-1.schema.json" "$SCHEMA"; rc=$?
+cmp -s "$D/usr/share/nvrm/schema/nvrm-info-2.schema.json" "$SCHEMA"; rc=$?
 expect_rc "installed schema is the checked-in schema" $rc 0
 
 printf '\nlibnvrm_test: %d ok, %d FAILED\n' "$PASS" "$FAIL"

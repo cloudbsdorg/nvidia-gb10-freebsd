@@ -68,9 +68,6 @@ NVRM_1.2 {
 		nvrm_driver_version;
 		nvrm_rm_api_version;
 		nvrm_built_for_version;
-		nvrm_library_version;
-		nvrm_symbol_version;
-		nvrm_schema_version;
 		nvrm_reason_from_id;
 		/* the default versions: they grew rows after 1.0; the 1.0 versions
 		 * (nvrm_compat.c, .symver) return only the rows 1.0 had */
@@ -90,3 +87,21 @@ NVRM_1.3 {
 		nvrm_chan_info_get;
 		nvrm_chan_destroy;
 } NVRM_1.2;
+
+/* API major 2: the published chip family names.
+ *
+ * The calls that report the version of the interface moved here, because
+ * their answers changed with the major: the library version, the symbol
+ * version and the schema version are the versions of this interface, and a
+ * caller that compares them needs the new node.  The other calls are the
+ * same as in 1.3 and keep their symbols.
+ *
+ * The published values changed with the major: the family of a GPU is a chip
+ * family (the same name the driver publishes) and not the marketing name of
+ * the generation. */
+NVRM_2.0 {
+	global:
+		nvrm_library_version;
+		nvrm_symbol_version;
+		nvrm_schema_version;
+} NVRM_1.3;

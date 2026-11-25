@@ -12,7 +12,7 @@
  
      name = rm_get_device_name(device, subvendor, subdevice);
  
-+    /* Ampere (RTX 30) and later only, for now (Track #2457) */
++    /* GA10x (RTX 30) and later only, for now (Track #2457) */
 +    if (nv_arch_floor_probe(dev, name) != 0)
 +        return ENXIO;
 +

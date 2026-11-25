@@ -57,7 +57,7 @@
 # src/gb10-client-owner/nv_client_owner.h and nvco_glue.h (the RM client
 # ownership table and its kernel glue for nvidia-uvm.ko, Track #2373) to
 # TREE/nvidia/. The architecture floor (src/gb10-archfloor/nv_arch_floor.c and
-# .h, Track #2457: nvidia.ko attaches to Ampere and later only) goes to
+# .h, Track #2457: nvidia.ko attaches to GA10x (RTX 30) and later only) goes to
 # TREE/nvidia/ as well, built through the patched nvidia/Makefile. The
 # version sysctl source/header and the shared freestanding
 # nvrm_version.h parser go to both TREE/nvidia/ and TREE/nvidia-modeset/; each

@@ -100,10 +100,10 @@ done
 for _k in below-floor unknown no-firmware not-responding unreadable; do
 	check_man ".Qq $_k" "the verdict keyword $_k"
 done
-check_man 'is Ar architecture ; this driver supports Ampere (RTX 30) and later' 'the architecture message'
-check_man 'is architecture 0x Ns Ar NN , older than Ampere; this driver supports Ampere (RTX 30) and later' 'the unnamed older message'
-check_man 'reports unknown architecture 0x Ns Ar NN ; this driver supports Ampere (RTX 30) and later' 'the unknown architecture message'
-check_man 'Turing, Volta, Pascal or Maxwell' 'the names of the older architectures'
+check_man 'is Ar architecture ; this driver supports GA10x (RTX 30) and later' 'the architecture message'
+check_man 'is architecture 0x Ns Ar NN , older than GA10x; this driver supports GA10x (RTX 30) and later' 'the unnamed older message'
+check_man 'reports unknown architecture 0x Ns Ar NN ; this driver supports GA10x (RTX 30) and later' 'the unknown architecture message'
+check_man 'TU10x, GV11x, GV10x, GP10x, GM20x and GM10x' 'the names of the older architectures'
 check_man 'which needs the gsp_tu10x firmware; only the amd64 build carries it' 'the missing firmware message'
 check_man 'only the amd64 build carries it' 'the build that carries the image'
 check_man 'Use an amd64 machine for that card' 'the action for a missing image'
@@ -111,16 +111,17 @@ check_man 'Reseat or power-cycle the card, and check its power connectors' 'the 
 check_man '-r for another owner of the memory range' 'the action for an unreadable card'
 check_man 'does not respond (PMC_BOOT_0 and PMC_BOOT_42 read 0xffffffff); not attaching' 'the not responding message'
 check_man 'cannot read PMC_BOOT_42 (BAR0 not available); not attaching' 'the unreadable message'
-check_man 'The driver attaches to Ampere and later GPUs (the architecture named by' 'the architecture the driver attaches to'
+check_man 'The driver attaches to GA10x (RTX 30) and later GPUs (the architecture named by' 'the architecture the driver attaches to'
 check_man 'kldunload' 'the idle nvidia.ko on a machine with only refused GPUs'
 if sed -n '/^.Sh SYSCTL VARIABLES/,/^.Sh LOADER TUNABLES/p' "$MAN" | grep -q -E 'existing|unchanged|siblings'; then
 	echo 'FAIL nvidia(4) describes the change ("existing", "unchanged", "siblings")' >&2
 	FAILED=$((FAILED + 1))
 fi
 
-# The row tables are read by make preflight with awk: one row per line.
+# The row tables are read by make preflight with awk: one row per line.  The
+# third field is the chip key: the prefix of the chip and its two digits.
 for _row in 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18 0x19 0x1a 0x1b; do
-	if [ "$(grep -c "^	ROW($_row, \"[A-Za-z]*\", \"[A-Z][A-Z]\")" \
+	if [ "$(grep -c "^	ROW($_row, \"[A-Za-z0-9]*\", \"[A-Z][A-Z][0-9][0-9]\")" \
 	    "$SRCDIR/nv_arch_floor.h")" -eq 1 ]; then
 		printf 'ok   table row %s is on one line\n' "$_row"
 	else
@@ -133,6 +134,62 @@ if [ "$(grep -c '^	ROW(0x17, 0x0, "GA100", "gsp_tu10x", "amd64")' \
 	echo 'ok   firmware row is on one line'
 else
 	echo 'FAIL firmware row is not on one line' >&2
+	FAILED=$((FAILED + 1))
+fi
+
+# The docs name every family the code recognises below the floor: a family
+# the table has and the manual does not name is a family a reader cannot
+# look up.
+_floorhex=$(sed -n 's/^#define NV_ARCH_FLOOR_MIN_ARCHITECTURE[ 	]*\(0x[0-9a-fA-F]*\).*/\1/p' \
+    "$SRCDIR/nv_arch_floor.h")
+_floordec=$(printf '%d' "$_floorhex")
+_below=$(sed -n 's/^	ROW(\(0x[0-9a-fA-F]*\), "\([^"]*\)".*/\1 \2/p' \
+    "$SRCDIR/nv_arch_floor.h" | while read -r _v _n; do
+	if [ "$(printf '%d' "$_v")" -lt "$_floordec" ]; then
+		printf '%s\n' "$_n"
+	fi
+done)
+for _f in $_below; do
+	if grep -q "$_f" "$MAN"; then
+		printf 'ok   nvidia(4) names the family below the floor: %s\n' "$_f"
+	else
+		echo "FAIL nvidia(4) does not name the family below the floor: $_f" >&2
+		FAILED=$((FAILED + 1))
+	fi
+	if grep -q "$_f" "$REPO/README.md"; then
+		printf 'ok   the README names the family below the floor: %s\n' "$_f"
+	else
+		echo "FAIL the README does not name the family below the floor: $_f" >&2
+		FAILED=$((FAILED + 1))
+	fi
+done
+
+# the legend: every family the code knows is in the legend of the README and
+# of nvidia(4), so that a family code a reader meets can be looked up
+_all=$(sed -n 's/^	ROW(0x[0-9a-fA-F]*, "\([^"]*\)".*/\1/p' \
+    "$SRCDIR/nv_arch_floor.h" | sort -u)
+for _f in $_all; do
+	if grep -q "$_f" "$MAN"; then
+		printf 'ok   nvidia(4) names the family: %s\n' "$_f"
+	else
+		echo "FAIL nvidia(4) does not name the family: $_f" >&2
+		FAILED=$((FAILED + 1))
+	fi
+	if grep -q "$_f" "$REPO/README.md"; then
+		printf 'ok   the README names the family: %s\n' "$_f"
+	else
+		echo "FAIL the README does not name the family: $_f" >&2
+		FAILED=$((FAILED + 1))
+	fi
+done
+
+# the manual build prerequisites name the image the GA100 needs: the build
+# does not carry it, so it refuses a GA100
+if grep -q 'GA100 requires `gsp_tu10x`' "$REPO/docs/MANUAL-BUILD.md" &&
+    ! grep -q 'TU10x needs `gsp_tu10x`' "$REPO/docs/MANUAL-BUILD.md"; then
+	printf 'ok   the manual build prerequisites name the GA100 image\n'
+else
+	echo 'FAIL the manual build prerequisites do not name the GA100 image' >&2
 	FAILED=$((FAILED + 1))
 fi
 
@@ -201,10 +258,10 @@ run_mutant floor-0x13 nv_arch_floor.h \
 	's/^\(#define NV_ARCH_FLOOR_MIN_ARCHITECTURE[ 	]*\)0x17/\10x13/'
 run_mutant floor-exclusive nv_arch_floor.c \
 	's/architecture < NV_ARCH_FLOOR_MIN_ARCHITECTURE/architecture <= NV_ARCH_FLOOR_MIN_ARCHITECTURE/'
-run_mutant row-ada-dropped nv_arch_floor.h '/^	ROW(0x19, /d'
-run_mutant row-blackwell-gb20x-dropped nv_arch_floor.h '/^	ROW(0x1b, /d'
-run_mutant row-blackwell-gb10x-dropped nv_arch_floor.h '/^	ROW(0x1a, /d'
-run_mutant row-ampere-dropped nv_arch_floor.h '/^	ROW(0x17, "Ampere"/d'
+run_mutant row-ad10x-dropped nv_arch_floor.h '/^	ROW(0x19, /d'
+run_mutant row-gb20x-dropped nv_arch_floor.h '/^	ROW(0x1b, /d'
+run_mutant row-gb10x-dropped nv_arch_floor.h '/^	ROW(0x1a, /d'
+run_mutant row-ga10x-dropped nv_arch_floor.h '/^	ROW(0x17, "GA10x"/d'
 run_mutant firmware-row-dropped nv_arch_floor.h '/^	ROW(0x17, 0x0, "GA100"/d'
 run_mutant vendor-guard-removed nv_arch_floor.c \
 	's/if (pci_get_vendor(dev) != NV_ARCH_FLOOR_NVIDIA_VENDOR)/if (0)/'

@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # preflight_support_test.sh - what make preflight says about each NVIDIA
-# display device now that nvidia.ko attaches to Ampere (RTX 30) and later only
+# display device now that nvidia.ko attaches to GA10x (RTX 30) and later only
 # (Track #2457): the support verdict from the chip name and the header's
 # table when nvidia.ko is not loaded, from the kernel's own answer when it is,
-# the JSON contract (schema 1.1, the document's schema_version stays 1.0) and
-# the text.
+# the JSON contract (schema 2.0: the document carries schema_version as a
+# string and schema_major and schema_minor as integers) and the text.
 # pciconf, sysctl and the machine architecture are faked through the make.sh
 # test hooks; plants (mutated copies of make.sh and the header) must turn the
 # cases red.  Nothing is loaded and no GPU is needed.
@@ -107,6 +107,14 @@ PYEOF
 	add_dev vgapci9@pci0:9:0:0 0x10de 0x9998 'ZZ104 [Future]'
 	add_dev vgapci10@pci0:10:0:0 0x10de 0x20b6 'GA100GL [A30 PCIe]'
 	add_dev vgapci11@pci0:11:0:0 0x10de 0x0fc6 'GK208B [GeForce GT 710]'
+	# the chip key (the prefix and the two digits) tells the families of
+	# one prefix apart: GM100 is not GM200, GV100 is not GV110 and
+	# GB100 is not GB206
+	add_dev vgapci12@pci0:12:0:0 0x10de 0x1004 'GM100 [GeForce GTX 780]'
+	add_dev vgapci13@pci0:13:0:0 0x10de 0x1024 'GM200 [Tesla M60]'
+	add_dev vgapci14@pci0:14:0:0 0x10de 0x1db1 'GV100 [Tesla V100 PCIe]'
+	add_dev vgapci15@pci0:15:0:0 0x10de 0x1c1c 'GV110 [Tesla P100 PCIe]'
+	add_dev vgapci16@pci0:16:0:0 0x10de 0x2321 'GB100 [NVIDIA B200]'
 	one arm64 aarch64
 	one amd64 amd64
 	# nvidia.ko loaded: the kernel decides
@@ -115,15 +123,15 @@ PYEOF
 	add_dev vgapci2@pci0:5:0:0 0x10de 0x2204 'GA102 [GeForce RTX 3090]'
 	add_dev vgapci3@pci0:6:0:0 0x10de 0x2684 'AD102 [GeForce RTX 4090]'
 	printf '23\n' > "$FAKE/sysd/min"
-	printf 'Ampere\n' > "$FAKE/sysd/name"
+	printf 'GA10x\n' > "$FAKE/sysd/name"
 	printf 'dev.nvidia.0.%%parent: vgapci2\ndev.nvidia.0.%%desc: NVIDIA test\n' > "$FAKE/sysd/dev"
-	printf 'pci0:13:0:0 vgapci1 0x1e84 below-floor NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; this driver supports Ampere (RTX 30) and later\n' > "$FAKE/sysd/refused"
+	printf 'pci0:13:0:0 vgapci1 0x1e84 below-floor NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; this driver supports GA10x (RTX 30) and later\n' > "$FAKE/sysd/refused"
 	one kernel amd64
 	# vgapci1 unclaimed while vgapci10 attached: vgapci1 is not "attached"
 	reset
 	add_dev vgapci1@pci0:13:0:0 0x10de 0x2204 'GA102 [GeForce RTX 3090]'
 	printf '23\n' > "$FAKE/sysd/min"
-	printf 'Ampere\n' > "$FAKE/sysd/name"
+	printf 'GA10x\n' > "$FAKE/sysd/name"
 	printf 'dev.nvidia.0.%%parent: vgapci10\n' > "$FAKE/sysd/dev"
 	: > "$FAKE/sysd/refused"
 	one kernel-prefix aarch64
@@ -131,7 +139,7 @@ PYEOF
 	reset
 	add_dev vgapci1@pci0:13:0:0 0x10de 0x1e84 'TU104 [GeForce RTX 2070 SUPER]'
 	printf '23\n' > "$FAKE/sysd/min"
-	printf 'Ampere\n' > "$FAKE/sysd/name"
+	printf 'GA10x\n' > "$FAKE/sysd/name"
 	: > "$FAKE/sysd/dev"
 	printf 'pci0:13:0:0 vgapci1 0x1e84 bogus msg\n' > "$FAKE/sysd/refused"
 	one kernel-bogus aarch64
@@ -139,15 +147,15 @@ PYEOF
 	reset
 	add_dev vgapci1@pci0:13:0:0 0x10de 0x1e84 'TU104 [GeForce RTX 2070 SUPER]'
 	printf '23\n' > "$FAKE/sysd/min"
-	printf 'Ampere\n' > "$FAKE/sysd/name"
+	printf 'GA10x\n' > "$FAKE/sysd/name"
 	: > "$FAKE/sysd/dev"
-	printf 'pci0:13:0:0 vgapci1 0x1e84 x","architecture":"Ampere","source":"kernel below\n' > "$FAKE/sysd/refused"
+	printf 'pci0:13:0:0 vgapci1 0x1e84 x","architecture":"GA10x","source":"kernel below\n' > "$FAKE/sysd/refused"
 	one kernel-injected aarch64
 	# the kernel refused more GPUs than it lists
 	reset
 	add_dev vgapci1@pci0:13:0:0 0x10de 0x1e84 'TU104 [GeForce RTX 2070 SUPER]'
 	printf '23\n' > "$FAKE/sysd/min"
-	printf 'Ampere\n' > "$FAKE/sysd/name"
+	printf 'GA10x\n' > "$FAKE/sysd/name"
 	: > "$FAKE/sysd/dev"
 	: > "$FAKE/sysd/refused"
 	printf '17\n' > "$FAKE/sysd/count"
@@ -155,35 +163,45 @@ PYEOF
 }
 
 cat > "$T/want" <<'EOT'
-arm64: vgapci1@pci0:1:0:0 state=below-floor arch=Turing source=pci_vendors
-arm64: vgapci2@pci0:2:0:0 state=supported arch=Ampere source=pci_vendors
-arm64: vgapci3@pci0:3:0:0 state=supported arch=Ada source=pci_vendors
-arm64: vgapci4@pci0:4:0:0 state=supported arch=Blackwell source=pci_vendors
-arm64: vgapci5@pci0:5:0:0 state=supported arch=Blackwell source=pci_vendors
-arm64: vgapci6@pci0:6:0:0 state=below-floor arch=Pascal source=pci_vendors
-arm64: vgapci7@pci0:7:0:0 state=no-firmware arch=Ampere source=pci_vendors
+arm64: vgapci1@pci0:1:0:0 state=below-floor arch=TU10x source=pci_vendors
+arm64: vgapci2@pci0:2:0:0 state=supported arch=GA10x source=pci_vendors
+arm64: vgapci3@pci0:3:0:0 state=supported arch=AD10x source=pci_vendors
+arm64: vgapci4@pci0:4:0:0 state=supported arch=GB20x source=pci_vendors
+arm64: vgapci5@pci0:5:0:0 state=supported arch=GB20x source=pci_vendors
+arm64: vgapci6@pci0:6:0:0 state=below-floor arch=GP10x source=pci_vendors
+arm64: vgapci7@pci0:7:0:0 state=no-firmware arch=GA10x source=pci_vendors
 arm64: vgapci8@pci0:8:0:0 state=unknown arch=None source=pci_vendors
 arm64: vgapci9@pci0:9:0:0 state=unknown arch=None source=pci_vendors
-arm64: vgapci10@pci0:10:0:0 state=no-firmware arch=Ampere source=pci_vendors
+arm64: vgapci10@pci0:10:0:0 state=no-firmware arch=GA10x source=pci_vendors
 arm64: vgapci11@pci0:11:0:0 state=unknown arch=None source=pci_vendors
-amd64: vgapci1@pci0:1:0:0 state=below-floor arch=Turing source=pci_vendors
-amd64: vgapci2@pci0:2:0:0 state=supported arch=Ampere source=pci_vendors
-amd64: vgapci3@pci0:3:0:0 state=supported arch=Ada source=pci_vendors
-amd64: vgapci4@pci0:4:0:0 state=supported arch=Blackwell source=pci_vendors
-amd64: vgapci5@pci0:5:0:0 state=supported arch=Blackwell source=pci_vendors
-amd64: vgapci6@pci0:6:0:0 state=below-floor arch=Pascal source=pci_vendors
-amd64: vgapci7@pci0:7:0:0 state=supported arch=Ampere source=pci_vendors
+arm64: vgapci12@pci0:12:0:0 state=below-floor arch=GM10x source=pci_vendors
+arm64: vgapci13@pci0:13:0:0 state=below-floor arch=GM20x source=pci_vendors
+arm64: vgapci14@pci0:14:0:0 state=below-floor arch=GV10x source=pci_vendors
+arm64: vgapci15@pci0:15:0:0 state=below-floor arch=GV11x source=pci_vendors
+arm64: vgapci16@pci0:16:0:0 state=supported arch=GB10x source=pci_vendors
+amd64: vgapci1@pci0:1:0:0 state=below-floor arch=TU10x source=pci_vendors
+amd64: vgapci2@pci0:2:0:0 state=supported arch=GA10x source=pci_vendors
+amd64: vgapci3@pci0:3:0:0 state=supported arch=AD10x source=pci_vendors
+amd64: vgapci4@pci0:4:0:0 state=supported arch=GB20x source=pci_vendors
+amd64: vgapci5@pci0:5:0:0 state=supported arch=GB20x source=pci_vendors
+amd64: vgapci6@pci0:6:0:0 state=below-floor arch=GP10x source=pci_vendors
+amd64: vgapci7@pci0:7:0:0 state=supported arch=GA10x source=pci_vendors
 amd64: vgapci8@pci0:8:0:0 state=unknown arch=None source=pci_vendors
 amd64: vgapci9@pci0:9:0:0 state=unknown arch=None source=pci_vendors
-amd64: vgapci10@pci0:10:0:0 state=supported arch=Ampere source=pci_vendors
+amd64: vgapci10@pci0:10:0:0 state=supported arch=GA10x source=pci_vendors
 amd64: vgapci11@pci0:11:0:0 state=unknown arch=None source=pci_vendors
-kernel: vgapci1@pci0:13:0:0 state=below-floor arch=Turing source=kernel
-kernel: vgapci2@pci0:5:0:0 state=supported arch=Ampere source=kernel
-kernel: vgapci3@pci0:6:0:0 state=unknown arch=Ada source=kernel
-kernel-prefix: vgapci1@pci0:13:0:0 state=unknown arch=Ampere source=kernel
-kernel-bogus: vgapci1@pci0:13:0:0 state=unknown arch=Turing source=kernel
-kernel-injected: vgapci1@pci0:13:0:0 state=unknown arch=Turing source=kernel
-kernel-overflow: vgapci1@pci0:13:0:0 state=unknown arch=Turing source=kernel
+amd64: vgapci12@pci0:12:0:0 state=below-floor arch=GM10x source=pci_vendors
+amd64: vgapci13@pci0:13:0:0 state=below-floor arch=GM20x source=pci_vendors
+amd64: vgapci14@pci0:14:0:0 state=below-floor arch=GV10x source=pci_vendors
+amd64: vgapci15@pci0:15:0:0 state=below-floor arch=GV11x source=pci_vendors
+amd64: vgapci16@pci0:16:0:0 state=supported arch=GB10x source=pci_vendors
+kernel: vgapci1@pci0:13:0:0 state=below-floor arch=TU10x source=kernel
+kernel: vgapci2@pci0:5:0:0 state=supported arch=GA10x source=kernel
+kernel: vgapci3@pci0:6:0:0 state=unknown arch=AD10x source=kernel
+kernel-prefix: vgapci1@pci0:13:0:0 state=unknown arch=GA10x source=kernel
+kernel-bogus: vgapci1@pci0:13:0:0 state=unknown arch=TU10x source=kernel
+kernel-injected: vgapci1@pci0:13:0:0 state=unknown arch=TU10x source=kernel
+kernel-overflow: vgapci1@pci0:13:0:0 state=unknown arch=TU10x source=kernel
 EOT
 
 table_for "$REPO" > "$T/got" 2> "$T/got.err"
@@ -202,7 +220,7 @@ run_pf "$REPO" aarch64 "$T/one.json" --json
 reset
 run_pf "$REPO" aarch64 "$T/none.json" --json
 cat > "$T/validate.py" <<'PYEOF'
-# a small JSON Schema checker for the keywords schema/make-preflight-1 uses
+# a small JSON Schema checker for the keywords schema/make-preflight-2 uses
 import json, re, sys
 
 def check(schema, doc, path="$"):
@@ -255,12 +273,20 @@ for f in sys.argv[2:]:
     bad += len(errs)
 sys.exit(1 if bad else 0)
 PYEOF
-if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" \
-    "$T/one.json" "$T/none.json" "$REPO/tests/fixtures/make-preflight.json" > "$T/validate.out" 2>&1; then
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" \
+    "$T/one.json" "$T/none.json" "$REPO/tests/fixtures/make-preflight-2.json" > "$T/validate.out" 2>&1; then
 	pass "schema: a device document, an empty one and the fixture validate"
 else
 	cat "$T/validate.out" >&2
 	fail "schema validation"
+fi
+# the fixture of the old contract still validates against the old schema
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" \
+    "$REPO/tests/fixtures/make-preflight.json" > "$T/validate1.out" 2>&1; then
+	pass "schema: the fixture of the old contract validates against the old schema"
+else
+	cat "$T/validate1.out" >&2
+	fail "the old fixture does not validate against the old schema"
 fi
 # the checker itself can fail: a bad state and a stray key are refused
 python3 -I - "$T/one.json" "$T/bad.json" <<'PYEOF'
@@ -270,13 +296,13 @@ d["items"][0]["support"]["state"] = "maybe"
 d["extra"] = 1
 json.dump(d, open(sys.argv[2], "w"))
 PYEOF
-if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" "$T/bad.json" > /dev/null 2>&1; then
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/bad.json" > /dev/null 2>&1; then
 	fail "the schema checker accepted a bad document"
 else
 	pass "the schema checker refuses a bad state and a stray key"
 fi
-# 1.1 requires the new properties: a document without them is refused
-python3 -I - "$REPO/tests/fixtures/make-preflight.json" "$T/v10.json" <<'PYEOF'
+# the schema requires the new properties: a document without them is refused
+python3 -I - "$REPO/tests/fixtures/make-preflight-2.json" "$T/v10.json" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 d.pop("min_architecture", None)
@@ -284,7 +310,7 @@ for it in d["items"]:
     it.pop("support", None)
 json.dump(d, open(sys.argv[2], "w"))
 PYEOF
-if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" "$T/v10.json" > "$T/validate.out" 2>&1; then
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/v10.json" > "$T/validate.out" 2>&1; then
 	fail "the schema checker accepted a document without support and min_architecture"
 else
 	pass "schema: a document without support or min_architecture is refused"
@@ -293,12 +319,13 @@ if python3 -I - "$T/one.json" "$T/none.json" <<'PYEOF'
 import json, sys
 one = json.load(open(sys.argv[1]))
 none = json.load(open(sys.argv[2]))
-assert one["schema_version"] == "1.0"
+assert one["schema_version"] == "2.0", one["schema_version"]
+assert one["schema_major"] == 2 and one["schema_minor"] == 0, one
 m = one["min_architecture"]
-assert m["value"] == 23 and m["name"] == "Ampere" and m["source"] == "header", m
+assert m["value"] == 23 and m["name"] == "GA10x" and m["source"] == "header", m
 s = one["items"][0]["support"]
-assert s["state"] == "below-floor" and s["architecture"] == "Turing"
-assert s["reason"] == "TU104 is Turing; this driver supports Ampere (RTX 30) and later", s["reason"]
+assert s["state"] == "below-floor" and s["architecture"] == "TU10x"
+assert s["reason"] == "TU104 belongs to the TU10x chip family; this driver supports GA10x (RTX 30) and later", s["reason"]
 # a card below the floor is never a missing item: the build needs no GPU
 assert one["missing"] == none["missing"], (one["missing"], none["missing"])
 assert [x["name"] for x in one["status"]] == [x["name"] for x in none["status"]]
@@ -306,7 +333,7 @@ assert one["device"] == "NVIDIA device present" and none["device"] == "no NVIDIA
 assert none["items"] == [] and none["min_architecture"]["value"] == 23
 PYEOF
 then
-	pass "JSON: reason, min_architecture 23 Ampere from the header, no missing item for an old card"
+	pass "JSON: reason, min_architecture 23 GA10x from the header, no missing item for an old card"
 else
 	fail "JSON details"
 fi
@@ -315,23 +342,23 @@ fi
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [GeForce RTX 2070 SUPER]'
 printf '24\n' > "$FAKE/sysd/min"
-printf 'Hopper\n' > "$FAKE/sysd/name"
+printf 'GH100\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
-printf 'pci0:13:0:0 vgapci2 0x1e84 below-floor NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; this driver supports Ampere (RTX 30) and later\n' > "$FAKE/sysd/refused"
+printf 'pci0:13:0:0 vgapci2 0x1e84 below-floor NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; this driver supports GA10x (RTX 30) and later\n' > "$FAKE/sysd/refused"
 run_pf "$REPO" aarch64 "$T/k.json" --json
 run_pf "$REPO" aarch64 "$T/k.txt"
 if python3 -I - "$T/k.json" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 m = d["min_architecture"]
-assert m == {"value": 24, "name": "Hopper", "source": "kernel"}, m
+assert m == {"value": 24, "name": "GH100", "source": "kernel"}, m
 s = d["items"][0]["support"]
 assert s["source"] == "kernel" and s["state"] == "below-floor"
-assert s["reason"] == "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; this driver supports Ampere (RTX 30) and later", s["reason"]
+assert s["reason"] == "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; this driver supports GA10x (RTX 30) and later", s["reason"]
 PYEOF
 then pass "JSON kernel source: the kernel's message and its own floor"; else fail "JSON kernel source details"; fi
 if grep -q '^gpu   vgapci2@pci0:13:0:0 0x10de 0x1e84 0x030000: present, below the supported floor$' "$T/k.txt" &&
-    grep -q '^      NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; this driver supports Ampere (RTX 30) and later$' "$T/k.txt"; then
+    grep -q '^      NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; this driver supports GA10x (RTX 30) and later$' "$T/k.txt"; then
 	pass "text: a refused card prints 'present, below the supported floor' with the kernel's words"
 else
 	grep '^gpu\|^      ' "$T/k.txt" >&2
@@ -341,7 +368,7 @@ reset
 add_dev vgapci1@pci0:13:0:0 0x10de 0x2d04 'GB206 [GeForce RTX 5060 Ti]'
 run_pf "$REPO" aarch64 "$T/s.txt"
 if grep -q '^gpu   vgapci1@pci0:13:0:0 0x10de 0x2d04 0x030000: present, supported$' "$T/s.txt" &&
-    grep -q '^      GB206 is Blackwell$' "$T/s.txt"; then
+    grep -q '^      GB206 belongs to the GB20x chip family$' "$T/s.txt"; then
 	pass "text: a supported card prints its architecture and 'supported'"
 else
 	grep '^gpu\|^      ' "$T/s.txt" >&2
@@ -351,26 +378,66 @@ fi
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [x]'
 printf '23\n' > "$FAKE/sysd/min"
-printf 'Ampere\n' > "$FAKE/sysd/name"
+printf 'GA10x\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
-printf 'pci0:13:0:0 vgapci2 0x1e84 below-floor name "with|pipe" (0x1e84) is Turing\n' > "$FAKE/sysd/refused"
+printf 'pci0:13:0:0 vgapci2 0x1e84 below-floor name "with|pipe" (0x1e84) is TU10x\n' > "$FAKE/sysd/refused"
 run_pf "$REPO" aarch64 "$T/h.json" --json
 if python3 -I - "$T/h.json" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["items"][0]["support"]["reason"] == 'name "with|pipe" (0x1e84) is Turing', d["items"][0]["support"]["reason"]
+assert d["items"][0]["support"]["reason"] == 'name "with|pipe" (0x1e84) is TU10x', d["items"][0]["support"]["reason"]
 PYEOF
 then pass "a '|' and quotes in the kernel's message round-trip"; else fail "hostile message round trip"; fi
+
+# a kernel older than this build answers hw.nvidia.min_architecture_name
+# with the marketing name of the generation: the document must carry the
+# chip family, and it must validate against the schema of this build
+reset
+add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [GeForce RTX 2070 SUPER]'
+printf '23\n' > "$FAKE/sysd/min"
+printf 'Ampere\n' > "$FAKE/sysd/name"
+: > "$FAKE/sysd/dev"
+: > "$FAKE/sysd/refused"
+run_pf "$REPO" aarch64 "$T/old.json" --json
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/old.json" > "$T/validate.out" 2>&1 &&
+    python3 -I - "$T/old.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["min_architecture"]
+assert m == {"value": 23, "name": "GA10x", "source": "kernel"}, m
+PYEOF
+then
+	pass "an older kernel: the marketing name is translated and the document validates"
+else
+	cat "$T/validate.out" >&2
+	fail "the document of an older kernel does not validate"
+fi
+# an old name that names two chip families is left out, not guessed
+printf 'Blackwell\n' > "$FAKE/sysd/name"
+run_pf "$REPO" aarch64 "$T/old2.json" --json
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/old2.json" > "$T/validate.out" 2>&1 &&
+    python3 -I - "$T/old2.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["min_architecture"]
+assert m == {"value": 23, "name": None, "source": "kernel"}, m
+PYEOF
+then
+	pass "an older kernel with an ambiguous name: the name is left out"
+else
+	cat "$T/validate.out" >&2
+	fail "the document of an older kernel with an ambiguous name does not validate"
+fi
 
 # a keyword this build does not know is "unknown", and the document is valid
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [x]'
 printf '23\n' > "$FAKE/sysd/min"
-printf 'Ampere\n' > "$FAKE/sysd/name"
+printf 'GA10x\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
 printf 'pci0:13:0:0 vgapci2 0x1e84 bogus msg\n' > "$FAKE/sysd/refused"
 run_pf "$REPO" aarch64 "$T/bogus.json" --json
-if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" "$T/bogus.json" > "$T/validate.out" 2>&1 &&
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/bogus.json" > "$T/validate.out" 2>&1 &&
     python3 -I - "$T/bogus.json" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -387,17 +454,17 @@ fi
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [x]'
 printf '23\n' > "$FAKE/sysd/min"
-printf 'Ampere\n' > "$FAKE/sysd/name"
+printf 'GA10x\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
-printf 'pci0:13:0:0 vgapci2 0x1e84 x","architecture":"Ampere","source":"kernel below\n' > "$FAKE/sysd/refused"
+printf 'pci0:13:0:0 vgapci2 0x1e84 x","architecture":"GA10x","source":"kernel below\n' > "$FAKE/sysd/refused"
 run_pf "$REPO" aarch64 "$T/injected.json" --json
-if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-1.schema.json" "$T/injected.json" > "$T/validate.out" 2>&1 &&
+if python3 -I "$T/validate.py" "$REPO/schema/make-preflight-2.schema.json" "$T/injected.json" > "$T/validate.out" 2>&1 &&
     python3 -I - "$T/injected.json" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 s = d["items"][0]["support"]
 assert s["state"] == "unknown", s
-assert s["architecture"] == "Turing", s
+assert s["architecture"] == "TU10x", s
 PYEOF
 then pass "a keyword that tries to inject JSON cannot: the state is 'unknown'"
 else
@@ -408,7 +475,7 @@ fi
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [x]'
 printf '23\n' > "$FAKE/sysd/min"
-printf 'Ampere\n' > "$FAKE/sysd/name"
+printf 'GA10x\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
 : > "$FAKE/sysd/refused"
 printf '17\n' > "$FAKE/sysd/count"
@@ -426,7 +493,7 @@ else fail "the reason for a refusal that is not listed"; fi
 reset
 add_dev vgapci2@pci0:13:0:0 0x10de 0x1e84 'TU104 [x]'
 printf '23\n' > "$FAKE/sysd/min"
-printf 'Ampere\n' > "$FAKE/sysd/name"
+printf 'GA10x\n' > "$FAKE/sysd/name"
 : > "$FAKE/sysd/dev"
 : > "$FAKE/sysd/refused"
 run_pf "$REPO" aarch64 "$T/un.json" --json
@@ -440,9 +507,10 @@ then pass "neither attached nor refused: the reason says where to look"
 else fail "the reason for a device the kernel did not touch"; fi
 
 # the README says which cards the preflight can name
-if grep -q 'A Maxwell or Turing card below the' "$REPO/README.md" &&
-    grep -q 'an older card (Kepler, Fermi, ...) has no' "$REPO/README.md"; then
-	pass "README: only Maxwell to Turing cards are named below the floor"
+if grep -q 'A GM10x, GM20x, GP10x, GV10x, GV11x' "$REPO/README.md" &&
+    grep -q 'or TU10x card below the floor' "$REPO/README.md" &&
+    grep -q 'an older card' "$REPO/README.md"; then
+	pass "README: only the six families below the floor are named"
 else
 	fail "README does not narrow the cards preflight names"
 fi
@@ -519,16 +587,16 @@ plant floor-0x1a src/gb10-archfloor/nv_arch_floor.h \
 # a floor with three hexadecimal digits is malformed: every verdict is unknown
 plant floor-0x017 src/gb10-archfloor/nv_arch_floor.h \
 	's/^\(#define NV_ARCH_FLOOR_MIN_ARCHITECTURE[ 	]*\)0x17/\10x017/'
-# both Blackwell rows share the prefix GB: dropping one leaves the verdict as it was
-plant row-blackwell-dropped src/gb10-archfloor/nv_arch_floor.h '/^	ROW(0x1[ab], /d'
-plant row-ada-dropped src/gb10-archfloor/nv_arch_floor.h '/^	ROW(0x19, /d'
+# both GB rows share the prefix GB: dropping one leaves the verdict as it was
+plant row-gb-dropped src/gb10-archfloor/nv_arch_floor.h '/^	ROW(0x1[ab], /d'
+plant row-ad10x-dropped src/gb10-archfloor/nv_arch_floor.h '/^	ROW(0x19, /d'
 plant firmware-row-dropped src/gb10-archfloor/nv_arch_floor.h '/^	ROW(0x17, 0x0, "GA100"/d'
 plant floor-exclusive scripts/make.sh 's/if (best < floor) {/if (best <= floor) {/'
 plant firmware-machine-inverted scripts/make.sh \
 	's/&& !machine_in(fwmach\[j\], machine)/\&\& machine_in(fwmach[j], machine)/'
 plant firmware-chip-exact scripts/make.sh \
 	's/if (substr(c, 1, length(row)) != row) return 0/if (c != row) return 0/'
-plant prefix-two-letters scripts/make.sh 's/p = substr(chip, 1, 2)/p = substr(chip, 1, 1)/'
+plant prefix-two-letters scripts/make.sh 's/p = substr(chip, 1, 4)/p = substr(chip, 1, 2)/'
 plant kernel-ignored scripts/make.sh 's/\*) _k_on=1 ;;/*) _k_on=0 ;;/'
 plant attached-prefix-match scripts/make.sh 's/\$2 == v { print "yes"; exit }/index($2, v) == 1 { print "yes"; exit }/'
 plant location-not-after-at scripts/make.sh 's#@/, "", s#X/, "", s#'

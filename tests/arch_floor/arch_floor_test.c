@@ -512,7 +512,7 @@ last_log(void)
 	return (fake_log_count > 0 ? fake_log[fake_log_count - 1] : "");
 }
 
-#define FLOOR_TAIL "this driver supports Ampere (RTX 30) and later"
+#define FLOOR_TAIL "this driver supports GA10x (RTX 30) and later"
 
 /* --- tests --- */
 
@@ -539,7 +539,7 @@ test_pure_decide(void)
 			check_int(what, d.verdict, NV_ARCH_FLOOR_UNKNOWN);
 	}
 	nv_arch_floor_decide(0, BOOT42(0x16, 4), &d);
-	check_str("Turing name", d.architecture_name, "Turing");
+	check_str("TU10x name", d.architecture_name, "TU10x");
 	nv_arch_floor_decide(0, BOOT42(0x0e, 4), &d);
 	check_true(d.architecture_name == NULL, "unnamed older has no name");
 	check_int("unnamed older is below the floor", d.verdict,
@@ -592,14 +592,14 @@ test_pure_format(void)
 	nv_arch_floor_decide(0, BOOT42(0x16, 4), &d);
 	nv_arch_floor_format(&d, "NVIDIA GeForce RTX 2070 SUPER", 0x1e84, buf,
 	    sizeof(buf));
-	check_str("format Turing", buf,
-	    "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; " FLOOR_TAIL);
+	check_str("format TU10x", buf,
+	    "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; " FLOOR_TAIL);
 	nv_arch_floor_decide(0, BOOT42(0x0e, 4), &d);
 	nv_arch_floor_format(&d, "NVIDIA GeForce GT 710", 0x0fc6, buf,
 	    sizeof(buf));
 	check_str("format unnamed older", buf,
 	    "NVIDIA GeForce GT 710 (0x0fc6) is architecture 0x0e, older than "
-	    "Ampere; " FLOOR_TAIL);
+	    "GA10x; " FLOOR_TAIL);
 	nv_arch_floor_decide(0, BOOT42(0x1f, 0), &d);
 	nv_arch_floor_format(&d, "NVIDIA Future", 0x9999, buf, sizeof(buf));
 	check_str("format unknown", buf,
@@ -608,14 +608,14 @@ test_pure_format(void)
 	memset(&d, 0, sizeof(d));
 	d.verdict = NV_ARCH_FLOOR_NO_FIRMWARE;
 	d.architecture = 0x17;
-	d.architecture_name = "Ampere";
+	d.architecture_name = "GA10x";
 	d.chip = "GA100";
 	d.missing_image = "gsp_tu10x";
 	d.machines = "amd64";
 	nv_arch_floor_format(&d, "NVIDIA A100-SXM4-40GB", 0x20b0, buf,
 	    sizeof(buf));
 	check_str("format no firmware", buf,
-	    "NVIDIA A100-SXM4-40GB (0x20b0) is Ampere GA100, which needs the "
+	    "NVIDIA A100-SXM4-40GB (0x20b0) is GA10x GA100, which needs the "
 	    "gsp_tu10x firmware; only the amd64 build carries it");
 	nv_arch_floor_decide(NV_ARCH_FLOOR_ALL_ONES, NV_ARCH_FLOOR_ALL_ONES, &d);
 	nv_arch_floor_format(&d, "NVIDIA GeForce RTX 3060", 0x2504, buf,
@@ -755,40 +755,40 @@ test_refusals(void)
 	char want[512];
 	int count;
 
-	/* Turing TU104 */
+	/* TU10x TU104 */
 	dev = make_dev(0x10de, 0x1e84, 3, 0, 0, 0x164000a1, BOOT42(0x16, 4),
 	    PCIM_CMD_MEMEN);
-	check_int("Turing refused", probe(dev, "NVIDIA GeForce RTX 2070 SUPER"),
+	check_int("TU10x refused", probe(dev, "NVIDIA GeForce RTX 2070 SUPER"),
 	    ENXIO);
-	check_int("Turing logged once", fake_log_count, 1);
+	check_int("TU10x logged once", fake_log_count, 1);
 	snprintf(want, sizeof(want),
-	    "%s: nvidia: NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; "
+	    "%s: nvidia: NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; "
 	    FLOOR_TAIL "\n", parent_name(dev));
-	check_str("Turing log line", last_log(), want);
-	check_hygiene("Turing", dev, 1);
+	check_str("TU10x log line", last_log(), want);
+	check_hygiene("TU10x", dev, 1);
 	check_int("refused_count 1", get_int("refused_count"), 1);
 	refused = get_refused();
 	snprintf(want, sizeof(want),
 	    "pci0:3:0:0 %s 0x1e84 below-floor "
-	    "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is Turing; " FLOOR_TAIL,
+	    "NVIDIA GeForce RTX 2070 SUPER (0x1e84) is TU10x; " FLOOR_TAIL,
 	    parent_name(dev));
 	check_str("refused one line", refused, want);
 
 	/* the same location again: one log line, one entry */
-	check_int("Turing refused again",
+	check_int("TU10x refused again",
 	    probe(dev, "NVIDIA GeForce RTX 2070 SUPER"), ENXIO);
 	check_int("re-probe logs nothing new", fake_log_count, 1);
 	check_int("re-probe counts once", get_int("refused_count"), 1);
 	check_int("re-probe adds no line", count_lines(get_refused()), 1);
-	check_hygiene("Turing re-probe", dev, 1);
+	check_hygiene("TU10x re-probe", dev, 1);
 
-	/* Pascal GP104 at another location */
+	/* GP10x GP104 at another location */
 	dev = make_dev(0x10de, 0x1b80, 4, 0, 0, 0x134000a1, BOOT42(0x13, 4),
 	    PCIM_CMD_MEMEN);
-	check_int("Pascal refused", probe(dev, "NVIDIA GeForce GTX 1080"), ENXIO);
-	check_int("Pascal logged", fake_log_count, 2);
-	check_has("Pascal line", last_log(),
-	    "(0x1b80) is Pascal; " FLOOR_TAIL);
+	check_int("GP10x refused", probe(dev, "NVIDIA GeForce GTX 1080"), ENXIO);
+	check_int("GP10x logged", fake_log_count, 2);
+	check_has("GP10x line", last_log(),
+	    "(0x1b80) is GP10x; " FLOOR_TAIL);
 	check_int("two locations count two", get_int("refused_count"), 2);
 	refused = get_refused();
 	check_int("two lines", count_lines(refused), 2);
@@ -879,7 +879,7 @@ test_ga100(void)
 	} else {
 		check_int("GA100 refused without the image", rc, ENXIO);
 		check_has("GA100 line", last_log(),
-		    "(0x20b0) is Ampere GA100, which needs the gsp_tu10x "
+		    "(0x20b0) is GA10x GA100, which needs the gsp_tu10x "
 		    "firmware; only the amd64 build carries it");
 		snprintf(want, sizeof(want), "pci0:2:0:0 %s 0x20b0 no-firmware ",
 		    parent_name(dev));
@@ -951,7 +951,7 @@ test_reprobe(void)
 	    "the accepted device is not listed any more");
 	check_int("the accept logs nothing", fake_log_count, before_log + 1);
 
-	/* refused as unreadable, then as Turing: the entry is replaced */
+	/* refused as unreadable, then as TU10x: the entry is replaced */
 	dev = make_dev(0x10de, 0x1e84, 41, 0, 0, 0x164000a1, BOOT42(0x16, 4),
 	    PCIM_CMD_MEMEN);
 	dev->alloc_fails = 1;
@@ -962,7 +962,7 @@ test_reprobe(void)
 	check_int("unreadable counted first", get_int("refused_count"),
 	    before_count + 1);
 	dev->alloc_fails = 0;
-	check_int("refused as Turing next",
+	check_int("refused as TU10x next",
 	    probe(dev, "NVIDIA GeForce RTX 2070 SUPER"), ENXIO);
 	check_int("the count does not change", get_int("refused_count"),
 	    before_count + 1);
@@ -979,7 +979,7 @@ test_sysctls(void)
 {
 	check_int("min_architecture", get_int("min_architecture"), 23);
 	check_str("min_architecture_name", get_string("min_architecture_name"),
-	    "Ampere");
+	    "GA10x");
 	check_true(find_oid("refused_count") != NULL, "refused_count exists");
 	check_true(find_oid("refused") != NULL, "refused exists");
 	{

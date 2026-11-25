@@ -95,8 +95,8 @@ run_event() {
 # cases <conf>: the truth table, one "label: got" line per case.
 cases() {
 	_c=$1
-	echo "ampere-attached: $(run_event "$_c" YES vgapci1 'dev.nvidia.0.%parent: vgapci1')"
-	echo "turing-refused: $(run_event "$_c" YES vgapci1)"
+	echo "ga10x-attached: $(run_event "$_c" YES vgapci1 'dev.nvidia.0.%parent: vgapci1')"
+	echo "tu10x-refused: $(run_event "$_c" YES vgapci1)"
 	echo "autoload-off: $(run_event "$_c" NO vgapci1 'dev.nvidia.0.%parent: vgapci1')"
 	echo "vgapci1-refused-vgapci10-attached-event1: $(run_event "$_c" YES vgapci1 'dev.nvidia.0.%parent: vgapci10')"
 	echo "vgapci1-refused-vgapci10-attached-event10: $(run_event "$_c" YES vgapci10 'dev.nvidia.0.%parent: vgapci10')"
@@ -105,8 +105,8 @@ cases() {
 }
 
 cat > "$TMPD/want" <<'EOT'
-ampere-attached: nvidia nvidia-drm
-turing-refused: nvidia
+ga10x-attached: nvidia nvidia-drm
+tu10x-refused: nvidia
 autoload-off: 
 vgapci1-refused-vgapci10-attached-event1: nvidia
 vgapci1-refused-vgapci10-attached-event10: nvidia nvidia-drm

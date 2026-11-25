@@ -12,11 +12,11 @@
 # Usage: sh scripts/make.sh TARGET
 #   preflight [--json] [--purpose NAME]
 #                    report what is missing (--json or MK_JSON=1: the JSON
-#                    contract, schema/make-preflight-1.schema.json); exit 1
+#                    contract, schema/make-preflight-2.schema.json); exit 1
 #                    when something is missing.  Each NVIDIA display device
-#                    also gets a support verdict (nvidia.ko attaches to Ampere
-#                    and later only); a card below that is reported, never
-#                    counted as missing
+#                    also gets a support verdict (nvidia.ko attaches to
+#                    GA10x (RTX 30) and later only); a card below that is
+#                    reported, never counted as missing
 #   install-prereqs  install the missing packages (pkg), fetch the NVIDIA
 #                    sources (showing the NVIDIA licence first), the FreeBSD
 #                    source tree of the running kernel and drm-kmod
@@ -100,6 +100,14 @@ name=nvidia-gb10-freebsd
 # tree_fits_osrel); sourcing it only defines functions
 . "$repo/scripts/lib.sh"
 STATEDIR=/var/db/$name
+
+# The JSON contract of make preflight: schema/make-preflight-2.schema.json.
+# The version of the document is published three ways, so no consumer has to
+# parse the string: the string, and the two integers.  Keep the three in
+# step with the schema file (tests/preflight_support_test.sh checks that).
+PREFLIGHT_SCHEMA_VERSION=2.0
+PREFLIGHT_SCHEMA_MAJOR=2
+PREFLIGHT_SCHEMA_MINOR=0
 
 die() {
 	printf 'make.sh: %s\n' "$*" >&2
@@ -473,13 +481,13 @@ nvidia_devices() {
 
 # --- GPU support verdicts (Track #2457) ----------------------------------
 #
-# nvidia.ko attaches to Ampere (RTX 30) and later only.  preflight says, for
-# each NVIDIA display device, whether the driver will take it.  When nvidia.ko
-# is loaded the kernel decides (what it attached, what it refused:
-# hw.nvidia.refused); otherwise the chip name pciconf -lv gives is looked up
-# in the table of src/gb10-archfloor/nv_arch_floor.h, which this reads with awk:
-# the values live in that one file and nowhere else.  Missing the GPU is never
-# a missing item: the build needs none.
+# nvidia.ko attaches to GA10x (RTX 30) and later only.  preflight
+# says, for each NVIDIA display device, whether the driver will take it.
+# When nvidia.ko is loaded the kernel decides (what it attached, what it
+# refused: hw.nvidia.refused); otherwise the chip name pciconf -lv gives is
+# looked up in the table of src/gb10-archfloor/nv_arch_floor.h, which this
+# reads with awk: the values live in that one file and nowhere else.  Missing
+# the GPU is never a missing item: the build needs none.
 
 arch_floor_header() {
 	printf '%s\n' "$repo/src/gb10-archfloor/nv_arch_floor.h"
@@ -488,7 +496,7 @@ arch_floor_header() {
 # arch_floor_table CHIP MACHINE: with no chip, the architecture table of the
 # header, one record per line:
 #   floor <value> <name> <label>
-#   arch  <value> <name> <chip prefix>
+#   arch  <value> <name> <chip key>
 #   fw    <architecture> <implementation> <chip> <image> <machines>
 # and with a chip the verdict for it: "state|architecture|reason".
 # This is the one program that reads the header: a value is 0x and one or two
@@ -503,12 +511,12 @@ arch_floor_table() {
 		d = 0
 		for (i = 3; i <= length(s); i++) {
 			c = tolower(substr(s, i, 1))
-			if (c >= "0" && c <= "9")
-				v = c - "0"
-			else if (c >= "a" && c <= "f")
-				v = c - "a" + 10
-			else
-				return -1
+			# the value of the digit: a number, not a difference of
+			# two strings (awk reads a non-numeric string as 0, so
+			# "b" - "a" is 0 and every digit from b to f would be
+			# read as ten)
+			v = index("0123456789abcdef", c) - 1
+			if (v < 0) return -1
 			d = d * 16 + v
 		}
 		return d
@@ -570,6 +578,11 @@ arch_floor_table() {
 			}
 			narch++
 			archval[narch] = v; archname[narch] = nm; archpre[narch] = pre
+			for (j = 1; j < narch; j++)
+				if (archpre[j] == pre) {
+					bad("two architecture rows with the chip key " pre)
+					next
+				}
 		} else if (n == 5) {
 			av = hexnum(a[1]); iv = hexnum(a[2])
 			ch = unquoted(a[3]); im = unquoted(a[4]); mac = unquoted(a[5])
@@ -603,11 +616,14 @@ arch_floor_table() {
 			    fwimage[i], fwmach[i]
 			exit 0
 		}
-		if (chip !~ /^[A-Z][A-Z][0-9]/) {
+		if (chip !~ /^[A-Z][A-Z][0-9][0-9]/) {
 			print "unknown||no chip name in the PCI device name; nvidia.ko decides when it probes"
 			exit 0
 		}
-		p = substr(chip, 1, 2); best = -1; an = ""
+		# The chip key is the first four characters of the chip name
+		# (GM10, GM20, GV11, ...): the key tells the families apart,
+		# which the two-letter prefix cannot.
+		p = substr(chip, 1, 4); best = -1; an = ""
 		for (i = 1; i <= narch; i++)
 			if (archpre[i] == p && archval[i] > best) {
 				best = archval[i]; an = archname[i]
@@ -616,19 +632,21 @@ arch_floor_table() {
 			print "unknown||unknown chip " chip "; nvidia.ko decides when it probes"
 			exit 0
 		}
+		# Every name in the table is a chip family; the value column
+		# carries the name of the row the chip belongs to.
 		if (best < floor) {
-			print "below-floor|" an "|" chip " is " an \
-			    "; this driver supports " flabel " and later"
+			print "below-floor|" an "|" chip " belongs to the " an \
+			    " chip family; this driver supports " flabel " and later"
 			exit 0
 		}
 		for (j = 1; j <= nfw; j++)
 			if (chip_matches(chip, fwchip[j]) && !machine_in(fwmach[j], machine)) {
-				print "no-firmware|" an "|" chip " is " an \
-				    ", which needs the " fwimage[j] \
+				print "no-firmware|" an "|" chip " belongs to the " \
+				    an " chip family and needs the " fwimage[j] \
 				    " firmware; only the " fwmach[j] " build carries it"
 				exit 0
 			}
-		print "supported|" an "|" chip " is " an
+		print "supported|" an "|" chip " belongs to the " an " chip family"
 		exit 0
 	}
 	' "$(arch_floor_header)"
@@ -641,6 +659,42 @@ floor_from_header() {
 	_f=$(printf '%s\n' "$_t" | awk '$1 == "floor" { print $2 "|" $3; exit }')
 	[ -n "$_f" ] || return 1
 	printf '%s\n' "$_f"
+}
+
+# arch_floor_families: the chip family names the header's table has, one per
+# line.  The header is the one source of the names.
+arch_floor_families() {
+	_t=$(arch_floor_table) || return 1
+	printf '%s\n' "$_t" | awk '$1 == "arch" { print $3 }'
+}
+
+# chip_family_name NAME: NAME as a chip family of the header's table.  Prints
+# nothing when NAME is not one of them.
+#
+# A nvidia.ko older than this build answers hw.nvidia.min_architecture_name
+# with the marketing name of the generation ("Ampere").  The names this build
+# publishes are chip families, so a document that carried the old name would
+# be a document its own schema rejects.  The old names that name exactly one
+# chip family are translated here; the ones that name two ("Volta" was GV10x
+# or GV11x, "Maxwell" GM10x or GM20x, "Blackwell" GB10x or GB20x) are
+# refused: the name is left out rather than guessed.
+chip_family_name() {
+	_n=$1
+	[ -n "$_n" ] || return 0
+	for _f in $(arch_floor_families); do
+		if [ "$_f" = "$_n" ]; then
+			printf '%s\n' "$_n"
+			return 0
+		fi
+	done
+	case $_n in
+	Ampere) printf 'GA10x\n' ;;
+	Turing) printf 'TU10x\n' ;;
+	Pascal) printf 'GP10x\n' ;;
+	Ada) printf 'AD10x\n' ;;
+	Hopper) printf 'GH100\n' ;;
+	*) return 0 ;;
+	esac
 }
 
 # pci_vendors_support CHIP MACHINE: "state|architecture|reason" from the chip
@@ -805,7 +859,12 @@ gpu_support_rows() {
 	esac
 	if [ "$_k_on" = 1 ]; then
 		_nvname=$("$_sysctl" -n hw.nvidia.min_architecture_name 2>/dev/null) || _nvname=
-		_minarch="$_nvmin|$_nvname|kernel"
+		# a kernel older than this build answers with the marketing
+		# name of the generation: the document must carry a chip
+		# family, so the name is translated (chip_family_name) and
+		# an ambiguous one is left out.
+		_nvfamily=$(chip_family_name "$_nvname")
+		_minarch="$_nvmin|$_nvfamily|kernel"
 		_k_dev=$("$_sysctl" dev.nvidia 2>/dev/null) || _k_dev=
 		_k_ref=$("$_sysctl" -n hw.nvidia.refused 2>/dev/null) || _k_ref=
 		_k_count=$("$_sysctl" -n hw.nvidia.refused_count 2>/dev/null) || _k_count=
@@ -959,7 +1018,8 @@ EOF
 # incompatible report in its JSON and JSONL modes.
 render_preflight() {
 	if [ "${MK_JSON:-0}" = 1 ]; then
-		printf '{\n  "schema_version": "1.0",\n  "tool": "preflight",\n'
+		printf '{\n  "schema_version": "%s", "schema_major": %s, "schema_minor": %s,\n  "tool": "preflight",\n' \
+		    "$PREFLIGHT_SCHEMA_VERSION" "$PREFLIGHT_SCHEMA_MAJOR" "$PREFLIGHT_SCHEMA_MINOR"
 		printf '  "purpose": "%s",\n' "$(json_str "${MK_PURPOSE:-application}")"
 		printf '  "metadata": {"os": "%s", "arch": "%s", "release": "%s", "osreldate": "%s", "work": "%s"},\n' \
 		    "$(json_str "$_os")" "$(json_str "$_arch")" "$(json_str "$(uname -r)")" "$(json_str "$_run")" "$(json_str "$WORK")"
@@ -988,8 +1048,13 @@ render_preflight() {
 			IFS='|' read -r _mv _mn _ms <<EOF
 $_minarch
 EOF
-			printf '  "min_architecture": {"value": %s, "name": "%s", "source": "%s"},\n' \
-			    "$_mv" "$(json_str "$_mn")" "$_ms"
+			if [ -n "$_mn" ]; then
+				_mnj="\"$(json_str "$_mn")\""
+			else
+				_mnj=null
+			fi
+			printf '  "min_architecture": {"value": %s, "name": %s, "source": "%s"},\n' \
+			    "$_mv" "$_mnj" "$_ms"
 		else
 			printf '  "min_architecture": {"value": null, "name": null, "source": "unavailable"},\n'
 		fi

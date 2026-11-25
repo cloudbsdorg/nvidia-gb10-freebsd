@@ -20,9 +20,18 @@ What any compute or graphics GPU reports: architecture, implementation, chip
 id, raw RM SM version and compute capability, GPC, TPC and SM counts, the class
 list, memory sizes, page sizes and the capability flags.
 .It family
-Values only a generation table knows, selected by the pair of GPFIFO and
+Values only a chip family table knows, selected by the pair of GPFIFO and
 compute classes the GPU lists: family name, the channel, compute, 3D and copy
 classes and the page size candidates.
+The family name is a chip family, and the same name the driver publishes:
+.Dq GB20x ,
+.Dq GB10x ,
+.Dq GH100 ,
+.Dq AD10x ,
+.Dq GA10x
+or
+.Dq TU10x .
+Those are the values the JSON schema pins.
 A GPU the table does not know is still described; the family values are then
 unavailable with the reason
 .Li family_unknown .
@@ -81,7 +90,7 @@ the RM reports the control is not supported on this GPU.
 .It Li os_not_reported
 the OS layer does not report the value.
 .It Li family_unknown
-the GPU matched no row of the generation table (the family is unknown).
+the GPU matched no row of the chip family table (the family is unknown).
 .It Li family_has_no_class
 the family is known and has no class of this kind.
 .It Li input_unavailable
@@ -199,11 +208,17 @@ submits ordered GPFIFO work, reports progress through a semaphore, and isolates
 a dead channel from the other channels of its client.
 .Ss JSON
 Schema
-.Li nvrm-info/1 ,
-minor 3;
+.Li nvrm-info/2 ,
+minor 4;
 documents name it in the
 .Li schema
 member.
+Major 2 names the chip family of a GPU by its chip family (GB20x, GB10x,
+GH100, AD10x, GA10x, TU10x) and pins those names; the documents of major 1,
+which carry the older generation names, are described by
+.Pa nvrm-info-1.schema.json .
+The minor counts the revisions of the interface: the identifiers of the
+schema have their own baseline and keep their numbers.
 Document and header records have a
 .Li versions
 object whose members preserve each version string and, when available, expose

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * The architecture floor of nvidia.ko (Track #2457): the driver attaches to
- * Ampere (RTX 30) and later GPUs and refuses anything older at probe time.
+ * GA10x (RTX 30) and later GPUs and refuses anything older at probe time.
  * The floor lives here and nowhere else; scripts/make.sh (make preflight)
  * reads the NV_ARCH_FLOOR_TABLE and NV_ARCH_FLOOR_FIRMWARE rows of this very
  * file with awk, so no second copy of the values exists.  The device
@@ -41,29 +41,47 @@ struct sysctl_oid;
 #define NV_ARCH_FLOOR_ALL_ONES			0xffffffffu
 
 /*
- * The architecture values are not chronological, but every Ampere or later
+ * The architecture values are not chronological, but every GA10x or later
  * value is at least 0x17 and every older one is below it (nv_ref.h).
+ *
+ * Every name here is a chip family, never a marketing name.  NAME is the
+ * published value: it is what hw.nvidia.min_architecture_name returns and
+ * what the preflight JSON carries as the architecture name.  LABEL is that
+ * name with the product line it covers.  There is no second name for the
+ * floor: the messages print the name of the row they name.
  */
 #define NV_ARCH_FLOOR_MIN_ARCHITECTURE		0x17
-#define NV_ARCH_FLOOR_MIN_ARCHITECTURE_NAME	"Ampere"
-#define NV_ARCH_FLOOR_MIN_ARCHITECTURE_LABEL	"Ampere (RTX 30)"
+#define NV_ARCH_FLOOR_MIN_ARCHITECTURE_NAME	"GA10x"
+#define NV_ARCH_FLOOR_MIN_ARCHITECTURE_LABEL	"GA10x (RTX 30)"
 
 /*
- * Known architectures: ROW(value, "Name", "chip prefix").  One row per line
- * so that make preflight can read the table with awk.
+ * Known architectures: ROW(value, "chip family", "chip key").  One row per
+ * line so that make preflight can read the table with awk.  The name of a
+ * row is its chip family: the chip key with its last digit replaced by an x
+ * (GM10 gives GM10x, GV11 gives GV11x, GB20 gives GB20x), or the chip name
+ * itself where the family has a single chip (GH100).  The name is a value
+ * too: the architecture field of the preflight JSON carries it.
+ *
+ * The chip key is the first four characters of the chip names of the family
+ * (GM100 gives GM10, GV100 gives GV10, GV110 gives GV11).  The key tells
+ * the families apart, which the two-letter prefix cannot: GM10x and GM20x
+ * both start with GM, and GB10x and GB20x both start with GB.  make preflight
+ * looks a chip name up by that key (the first four characters of the name
+ * pciconf gives); the kernel looks it up by the architecture number the
+ * register gives, which needs no key at all.
  */
 #define NV_ARCH_FLOOR_TABLE(ROW) \
-	ROW(0x11, "Maxwell", "GM") \
-	ROW(0x12, "Maxwell", "GM") \
-	ROW(0x13, "Pascal", "GP") \
-	ROW(0x14, "Volta", "GV") \
-	ROW(0x15, "Volta", "GV") \
-	ROW(0x16, "Turing", "TU") \
-	ROW(0x17, "Ampere", "GA") \
-	ROW(0x18, "Hopper", "GH") \
-	ROW(0x19, "Ada", "AD") \
-	ROW(0x1a, "Blackwell", "GB") \
-	ROW(0x1b, "Blackwell", "GB")
+	ROW(0x11, "GM10x", "GM10") \
+	ROW(0x12, "GM20x", "GM20") \
+	ROW(0x13, "GP10x", "GP10") \
+	ROW(0x14, "GV10x", "GV10") \
+	ROW(0x15, "GV11x", "GV11") \
+	ROW(0x16, "TU10x", "TU10") \
+	ROW(0x17, "GA10x", "GA10") \
+	ROW(0x18, "GH100", "GH10") \
+	ROW(0x19, "AD10x", "AD10") \
+	ROW(0x1a, "GB10x", "GB10") \
+	ROW(0x1b, "GB20x", "GB20")
 
 /*
  * GSP images that a build may lack: ROW(architecture, implementation, "chip",
