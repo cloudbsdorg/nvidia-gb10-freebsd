@@ -106,7 +106,7 @@ expect_rc "drift mutant: the build fails with 'schema drift'" $rc 0
 
 # ---- unit tests with coverage ---------------------------------------------
 CINC="-pthread -I$L -I$L/include -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
-LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
+LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_rm_chan.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
 mkdir -p "$W/cov"
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/core_test" "$T/core_test.c" $LIBSRC >"$W/cc1.log" 2>&1
 rc=$?
@@ -256,7 +256,7 @@ sed -i '' 's/text_version(nvrm_schema_version());/printf("0.0");/' "$MD/nvrm-inf
 if cmp -s "$MD/nvrm-info.c" "$L/nvrm-info/nvrm-info.c"; then
 	bad "mutant schema-text-source: the edit did not apply"
 else
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_rm_chan.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
 	rc=$?
 	if [ $rc -ne 0 ]; then
@@ -298,9 +298,9 @@ expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc
 (cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_owner.c nvrm_fake_mem.c)
 rc=$?
 expect_rc "memory core, VA allocator and fake memory model: 100% line and branch coverage" $rc 0
-(cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c)
+(cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c $L/nvrm_rm_chan.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c nvrm_rm_chan.c)
 rc=$?
-expect_rc "RM memory backend: 100% line and branch coverage by the scripted kernel" $rc 0
+expect_rc "RM memory backend and RM channel backend: 100% line and branch coverage by the scripted kernel" $rc 0
 (cd "$W/cov" && llvm-profdata merge -o chan.profdata chan.*.profraw && llvm-cov export ./chan_test -instr-profile=chan.profdata --summary-only $L/nvrm_chan.c $L/nvrm_fake_chan.c | python3 -I "$T/coverage_gate.py" nvrm_chan.c nvrm_fake_chan.c)
 rc=$?
 expect_rc "channel core and fake GPFIFO: 100% line and branch coverage" $rc 0
@@ -334,7 +334,7 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_rm_chan.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
 	if [ "$4" = version_test ]; then MUTSRC=; fi
 	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
@@ -417,7 +417,7 @@ mutant fake-exported nvrm_fake_mem.c 's/ || !o->exported//' mem_test
 mutant fake-spare-limit nvrm_fake_mem.c 's/	    export_spare_limit(\*fd);/	    NVRM_OK;/' mem_test
 mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
 mutant fake-obj-leak nvrm_fake_mem.c '/^fk_mem_free/,/^}/s/		obj_unref(m->o);//' mem_test
-mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,$/	return (1 ? NVRM_OK : status_fail(err, errlen,/' rm_mem_test
+mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,$/	return (1 ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,/' rm_mem_test
 mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got;/out->page_size = a->page_size;/' rm_mem_test
 mutant wb-default nvrm_rm_mem.c 's/(void)import_page_size(surface\.attr, &got);/got = a->page_size;/' rm_mem_test
 mutant rm-huge-import nvrm_rm_mem.c 's/		\*ps = 2097152;/		*ps = 536870912;/' rm_mem_test

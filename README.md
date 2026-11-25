@@ -829,7 +829,9 @@ OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()`
 RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
 software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
 API is tested without hardware; the RM backend is tested against a scripted kernel
-(`tests/libnvrm/rm_mem_test.c`).
+(`tests/libnvrm/rm_mem_test.c`). The RM backend's channels are real RM objects: a channel
+group, a GPFIFO channel, the engine objects, a userd page and an error notifier in system
+memory, and a usermode page the doorbell is written in.
 
 ## Native test boot (no Linux layer)
 

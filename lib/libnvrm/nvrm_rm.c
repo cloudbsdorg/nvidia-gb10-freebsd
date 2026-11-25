@@ -43,6 +43,16 @@
 #include <class/cl0000.h>
 #include <class/cl0080.h>
 #include <class/cl2080.h>
+#include <class/cla06c.h>
+#include <class/clca6f.h>
+#include <class/clc96f.h>
+#include <class/clcab5.h>
+#include <class/clcdc0.h>
+#include <class/clcd40.h>
+#include <class/clcec0.h>
+#include <class/clce97.h>
+#include <class/clc761.h>
+#include <class/cl902d.h>
 #include <ctrl/ctrl0000/ctrl0000gpu.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
 #include <ctrl/ctrl2080/ctrl2080bios.h>
@@ -952,6 +962,85 @@ rm_limit(nvrm_backend *be, int allow_alloc)
 	return (nvrm_cap_limit_fd(be->fd, full, 3));
 }
 
+/* ---- the classes the channel backend binds (nvrm_rm_chan.c) ------------- */
+
+/*
+ * The RM's names for the classes a channel is made of.  They are in NVIDIA's
+ * own headers, and this table is the only place in the library that names
+ * them: the rest of it does not have to know which chip it talks to.  Each
+ * slot has two candidates and the first the device lists wins.
+ */
+static const uint32_t chan_class_tab[NVRM_RM_CLS__COUNT][2] = {
+	{ BLACKWELL_B, 0 },
+	{ BLACKWELL_COMPUTE_B, BLACKWELL_COMPUTE_A },
+	{ BLACKWELL_INLINE_TO_MEMORY_A, 0 },
+	{ FERMI_TWOD_A, 0 },
+	{ BLACKWELL_DMA_COPY_B, 0 },
+	{ BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_CHANNEL_GPFIFO_A }
+};
+
+/* The class of a slot: the first of its candidates the device lists, or 0
+ * when the device lists none of them.  The slot is one of NVRM_RM_CLS_*. */
+uint32_t
+nvrm_rm_chan_class(const nvrm_bclient *c, unsigned slot)
+{
+	unsigned i, j;
+
+	/* Time: O(the candidates and the classes of the device).  Space:
+	 * O(1). */
+	for (i = 0; i < 2; i++) {
+		uint32_t cls = chan_class_tab[slot][i];
+
+		if (cls == 0)
+			continue;
+		for (j = 0; j < c->nclasses; j++)
+			if (c->classes[j] == cls)
+				return (cls);
+	}
+	return (0);
+}
+
+/* The class of the channel group (one per channel). */
+uint32_t
+nvrm_rm_chan_group_class(void)
+{
+	return (KEPLER_CHANNEL_GROUP_A);
+}
+
+/* The client's own objects for the channel backend: a subdevice of the
+ * device and the usermode object under it, where the doorbell is written.
+ * The class and the parameters are the RM backend's own. */
+int
+nvrm_rm_usermode_alloc(nvrm_bclient *c, char *err, size_t errlen)
+{
+	NV2080_ALLOC_PARAMETERS sp;
+	NV_HOPPER_USERMODE_A_PARAMS up;
+	NvU32 st;
+
+	memset(&sp, 0, sizeof(sp));
+	sp.subDeviceId = 0;
+	c->subdevice = nvrm_rm_new_handle(c->s);
+	st = nvrm_rm_alloc(c->s, c->device, &c->subdevice, NV20_SUBDEVICE_0, &sp,
+	    sizeof(sp));
+	if (st != NV_OK) {
+		c->subdevice = 0;
+		return (nvrm_rmm_status_fail(err, errlen,
+		    "the subdevice allocation", st));
+	}
+	memset(&up, 0, sizeof(up));
+	up.bBar1Mapping = NV_FALSE;
+	up.bPriv = NV_FALSE;
+	c->usermode = nvrm_rm_new_handle(c->s);
+	st = nvrm_rm_alloc(c->s, c->subdevice, &c->usermode,
+	    BLACKWELL_USERMODE_A, &up, sizeof(up));
+	if (st != NV_OK) {
+		c->usermode = 0;
+		return (nvrm_rmm_status_fail(err, errlen,
+		    "the usermode object allocation", st));
+	}
+	return (NVRM_OK);
+}
+
 const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.name = "rm",
 	.score = 100,
@@ -969,4 +1058,5 @@ const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.gpu_classes = rm_gpu_classes,
 	.limit = rm_limit,
 	.mem = &nvrm_rm_mem_ops,
+	.chan = &nvrm_rm_chan_ops,
 };

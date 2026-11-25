@@ -245,6 +245,17 @@ structure is
 Zero or the structure's current
 .Li sizeof
 selects this version; another value is invalid.
+.Sh IMPLEMENTATION NOTES
+The RM backend makes one channel group (a TSG) per channel, with the engine
+of the runlist, the channel itself of the GPFIFO class, and one engine object
+per engine the mask asks for.
+The userd page is one 4 KiB page of system memory that the GPU reads and the
+CPU writes: the GPFIFO control words (the get and the put offsets) are in it.
+The error notifier is one more page of system memory, read-only for the CPU.
+The usermode page of the client is the only device mapping the backend makes:
+the doorbell is one aligned 32-bit store of the work submit token in it.
+The copy class is not bound on a graphics runlist yet: a channel that asks
+for both is refused.
 .Sh RETURN VALUES
 The calls returning
 .Vt int
