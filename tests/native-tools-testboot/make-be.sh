@@ -6,14 +6,16 @@
 # (Track #2362): no Linuxulator, no LinuxKPI, no Linux binary.
 #
 # Usage: make-be.sh [-N NORMAL_BE] [-b BASE_BE] [-D YYYYMMDD] [-n SEQ] [-m STAGEDIR] [-s SHA256FILE] [-o COPYOUT]
-#                   [-V VRAM_BYTES] [-R RESERVE_BYTES] [-S SM] [-u UVM_KO] [-d DRM_KO] [--dry-run] [--activate]      (run as root)
-#   -N NORMAL_BE  the boot environment the host returns to (default cloudbsd-rx7600)
+#                   [-V VRAM_BYTES] [-R RESERVE_BYTES] [-S SM] [-u UVM_KO] [-d DRM_KO] [-c CHAN_STRESS]
+#                   [-C CHAN_STRESS_SECONDS] [--dry-run] [--activate]      (run as root)
+#   -N NORMAL_BE  the boot environment the host returns to (default cloudbsd-current)
 #   -b BASE_BE    the boot environment to clone (default NORMAL_BE)
 #   -D, -n        the name is nvidia-native-tools-test-<DATE>-<SEQ> (today, 1); an existing name is refused with the
 #                 next free SEQ
 #   -m STAGEDIR   the staged build (default $GB10_WORK/logs/native-tools/stage): nvidia_gsp_ga10x_fw.ko,
-#                 nvidia.ko, nvidia-modeset.ko, nvrm-info and libnvrm.so.1, built from nvidia-gb10-freebsd main
-#   -s FILE       the hash list (default STAGEDIR/SHA256.txt): five lines SHA256 (name) = <64 hex>
+#                 nvidia.ko, nvidia-modeset.ko, nvrm-info, libnvrm.so.1, mem_probe and chan_probe, built from
+#                 nvidia-gb10-freebsd main
+#   -s FILE       the hash list (default STAGEDIR/SHA256.txt): seven lines SHA256 (name) = <64 hex>
 #   -o COPYOUT    where the one-shot copies its run (default $GB10_WORK/logs/native-tools-testboot);
 #                 an absolute path on a dataset outside the boot environments
 #   -V, -R, -S    what the board is, for boot_nvrm_info.sh (defaults: the amp001 board, in
@@ -27,6 +29,8 @@
 #                 the module is read, never installed
 #   -d DRM_KO     the nvidia-drm.ko whose dependencies decide the PRIME row; without it that row is not-available;
 #                 the module is read, never installed
+#   -c N          how many semaphore releases the channel probe pushes in its stress loop (default 100000)
+#   -C S          how long that stress loop may run, in seconds (default 300); the probe stops earlier when it is done
 #   --dry-run     build and check the boot environment, never arm it (the default)
 #   --activate    finish with bectl activate -t BE (the orchestrator's decision; never while a Fable agent runs)
 #
@@ -35,9 +39,12 @@
 #      installed is git archive of that commit; the vendored gpu-detect.sh and testboot-return equal their pins in
 #      VENDOR;
 #   2. each staged file equals its full hash; each staged .ko has no dependency and no undefined symbol of the
-#      Linuxulator or LinuxKPI (kldxref -d -v, nm -u); nvrm-info and libnvrm.so.1 are FreeBSD-branded ELF;
+#      Linuxulator or LinuxKPI (kldxref -d -v, nm -u); nvrm-info, libnvrm.so.1, mem_probe and chan_probe are
+#      FreeBSD-branded ELF;
 #   3. writes the evidence of the rows that cannot run natively (static-rows/): the uvm rows from UVM_KO's
-#      dependencies, PRIME from DRM_KO's, the render uAPI and libnvrm S2 from the commit's tree;
+#      dependencies, PRIME from DRM_KO's, the render uAPI from the commit's tree; the S2 memory row and the S3
+#      channel row are not one of them: mem_probe and chan_probe are staged and run, so their rows are measured
+#      on the card;
 #   4. bectl create -e BASE BE, mounts it under a new root-owned directory of /var/run, refuses a clone with an
 #      nvidia module in /boot/modules or /boot/kernel or a loader.conf that loads a Linux, LinuxKPI, drm or nvidia
 #      module;
@@ -47,8 +54,9 @@
 #      off (drm_ready loads amdgpu by itself), cloudbsd_hwprobe_command="probe" (the probe loads no KMS driver), the
 #      panic settings in loader.conf; a base with a devd rule that loads a driver by itself (a kldload, or the start
 #      of a service that loads one) is refused: devd runs it when the device appears, and the kit cannot make it safe;
-#   6. installs the staged files into the new directory /boot/modules.nvnative-test (root, 0444; nvrm-info 0555), the
-#      kit into /usr/local/share/nvidia-native-tools-test, the rc one-shot and testboot-return;
+#   6. installs the staged files into the new directory /boot/modules.nvnative-test (root, 0444; nvrm-info,
+#      mem_probe and chan_probe 0555), the kit into /usr/local/share/nvidia-native-tools-test, the rc one-shot and
+#      testboot-return;
 #   7. unmounts; with --activate arms the one-shot boot.
 # The running system is not touched: nothing is loaded, unloaded or rebooted.
 #
@@ -77,7 +85,7 @@ if [ "${GB10_TEST_HOOKS:-0}" = 1 ] && [ "$(id -u)" != 0 ]; then
 	HOOKS=1; BECTL=${NVNT_BECTL:-bectl}
 	[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
 fi
-NORMAL=cloudbsd-rx7600
+NORMAL=cloudbsd-current
 BASE=
 DATE=$(date -u +%Y%m%d)
 SEQ=1
@@ -91,10 +99,12 @@ COPYOUT_GIVEN=0
 VRAM=$BOARD_VRAM_BYTES
 RESERVE=$BOARD_VRAM_RESERVE_MAX_BYTES
 SM=$BOARD_SM
+CHAN_STRESS=100000
+CHAN_STRESS_SECONDS=300
 UVMKO=
 DRMKO=
 ACTIVATE=0
-FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1"
+FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1 mem_probe chan_probe"
 # a kld_list or devmatch entry of these names is stripped from the clone (LinuxKPI drivers, the Linux ABI, NVIDIA).
 # The list is the one of guard.sh (GUARD_FORBID_RE), so the guard, this script and check-be.sh agree on it.
 FORBID_RE=$GUARD_FORBID_RE
@@ -117,6 +127,8 @@ while [ $# -gt 0 ]; do
 	-S) need "$1" "$#"; SM=$2; shift 2 ;;
 	-u) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; UVMKO=$2; shift 2 ;;
 	-d) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; DRMKO=$2; shift 2 ;;
+	-c) need "$1" "$#"; CHAN_STRESS=$2; shift 2 ;;
+	-C) need "$1" "$#"; CHAN_STRESS_SECONDS=$2; shift 2 ;;
 	--dry-run) ACTIVATE=0; shift ;;
 	--activate) ACTIVATE=1; shift ;;
 	-h | --help) help ;;
@@ -138,6 +150,8 @@ case $RESERVE in '' | *[!0-9]*) echo "make-be.sh: -R must be a number of bytes" 
 [ "$VRAM" -eq 0 ] || [ "$RESERVE" -lt "$VRAM" ] || { echo "make-be.sh: -R $RESERVE must be below -V $VRAM (unless -V is 0): the boot would reject it" >&2; exit 2; }
 case $SM in [0-9]*.[0-9]*) ;; *) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 case $SM in *[!0-9.]* | *.*.*) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
+case $CHAN_STRESS in '' | *[!0-9]*) echo "make-be.sh: -c must be a number of releases" >&2; exit 2 ;; esac
+case $CHAN_STRESS_SECONDS in '' | *[!0-9]*) echo "make-be.sh: -C must be a number of seconds" >&2; exit 2 ;; esac
 _l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit 2; }
 # The person who runs the kit is the one who has to read the results: record who that is, so the one-shot can give
 # the run directory to them.  doas and sudo tell it (DOAS_USER, SUDO_USER); without them the owner of the copy-out
@@ -233,7 +247,7 @@ done
 # 2. the staged build
 literal() { awk -v n="($1)" '$1 == "SHA256" && $2 == n && $3 == "=" && length($4) == 64 && $4 ~ /^[0-9a-f]+$/ { print $4; c++ } END { exit (c == 1 ? 0 : 1) }' "$SHAFILE"; }
 [ -f "$SHAFILE" ] || { echo "make-be.sh: no hash list $SHAFILE" >&2; exit 1; }
-[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 5 ] || { echo "make-be.sh: $SHAFILE must hold exactly five SHA256 lines: $FILES" >&2; exit 1; }
+[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 7 ] || { echo "make-be.sh: $SHAFILE must hold exactly seven SHA256 lines: $FILES" >&2; exit 1; }
 for _f in $FILES; do
 	_w=$(literal "$_f") || { echo "make-be.sh: $SHAFILE has no single full sha256 for $_f" >&2; exit 1; }
 	[ -f "$STAGE/$_f" ] || { echo "make-be.sh: missing $STAGE/$_f" >&2; exit 1; }
@@ -253,7 +267,7 @@ for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	_l=$(guard_undef "$STAGE/$_k") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
 	echo "native $_k: depends on $(printf '%s\n' "$_d" | tr '\n' ' ')"
 done
-for _f in nvrm-info libnvrm.so.1; do
+for _f in nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 	_l=$(guard_elf "$STAGE/$_f") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
 	echo "native $_f: ${_l#* }"
 done
@@ -286,18 +300,13 @@ for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race; do
 done
 { _p=$(classify "$DRMKO" "nvidia-drm.ko, the NVIDIA side of PRIME import"); printf '%s\n' "$_p" | head -1
   printf 'PRIME import needs nvidia-drm.ko and the AMD amdgpu driver (drm-kmod, LinuxKPI) on the other side. '; printf '%s\n' "$_p" | sed -n '2,$p'; } > "$SR/prime-import"
-_tree=$(cd "$SCRATCH/kit" && find . -type f | sed 's|^\./||')
 if [ "$COMMIT" != unchecked-test-hook ] && git_ ls-tree -r --name-only "$COMMIT" -- src/nvidia-drm-render | grep -q '\.c$'; then
 	printf 'not-available\nthe commit has a render uAPI implementation under src/nvidia-drm-render, but this kit has no row for it yet\n' > "$SR/render-uapi"
 else
 	printf 'not-available\nthe render uAPI is a header and documents only (src/nvidia-drm-render/nvidia-drm-render.h, docs/RENDER-UAPI.md) at commit %s: no kernel module serves it yet\n' "$COMMIT" > "$SR/render-uapi"
 fi
-if printf '%s\n' "$_tree" | grep -q '^lib/libnvrm/man/nvrm_mem.3$'; then
-	printf 'not-available\nlibnvrm S2 (memory) is in the commit, but this kit has no S2 rows yet: add the allocation and copy timing rows\n' > "$SR/nvrm-s2-memory"
-else
-	printf 'not-available\nlibnvrm S2 (RM-direct memory allocation and copy) is not in commit %s: its allocation and copy timing rows are added when it lands on main\n' "$COMMIT" > "$SR/nvrm-s2-memory"
-fi
-for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi nvrm-s2-memory; do echo "static row $_r: $(head -1 "$SR/$_r")"; done
+# the S2 memory row is not a static row: the kit stages mem_probe and the one-shot runs it (row nvrm-s2-memory)
+for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi; do echo "static row $_r: $(head -1 "$SR/$_r")"; done
 
 run() { echo "+ $*"; "$@"; }
 BE_MADE=0
@@ -440,7 +449,7 @@ MODS=$MNT/boot/modules.nvnative-test
 [ ! -e "$MODS" ] || { echo "make-be.sh: $MODS already exists in the clone" >&2; exit 1; }
 run install -d $ROOTOWN -m 0755 "$MODS"
 for _f in $FILES; do
-	case $_f in nvrm-info) _m=0555 ;; *) _m=0444 ;; esac
+	case $_f in nvrm-info | mem_probe | chan_probe) _m=0555 ;; *) _m=0444 ;; esac
 	run install $ROOTOWN -m "$_m" "$STAGE/$_f" "$MODS/$_f"
 	[ "$(sha256 -q "$MODS/$_f")" = "$(literal "$_f")" ] || { echo "make-be.sh: $_f differs after the copy" >&2; exit 1; }
 done
@@ -458,8 +467,8 @@ run install $ROOTOWN -m 0555 "$A/nvidia_native_tools_testboot" "$MNT/usr/local/e
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.version"
 printf '%s\n' "$BE" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
 chmod 0444 "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
-printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_owner="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_vram_reserve="%s"\nnvidia_native_tools_testboot_sm="%s"\n' \
-    "$NORMAL" "$COPYOUT" "$_OWNER" "$VRAM" "$RESERVE" "$SM" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
+printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_owner="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_vram_reserve="%s"\nnvidia_native_tools_testboot_sm="%s"\nnvidia_native_tools_testboot_chan_stress="%s"\nnvidia_native_tools_testboot_chan_stress_seconds="%s"\n' \
+    "$NORMAL" "$COPYOUT" "$_OWNER" "$VRAM" "$RESERVE" "$SM" "$CHAN_STRESS" "$CHAN_STRESS_SECONDS" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
 
 # 7. done
 run $BECTL umount "$BE"

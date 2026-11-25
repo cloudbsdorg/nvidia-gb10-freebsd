@@ -1121,10 +1121,51 @@ expect_rc "mem_probe reports every step on each GPU as PASS${_missing:+ (missing
 NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/mem_probe" >"$W/probe-nogpu.out" 2>&1
 rc=$?
 if [ $rc -eq 101 ] && grep -q '^FAIL enumerate: no GPU' "$W/probe-nogpu.out"; then ok "mem_probe plant: no GPU is a FAIL (rc 101), never a pass"; else bad "mem_probe plant: no GPU gave rc=$rc"; fi
+
+# the channel probe of the boot kit, built against the library under test and
+# run on the fake software GPU (on the test boot it runs on the driver).  The
+# RM backend of main has no channel backend yet, so this is the only place
+# where the channel calls are exercised: the probe itself is the proof on the
+# card.
+cc -I"$L/include" -std=gnu11 -Wall -Wextra -Werror -o "$W/chan_probe" "$T/chan_probe.c" -L"$O/lib" -lnvrm -lthr >"$W/cc-chan.log" 2>&1
+rc=$?
+expect_rc "chan_probe builds against libnvrm (-Werror)" $rc 0
+NVRM_BACKEND=fake NVRM_FAKE_PROFILE=discrete,unified "$W/chan_probe" >"$W/chan.out" 2>&1
+rc=$?
+expect_rc "chan_probe passes every step on two fake GPUs" $rc 0
+_missing=
+for g in 0 1; do for s in create release latency stress isolation cleanup; do
+	grep -q "^PASS gpu $g ([^)]*) $s: " "$W/chan.out" || _missing="$_missing gpu$g:$s"
+done; done
+[ -z "$_missing" ] && ! grep -q '^FAIL' "$W/chan.out"; rc=$?
+expect_rc "chan_probe reports every step on each GPU as PASS${_missing:+ (missing:$_missing)}" $rc 0
+[ $rc -eq 0 ] || sed -n 1,40p "$W/chan.out"
+grep -q '^INFO gpu 0 .* latency_ns: p50 .* ns, p99 .* ns, max .* ns' "$W/chan.out"; rc=$?
+expect_rc "chan_probe reports the latency percentiles" $rc 0
+grep -q '^PASS gpu 0 .* isolation: the second channel died' "$W/chan.out"; rc=$?
+expect_rc "chan_probe kills the channel of the bad push" $rc 0
+NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/chan_probe" >"$W/chan-nogpu.out" 2>&1
+rc=$?
+if [ $rc -eq 101 ] && grep -q '^FAIL enumerate: no GPU' "$W/chan-nogpu.out"; then ok "chan_probe plant: no GPU is a FAIL (rc 101), never a pass"; else bad "chan_probe plant: no GPU gave rc=$rc"; fi
+NVRM_BACKEND=fake NVRM_FAKE_PROFILE=discrete,unified "$W/chan_probe" --json >"$W/chan.json" 2>&1
+rc=$?
+expect_rc "chan_probe --json prints one document" $rc 0
+python3 -I "$T/schema_validate.py" "$T/schema/chan-probe-1.schema.json" "$W/chan.json" >"$W/chan-schema.log" 2>&1
+rc=$?
+expect_rc "chan_probe --json validates against the schema" $rc 0
+[ $rc -eq 0 ] || sed -n 1,20p "$W/chan-schema.log"
+_gpus=$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["gpus"]))' "$W/chan.json" 2>/dev/null)
+[ "$_gpus" = 2 ]; rc=$?
+expect_rc "chan_probe --json holds one entry per GPU" $rc 0
 mkdir -p "$W/bootm"
-BOOT_MEM_PROBE="$W/mem_probe" NVRM_FAKE_PROFILE=discrete BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootm" "$INFO" "$SCHEMA" >/dev/null 2>&1
+BOOT_MEM_PROBE="$W/mem_probe" BOOT_CHAN_PROBE="$W/chan_probe" NVRM_FAKE_PROFILE=discrete BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootm" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q '^PASS mem_probe: every memory step passed on every GPU' "$W/bootm/results.txt" && grep -q '^PASS gpu 0 .* nothing_left' "$W/bootm/results.txt" && [ -s "$W/bootm/mem_probe.txt" ]; rc=$?
 expect_rc "boot script: runs the memory probe and records its rows" $rc 0
+grep -q '^PASS chan_probe: every channel step passed on every GPU' "$W/bootm/results.txt" && grep -q '^PASS gpu 0 .* isolation:' "$W/bootm/results.txt" && [ -s "$W/bootm/chan_probe.txt" ]; rc=$?
+expect_rc "boot script: runs the channel probe and records its rows" $rc 0
+python3 -I "$T/schema_validate.py" "$T/schema/chan-probe-1.schema.json" "$W/bootm/chan_probe.json" >"$W/bootm-chan-schema.log" 2>&1
+rc=$?
+expect_rc "boot script: the JSON document of the channel probe validates against the schema" $rc 0
 mkdir -p "$W/boot"
 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boot" "$INFO" "$SCHEMA" >/dev/null 2>&1
 rc=$?
@@ -1138,16 +1179,25 @@ rc=$?
 expect_rc "boot script: validates --json and --jsonl against the schema" $rc 0
 grep -q '^FAIL memory probe missing' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: a kit without the memory probe FAILs" $rc 0
+grep -q '^FAIL channel probe missing' "$W/boot/results.txt"; rc=$?
+expect_rc "boot script: a kit without the channel probe FAILs" $rc 0
 mkdir -p "$W/boots1"
 BOOT_S1_ONLY=1 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boots1" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q '^INFO memory probe not run: BOOT_S1_ONLY=1' "$W/boots1/results.txt" && ! grep -q '^FAIL memory probe' "$W/boots1/results.txt"; rc=$?
 expect_rc "boot script: BOOT_S1_ONLY=1 records the opt-out instead" $rc 0
+grep -q '^INFO channel probe not run: BOOT_S1_ONLY=1' "$W/boots1/results.txt" && ! grep -q '^FAIL channel probe' "$W/boots1/results.txt"; rc=$?
+expect_rc "boot script: BOOT_S1_ONLY=1 records the opt-out of the channel probe too" $rc 0
 mkdir -p "$W/bootf"
 BOOT_MEM_PROBE=/usr/bin/false BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootf" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q "^FAIL mem_probe exited 1 ($W/bootf/mem_probe.txt)" "$W/bootf/results.txt"; rc=$?
 expect_rc "boot script: a failing probe is a FAIL naming its output file" $rc 0
+mkdir -p "$W/bootcf"
+BOOT_CHAN_PROBE=/usr/bin/false BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootcf" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q "^FAIL chan_probe exited 1 ($W/bootcf/chan_probe.txt)" "$W/bootcf/results.txt"; rc=$?
+expect_rc "boot script: a failing channel probe is a FAIL naming its output file" $rc 0
 grep -q '^PASS GPU 0 sm_count' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: compares GPU values" $rc 0
+
 
 # the version has one source: a header naming another version fails the build
 M=$W/mut-version

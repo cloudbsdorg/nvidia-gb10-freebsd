@@ -296,6 +296,7 @@ find it by PCI bus, never by assuming 0. See `man/nvidia.4`.
 | Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node, found by PCI bus; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
+| Native GPU memory (libnvrm: allocation, mappings, export/import) | in the tree, against the fake backend; the test-boot kit measures it on the card (row `nvrm-s2-memory`), not yet on hardware |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | waits for a test boot: it ran earlier on the tested machine (numbers below); the BAR0 mapping fix (register window as Device memory, not cached) is committed and not yet run on hardware; Linux-only, last resort |
 | CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
@@ -852,6 +853,17 @@ API is tested without hardware; the RM backend is tested against a scripted kern
 - only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
   Linux dependency since #2363;
 - `gpu-detect.sh` and `nvrm-info` traced under `ktrace`, so that every file they execute is checked.
+- `mem_probe` runs beside `nvrm-info`, in the same `boot_nvrm_info.sh` run: the row `nvrm-s2-memory` is the
+  memory measurement of the card (a client with CPU mapping, a VA reservation, video and system memory, GPU
+  and CPU mappings, a pattern written and read back, export and import into a second client, and nothing left
+  after the frees). It is a native row now, not a static one: its status comes from the probe on the card, and
+  its detail holds the FAIL lines of the probe.
+- `chan_probe` runs beside it, in the same `boot_nvrm_info.sh` run: the row `nvrm-s3-channel` is the
+  channel measurement of the card (a compute GPFIFO channel, a semaphore release the GPU writes into a
+  memory object of the probe, so the release is seen, the latency of a thousand releases as p50, p99 and
+  max in nanoseconds, a stress loop of releases, and the isolation: a push at an address that is not
+  mapped kills one channel while the other one keeps releasing). It is a native row too: its status comes
+  from the probe on the card, and its detail holds the latency line and the stress line of the probe.
 
 The environment check fails when a loaded file other than the kernel, or a module record in such a
 file, has a Linux-layer name listed by `guard_layer_name`, or when `compat.linux` answers. Module
@@ -887,7 +899,12 @@ the boot would reject, as `make-be.sh` does:
   of it, below `-V` unless `-V` is 0. The RM reports the usable size (17103323136 on that card),
   which must lie between nominal less the reserve and nominal;
 - `-S` (`BOOT_EXPECT_SM`, default 12.0): the compute capability. It is compared with
-  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card).
+  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card);
+- `-c` (`BOOT_CHAN_STRESS`, default 100000): how many semaphore releases the channel probe pushes in its
+  stress loop; `make-be.sh` writes it to `rc.conf.d` as `nvidia_native_tools_testboot_chan_stress`;
+- `-C` (`BOOT_CHAN_STRESS_SECONDS`, default 300): how long that stress loop may run, in seconds; the probe
+  stops earlier when it is done, and `make-be.sh` writes it as
+  `nvidia_native_tools_testboot_chan_stress_seconds`.
 
 The GPU uuid is found through the device unit whose `dev.nvidia.<unit>.pci_bus_id` is the device's
 PCI location (000d:01:00.0 on amp001; the units are not nvrm-info's indexes: a BMC display can take

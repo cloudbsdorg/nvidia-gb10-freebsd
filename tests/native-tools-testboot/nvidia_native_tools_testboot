@@ -25,8 +25,10 @@
 #      ktrace; the guard checks every file it executed (FreeBSD-branded ELF or #! script) and that no kld was loaded;
 #   9. records the rows that cannot run natively yet, with their evidence (needs-linux, needs-linuxkpi,
 #      not-available): the uvm-bsd ioctl suite and the #2373 probe and race tests (nvidia-uvm.ko depends on the
-#      Linuxulator), PRIME import (nvidia-drm.ko depends on LinuxKPI), the render uAPI (no kernel part yet), the
-#      libnvrm S2 memory rows (not on main at assembly);
+#      Linuxulator), PRIME import (nvidia-drm.ko depends on LinuxKPI), the render uAPI (no kernel part yet); the
+#      S2 memory row and the S3 channel row are not one of them: mem_probe and chan_probe are staged beside
+#      nvrm-info and run with it, so the rows nvrm-s2-memory and nvrm-s3-channel are what the probes measured on
+#      the card;
 #  10. env-after: the guard a last time, and a delta against env-loaded;
 #  11. summarize.py writes summary.json and summary.txt; the run is copied to the copy-out directory;
 #  12. ALWAYS ends with testboot-return NORMAL_BE (a panic excepted: it reboots in 5 seconds, the one-shot is used up).
@@ -35,12 +37,13 @@
 # needs-linuxkpi or not-available.  A "running" row is written and synced before each step that can panic.
 #
 # rc.conf variables (make-be.sh writes _enable, _normal_be, _copyout, _owner, _vram, _vram_reserve, _sm): nvidia_native_tools_testboot_enable,
-# _normal_be (cloudbsd-rx7600), _deadman (minutes, 30), _kit (/usr/local/share/nvidia-native-tools-test), _mods
+# _normal_be (cloudbsd-current), _deadman (minutes, 30), _kit (/usr/local/share/nvidia-native-tools-test), _mods
 # (/boot/modules.nvnative-test), _work (/var/db/nvidia-native-tools-test), _fallback (/var/db/nvnt-testboot), _copyout,
 # _owner (the user the copy-out is given to: the person who ran make-be.sh), _return (/usr/local/sbin/testboot-return),
 # _devdir (/dev), _vram (the board's nominal VRAM in bytes), _vram_reserve
 # (the most the driver may reserve of it, in bytes) and _sm (the compute capability, major.minor), for
-# boot_nvrm_info.sh (values: tests/libnvrm/board-amp001.env), _lockfile, _version.  _foreground=YES runs the recorder in the foreground: only
+# boot_nvrm_info.sh (values: tests/libnvrm/board-amp001.env), _chan_stress and _chan_stress_seconds (how many
+# semaphore releases the channel probe pushes and how long it may run), _lockfile, _version.  _foreground=YES runs the recorder in the foreground: only
 # tests/native_tools_kit_test.sh sets it, so that it can wait for the run; make-be.sh never writes it.
 
 . /etc/rc.subr
@@ -53,7 +56,7 @@ stop_cmd=:
 # rc.conf and rc.conf.d/nvidia_native_tools_testboot first, then the defaults, then the values derived from them
 load_rc_config $name
 
-: "${nvidia_native_tools_testboot_normal_be:=cloudbsd-rx7600}"
+: "${nvidia_native_tools_testboot_normal_be:=cloudbsd-current}"
 : "${nvidia_native_tools_testboot_deadman:=30}"
 : "${nvidia_native_tools_testboot_kit:=/usr/local/share/nvidia-native-tools-test}"
 : "${nvidia_native_tools_testboot_mods:=/boot/modules.nvnative-test}"
@@ -63,6 +66,8 @@ load_rc_config $name
 : "${nvidia_native_tools_testboot_owner:=}"
 : "${nvidia_native_tools_testboot_return:=/usr/local/sbin/testboot-return}"
 : "${nvidia_native_tools_testboot_devdir:=/dev}"
+: "${nvidia_native_tools_testboot_chan_stress:=100000}"
+: "${nvidia_native_tools_testboot_chan_stress_seconds:=300}"
 : "${nvidia_native_tools_testboot_vram:=}"
 : "${nvidia_native_tools_testboot_vram_reserve:=}"
 : "${nvidia_native_tools_testboot_sm:=}"
@@ -252,6 +257,68 @@ static_row()
 	esac
 }
 
+# s2_memory_row: the S2 memory row of the kit.  The memory probe (mem_probe, staged beside nvrm-info) runs inside
+# boot_nvrm_info.sh: its PASS and FAIL lines join results.txt and its whole output is mem_probe.txt.  The row is
+# pass when the probe passed every step on every GPU, and the detail is the number of GPUs it measured.
+s2_memory_row()
+{
+	_mr=$OUT/nvrm-info/results.txt
+	_mp=$OUT/nvrm-info/mem_probe.txt
+	if [ ! -f "$_mr" ]; then
+		row nvrm-s2-memory fail "mem_probe.txt missing: boot_nvrm_info.sh wrote no results.txt"
+		return 1
+	fi
+	if grep -q '^PASS mem_probe: every memory step passed on every GPU' "$_mr"; then
+		_mg=$(grep -c '^PASS gpu' "$_mp" 2> /dev/null)
+		row nvrm-s2-memory pass "${_mg:-0} GPU(s): mem_probe passed every memory step on every GPU"
+		return 0
+	fi
+	_mf=
+	if [ -f "$_mp" ]; then
+		_mf=$(grep '^FAIL' "$_mp" 2> /dev/null | head -3 | tr '\n' ';')
+	fi
+	if [ -z "$_mf" ]; then
+		_mf=$(grep '^FAIL' "$_mr" 2> /dev/null | head -3 | tr '\n' ';')
+	fi
+	if [ -z "$_mf" ]; then
+		if [ -f "$_mp" ]; then _mf="mem_probe did not pass"; else _mf="mem_probe.txt missing"; fi
+	fi
+	row nvrm-s2-memory fail "$_mf"
+	return 1
+}
+
+# s3_channel_row: the S3 channel row of the kit.  The channel probe (chan_probe, staged beside mem_probe) runs
+# inside boot_nvrm_info.sh: its PASS, FAIL and INFO lines join results.txt and its whole output is
+# chan_probe.txt.  The row is pass when the probe passed every channel step on every GPU, and the detail is the
+# latency the probe measured and the stress it ran.
+s3_channel_row()
+{
+	_mr=$OUT/nvrm-info/results.txt
+	_mp=$OUT/nvrm-info/chan_probe.txt
+	if [ ! -f "$_mr" ]; then
+		row nvrm-s3-channel fail "chan_probe.txt missing: boot_nvrm_info.sh wrote no results.txt"
+		return 1
+	fi
+	if grep -q '^PASS chan_probe: every channel step passed on every GPU' "$_mr"; then
+		_ml=$(grep '^INFO .* latency_ns: ' "$_mp" 2> /dev/null | head -1)
+		_ms=$(grep '^PASS .* stress: ' "$_mp" 2> /dev/null | head -1)
+		row nvrm-s3-channel pass "${_ml:-no latency line}; ${_ms:-no stress line}"
+		return 0
+	fi
+	_mf=
+	if [ -f "$_mp" ]; then
+		_mf=$(grep '^FAIL' "$_mp" 2> /dev/null | head -3 | tr '\n' ';')
+	fi
+	if [ -z "$_mf" ]; then
+		_mf=$(grep '^FAIL' "$_mr" 2> /dev/null | head -3 | tr '\n' ';')
+	fi
+	if [ -z "$_mf" ]; then
+		if [ -f "$_mp" ]; then _mf="chan_probe did not pass"; else _mf="chan_probe.txt missing"; fi
+	fi
+	row nvrm-s3-channel fail "$_mf"
+	return 1
+}
+
 run_body()
 {
 	deadman_arm	# check-be: deadman-arm
@@ -271,7 +338,7 @@ run_body()
 	case $_le in [Nn][Oo]) row linux-enable pass "linux_enable is $_le" ;; *) row linux-enable fail "linux_enable is '${_le:-unset}', not NO"; ok=0 ;; esac
 	env_snapshot env-before || ok=0
 	if kldstat -q -m nvidia > /dev/null 2>&1; then row preloaded fail "nvidia is loaded before the kit loads it"; ok=0; fi
-	for _f in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1; do
+	for _f in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		if hash_ok "$_f"; then row "hash-$_f" pass "$(sha256 -q "$MODS/$_f")"; else row "hash-$_f" fail "$MODS/$_f is missing or not the hash of $KIT/SHA256.txt"; ok=0; fi
 	done
 	# the modules to load reference nothing of the Linuxulator or LinuxKPI: their declared dependencies (kldxref) and
@@ -354,6 +421,10 @@ run_body()
 		kldstat -v > "$OUT/nvrm-info.kldstat-before" 2>&1
 		( cd "$OUT" && env LD_LIBRARY_PATH="$MODS" BOOT_EXPECT_VRAM_BYTES="$nvidia_native_tools_testboot_vram" \
 		    BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES="$nvidia_native_tools_testboot_vram_reserve" BOOT_EXPECT_SM="$nvidia_native_tools_testboot_sm" \
+		    BOOT_MEM_PROBE="$MODS/mem_probe" \
+		    BOOT_CHAN_PROBE="$MODS/chan_probe" \
+		    BOOT_CHAN_STRESS="$nvidia_native_tools_testboot_chan_stress" \
+		    BOOT_CHAN_STRESS_SECONDS="$nvidia_native_tools_testboot_chan_stress_seconds" \
 		    ktrace -i -t cn -f "$OUT/nvrm-info.ktrace" /bin/sh "$_t" "$OUT/nvrm-info" "$MODS/nvrm-info" ) > "$OUT/nvrm-info.out" 2>&1
 		_nrc=$?
 		kldstat -v > "$OUT/nvrm-info.kldstat-after" 2>&1
@@ -368,13 +439,15 @@ run_body()
 		else
 			row nvrm-info fail "boot_nvrm_info.sh exit $_nrc: ${_np:-0} passed, ${_nf:-unknown} failed: $(grep '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null | head -3 | tr '\n' ';')"
 		fi
+		s2_memory_row || :
+		s3_channel_row || :
 	else
-		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module; do
+		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module nvrm-s2-memory nvrm-s3-channel; do
 			grep -q "^{\"row\":\"$_r\"," "$OUT/results.jsonl" || row "$_r" not-run "not reached: a step before it failed (see the rows above)"
 		done
 	fi
 
-	for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi nvrm-s2-memory; do static_row "$_r"; done
+	for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi; do static_row "$_r"; done
 
 	if [ -f "$OUT/env-loaded.kldstat" ]; then
 		env_snapshot env-after nvidia.ko || :

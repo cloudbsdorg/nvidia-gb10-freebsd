@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvrm:schema:chan-probe/1",
+  "title": "chan_probe output, version 1",
+  "description": "One document: what the channel probe measured on a test boot, one entry per GPU the library enumerated.  The probe prints it with --json; the lines of the default mode hold the same facts.  Copyright (c) 2026 REVYTECH, Inc.; SPDX-License-Identifier: BSD-2-Clause",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "gpus"],
+  "properties": {
+    "schema": { "const": "chan-probe/1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "gpus": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gpu" }
+    }
+  },
+  "$defs": {
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pci", "steps", "latency_ns", "stress"],
+      "properties": {
+        "pci": { "type": "string" },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "latency_ns": { "$ref": "#/$defs/latency" },
+        "stress": { "$ref": "#/$defs/stress" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "detail"],
+      "properties": {
+        "name": { "type": "string" },
+        "status": { "enum": ["pass", "fail", "info"] },
+        "detail": { "type": "string" }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50", "p99", "max"],
+      "properties": {
+        "p50": { "type": "integer", "minimum": 0 },
+        "p99": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "stress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["done", "planned", "seconds"],
+      "properties": {
+        "done": { "type": "integer", "minimum": 0 },
+        "planned": { "type": "integer", "minimum": 0 },
+        "seconds": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
