@@ -11,7 +11,9 @@
 #       (the loader list, an rc.d service with required_modules, devd) and points at check-be.sh; it names no service
 #       when it cannot see one; guard_rc_loaders names that service and that devd rule (and stops naming them when
 #       the probe only probes), resolves the rcvar built from the name of the script and the defaults of the script,
-#       and reports a service it cannot read as unknown; guard_rc_expand keeps the default of ${var-default}; the
+#       and reports a service it cannot read as unknown; a service whose enable state cannot be read (it has no
+#       rcvar: devd starts it per device) is an offender only when the modules it loads are forbidden, and one that
+#       loads none of them is skipped; guard_rc_expand keeps the default of ${var-default}; the
 #       defaults of a script and the rc.conf are read with the same rule; a service that its own script enables is
 #       enabled; a devd rule that starts a service which loads a driver is a loader too; the summary of the capture
 #       has the layout summarize.py writes today;
@@ -27,7 +29,9 @@
 #   (e) make-be.sh with the test hooks and a fake clone: amdgpu and linux64 are stripped from kld_list, linux_enable
 #       becomes NO, devmatch_blocklist is set in rc.conf and loader.conf, the staged files are installed, the static
 #       rows are written; the enabled rc.d service whose required_modules loads amdgpu (drm_ready) is turned off, the
-#       service whose rcvar is built from its name is turned off too, a service that cannot be read is refused, the
+#       service whose rcvar is built from its name is turned off too, a service that cannot be read is refused, a base
+#       with /etc/rc.d/bluetooth (a service whose enable state cannot be read and whose modules are no driver) is
+#       built, one with a forbidden module in that list is refused, the
 #       hwprobe service gets the command probe (and the base is refused when another rc.conf file sets it back), a base
 #       with a devd rule that starts a service which loads a driver is refused, the
 #       owner of the run directory is recorded (and refused when it is not a user of the boot environment), a
@@ -388,6 +392,40 @@ printf '%s' "$_ct" | grep -q '|yes|' \
 _l23u=$(guard_rc_offenders "$T/fakeroot-idioms")
 printf '%s\n' "$_l23u" | grep -q '^drm_unknown|?|unknown|' && ok "guard_rc_offenders: a service whose modules cannot be read is reported as unknown" || no "guard_rc_offenders: the service that cannot be read is not reported: $_l23u"
 printf '%s\n' "$_l23u" | grep -q '^drm_unknown|drm_unknown_enable|' && no "guard_rc_offenders: the service that cannot be read is reported as a known offender" || ok "guard_rc_offenders: the service that cannot be read is not reported as a known offender"
+# a service whose enable state cannot be read (it has no rcvar: devd starts it per device) and whose modules are
+# known is an offender only when the modules it loads are forbidden: the kit refused a base because of
+# /etc/rc.d/bluetooth, whose modules are ng_bluetooth and friends, and none of them is a driver (Track #2437)
+mkdir -p "$T/fakeroot-bt/etc/rc.d"
+cat > "$T/fakeroot-bt/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+cat > "$T/fakeroot-bt/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+cat > "$T/fakeroot-bt/etc/rc.d/bt_unreadable" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_unreadable
+required_modules="${bt_unreadable_modules}"
+EOF
+chmod 0755 "$T/fakeroot-bt/etc/rc.d/"*
+_l24=$(guard_rc_offenders "$T/fakeroot-bt")
+printf '%s\n' "$_l24" | grep -q '^bluetooth|' \
+    && no "guard_rc_offenders: a service whose enable state is unknown and whose modules are not forbidden is an offender: $_l24" \
+    || ok "guard_rc_offenders: a service whose enable state is unknown and whose modules are not forbidden is not an offender"
+printf '%s\n' "$_l24" | grep -q '^bt_amd|?|unknown-enable|amdgpu' \
+    && ok "guard_rc_offenders: a service whose enable state is unknown and whose modules are forbidden is an offender" \
+    || no "guard_rc_offenders: the service whose modules are forbidden is not an offender: $_l24"
+printf '%s\n' "$_l24" | grep -q '^bt_unreadable|?|unknown|' \
+    && ok "guard_rc_offenders: a service whose enable state and modules are unknown is refused" \
+    || no "guard_rc_offenders: the service that cannot be read is not refused: $_l24"
+printf '%s\n' "$_l24" | grep -q '^bt_unreadable|?|unknown-enable|' \
+    && no "guard_rc_offenders: the service that cannot be read is reported as one whose enable state is unknown" \
+    || ok "guard_rc_offenders: the service that cannot be read is not reported as one whose enable state is unknown"
 GUARD_ROOT=$T/fakeroot; export GUARD_ROOT
 guard_env "$FIX23" 0 "$T/sys-absent" 1 > "$T/fix23-known.out"; expect 1 $? "guard_env with GUARD_ROOT fails the 2026-11-23 capture"
 grep -q 'rc.d service drm_ready (required_modules amdgpu)' "$T/fix23-known.out" && ok "guard_env: the failure names the loader it can see" || no "guard_env: the failure names no loader: $(head -1 "$T/fix23-known.out")"
@@ -898,6 +936,31 @@ EOF
 	    && ok "check-be.sh: a service whose modules cannot be read is a FAIL" \
 	    || no "check-be.sh: the service that cannot be read is not refused: $(grep '^FAIL' "$T/cb-unknown.out" | head -3)"
 	rm -f "$R/usr/local/etc/rc.d/drm_unknown"
+	# a service whose enable state cannot be read (its script has no rcvar) and whose modules are not forbidden is not
+	# a FAIL: the base of a machine with /etc/rc.d/bluetooth must pass (Track #2437)
+	cat > "$R/usr/local/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+	chmod 0755 "$R/usr/local/etc/rc.d/bluetooth"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-bt.out" 2>&1
+	_cbf4=$(grep '^FAIL' "$T/cb-bt.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf4" ] && ok "check-be.sh: a clone with /etc/rc.d/bluetooth passes" || no "check-be.sh on the clone with bluetooth: $_cbf4"
+	rm -f "$R/usr/local/etc/rc.d/bluetooth"
+	# the same service with a forbidden module in its list is a FAIL: it cannot be turned off
+	cat > "$R/usr/local/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+	chmod 0755 "$R/usr/local/etc/rc.d/bt_amd"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-btamd.out" 2>&1
+	grep -q '^FAIL the rc.d service bt_amd has an enable state that cannot be read and its required_modules loads amdgpu' "$T/cb-btamd.out" \
+	    && ok "check-be.sh: a service whose enable state cannot be read and whose modules are forbidden is a FAIL" \
+	    || no "check-be.sh: the service whose enable state cannot be read is not refused: $(grep '^FAIL' "$T/cb-btamd.out" | head -3)"
+	rm -f "$R/usr/local/etc/rc.d/bt_amd"
 	# a devd rule that loads a driver by itself is a FAIL
 	mkdir -p "$R/usr/local/etc/devd"
 	cat > "$R/usr/local/etc/devd/cloudbsd-gpu-hotplug.conf" <<'EOF'
@@ -1024,6 +1087,30 @@ EOF
 	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-unknown/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990114 -m "$STAGE" > "$T/mb-unknown.out" 2>&1
 	expect 1 $? "make-be.sh refuses a base with a service whose required_modules cannot be read"
 	grep -q 'drm_unknown has a required_modules entry that could not be read' "$T/mb-unknown.out" && ok "make-be.sh: the refusal names the service that cannot be read" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-unknown.out")"
+	# a base with /etc/rc.d/bluetooth is not refused: its enable state cannot be read (the script has no rcvar) but
+	# the modules it loads are none of the drivers the kit refuses (Track #2437)
+	mkclone "$T/clone-bt/root"
+	cat > "$T/clone-bt/root/usr/local/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+	chmod 0755 "$T/clone-bt/root/usr/local/etc/rc.d/bluetooth"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-bt/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990119 -m "$STAGE" > "$T/mb-bt.out" 2>&1
+	expect 0 $? "make-be.sh builds a base with /etc/rc.d/bluetooth"
+	grep -q 'bluetooth' "$T/mb-bt.out" && no "make-be.sh: a base with /etc/rc.d/bluetooth is refused: $(grep bluetooth "$T/mb-bt.out" | head -2)" || ok "make-be.sh: a base with /etc/rc.d/bluetooth is not refused"
+	# the same service with a forbidden module in its list is refused: it cannot be turned off
+	mkclone "$T/clone-btamd/root"
+	cat > "$T/clone-btamd/root/usr/local/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+	chmod 0755 "$T/clone-btamd/root/usr/local/etc/rc.d/bt_amd"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-btamd/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990120 -m "$STAGE" > "$T/mb-btamd.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base with a service whose enable state cannot be read and whose modules are forbidden"
+	grep -q 'bt_amd has an enable state that cannot be read and its required_modules loads amdgpu' "$T/mb-btamd.out" && ok "make-be.sh: the refusal names the service and the module it loads" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-btamd.out")"
 	# a devd rule that starts a service which loads a driver by itself is refused: devd runs it when the device
 	# appears, and the kit cannot make such a rule safe
 	mkclone "$T/clone-devd/root"

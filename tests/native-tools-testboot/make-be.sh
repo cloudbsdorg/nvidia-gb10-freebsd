@@ -399,13 +399,27 @@ done
 # An enabled rc.d service that loads a forbidden module by itself must not run in the clone: rc(8) loads the module of
 # its required_modules entry after kld_list was stripped (drm_ready loads amdgpu).  The rule is generic: every rc
 # script of the clone is read, and the modules its required_modules names are expanded with the rc.conf variables it
-# uses (drm_ready_modules for drm_ready).  A service whose rcvar or whose modules cannot be read is refused, not
-# ignored: a service that is not read is a service that is not known.  Only cloudbsd_hwprobe is named: its loading
-# is not through a required_modules entry, but through the probe it runs.
+# uses (drm_ready_modules for drm_ready).  A service whose modules cannot be read is refused, not ignored: a service
+# that is not read is a service that is not known.  A service whose enable state cannot be read (its script has no
+# rcvar: devd starts it per device) cannot be turned off, so it is refused only when the modules it loads are
+# forbidden.  Only cloudbsd_hwprobe is named: its loading is not through a required_modules entry, but through the
+# probe it runs.
+# rc_refuse <service> <modules>: the reason the service cannot be turned off safely, on standard error
+rc_refuse()
+{
+	case $2 in
+	unknown-enable\|*)
+		echo "make-be.sh: the rc.d service $1 has an enable state that cannot be read and its required_modules loads ${2#unknown-enable|}: it cannot be turned off safely; use a base without it" >&2
+		;;
+	*)
+		echo "make-be.sh: the rc.d service $1 has a required_modules entry that could not be read ($2): it cannot be turned off safely; use a base without it" >&2
+		;;
+	esac
+}
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCRATCH/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		echo "make-be.sh: the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be turned off safely; use a base without it" >&2
+		rc_refuse "$_svc" "$_mods"
 		exit 1
 	fi
 	run sysrc -f "$RCC" "$_rcvar=NO"
@@ -415,7 +429,7 @@ done < "$SCRATCH/rc-offenders.txt"
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCRATCH/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		echo "make-be.sh: the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be turned off safely; use a base without it" >&2
+		rc_refuse "$_svc" "$_mods"
 		exit 1
 	fi
 	echo "make-be.sh: $_svc ($_rcvar) is still enabled and its required_modules loads $_mods: another rc.conf file of the base sets it; use a base without it" >&2

@@ -187,11 +187,25 @@ _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/nu
 # an enabled rc.d service that loads a forbidden module by itself: rc(8) loads the module of its required_modules
 # entry after kld_list was stripped (drm_ready loads amdgpu).  The rule is generic: every rc script of the clone is
 # read, and the modules its required_modules names are expanded with the rc.conf variables it uses.  A service whose
-# rcvar or whose modules cannot be read is a FAIL too: a service that is not read is a service that is not known.
+# modules cannot be read is a FAIL too: a service that is not read is a service that is not known.  A service whose
+# enable state cannot be read (its script has no rcvar: devd starts it per device) cannot be turned off, so it is a
+# FAIL only when the modules it loads are forbidden.
+# rc_refuse <service> <modules>: the reason the service cannot be known to load nothing, as a FAIL
+rc_refuse()
+{
+	case $2 in
+	unknown-enable\|*)
+		bad "the rc.d service $1 has an enable state that cannot be read and its required_modules loads ${2#unknown-enable|}: rc(8) loads it by itself"
+		;;
+	*)
+		bad "the rc.d service $1 has a required_modules entry that could not be read ($2): it cannot be known to load nothing"
+		;;
+	esac
+}
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCR/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		bad "the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be known to load nothing"
+		rc_refuse "$_svc" "$_mods"
 		continue
 	fi
 	bad "the rc.d service $_svc ($_rcvar) is enabled and its required_modules loads $_mods: rc(8) loads it by itself"
