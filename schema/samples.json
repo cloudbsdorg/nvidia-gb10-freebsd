@@ -1,6 +1,7 @@
 {"samples": [
   {"schema": "schema/make-preflight-1.schema.json", "fixture": "tests/fixtures/make-preflight.json", "format": "json", "command": "sh scripts/make.sh preflight --json"},
-  {"schema": "schema/make-install-1.schema.json", "fixture": "tests/fixtures/make-install.json", "format": "json", "command": "make install ACCEPT_NVIDIA_LICENSE=1 JSON=1"},
+  {"schema": "schema/make-install-2.schema.json", "fixture": "tests/fixtures/make-install.json", "format": "json", "command": "make install ACCEPT_NVIDIA_LICENSE=1 JSON=1"},
+  {"schema": "schema/make-install-2.schema.json", "fixture": "tests/fixtures/make-install-progress.jsonl", "format": "jsonl", "command": "make install JSONL=1"},
   {"schema": "schema/stock-install-step-1.schema.json", "fixture": "tests/fixtures/stock-install-steps.jsonl", "format": "jsonl", "command": "sh tests/install-e2e/guest.sh ... (RESULTS/steps.jsonl)"},
   {"schema": "schema/stock-install-summary-1.schema.json", "fixture": "tests/fixtures/stock-install-summary.json", "format": "json", "command": "sh tests/install-e2e/run.sh ... (RESULTS/summary.json)"}
 ]}

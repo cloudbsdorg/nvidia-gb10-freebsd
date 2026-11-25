@@ -13,8 +13,8 @@
 #   2. the same with a drm.h stub (Linux and drm-kmod spelling) included before
 #      the header and after it, under -Werror: no macro clash, same numbers;
 #   3. kernel: the probe compiles with -D_KERNEL -nostdinc against the FreeBSD
-#      source tree SYSDIR (default ~/src/csrc-90dcf68/sys), where
-#      _Static_assert does the checking;
+#      source tree SYSDIR (no default: a src/sys checkout the caller names),
+#      where _Static_assert does the checking;
 #   4. self-contained: the header alone compiles as C99, C11 and C++17 with
 #      -Wall -Wextra -Werror -pedantic, included twice, as the first include;
 #   4b. the header defines no macro outside NVR_, DRM_NVR_ and DRM_IOCTL_NVR_
@@ -36,17 +36,21 @@
 # A check that cannot run (no SYSDIR, no NVIDIA header) is SKIPPED and said so
 # loudly; every SKIPPED line stays in the output. The checks that can run still
 # decide the result: with neither CI nor REQUIRE_INPUTS=yes the test exits 0 and
-# its last line says plainly how many checks were skipped; with CI or
-# REQUIRE_INPUTS=yes a skip is a FAIL (exit 1). RENDER_UAPI_ALLOW_SKIP=1 is
-# still accepted, but it is now a no-op: a skip is a skip, not a failure.
+# its last line says plainly how many checks were skipped and what would make
+# each of them run; with CI or REQUIRE_INPUTS=yes a skip is a FAIL (exit 1).
+# RENDER_UAPI_ALLOW_SKIP=1 is still accepted, but it is now a no-op: a skip is
+# a skip, not a failure.
 #
 # Environment: GB10_WORK (default <repo>/work; the NVIDIA header is looked for
-# under $GB10_WORK/sources), SYSDIR (no default; a FreeBSD src/sys checkout),
-# TMPDIR (default <repo>/tmp), RENDER_UAPI_ALLOW_SKIP (accepted, no-op).
+# under $GB10_WORK/sources), NVIDIA_IOCTL_H (names the NVIDIA header instead,
+# when it names a file that exists), SYSDIR (no default; a FreeBSD src/sys
+# checkout), TMPDIR (default <repo>/tmp), RENDER_UAPI_ALLOW_SKIP (accepted,
+# no-op).
 # Exit: 0 every check that could run passed (a skip is reported in the last
-#       line; with CI or REQUIRE_INPUTS=yes a skip exits 1 instead), 1 a check
-#       failed or a required input was missing, 2 a prerequisite of the test
-#       itself is missing (the header, the probe, cc or a temporary directory).
+#       line; with CI or REQUIRE_INPUTS=yes a skip exits 1 instead)
+#       1 a check failed, or a required input was missing
+#       2 the test itself cannot run: the render header or the probe is
+#         missing, cc is not on PATH, or there is no temporary directory
 # Run: sh tests/render_uapi_layout_test.sh
 
 set -u
@@ -71,26 +75,30 @@ PROBE=$TESTSDIR/render_uapi_layout.c
 die2() { echo "render_uapi_layout_test: $*" >&2; exit 2; }
 [ -f "$HDR_DIR/nvidia-drm-render.h" ] || die2 "missing $HDR_DIR/nvidia-drm-render.h"
 [ -f "$PROBE" ] || die2 "missing $PROBE"
-# RENDER_UAPI_ALLOW_SKIP is accepted for callers that still set it; it is now a
-# no-op, because a skip is a skip and never changes the exit status.
-RENDER_UAPI_ALLOW_SKIP=${RENDER_UAPI_ALLOW_SKIP:-0}
+# RENDER_UAPI_ALLOW_SKIP is accepted for callers that still set it; it is a
+# no-op, because a skip is a skip and never changes the exit status.  It is
+# not read into a variable: nothing uses it.
 SKIPS=0
 SKIP_LABELS=
-skipped() { # label - record a check that could not run
+skipped() { # label remedy - record a check that could not run, and what
+	# would make it run
 	SKIPS=$((SKIPS + 1))
 	if [ -z "$SKIP_LABELS" ]; then
-		SKIP_LABELS=$1
+		SKIP_LABELS="$1 ($2)"
 	else
-		SKIP_LABELS="$SKIP_LABELS, $1"
+		SKIP_LABELS="$SKIP_LABELS, $1 ($2)"
 	fi
 }
 HAVE_SYS=1
 if [ -z "$SYSDIR" ] || [ ! -f "$SYSDIR/sys/ioccom.h" ] || [ ! -d "$SYSDIR/arm64/include" ]; then
 	HAVE_SYS=0
-	echo "SKIPPED: kernel compile (check 3): SYSDIR $SYSDIR is not a FreeBSD src/sys tree; set SYSDIR=/path/to/src/sys (no default)"
-	skipped "kernel compile"
+	# The remedy is written once and used in the SKIPPED line and in the
+	# PASS summary, so the two cannot tell the reader different things.
+	_sys_remedy="set SYSDIR to a FreeBSD src/sys tree"
+	echo "SKIPPED: kernel compile (check 3): SYSDIR $SYSDIR is not a FreeBSD src/sys tree ($_sys_remedy)"
+	skipped "kernel compile" "$_sys_remedy"
 fi
-command -v cc >/dev/null 2>&1 || die2 "cc not found"
+command -v cc >/dev/null 2>&1 || die2 "cc not found; install a C compiler (pkg install llvm) and make sure cc is on PATH"
 mkdir -p "$TMPDIR" || die2 "cannot create $TMPDIR"
 W=$(mktemp -d "$TMPDIR/render_uapi.XXXXXX") || die2 "mktemp failed"
 trap 'rm -rf "$W"' EXIT INT TERM
@@ -189,8 +197,24 @@ else
 fi
 
 # ---- 6. NVIDIA's own table --------------------------------------------------
-# pinned to the driver version this contract was written against
-NVH_PIN=${NVIDIA_IOCTL_H:-${WORK:+$WORK/sources/open-gpu-kernel-modules-580.178.04/kernel-open/nvidia-drm/nvidia-drm-ioctl.h}}
+# The NVIDIA header is looked for under the work root the caller named.
+# NVIDIA_IOCTL_H names it instead when it names a file that exists: the
+# caller asked for that header.  When it names no file the skip says which
+# path is wrong, because fetching the sources would not repair a path the
+# caller chose.  The remedy is written once and used both in the SKIPPED
+# line and in the PASS summary, so the two cannot disagree.
+NVH_REMEDY=
+if [ -n "${NVIDIA_IOCTL_H:-}" ]; then
+	if [ -f "$NVIDIA_IOCTL_H" ]; then
+		NVH_PIN=$NVIDIA_IOCTL_H
+	else
+		NVH_PIN=
+		NVH_REMEDY="set NVIDIA_IOCTL_H to an existing header, or unset it to use the header under $WORK/sources"
+	fi
+else
+	NVH_PIN=$WORK/sources/open-gpu-kernel-modules-580.178.04/kernel-open/nvidia-drm/nvidia-drm-ioctl.h
+	NVH_REMEDY="run $REPO/scripts/fetch-sources.sh to fetch it into $WORK/sources"
+fi
 NVHS=
 [ -n "$NVH_PIN" ] && [ -f "$NVH_PIN" ] && NVHS=$NVH_PIN
 if [ -n "$NVHS" ]; then
@@ -211,12 +235,17 @@ if [ -n "$NVHS" ]; then
 		fi
 	done
 else
-	echo "SKIPPED: check 6: no NVIDIA nvidia-drm-ioctl.h under $WORK/sources (run scripts/fetch-sources.sh); the probe still asserts the NVR numbers are above 0x3f"
-	skipped "check 6"
+	if [ -n "${NVIDIA_IOCTL_H:-}" ]; then
+		echo "SKIPPED: check 6: NVIDIA_IOCTL_H names $NVIDIA_IOCTL_H, which is not there ($NVH_REMEDY); the probe still asserts the NVR numbers are above 0x3f"
+	else
+		echo "SKIPPED: check 6: no NVIDIA nvidia-drm-ioctl.h under $WORK/sources ($NVH_REMEDY); the probe still asserts the NVR numbers are above 0x3f"
+	fi
+	skipped "check 6" "$NVH_REMEDY"
 fi
 if [ "$HAVE_CXX" -eq 0 ]; then
-	echo "SKIPPED: C++17 self-contained check (check 4): no c++ on PATH"
-	skipped "C++17 self-contained"
+	_cxx_remedy="install a c++ compiler (pkg install llvm)"
+	echo "SKIPPED: C++17 self-contained check (check 4): no c++ on PATH ($_cxx_remedy)"
+	skipped "C++17 self-contained" "$_cxx_remedy"
 fi
 
 # ---- 7. the test can fail ---------------------------------------------------
@@ -283,7 +312,7 @@ if [ "$FAILS" -eq 0 ]; then
 	if [ "$SKIPS" -gt 0 ]; then
 		_skipword=checks
 		[ "$SKIPS" -eq 1 ] && _skipword=check
-		echo "render_uapi_layout_test: PASS ($SKIPS $_skipword SKIPPED: $SKIP_LABELS; set SYSDIR and run scripts/fetch-sources.sh to run them, or REQUIRE_INPUTS=yes to fail on a skip)"
+		echo "render_uapi_layout_test: PASS ($SKIPS $_skipword SKIPPED: $SKIP_LABELS; REQUIRE_INPUTS=yes makes a skip a failure)"
 		exit 0
 	fi
 	echo "render_uapi_layout_test: PASS"
