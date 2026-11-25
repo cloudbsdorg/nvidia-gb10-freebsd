@@ -1,0 +1,157 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 23, 2026
+.Dt CUDA-OBJDUMP 1
+.Os
+.Sh NAME
+.Nm cuda-objdump
+.Nd list the members of a cuda-native fatbin container
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json | Fl -jsonl
+.Ar file
+.Nm
+.Fl -extract
+.Ar index output
+.Ar file
+.Nm
+.Fl -schema
+.Nm
+.Fl -version
+.Op Fl -json
+.Sh DESCRIPTION
+.Nm
+lists the members of a cuda-native fatbin container.
+The container is LLVM's
+.Em OffloadBinary
+format, version 2; see
+.Xr nvfatbin 5 .
+.Pp
+.Ar file
+is either the container itself or an ELF object or executable that carries
+one in its
+.Pa .nv_fatbin
+section, which is where clang puts it.
+When the file is an ELF object, the container is read from that section.
+.Pp
+Without an output option
+.Nm
+prints one line per member:
+.Bd -literal -offset indent
+file.fatbin: container, container version 2, 2 members
+[0] ptx arch=sm_120 format=ptx size=78 sha256=HASH sha256_ok=yes
+[1] ptx arch=sm_121a format=ptx size=80 sha256=HASH sha256_ok=yes
+.Ed
+.Pp
+A member whose container carries no
+.Dv cloudbsd.format
+or
+.Dv cloudbsd.sha256
+key shows a dash for that field.
+.Pp
+.Fl -json
+prints one JSON document that holds every member.
+.Fl -jsonl
+prints a header line and then one line per member, and flushes every line
+as it is written, so a reader that stops early ends the program cleanly.
+.Pp
+Only one output mode may be given.
+.Nm
+refuses
+.Fl -json
+and
+.Fl -jsonl
+together, refuses
+.Fl -extract
+with either of them, and refuses a second
+.Fl -extract ;
+each refusal names the options that cannot be combined, and the exit status
+is 2.
+.Pp
+The path and the metadata of the members come from outside the tool.
+The text output shows every control byte as a
+.Ql \exNN
+escape, so no raw control byte reaches the terminal and one member stays
+one line.
+The JSON output writes every byte that is not a UTF-8 character as the
+replacement character, so the document is always valid UTF-8 JSON.
+.Pp
+A file that cannot be read says why: it is not there, the permission is
+refused, the input is a directory, the input is empty, the read failed, or
+the host is out of memory.
+.Pp
+The JSON output validates against
+.Pa share/cuda-native/schema/cuda-objdump-1.schema.json ,
+which
+.Nm
+also prints with
+.Fl -schema .
+.Pp
+.Fl -extract
+.Ar index output
+writes the image of member
+.Ar index
+to the file
+.Ar output
+and prints nothing.
+.Pp
+.Fl 64
+and
+.Fl g
+are not accepted; the tool has no options of its own beyond those above.
+.Sh OPTIONS
+.Bl -tag -width "--extract index output"
+.It Fl -json
+Print one JSON document instead of text.
+.It Fl -jsonl
+Print a header line and one line per member.
+.It Fl -extract Ar index output
+Write the image of member
+.Ar index
+to
+.Ar output .
+.Ar index
+is a non-negative decimal number, and anything else is a usage problem.
+For a number that names no member the diagnostic says which indexes the
+container has.
+.It Fl -schema
+Print the JSON schema of this tool's output.
+.It Fl -version
+Print the version of the tool.
+With
+.Fl -json
+it prints one JSON object.
+.It Fl h , Fl -help
+Print usage.
+.El
+.Sh EXIT STATUS
+.Ex -std
+In detail, exit status 0 means the container was read, 2 reports a usage
+problem and 1 reports a file that is not a readable container, a container
+that fails a check, or an output that cannot be written.
+.Sh EXAMPLES
+List the members of a container:
+.Bd -literal -offset indent
+cuda-objdump kernel.fatbin
+.Ed
+.Pp
+Print one JSON document and take the first member out of it:
+.Bd -literal -offset indent
+cuda-objdump --json kernel.fatbin
+cuda-objdump --extract 0 kernel.ptx kernel.fatbin
+.Ed
+.Pp
+List the container clang put in an object file:
+.Bd -literal -offset indent
+cuda-objdump kernel.o
+.Ed
+.Sh SEE ALSO
+.Xr nvfatbin 1 ,
+.Xr nvptxas 1 ,
+.Xr libcudart-stub 3 ,
+.Xr nvfatbin 5 ,
+.Xr cuda-native-toolchain 7
+.Sh CAVEATS
+The tool reads a cuda-native container only.
+It never reads an NVIDIA fatbinary, and it does not execute or assemble any
+device code.

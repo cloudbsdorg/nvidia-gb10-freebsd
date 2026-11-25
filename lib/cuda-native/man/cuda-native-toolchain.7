@@ -57,11 +57,13 @@ the executable
 .Nm nvptxas
 and
 .Nm nvfatbin
-stubs, also installed as
+programs, also installed as
 .Nm ptxas
 and
 .Nm fatbinary
-for clang.
+for clang, and
+.Nm cuda-objdump ,
+which lists the members of a fatbin container.
 .It Pa lib64/
 the non-executing
 .Pa libcudart.so.13
@@ -201,9 +203,11 @@ sh lib/cuda-native/mksdk.sh obj/cuda-native
 .Ed
 .Sh SEE ALSO
 .Xr clang 1 ,
+.Xr cuda-objdump 1 ,
 .Xr nvfatbin 1 ,
 .Xr nvptxas 1 ,
-.Xr libcudart-stub 3
+.Xr libcudart-stub 3 ,
+.Xr nvfatbin 5
 .Sh HISTORY
 The SDK tree first appeared in the native CUDA work on Track #2380, stage C1.1
 .Pq Track #2425 .

@@ -17,20 +17,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "../fatbin/cnfatbin.h"
+
 #define CUDA_NATIVE_SUCCESS 0
 #define CUDA_NATIVE_ERROR_NOT_SUPPORTED 801
 #define CUDA_NATIVE_FATBIN_WRAPPER_MAGIC 0x466243b1
-#define CUDA_NATIVE_FATBIN_MAGIC "CUDA-NATIVE-STUB-FATBIN 1\n"
-#define CUDA_NATIVE_MEMBER_PREFIX "member kind="
-#define CUDA_NATIVE_FATBIN_HEADER_LIMIT (64 * 1024)
-#define CUDA_NATIVE_FATBIN_MEMBER_LIMIT 64
-
-enum fatbin_header_result {
-	FATBIN_HEADER_OK = 0,
-	FATBIN_HEADER_MALFORMED = -1,
-	FATBIN_HEADER_TOO_MANY = -2,
-	FATBIN_HEADER_TOO_LONG = -3
-};
 
 struct cuda_native_dim3 {
 	unsigned int x, y, z;
@@ -216,121 +207,6 @@ fatbin_allocation_failure(const char *reason)
 	return NULL;
 }
 
-static int
-consume_digits(const char **cursor, const char *end)
-{
-	const char *start = *cursor;
-
-	/* Time: O(digits).  Space: O(1). */
-	while (*cursor < end && **cursor >= '0' && **cursor <= '9')
-		(*cursor)++;
-	return *cursor == start ? -1 : 0;
-}
-
-static int
-consume_literal(const char **cursor, const char *end, const char *literal,
-    size_t length)
-{
-	if ((size_t)(end - *cursor) < length ||
-	    memcmp(*cursor, literal, length) != 0)
-		return -1;
-	*cursor += length;
-	return 0;
-}
-
-static int
-consume_member_kind(const char **cursor, const char *end)
-{
-	if (consume_literal(cursor, end, "elf", 3) != 0 &&
-	    consume_literal(cursor, end, "ptx", 3) != 0)
-		return -1;
-	return 0;
-}
-
-static int
-valid_sha256(const char *p, const char *end)
-{
-	if ((size_t)(end - p) != 64)
-		return 0;
-	/* Time: O(hash length).  Space: O(1). */
-	while (p < end) {
-		if ((*p < '0' || *p > '9') && (*p < 'a' || *p > 'f'))
-			return 0;
-		p++;
-	}
-	return 1;
-}
-
-static int
-valid_member_line(const char *line, size_t length)
-{
-	const char *p = line;
-	const char *end;
-
-	if (length == 0 || line[length - 1] != '\n')
-		return 0;
-	end = line + length - 1;
-	if (consume_literal(&p, end, CUDA_NATIVE_MEMBER_PREFIX,
-	    sizeof(CUDA_NATIVE_MEMBER_PREFIX) - 1) != 0)
-		return 0;
-	if (consume_member_kind(&p, end) != 0)
-		return 0;
-	if (consume_literal(&p, end, " sm=", 4) != 0)
-		return 0;
-	if (consume_digits(&p, end) != 0)
-		return 0;
-	if (consume_literal(&p, end, " size=", 6) != 0)
-		return 0;
-	if (consume_digits(&p, end) != 0)
-		return 0;
-	if (consume_literal(&p, end, " sha256=", 8) != 0)
-		return 0;
-	return valid_sha256(p, end);
-}
-
-/* The generated fatbin has a bounded header followed by opaque bytes. */
-static enum fatbin_header_result
-count_fatbin_members(const char *data, size_t *member_count)
-{
-	const char *line = data + sizeof(CUDA_NATIVE_FATBIN_MAGIC) - 1;
-	size_t used = sizeof(CUDA_NATIVE_FATBIN_MAGIC) - 1;
-	size_t count = 0;
-
-	/* Time: O(header bytes), capped at 64 KiB.  Space: O(1). */
-	for (;;) {
-		const char *newline;
-		size_t avail, length, offset;
-
-		if (used >= CUDA_NATIVE_FATBIN_HEADER_LIMIT)
-			return FATBIN_HEADER_TOO_LONG;
-		avail = CUDA_NATIVE_FATBIN_HEADER_LIMIT - used;
-		/* Stop at the line's newline, or refuse a NUL, without reading
-		 * beyond the bytes remaining before the header limit. */
-		/* Time: O(remaining header bytes).  Space: O(1). */
-		for (offset = 0; offset < avail; offset++) {
-			if (line[offset] == '\0')
-				return FATBIN_HEADER_MALFORMED;
-			if (line[offset] == '\n')
-				break;
-		}
-		if (offset == avail)
-			return FATBIN_HEADER_TOO_LONG;
-		newline = line + offset;
-		length = offset + 1;
-		if (length == 4 && memcmp(line, "---\n", 4) == 0) {
-			*member_count = count;
-			return FATBIN_HEADER_OK;
-		}
-		if (count >= CUDA_NATIVE_FATBIN_MEMBER_LIMIT)
-			return FATBIN_HEADER_TOO_MANY;
-		if (!valid_member_line(line, length))
-			return FATBIN_HEADER_MALFORMED;
-		count++;
-		used += length;
-		line = newline + 1;
-	}
-}
-
 static struct cuda_native_fatbin_record *
 record_from_handle(void **handle)
 {
@@ -383,32 +259,47 @@ __cudaRegisterFatBinary(void *wrapper_pointer)
 {
 	struct cuda_native_fatbin_wrapper *wrapper = wrapper_pointer;
 	struct cuda_native_fatbin_record *record;
-	const char *data;
-	size_t members;
+	struct cnfatbin_container container;
+	const uint8_t *data;
+	uint64_t size = 0;
+	size_t bound;
+	enum cnfatbin_error err;
 
 	if (wrapper == NULL || wrapper->magic != CUDA_NATIVE_FATBIN_WRAPPER_MAGIC)
 		return invalid_fatbin("invalid fatbin wrapper magic");
 	if (wrapper->data == NULL)
 		return invalid_fatbin("fatbin data is null");
 	data = wrapper->data;
-	if (memcmp(data, CUDA_NATIVE_FATBIN_MAGIC,
-	    sizeof(CUDA_NATIVE_FATBIN_MAGIC) - 1) != 0)
+	/* The container carries its own length, but a length is not a bound:
+	 * the bytes the pointer names may be shorter than the container claims.
+	 * The bound comes from the object that holds the pointer: the PT_LOAD
+	 * segment that contains it ends where its readable bytes end, and no
+	 * read may pass that end. */
+	bound = cnfatbin_bound(data);
+	if (bound == 0)
+		return invalid_fatbin("cuda-native fatbin data is not inside a "
+		    "loaded object");
+	if (bound < CNFATBIN_HEADER_SIZE)
+		return invalid_fatbin("cuda-native fatbin is shorter than its header");
+	err = cnfatbin_peek_size(data, bound, &size);
+	if (err != CNFATBIN_OK)
 		return invalid_fatbin("invalid cuda-native fatbin data magic");
-	switch (count_fatbin_members(data, &members)) {
-	case FATBIN_HEADER_TOO_MANY:
-		return invalid_fatbin("too many members in cuda-native fatbin");
-	case FATBIN_HEADER_TOO_LONG:
-		return invalid_fatbin("cuda-native fatbin header exceeds 64 KiB");
-	case FATBIN_HEADER_OK:
-		break;
-	case FATBIN_HEADER_MALFORMED:
-	default:
-		return invalid_fatbin("malformed cuda-native fatbin header");
-	}
+	if (size < CNFATBIN_HEADER_SIZE)
+		return invalid_fatbin("cuda-native fatbin is shorter than its header");
+	if (size > CNFATBIN_MAX_SIZE)
+		return invalid_fatbin("cuda-native fatbin is larger than the limit");
+	if (size > bound)
+		return invalid_fatbin(cnfatbin_strerror(CNFATBIN_E_SIZE_TOO_LARGE));
+	err = cnfatbin_open(data, (size_t)size, &container);
+	if (err != CNFATBIN_OK)
+		return invalid_fatbin(cnfatbin_strerror(err));
 	record = calloc(1, sizeof(*record));
-	if (record == NULL)
+	if (record == NULL) {
+		cnfatbin_close(&container);
 		return fatbin_allocation_failure("cannot allocate a fatbin registration");
-	trace_register_fatbin(members);
+	}
+	trace_register_fatbin(container.entries_count);
+	cnfatbin_close(&container);
 	return &record->handle;
 }
 

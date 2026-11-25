@@ -586,26 +586,70 @@ else
 fi
 check "README Installed says the root tool in the kldload line is the one you have" has 'root tool in that line is the one' "$S/installed"
 check "README Installed puts EnableGpuFirmware=1 with the load instructions" has 'hw.nvidia.registry.EnableGpuFirmware=1' "$S/installed"
+# The quoted output of a successful install is an excerpt: a successful run
+# prints its progress lines too, and the block must say so.
+check "README Installed marks its example output as an excerpt" has 'an excerpt' "$S/installed"
+# The load commands belong to a live install: a staged install has no driver
+# to load, and the README says not to run them there.
+check "README Installed scopes the load commands to a live install" has 'For a live install, load the driver now' "$S/installed"
+check "README Installed tells a staged install not to run the load commands" has 'Do not run the load commands' "$S/installed"
 grep -v '^next: ' "$readme" > "$S/readme-unquoted"
 check "README never hardcodes doas for kenv or kldload, in code or inline, outside the quoted output" no_match 'doas +(kenv|kldload)' "$S/readme-unquoted"
 
-# Blocked: every quoted line is a line make.sh printed in the test run.
+# Blocked: every quoted line is a line make.sh printed in the test run.  The
+# settings that change where the install goes (the DESTDIR of the planted run)
+# are in the fix line of that run, so they are taken out before the
+# comparison: the README quotes the fix of a plain install.
+sed "s/ DESTDIR='[^']*'//g; s/ PREFIX='[^']*'//g" "$S/samples/blocked.out" 2>/dev/null > "$S/blocked.plain"
 awk '/^```text$/ { i = 1; next } /^```$/ { i = 0 } i' "$S/blocked" > "$S/blocked-lines"
 [ -s "$S/blocked-lines" ] || bad "README Blocked quotes no output"
 while IFS= read -r bl; do
 	[ -n "$bl" ] || continue
-	if grep -qxF -- "$bl" "$S/samples/blocked.out" 2>/dev/null; then
+	if grep -qxF -- "$bl" "$S/blocked.plain" 2>/dev/null; then
 		ok "Blocked line is what make.sh printed: $bl"
 	else
 		bad "Blocked line is not what make.sh printed: $bl"
 	fi
 done < "$S/blocked-lines"
+# The run's own fix line keeps the settings that change where it installs.
+if grep -q "fix: make install DESTDIR='[^']*' ACCEPT_NVIDIA_LICENSE=1" "$S/samples/blocked.out" 2>/dev/null; then
+	ok "the licence fix of the run keeps the DESTDIR it was given"
+else
+	bad "the licence fix of the run does not keep its DESTDIR: $(grep '^fix:' "$S/samples/blocked.out" 2>/dev/null | tr '\n' ' ')"
+fi
 check "README Blocked says what a blocked install writes and leaves" has 'stay installed' "$S/blocked"
 check "README never calls a sample real output" no_match '[Rr]eal ([Ee]nglish )?[Oo]utput' "$readme"
 check "README labels the samples as example output from make.sh" has 'Example output (from `scripts/make.sh`' "$readme"
+check "README does not call the example a planted install" no_match 'planted install' "$readme"
 check "README says JSON=1 output is on stdout and make adds its own lines" has "BSD make's own error lines are mixed in" "$readme"
 check "README Blocked says the setting works on make install" has 'make install ACCEPT_NVIDIA_LICENSE=1' "$S/blocked"
+check "README Blocked says the fix keeps the settings that change where the install goes" has 'keeps the settings that' "$S/blocked"
+# The promise of one pasteable command is the licence fix's: the other
+# blockers name their fix in words, because each has more than one way.
+check "README Blocked promises one command for the licence fix only" has 'fix:` line of the licence blocker' "$S/blocked"
+check "README Blocked does not promise one command for every blocker" no_match 'fix:` line for each blocker' "$S/blocked"
+# The blocked example must not be a line the reader has to scroll sideways
+# to read: every quoted line of it fits a narrow screen.
+_long=$(awk '/^```text$/ { i = 1; next } /^```$/ { i = 0 } i { if (length($0) > 80) print length($0) ": " $0 }' "$S/blocked")
+if [ -z "$_long" ]; then
+	ok "no quoted line of the blocked example is wider than 80 columns"
+else
+	bad "the blocked example has a wide line: $(printf '%s' "$_long" | head -n 1 | cut -c1-90)"
+fi
+# The explanation of the blocker is prose now, and it still names the two
+# other ways to accept the licence.
+check "README Blocked names the other ways to accept the licence" has 'ACCEPT_ALL_LICENSES=1' "$S/blocked"
+check "README Blocked names the terminal way to accept the licence" has 'answer the licence' "$S/blocked"
 check "README names 15.1-RELEASE with 16.0-CURRENT" has '15.1-RELEASE' "$S/install"
+# One sentence for preflight, not two: the paragraph that tells the reader
+# what to follow after a blocker says what preflight shows, once.
+awk '/^Follow the `fix:` line/{p=1;next} p&&/^$/{exit} p{print}' "$S/blocked" > "$S/blocked-follow"
+_pf=$(grep -c 'make preflight' "$S/blocked-follow")
+if [ "$_pf" = 1 ]; then
+	ok "README Blocked says what preflight shows in one sentence"
+else
+	bad "README Blocked mentions make preflight $_pf times in the paragraph after the example, not once"
+fi
 
 # Status wording: not-yet-verified statuses stay not-yet-verified.
 # Vulkan has one status in the README: not verified, waiting for a test boot.

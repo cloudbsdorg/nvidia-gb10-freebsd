@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:cuda-native:schema:cuda-objdump/1",
+  "title": "cuda-objdump JSON output, version 1",
+  "description": "The JSON that cuda-objdump writes: one document for --json, a header line and one line per member for --jsonl, and the version object for --version --json. Every object names its schema. The member fields format and sha256 are absent when the container carries no cloudbsd.format or cloudbsd.sha256 key for that member, which is the case for a container written by LLVM's own clang-offload-packager.",
+  "oneOf": [
+    { "$ref": "#/$defs/document" },
+    { "$ref": "#/$defs/header" },
+    { "$ref": "#/$defs/member" },
+    { "$ref": "#/$defs/version" }
+  ],
+  "$defs": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "tool", "file", "source", "container_version", "members"],
+      "properties": {
+        "schema": { "const": "cuda-objdump/1" },
+        "tool": { "const": "cuda-objdump" },
+        "file": { "type": "string" },
+        "source": { "enum": ["container", "section"] },
+        "container_version": { "type": "integer", "minimum": 1 },
+        "members": {
+          "type": "array",
+          "minItems": 0,
+          "items": { "$ref": "#/$defs/member" }
+        }
+      }
+    },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "tool", "file", "source", "container_version", "members"],
+      "properties": {
+        "schema": { "const": "cuda-objdump/1" },
+        "tool": { "const": "cuda-objdump" },
+        "file": { "type": "string" },
+        "source": { "enum": ["container", "section"] },
+        "container_version": { "type": "integer", "minimum": 1 },
+        "members": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "index", "kind", "arch", "size"],
+      "properties": {
+        "schema": { "const": "cuda-objdump/1" },
+        "index": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["ptx", "cubin", "none"] },
+        "arch": { "type": "string" },
+        "triple": { "type": "string" },
+        "format": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "tool", "version", "version_major", "version_minor", "version_patch"],
+      "properties": {
+        "schema": { "const": "cuda-objdump/1" },
+        "tool": { "const": "cuda-objdump" },
+        "version": { "type": "string" },
+        "version_major": { "type": "integer", "minimum": 0 },
+        "version_minor": { "type": "integer", "minimum": 0 },
+        "version_patch": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

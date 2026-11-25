@@ -756,6 +756,53 @@ Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
 - linux_bridge_test on a built tree (tests/linux_bridge_test.sh work/build/tree): 105 passed, 1 failed after; on cbe6ca3 104 passed, 3 failed. The two that went are check (g), the fresh-archive fuzz 0 apply of every patch ("does not apply with fuzz 0" and "a .rej file was left behind"). The one left is check (i), man/nvidia.4 line 272 `.Xr nvidia-smi 1` (mandoc STYLE "referenced manual not found"), which fails the same way on cbe6ca3.
 - Full suite (every tests/*_test.sh), here and on a cbe6ca3 baseline worktree, same build: the same tests fail on both, with identical FAIL lines. fw_depend and open_dev_failure fail on the nvidia.4 lint above; make_contract on two nvrm man3 links missing from expected.manifest; make_install_flow on a personal path in tests/version_sysctl_test.sh line 15; render_uapi_layout exits 2 on a skipped check. With the default tree argument, linux_bridge_test also reports the tree-2363 module files as missing (no tree-2363 is built here).
 
+## C1.3 (#2427) 2026-11-23T00:38Z slice 1 started on main 999b186
+Brief ~/work/gb10/briefs/2427-c1.3-s1-fatbin-container.md on opencode MiniMax (state tmp/round).
+
+## C1.3 (#2427) 2026-11-23T01:00Z checkpoint for the amp001 test boot
+Round stopped about 20 minutes in; snapshot ~/work/gb10/cuda-mgr/snap-20261123T0100Z. Resumed after the boot with ~/work/gb10/briefs/2427-c1.3-s1b-resume.md.
+
+## C1.3 (#2427) 2026-11-23T02:40Z slice 1 round done (MiniMax, resumed run)
+- cnfatbin reader and writer: the LLVM OffloadBinary v2 layout plus our cloudbsd.* keys.
+- nvfatbin and fatbinary, now in C.
+- cuda-objdump: text, --json, --jsonl, --extract and --schema; it also reads .nv_fatbin from ELF files.
+- The runtime stub reads the container.
+- Man pages nvfatbin(5) and cuda-objdump(1).
+Oracles:
+- llvm-objdump --offloading reads our container.
+- Our reader reads clang-offload-packager output, so image kind none is accepted.
+Tests: fatbin 65/65, toolchain 243/243; the mutant goes red.
+Manager review: the bounds checks in cnfatbin_open and read_member are sound.
+DEBT: clang's wrapper gives no length, so the runtime stub takes the container length from its own header (capped at 16 MiB).
+Next: gate round 1.
+
+## C1.3 (#2427) 2026-11-23T03:40Z scanner pass done (MiniMax): functions split, shared cntool.c/h for both tools, test oracle messages literal. lizard and cpd clean. fatbin 67/67, toolchain 243/243. Next: gate round 1.
+
+## C1.3 (#2427) 2026-11-23T03:45Z PAUSED (Claude quota)
+Slice 1 gate round 1 was started then STOPPED at 03:45Z under Mark's low-Claude-quota rule: Kimi is out of quota, so the gate voices would fall through to claude-opus. Staged work is intact; resume = review-and-record when a non-Claude voice chain answers (probe again after about 05:45Z).
+
+## C1.3 (#2427) 2026-11-23T07:12Z PAUSED 07:12Z: MiniMax Token Plan usage limit reached (about 07:05Z). The running passes were stopped with partial edits on disk. Resume after the next 5-hour window (about 10:01Z). Pass A (brief 2427-c1.3-s1e-A.md) got partway; then run B and C.
+
+## C1.3 (#2427) 2026-11-23T07:59Z PARKED 07:59Z for the amp001 drive swap. Nothing of the manager is running. Snapshot of the uncommitted work: ~/work/gb10/cuda-mgr/snap-20261123T0715Z (also on zroot; the cloudbsd pool is not writable for this user). Resume: probe MiniMax; if it answers, rerun the pass named in the previous entry.
+
+## C1.3 (#2427) 2026-11-24T05:40Z pass 3A done (runtime stub bound)
+Gate round 1 finding on the runtime stub trusting the header's own length (quality.10, security.1, falsification.3, the lengthless-peek half of quality.9): the stub now bounds every read by the loaded object that holds the pointer, found with dl_iterate_phdr(3) and the PT_LOAD segment end, capped at 16 MiB. A pointer in no loaded object is refused; a registered mapping is the fallback for it and never widens a bound a loaded object gives.
+Fixtures: the reviewer's 100-byte header claiming 1 MiB just before a PROT_NONE page, the 32-byte header claiming 16 MiB with one entry, eight bytes before a guard page, and a container in an unregistered mapping. A mutant whose stub takes the cap for its bound reads out of bounds and dies on SIGSEGV, so the fixture has teeth.
+Also repaired the earlier run's half-finished error-table refactor: it left the old error_names[] beside the new error_table[] and the tree did not compile under -Werror.
+DEBT closed: the wrapper still gives no length, but the stub no longer needs one.
+Tests: fatbin 67/67, toolchain 249/249. lizard, cpd and mandoc clean. Not committed.
+Next: the remaining gate round 1 findings (UTF-8 JSON, -emit-llvm, kind none, overlong values, overlapping ranges, trace arch, one error table/magic check/file reader, one crafting implementation, the writer's caps).
+
+## C1.3 (#2427) 2026-11-24T07:45Z pass 3B done (reader values and output)
+Gate round 1 findings on values and output: the JSON escaper validates UTF-8 and writes every byte that is not a character as the replacement character, so the document always parses; the text output shows every control byte as a \xNN escape, so one member stays one line and no raw control byte reaches the terminal. The reader measures a value before it copies it: a value of a key we know that does not fit the field is refused with value-too-long, a digest is exactly 64 hexadecimal digits or it is sha256-format, and a key we do not know is ignored however long its value is. Two members that name the same image range ask for more hashing than the container's size allows, and the container is refused with hash-budget before any digest is computed. The writer refuses what the reader or the stub refuses: no members, too many members, and a container larger than 16 MiB. One file reader in cntool.c keeps the cause of a failed read (no such file, permission denied, a directory, an empty file, a failed read, no memory), and cuda-objdump refuses the output modes that cannot be combined and parses the member index strictly.
+The C reader test now writes the containers it breaks, and the shell test drives the tools over them, so the new cases have one crafting place.
+Tests: fatbin 94/94, toolchain 249/249. lizard, cpd and mandoc clean. Not committed.
+Next: the remaining gate round 1 findings (-emit-llvm, kind none, the trace arch, one magic check, the alignment wording, the rest of quality.6).
+
+## C1.3 (#2427) 2026-11-24T08:20Z pass 3C done (docs, tables, tests)
+The rest of gate round 1. The -emit-llvm compile now runs against the real fatbinary and is asserted to fail with "not a cuda-native cubin"; the limitation is in nvfatbin(1) CAVEATS and README.md. The error table is one table of name and message pairs with a build time check, and the shell test proves it. The magic is checked in one helper and one reader reads a whole file; the shell test proves both. The C reader test writes every broken container it builds and the shell test drives cuda-objdump over those files, so the Python crafting block is gone. The trace records the architecture of every image ("arch":"sm_121a") and the trace schema carries it as an additive, optional field. nvfatbin(5) says which offsets are 8-byte aligned and that the keys and values are packed, and it says that an image kind and an offload kind of none are accepted, as the reader does. The offload diagnostic is now "a member has an unsupported offload kind". nvfatbin(1) says that a failed trace write leaves the container in place. The fatbinary alias names itself the way it was invoked, in its usage and in its diagnostics, while the JSON and the trace keep the canonical name nvfatbin. The dead digest field sha256_ok is gone from the reader, the tools, the schema and the tests.
+Tests: fatbin 112/112, toolchain 252/252. lizard empty, scan-cpd CLEAN, mandoc clean. Not committed.
+Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries the merged answers); the work is ready for the commit gate.
 ## 2026-11-23T00:55Z #2455 checkpoint for an amp001 test boot
 - Committed and pushed: b413557 (design, gate rounds ff8d06fb and 6ef863ea), 9e9925e (merge of main 999b186, overlap gate 963bb2f3).
 - Suite stopped for the queued test boot: the merged branch and a 999b186 baseline (wt-2455-base) had 25 ok each, and the same four failures each (abi_layout, firmware, kmod_symbols, linux_bridge: modules not built in the prepared tree).

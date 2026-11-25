@@ -1,0 +1,247 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 23, 2026
+.Dt NVFATBIN 5
+.Os
+.Sh NAME
+.Nm nvfatbin
+.Nd the cuda-native fatbin container
+.Sh DESCRIPTION
+The cuda-native fatbin container holds the device images clang collects for
+one CUDA compilation.
+It is LLVM's
+.Em OffloadBinary
+format, version 2: the layout documented in LLVM's
+.Pa llvm/Object/OffloadBinary.h .
+No NVIDIA fatbin, cubin or ELF format is read, parsed or imitated.
+.Pp
+The container is a header, one entry per member, one string table per entry
+and the member images themselves.
+Every field is little-endian and every offset is an absolute byte offset from
+the start of the container.
+The header, the entries table, each entry's string table and each image start
+at an 8-byte aligned offset.
+The keys and the values inside the string blob are packed one after another
+and are not aligned: their offsets are exact byte offsets, and a reader must
+use them as they are.
+.Pp
+The header is 32 bytes long:
+.Bl -tag -width "entries_offset" -compact
+.It Dv offset
+.It Dv size
+.It Dv field
+.It 0
+.It 4
+.It Va magic
+the four bytes
+.Ql 10 FF 10 AD .
+.It 4
+.It 4
+.It Va version
+the container version, 2 .
+.It 8
+.It 8
+.It Va size
+the length of the whole container in bytes, including the padding at its end.
+.It 16
+.It 8
+.It Va entries_offset
+the offset of the first entry, always 32 .
+.It 24
+.It 8
+.It Va entries_count
+the number of entries.
+.El
+.Pp
+Each entry is 40 bytes long:
+.Bl -tag -width "num_strings" -compact
+.It Dv offset
+.It Dv size
+.It Dv field
+.It 0
+.It 2
+.It Va image_kind
+5 for PTX, 3 for a cubin and 0 for none .
+.It 2
+.It 2
+.It Va offload_kind
+2 for CUDA and 0 for none .
+.It 4
+.It 4
+.It Va flags
+0 .
+.It 8
+.It 8
+.It Va string_offset
+the offset of the entry's string table.
+.It 16
+.It 8
+.It Va num_strings
+the number of strings in the table.
+.It 24
+.It 8
+.It Va image_offset
+the offset of the member's image.
+.It 32
+.It 8
+.It Va image_size
+the length of the member's image in bytes.
+.El
+.Pp
+A string table holds
+.Va num_strings
+records of 24 bytes each:
+.Bl -tag -width "value_size" -compact
+.It Dv offset
+.It Dv size
+.It Dv field
+.It 0
+.It 8
+.It Va key_offset
+the offset of the NUL-terminated key.
+.It 8
+.It 8
+.It Va value_offset
+the offset of the value.
+.It 16
+.It 8
+.It Va value_size
+the length of the value in bytes.
+.El
+.Pp
+A key is a NUL-terminated string.
+A value is a byte range; the byte after it is normally a NUL.
+.Pp
+A value of a key the reader knows must fit the field it belongs to:
+.Dv triple
+is at most 63 bytes,
+.Dv arch
+and
+.Dv cloudbsd.format
+are at most 31 bytes each, and
+.Dv cloudbsd.sha256
+is exactly 64 hexadecimal digits.
+A value that does not fit is refused with its own error, and it is never
+truncated.
+.Pp
+A key the reader does not know is ignored, and its value may be as long as
+it likes, so an additive key from another writer does not change the
+container.
+.Pp
+Every member carries these strings:
+.Bl -tag -width "cloudbsd.format" -compact
+.It Dv triple
+.Pa nvptx64-nvidia-cuda .
+.It Dv arch
+the architecture, for example
+.Pa sm_120
+or
+.Pa sm_121a .
+.It Dv cloudbsd.format
+.Pa ptx
+for a PTX member and
+.Pa nvcubin/1
+for a cubin member.
+.It Dv cloudbsd.sha256
+the hexadecimal SHA-256 of the member's image.
+.El
+.Pp
+A container written by LLVM's own
+.Xr clang-offload-packager 1
+has no
+.Dv cloudbsd.*
+keys.
+A reader accepts such a container and reports those fields as absent.
+.Pp
+An image kind of
+.Dv none
+and an offload kind of
+.Dv none
+mean that the writer did not name the kind of the image or the producer of
+the member.
+LLVM's own packager writes them, so a reader accepts them; every other kind is
+refused.
+.Sh VERSIONING
+The container version stays 2 as long as the layout stays the same.
+New keys may be added: a reader ignores a key it does not know, so an
+additive key does not change the version.
+A change to the layout itself is a new
+.Dv cloudbsd.format
+value, not a new version number.
+.Sh CHECKS
+A reader must refuse a container, with a distinct error for each case, when
+any of the following holds:
+.Bl -bullet -compact
+.It
+the input is shorter than the header;
+.It
+the magic is not
+.Ql 10 FF 10 AD ;
+.It
+the version is not one it knows;
+.It
+the size in the header is larger than the input it was given;
+.It
+the entries table lies outside the container, or the entry count is above
+4096;
+.It
+an image offset and size overflow, or leave the container;
+.It
+a string offset leaves the container, or a string value is not NUL
+terminated;
+.It
+a value of a key the reader knows is longer than the field it belongs to;
+.It
+an image kind is neither PTX, nor a cubin, nor none;
+.It
+an offload kind is neither CUDA nor none;
+.It
+a
+.Dv cloudbsd.sha256
+is not 64 hexadecimal digits, or does not match the image;
+.It
+the sum of the sizes of the images the container names is larger than the
+container itself.
+.El
+.Pp
+The sum of the sizes of the images a container names may not be larger than
+the container itself.
+Two members that name the same image range ask for twice the hashing work
+one image is worth, so a container that asks for more work than its size
+allows is refused before any digest is computed.
+.Pp
+The writer refuses to write a container that a reader or the runtime would
+refuse: a container with no members, one with more than 4096 members and
+one larger than 16 MiB are refused, each with its own error.
+.Pp
+A reader must never read past the end of the input it was given, and must
+check every offset and length for overflow before it adds them.
+.Pp
+A reader that is given a pointer without a length cannot take the length in
+the header for a bound: the bytes the pointer names may be shorter than the
+container claims.
+Such a reader bounds every read by the object that holds the pointer.
+It finds that object with
+.Xr dl_iterate_phdr 3 :
+the
+.Va PT_LOAD
+segment that contains the pointer ends where the readable bytes of that
+object end, and no read may pass that end.
+The bound is never more than 16 MiB.
+A pointer that is in no loaded object is refused.
+A program that holds a container in a mapping of its own, which is in no
+loaded object, registers that mapping with the reader, and the bound is then
+the end of the registered mapping.
+A registration never widens the bound of a pointer that a loaded object
+already bounds: the loaded object is the authority, and a registration only
+answers for a pointer that is in no loaded object at all.
+.Sh SEE ALSO
+.Xr cuda-objdump 1 ,
+.Xr nvptxas 1 ,
+.Xr libcudart-stub 3 ,
+.Xr cuda-native-toolchain 7
+.Sh CAVEATS
+The container is a cuda-native format built on LLVM's layout.
+It is not an NVIDIA fatbinary and no NVIDIA fatbinary tool reads it.
+The container carries device code; it neither assembles PTX nor makes device
+code executable.
