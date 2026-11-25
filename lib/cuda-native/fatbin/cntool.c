@@ -142,12 +142,46 @@ cntool_json_escape(FILE *stream, const char *s)
 }
 
 /*
- * Write one string as plain text, with every control byte and every byte
- * that is not a character shown as a \xNN escape, so that no raw control
- * byte reaches the terminal and one member is one line.
+ * Where the escaper writes what it produces.  One escaper serves the text
+ * output and the diagnostics, so the two cannot disagree about what a
+ * control byte looks like.
  */
-void
-cntool_write_text(FILE *stream, const char *s)
+typedef void (*cntool_sink)(void *context, const char *text, size_t length);
+
+/* Write to a stream. */
+static void
+sink_stream(void *context, const char *text, size_t length)
+{
+	fwrite(text, 1, length, (FILE *)context);
+}
+
+/* Write to a buffer, up to the room it has. */
+struct buffer_sink {
+	char *buffer;
+	size_t room;
+	size_t used;
+};
+
+static void
+sink_buffer(void *context, const char *text, size_t length)
+{
+	struct buffer_sink *sink = context;
+	size_t fit = sink->room > sink->used ? sink->room - sink->used : 0;
+
+	if (length > fit)
+		length = fit;
+	if (length > 0)
+		memcpy(sink->buffer + sink->used, text, length);
+	sink->used += length;
+}
+
+/*
+ * Escape one string: every control byte and every byte that is not a
+ * UTF-8 character is shown as a \xNN escape, so no raw control byte
+ * reaches the terminal and one member stays one line.
+ */
+static void
+escape_text(const char *s, cntool_sink sink, void *context)
 {
 	const unsigned char *p = (const unsigned char *)s;
 	size_t left = strlen(s);
@@ -155,45 +189,60 @@ cntool_write_text(FILE *stream, const char *s)
 	/* Time: O(string bytes).  Space: O(1). */
 	while (left > 0) {
 		size_t length = utf8_length(p, left);
+		char escape[5];
 
 		if (length == 0 || p[0] < 0x20 || p[0] == 0x7f) {
-			fprintf(stream, "\\x%02x", (unsigned int)p[0]);
+			snprintf(escape, sizeof(escape), "\\x%02x",
+			    (unsigned int)p[0]);
+			sink(context, escape, 4);
 			p++;
 			left--;
 			continue;
 		}
-		fwrite(p, 1, length, stream);
+		sink(context, (const char *)p, length);
 		p += length;
 		left -= length;
 	}
 }
 
 /*
- * The same escaping in a string of its own, for a diagnostic that has to
- * carry a path.  The caller frees it.  NULL when the host is out of memory.
+ * Write one string as plain text, with every control byte and every byte
+ * that is not a character shown as a \xNN escape, so that no raw control
+ * byte reaches the terminal and one member is one line.
+ */
+void
+cntool_write_text(FILE *stream, const char *s)
+{
+	escape_text(s, sink_stream, stream);
+}
+
+/*
+ * The same escaping in a string of the caller's, for a diagnostic that has
+ * to carry a path or an argument.  The buffer needs room for four bytes per
+ * byte of the string; when it is too small the string is cut short, and the
+ * diagnostic still shows no raw control byte.
  */
 char *
-cntool_escape_text(const char *s)
+cntool_escape_text(char *buffer, size_t buffer_size, const char *s)
 {
-	char *buffer = NULL;
-	size_t size = 0;
-	FILE *stream;
+	struct buffer_sink sink;
 
-	stream = open_memstream(&buffer, &size);
-	if (stream == NULL)
-		return NULL;
-	cntool_write_text(stream, s);
-	if (fclose(stream) != 0) {
-		free(buffer);
-		return NULL;
-	}
+	if (buffer == NULL || buffer_size == 0)
+		return buffer;
+	sink.buffer = buffer;
+	sink.room = buffer_size - 1;
+	sink.used = 0;
+	escape_text(s, sink_buffer, &sink);
+	buffer[sink.used] = '\0';
 	return buffer;
 }
 
 /* The cause of a failed read, in words. */
 const char *
-cntool_read_reason(enum cntool_read_result result)
+cntool_read_reason(enum cntool_read_result result, size_t limit)
 {
+	static char too_large[96];
+
 	switch (result) {
 	case CNTOOL_READ_OK:
 		return "the file was read";
@@ -205,6 +254,10 @@ cntool_read_reason(enum cntool_read_result result)
 		return "input is a directory";
 	case CNTOOL_READ_EMPTY:
 		return "input is empty";
+	case CNTOOL_READ_TOO_LARGE:
+		snprintf(too_large, sizeof(too_large),
+		    "the input is larger than the %zu byte limit", limit);
+		return too_large;
 	case CNTOOL_READ_FAILED:
 		return "read failed";
 	case CNTOOL_READ_NOMEM:
@@ -214,12 +267,14 @@ cntool_read_reason(enum cntool_read_result result)
 }
 
 /*
- * Read a whole file into memory.  The caller frees the buffer.  On failure
- * the buffer stays NULL and the reason says why, so the caller can tell a
- * missing file from a directory, an empty file and a failed read.
+ * Read a whole file into memory, up to the limit the caller gives.  The
+ * caller frees the buffer.  On failure the buffer stays NULL and the
+ * reason says why, so the caller can tell a missing file from a
+ * directory, an empty file and a failed read.  The size is checked before
+ * anything is allocated, so a file that is too large costs nothing.
  */
 enum cntool_read_result
-cntool_read_file(const char *path, uint8_t **data, size_t *size)
+cntool_read_file(const char *path, uint8_t **data, size_t *size, size_t limit)
 {
 	struct stat st;
 	uint8_t *buffer;
@@ -251,6 +306,12 @@ cntool_read_file(const char *path, uint8_t **data, size_t *size)
 	if (st.st_size == 0) {
 		close(fd);
 		return CNTOOL_READ_EMPTY;
+	}
+	/* The limit is checked before the buffer is allocated: a file that
+	 * is too large is refused without the host having to hold it. */
+	if ((uintmax_t)st.st_size > (uintmax_t)limit) {
+		close(fd);
+		return CNTOOL_READ_TOO_LARGE;
 	}
 	buffer = malloc((size_t)st.st_size);
 	if (buffer == NULL) {

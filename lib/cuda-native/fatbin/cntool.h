@@ -19,6 +19,21 @@
 #include <stdio.h>
 
 /*
+ * The room one escaped string needs in a diagnostic.  Every byte of the
+ * string becomes at most four bytes, so a path of PATH_MAX bytes and a
+ * command line argument of that size both fit.
+ */
+#define CNTOOL_ESCAPED_MAX 8192
+
+/*
+ * The largest file a tool reads.  A container is at most 16 MiB, but the
+ * file may also be an ELF object that carries one, and an object of a
+ * large CUDA translation unit is bigger than a container.  A file that is
+ * larger than this is refused before anything is allocated for it.
+ */
+#define CNTOOL_MAX_FILE_SIZE (256u * 1024u * 1024u)
+
+/*
  * Say what went wrong and stop: "tool: message" on stderr, then exit with
  * the given status.  The tool name is the one the user typed.
  */
@@ -43,10 +58,12 @@ void cntool_json_escape(FILE *stream, const char *s);
 void cntool_write_text(FILE *stream, const char *s);
 
 /*
- * The same escaping in a string of its own, for a diagnostic that has to
- * carry a path.  The caller frees it.  NULL when the host is out of memory.
+ * The same escaping in a string of the caller's, for a diagnostic that has
+ * to carry a path or an argument.  The buffer needs room for four bytes per
+ * byte of the string; when it is too small the string is cut short, and the
+ * diagnostic still shows no raw control byte.  Returns the buffer.
  */
-char *cntool_escape_text(const char *s);
+char *cntool_escape_text(char *buffer, size_t buffer_size, const char *s);
 
 /* Why a file could not be read.  Every cause has its own name. */
 enum cntool_read_result {
@@ -55,20 +72,27 @@ enum cntool_read_result {
 	CNTOOL_READ_PERM,	/* permission denied */
 	CNTOOL_READ_ISDIR,	/* it is a directory */
 	CNTOOL_READ_EMPTY,	/* it is empty */
+	CNTOOL_READ_TOO_LARGE,	/* it is larger than the limit */
 	CNTOOL_READ_FAILED,	/* the read failed */
 	CNTOOL_READ_NOMEM	/* the host is out of memory */
 };
 
-/* The cause of a failed read, in words. */
-const char *cntool_read_reason(enum cntool_read_result result);
+/*
+ * The cause of a failed read, in words.  The limit is the one the caller
+ * asked for: the message that names it says how large the input may be.
+ */
+const char *cntool_read_reason(enum cntool_read_result result, size_t limit);
 
 /*
- * Read a whole file into memory.  The caller frees the buffer.  On failure
- * the buffer stays NULL and the reason says why: the file is not there,
- * the permission is refused, the input is a directory, the input is empty,
- * the read failed, or the host is out of memory.
+ * Read a whole file into memory, up to the limit the caller gives.  The
+ * caller frees the buffer.  On failure the buffer stays NULL and the
+ * reason says why: the file is not there, the permission is refused, the
+ * input is a directory, the input is empty, the input is larger than the
+ * limit, the read failed, or the host is out of memory.  The size is
+ * checked before anything is allocated, so a file that is too large costs
+ * nothing.
  */
 enum cntool_read_result
-cntool_read_file(const char *path, uint8_t **data, size_t *size);
+cntool_read_file(const char *path, uint8_t **data, size_t *size, size_t limit);
 
 #endif /* CNTOOL_H */

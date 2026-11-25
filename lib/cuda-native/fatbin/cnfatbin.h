@@ -43,6 +43,13 @@
 /* A container never holds more entries than this. */
 #define CNFATBIN_MAX_ENTRIES	4096u
 
+/*
+ * The most strings one entry may carry.  It is a limit of the format and
+ * not an accident of the reader: a container that asks for more is
+ * refused, and a container that carries fewer opens as it is.
+ */
+#define CNFATBIN_MAX_STRINGS_PER_ENTRY 16384u
+
 /* The largest container we write, and the largest one we read from a
  * pointer that comes without a length of its own. */
 #define CNFATBIN_MAX_SIZE	(16u * 1024u * 1024u)
@@ -225,9 +232,10 @@ size_t cnfatbin_bound(const void *data);
  * Tell the reader that a mapping of ours holds a container, so that it can
  * bound the reads it makes there.  The runtime uses this for a container a
  * program built in memory of its own; the pointer must lie inside the
- * registered mapping.  Returns zero when the mapping was recorded, and -1
- * when it was not: a null pointer, an empty mapping, or a registry that is
- * full.
+ * registered mapping.  The registry grows as it is used, so there is no
+ * limit on the number of mappings a program may tell the reader about.
+ * Returns zero when the mapping was recorded, and -1 when it was not: a
+ * null pointer, an empty mapping, or a registry that cannot grow.
  */
 int cnfatbin_register_mapping(const void *base, size_t length);
 

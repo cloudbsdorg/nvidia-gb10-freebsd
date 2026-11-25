@@ -187,8 +187,8 @@ the entries table lies outside the container, or the entry count is above
 .It
 an image offset and size overflow, or leave the container;
 .It
-a string offset leaves the container, or a string value is not NUL
-terminated;
+a string offset leaves the container, or the value of a key the reader
+knows is not NUL terminated;
 .It
 a value of a key the reader knows is longer than the field it belongs to;
 .It
@@ -200,15 +200,25 @@ a
 .Dv cloudbsd.sha256
 is not 64 hexadecimal digits, or does not match the image;
 .It
-the sum of the sizes of the images the container names is larger than the
-container itself.
+the sum of the sizes of the images whose members carry a digest is larger
+than the container itself.
 .El
 .Pp
-The sum of the sizes of the images a container names may not be larger than
+The sum of the sizes of the images a container hashes may not be larger than
 the container itself.
-Two members that name the same image range ask for twice the hashing work
-one image is worth, so a container that asks for more work than its size
-allows is refused before any digest is computed.
+Only the images that are hashed are counted: a member without a
+.Dv cloudbsd.sha256
+key is not hashed and asks for no work.
+Two members that name the same image range and both carry a digest ask for
+twice the hashing work one image is worth, so a container that asks for more
+work than its size allows is refused before any digest is computed.
+.Pp
+A reader checks a value of a key it knows once, and it looks at no more of
+the value than could fit the field the key belongs to.
+A value that does not fit is refused by its length.
+The value of a key the reader does not know is ignored, and is never looked
+at, so a container cannot ask for the same long value to be checked again
+and again.
 .Pp
 The writer refuses to write a container that a reader or the runtime would
 refuse: a container with no members, one with more than 4096 members and

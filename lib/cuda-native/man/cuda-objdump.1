@@ -39,8 +39,8 @@ Without an output option
 prints one line per member:
 .Bd -literal -offset indent
 file.fatbin: container, container version 2, 2 members
-[0] ptx arch=sm_120 format=ptx size=78 sha256=HASH sha256_ok=yes
-[1] ptx arch=sm_121a format=ptx size=80 sha256=HASH sha256_ok=yes
+[0] ptx arch=sm_120 format=ptx size=78 sha256=HASH
+[1] ptx arch=sm_121a format=ptx size=80 sha256=HASH
 .Ed
 .Pp
 A member whose container carries no
@@ -77,8 +77,16 @@ The JSON output writes every byte that is not a UTF-8 character as the
 replacement character, so the document is always valid UTF-8 JSON.
 .Pp
 A file that cannot be read says why: it is not there, the permission is
-refused, the input is a directory, the input is empty, the read failed, or
-the host is out of memory.
+refused, the input is a directory, the input is empty, the input is larger
+than the 268435456 byte limit, the read failed, or the host is out of
+memory.
+The limit is checked before anything is allocated for the file, so a file
+that is too large costs nothing.
+.Pp
+Every string that comes from the command line or from a file is shown with
+its control bytes escaped, in the text output and in the diagnostics alike:
+a path or an argument that carries one cannot write to the terminal, and one
+diagnostic stays one line.
 .Pp
 The JSON output validates against
 .Pa share/cuda-native/schema/cuda-objdump-1.schema.json ,
@@ -118,9 +126,10 @@ container has.
 Print the JSON schema of this tool's output.
 .It Fl -version
 Print the version of the tool.
-With
+It takes no operand: with
 .Fl -json
 it prints one JSON object.
+Every other form is a usage problem, and no version is printed.
 .It Fl h , Fl -help
 Print usage.
 .El

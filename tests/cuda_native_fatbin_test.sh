@@ -24,6 +24,11 @@
 # - the output modes cannot be combined, and the member index is a number;
 # - a file that cannot be read says why, and the writer refuses a container
 #   the runtime would refuse;
+# - a file that is neither a container nor an ELF is not read after its
+#   buffer is freed, and no raw control byte reaches a diagnostic;
+# - a file that is larger than the limit is refused with the limit named;
+# - the version takes no operand, the alias names itself, and an output
+#   name of 240 bytes is written;
 # - LLVM reads our container (llvm-objdump --offloading) and we read the
 #   container LLVM writes;
 # - the ELF path: cuda-objdump finds the members in the object clang builds
@@ -275,7 +280,8 @@ check_case hash-mismatch.bin "a member sha256 does not match its image"
 # ---- the cases the reader test builds -------------------------------------
 # The same directory holds the containers the C test builds by hand.
 for name in arch-invalid-utf8 arch-control-bytes value-too-long \
-    unknown-long-key digest-too-long overlapping-images many-strings; do
+    unknown-long-key digest-too-long overlapping-images \
+    overlapping-images-digested many-strings shared-long-value; do
 	[ -s "$W/cases/$name.bin" ]
 	expect_rc "the crafted container $name is written" $? 0
 done
@@ -283,8 +289,29 @@ check_case value-too-long.bin \
     "a member value is longer than the field it belongs to"
 check_case digest-too-long.bin \
     "a member sha256 is not 64 hexadecimal digits"
-check_case overlapping-images.bin \
+check_case overlapping-images-digested.bin \
     "the container asks for more hashing than its size allows"
+
+# Only the images that carry a digest are hashed.  Two members that share
+# one image and carry no digest ask for no hashing at all, so the container
+# opens.
+"$SDK/bin/cuda-objdump" --json "$W/cases/overlapping-images.bin" \
+    >"$W/overlapping-images.json" 2>"$W/overlapping-images.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/overlapping-images.err" ]
+expect_rc "two members that share an image and carry no digest open" $? 0
+
+# ---- the work one container may ask for -------------------------------------
+# 262144 string records name one value of 4 MiB.  A reader that checks the
+# value once for every record scans a terabyte on a container of ten
+# megabytes; a reader that checks it once does the work of reading the
+# container.  The timeout is the oracle.
+timeout 30 "$W/fatbin_reader_test" "$W/cases/shared-long-value.bin" \
+    >"$W/shared-value.out" 2>&1
+rc=$?
+[ $rc -eq 0 ] && grep -q '^ok members=' "$W/shared-value.out"
+expect_rc "a value that many records share is checked once" $? 0
+sed -n 1,3p "$W/shared-value.out"
 
 # A key we do not know is ignored, and the container still opens.
 "$SDK/bin/cuda-objdump" --json "$W/cases/unknown-long-key.bin" \
@@ -538,6 +565,143 @@ rc=$?
     grep -q 'no such file' "$W/nvnoent.err"
 check=$?
 expect_rc "nvfatbin says why an image could not be read" $check 0
+
+# ---- the reader must not read a freed buffer ------------------------------
+# A file that is neither a container nor an ELF must not be read after its
+# buffer is freed.  The tool is built with AddressSanitizer for this check:
+# the sanitizer says so when the reader reads a buffer that was freed.
+mkdir -p "$W/asan"
+cat >"$W/asan/cc" <<'EOF'
+#!/bin/sh
+exec cc -fsanitize=address "$@"
+EOF
+chmod +x "$W/asan/cc"
+if CC="$W/asan/cc" sh "$CN/mksdk.sh" "$W/asan/sdk" \
+    >"$W/asan/mksdk.log" 2>&1; then
+	printf 'plain text, not an ELF container\n' >"$W/not-a-container.bin"
+	"$W/asan/sdk/bin/cuda-objdump" "$W/not-a-container.bin" \
+	    >"$W/not-a-container.out" 2>"$W/not-a-container.err"
+	rc=$?
+	[ $rc -eq 1 ] && [ ! -s "$W/not-a-container.out" ] &&
+	    ! grep -q 'AddressSanitizer' "$W/not-a-container.err" &&
+	    grep -q 'bad container magic' "$W/not-a-container.err"
+	check=$?
+	expect_rc "a file that is neither a container nor an ELF is not read after it is freed" \
+	    $check 0
+	sed -n 1,3p "$W/not-a-container.err"
+else
+	skip_check "a file that is neither a container nor an ELF is not read after it is freed"
+fi
+
+# ---- no raw control byte in a diagnostic -----------------------------------
+# A path that carries a control byte must not put it in the diagnostic: the
+# byte is shown as an escape, so the diagnostic stays one line and the
+# terminal is not written to.
+esc=$(printf '\033')
+"$SDK/bin/cuda-objdump" "$W/missing${esc}[2J" \
+    >"$W/esc-path.out" 2>"$W/esc-path.err"
+rc=$?
+[ $rc -eq 1 ] && [ "$(wc -l <"$W/esc-path.err")" -eq 1 ] &&
+    ! LC_ALL=C grep -q "$esc" "$W/esc-path.err" &&
+    grep -q 'x1b' "$W/esc-path.err"
+expect_rc "a path with a control byte in it is escaped in the diagnostic" $? 0
+nl=$(printf 'first\nsecond')
+"$SDK/bin/cuda-objdump" "$W/missing${nl}tail" \
+    >"$W/esc-newline.out" 2>"$W/esc-newline.err"
+rc=$?
+# One line is the oracle: a raw newline in the path would make the
+# diagnostic two lines, and the escape is shown instead.
+[ $rc -eq 1 ] && [ "$(wc -l <"$W/esc-newline.err")" -eq 1 ] &&
+    grep -q 'x0a' "$W/esc-newline.err"
+expect_rc "a path with a newline in it stays one line in the diagnostic" $? 0
+"$SDK/bin/nvfatbin" "$(printf -- '--bad%s[2J' "$esc")" \
+    >"$W/esc-option.out" 2>"$W/esc-option.err"
+rc=$?
+[ $rc -eq 2 ] && [ "$(wc -l <"$W/esc-option.err")" -eq 1 ] &&
+    ! LC_ALL=C grep -q "$esc" "$W/esc-option.err" &&
+    grep -q 'x1b' "$W/esc-option.err"
+expect_rc "an option with a control byte in it is escaped in the diagnostic" \
+    $? 0
+sed -n 1,3p "$W/esc-path.err"
+
+# ---- a file that is too large is refused -----------------------------------
+# The input is one byte over the limit the tools read.  The file is sparse,
+# so the tool must refuse it before it allocates anything for it.
+dd if=/dev/zero of="$W/too-large.bin" bs=1 count=0 seek=268435457 \
+    >/dev/null 2>&1
+"$SDK/bin/cuda-objdump" "$W/too-large.bin" \
+    >"$W/too-large.out" 2>"$W/too-large.err"
+rc=$?
+[ $rc -eq 1 ] && grep -q 'larger than the 268435456 byte limit' \
+    "$W/too-large.err"
+expect_rc "a file that is larger than the limit is refused with the limit named" \
+    $? 0
+sed -n 1,3p "$W/too-large.err"
+
+# ---- nvfatbin: the output name may be as long as the filesystem allows ----
+# The file the writer builds before it renames it has a short name of its
+# own, so the name of the output is not made longer by it.
+long=$(python3 -I -c "print('x' * 240)")
+"$SDK/bin/nvfatbin" -64 --create "$W/$long" \
+    --image3=kind=ptx,sm=120,file="$PTX1" >"$W/long.out" 2>"$W/long.err"
+rc=$?
+[ $rc -eq 0 ] && [ -s "$W/$long" ] && [ ! -s "$W/long.err" ]
+check=$?
+expect_rc "an output name of 240 bytes is written" $check 0
+"$SDK/bin/cuda-objdump" --json "$W/$long" >"$W/long.json" 2>"$W/long-json.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/long-json.err" ]
+check=$?
+expect_rc "the container with the long name is read back" $check 0
+
+# ---- an empty --create is a usage problem ----------------------------------
+"$SDK/bin/nvfatbin" --create= --image3=kind=ptx,sm=120,file="$PTX1" \
+    >"$W/empty-create.out" 2>"$W/empty-create.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -s "$W/empty-create.out" ] &&
+    grep -q -- '--create requires a file name' "$W/empty-create.err"
+check=$?
+expect_rc "an empty --create is a usage problem" $check 0
+
+# ---- the alias names itself ------------------------------------------------
+# The version line names the program as it was invoked, and the JSON keeps
+# the canonical name.
+"$SDK/bin/fatbinary" --version >"$W/alias-version.out" \
+    2>"$W/alias-version.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/alias-version.err" ] &&
+    grep -q '^fatbinary (cuda-native) ' "$W/alias-version.out"
+check=$?
+expect_rc "the fatbinary alias names itself in its version" $check 0
+"$SDK/bin/fatbinary" --version --json >"$W/alias-version.json" \
+    2>"$W/alias-version-json.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/alias-version-json.err" ] &&
+    grep -q '"tool":"nvfatbin"' "$W/alias-version.json"
+check=$?
+expect_rc "the alias keeps the canonical name in its JSON version" $check 0
+
+# ---- the version takes no operand -----------------------------------------
+"$SDK/bin/cuda-objdump" --version --json junk \
+    >"$W/version-extra.out" 2>"$W/version-extra.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -s "$W/version-extra.out" ] &&
+    grep -q 'unexpected argument junk' "$W/version-extra.err"
+check=$?
+expect_rc "--version takes no operand" $check 0
+"$SDK/bin/cuda-objdump" --version --json >"$W/version-json.out" \
+    2>"$W/version-json.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/version-json.err" ] &&
+    grep -q '"tool":"cuda-objdump"' "$W/version-json.out"
+check=$?
+expect_rc "--version --json still prints the version" $check 0
+
+# ---- the manual and the tools agree on the fields --------------------------
+# The field sha256_ok was removed from the reader, the tools and the
+# schema; the manual must not document it any more.
+! grep -rq 'sha256_ok' "$CN/man" "$CN/schema" "$CN/fatbin"
+expect_rc "the manual does not document the removed sha256_ok field" $? 0
 
 # ---- the writer refuses what the runtime would refuse ----------------------
 dd if=/dev/zero of="$W/huge.ptx" bs=1048576 count=17 2>/dev/null

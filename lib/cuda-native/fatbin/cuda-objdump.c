@@ -199,48 +199,66 @@ parse_index(const char *text)
 {
 	unsigned long value;
 	char *end = NULL;
+	char escaped[CNTOOL_ESCAPED_MAX];
 	size_t i;
 
+	/* The index comes from the command line: it is escaped before it
+	 * goes in a diagnostic, so a control byte in it cannot write to the
+	 * terminal. */
+	cntool_escape_text(escaped, sizeof(escaped), text);
 	if (text[0] == '\0')
 		cntool_fail(TOOL_NAME, 2,
-		    "member index must be a non-negative integer: %s", text);
+		    "member index must be a non-negative integer: %s", escaped);
 	/* Time: O(digits).  Space: O(1). */
 	for (i = 0; text[i] != '\0'; i++) {
 		if (text[i] < '0' || text[i] > '9')
 			cntool_fail(TOOL_NAME, 2,
 			    "member index must be a non-negative integer: %s",
-			    text);
+			    escaped);
 	}
 	errno = 0;
 	value = strtoul(text, &end, 10);
 	if (errno == ERANGE || end == text || *end != '\0')
 		cntool_fail(TOOL_NAME, 2,
-		    "member index must be a non-negative integer: %s", text);
+		    "member index must be a non-negative integer: %s", escaped);
 	return value;
 }
 
-/* Say the version, in the form the caller asked for. */
+/*
+ * Say the version, in the form the caller asked for.  The version takes
+ * no operand: --version alone, or --version --json.  Every other form is
+ * a usage problem, and no version is printed.
+ */
 static void
 print_version(int argc, char **argv)
 {
-	if (argc > 2 && strcmp(argv[2], "--json") != 0) {
-		if (argv[2][0] == '-')
-			cntool_fail(TOOL_NAME, 2,
-			    "unsupported option %s; see %s(1)", argv[2],
-			    TOOL_NAME);
-		cntool_fail(TOOL_NAME, 2, "unexpected argument %s; only --json "
-		    "may follow --version", argv[2]);
-	}
-	if (argc == 3)
+	char escaped[CNTOOL_ESCAPED_MAX];
+
+	if (argc > 2 && strcmp(argv[2], "--json") == 0) {
+		if (argc > 3)
+			cntool_fail(TOOL_NAME, 2, "unexpected argument %s; "
+			    "only --json may follow --version",
+			    cntool_escape_text(escaped, sizeof(escaped),
+			    argv[3]));
 		printf("{\"schema\":\"%s\",\"tool\":\"%s\","
 		    "\"version\":\"%s\",\"version_major\":%d,"
 		    "\"version_minor\":%d,\"version_patch\":%d}\n",
 		    SCHEMA_NAME, TOOL_NAME, CUDA_NATIVE_VERSION_TEXT,
 		    CUDA_NATIVE_VERSION_MAJOR, CUDA_NATIVE_VERSION_MINOR,
 		    CUDA_NATIVE_VERSION_PATCH);
-	else
-		printf("%s (cuda-native) %s\n", TOOL_NAME,
-		    CUDA_NATIVE_VERSION_TEXT);
+		return;
+	}
+	if (argc > 2) {
+		if (argv[2][0] == '-')
+			cntool_fail(TOOL_NAME, 2,
+			    "unsupported option %s; see %s(1)",
+			    cntool_escape_text(escaped, sizeof(escaped),
+			    argv[2]), TOOL_NAME);
+		cntool_fail(TOOL_NAME, 2, "unexpected argument %s; only --json "
+		    "may follow --version",
+		    cntool_escape_text(escaped, sizeof(escaped), argv[2]));
+	}
+	printf("%s (cuda-native) %s\n", TOOL_NAME, CUDA_NATIVE_VERSION_TEXT);
 }
 
 /*
@@ -250,6 +268,7 @@ print_version(int argc, char **argv)
 static int
 parse_arguments(int argc, char **argv, struct options *options)
 {
+	char escaped[CNTOOL_ESCAPED_MAX];
 	int argi;
 
 	/* Time: O(arguments).  Space: O(1). */
@@ -289,10 +308,13 @@ parse_arguments(int argc, char **argv, struct options *options)
 		}
 		if (arg[0] == '-' && arg[1] != '\0')
 			cntool_fail(TOOL_NAME, 2,
-			    "unsupported option %s; see %s(1)", arg, TOOL_NAME);
+			    "unsupported option %s; see %s(1)",
+			    cntool_escape_text(escaped, sizeof(escaped), arg),
+			    TOOL_NAME);
 		if (options->path != NULL)
-			cntool_fail(TOOL_NAME, 2,
-			    "unexpected argument %s; only one file is read", arg);
+			cntool_fail(TOOL_NAME, 2, "unexpected argument %s; only "
+			    "one file is read",
+			    cntool_escape_text(escaped, sizeof(escaped), arg));
 		options->path = arg;
 	}
 	/* The output modes cannot be combined: the last one would otherwise
@@ -319,32 +341,41 @@ static void
 load_container(const char *path, uint8_t **owned, uint8_t **section,
     const uint8_t **bytes, size_t *container_size, const char **source)
 {
+	char escaped[CNTOOL_ESCAPED_MAX];
 	size_t size = 0;
 	size_t offset = 0;
 	enum cntool_read_result reason;
 	int rc;
 
-	reason = cntool_read_file(path, owned, &size);
+	reason = cntool_read_file(path, owned, &size, CNTOOL_MAX_FILE_SIZE);
 	if (reason != CNTOOL_READ_OK)
-		cntool_fail(TOOL_NAME, 1, "cannot read %s: %s", path,
-		    cntool_read_reason(reason));
+		cntool_fail(TOOL_NAME, 1, "cannot read %s: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), path),
+		    cntool_read_reason(reason, CNTOOL_MAX_FILE_SIZE));
 	*bytes = *owned;
 	*container_size = size;
 	if (looks_like_container(*owned, size))
 		return;
-	/* The file is not a container: the bytes we read are of no use to
-	 * us, and the section is read again. */
-	free(*owned);
-	*owned = NULL;
+	/* The file is not the container itself.  The bytes we read stay
+	 * ours until we know what the file is: a file that is neither a
+	 * container nor an ELF is handed to the reader as it is, so that
+	 * the reader says what is wrong with it.  Nothing reads the bytes
+	 * after they are freed. */
 	rc = read_fatbin_section(path, section, &size);
-	if (rc == 2)
+	if (rc == 2) {
+		/* An ELF file without the section: the bytes are of no use. */
+		free(*owned);
+		*owned = NULL;
 		cntool_fail(TOOL_NAME, 1, "no %s section in %s", FATBIN_SECTION,
-		    path);
+		    cntool_escape_text(escaped, sizeof(escaped), path));
+	}
 	if (rc == 1) {
-		/* Not an ELF file: let the reader say what is wrong with
-		 * the bytes. */
+		/* Not an ELF file: the reader says what is wrong with the
+		 * bytes, and the bytes are still ours. */
 		return;
 	}
+	free(*owned);
+	*owned = NULL;
 	*source = "section";
 	/* The container is inside the section; it usually starts at its
 	 * first byte. */
@@ -354,7 +385,8 @@ load_container(const char *path, uint8_t **owned, uint8_t **section,
 		offset++;
 	if (offset + 4 > size)
 		cntool_fail(TOOL_NAME, 1, "no cuda-native container in the %s "
-		    "section of %s", FATBIN_SECTION, path);
+		    "section of %s", FATBIN_SECTION,
+		    cntool_escape_text(escaped, sizeof(escaped), path));
 	*bytes = *section + offset;
 	*container_size = size - offset;
 }
@@ -364,6 +396,7 @@ static void
 extract_member(unsigned long index, const char *out_path,
     const struct cnfatbin_container *container, const uint8_t *bytes)
 {
+	char escaped[CNTOOL_ESCAPED_MAX];
 	FILE *stream;
 
 	if (index >= container->entries_count) {
@@ -376,16 +409,19 @@ extract_member(unsigned long index, const char *out_path,
 	}
 	stream = fopen(out_path, "wb");
 	if (stream == NULL)
-		cntool_fail(TOOL_NAME, 1, "cannot create output: %s", out_path);
+		cntool_fail(TOOL_NAME, 1, "cannot create output: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), out_path));
 	if (container->members[index].image_size > 0 &&
 	    fwrite(bytes + container->members[index].image_offset,
 	    1, (size_t)container->members[index].image_size,
 	    stream) != container->members[index].image_size) {
 		fclose(stream);
-		cntool_fail(TOOL_NAME, 1, "cannot write output: %s", out_path);
+		cntool_fail(TOOL_NAME, 1, "cannot write output: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), out_path));
 	}
 	if (fclose(stream) != 0)
-		cntool_fail(TOOL_NAME, 1, "cannot write output: %s", out_path);
+		cntool_fail(TOOL_NAME, 1, "cannot write output: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), out_path));
 }
 
 /* The text listing: one line per member. */
@@ -495,9 +531,13 @@ main(int argc, char **argv)
 	    &container_size, &source);
 
 	err = cnfatbin_open(container_bytes, container_size, &container);
-	if (err != CNFATBIN_OK)
-		cntool_fail(TOOL_NAME, 1, "%s: %s", options.path,
+	if (err != CNFATBIN_OK) {
+		char escaped[CNTOOL_ESCAPED_MAX];
+
+		cntool_fail(TOOL_NAME, 1, "%s: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), options.path),
 		    cnfatbin_strerror(err));
+	}
 
 	if (options.have_extract)
 		extract_member(options.extract_index, options.extract_path,

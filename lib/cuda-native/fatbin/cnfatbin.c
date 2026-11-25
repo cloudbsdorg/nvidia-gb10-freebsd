@@ -25,13 +25,6 @@
 /* The number of strings every entry carries: triple, arch and our two. */
 #define CNFATBIN_STRINGS_PER_ENTRY 4
 
-/*
- * The most strings one entry may carry.  It is a limit of the format and
- * not an accident of the reader: a container that asks for more is
- * refused, and a container that carries fewer opens as it is.
- */
-#define CNFATBIN_MAX_STRINGS_PER_ENTRY 16384
-
 static const char *const member_keys[CNFATBIN_STRINGS_PER_ENTRY] = {
 	CNFATBIN_KEY_TRIPLE,
 	CNFATBIN_KEY_ARCH,
@@ -109,16 +102,18 @@ align_up(uint64_t value, uint64_t alignment)
  * The mappings a program has told us about.  A container a program built in
  * memory of its own is in no loaded object, so the bound on the reads the
  * reader makes there comes from here.
+ *
+ * The registry grows as it is used: a program that registers many mappings
+ * is not refused for want of space.
  */
-#define CNFATBIN_MAX_MAPPINGS	16
-
 struct cnfatbin_mapping {
 	const uint8_t *base;
 	size_t length;
 };
 
-static struct cnfatbin_mapping cnfatbin_mappings[CNFATBIN_MAX_MAPPINGS];
+static struct cnfatbin_mapping *cnfatbin_mappings;
 static size_t cnfatbin_mapping_count;
+static size_t cnfatbin_mapping_capacity;
 static atomic_flag cnfatbin_mapping_lock = ATOMIC_FLAG_INIT;
 
 /* Time: O(1).  Space: O(1). */
@@ -240,12 +235,25 @@ cnfatbin_register_mapping(const void *base, size_t length)
 	if (base == NULL || length == 0)
 		return -1;
 	mapping_lock();
-	if (cnfatbin_mapping_count < CNFATBIN_MAX_MAPPINGS) {
-		cnfatbin_mappings[cnfatbin_mapping_count].base = base;
-		cnfatbin_mappings[cnfatbin_mapping_count].length = length;
-		cnfatbin_mapping_count++;
-		recorded = 0;
+	/* The registry grows as it is used: there is no limit on the number
+	 * of mappings a program may tell the reader about. */
+	if (cnfatbin_mapping_count == cnfatbin_mapping_capacity) {
+		size_t grown = cnfatbin_mapping_capacity == 0 ? 8 :
+		    cnfatbin_mapping_capacity * 2;
+		struct cnfatbin_mapping *bigger =
+		    realloc(cnfatbin_mappings, grown * sizeof(*bigger));
+
+		if (bigger == NULL) {
+			mapping_unlock();
+			return -1;
+		}
+		cnfatbin_mappings = bigger;
+		cnfatbin_mapping_capacity = grown;
 	}
+	cnfatbin_mappings[cnfatbin_mapping_count].base = base;
+	cnfatbin_mappings[cnfatbin_mapping_count].length = length;
+	cnfatbin_mapping_count++;
+	recorded = 0;
 	mapping_unlock();
 	return recorded;
 }
@@ -396,17 +404,20 @@ is_hex64(const char *s)
 /*
  * Is the value at [offset, offset + size) a NUL terminated string?  The
  * bytes of the value hold no NUL, and the byte after them is the NUL that
- * ends it.  A value that holds a NUL is not the value it claims to be, so
- * it is refused.
+ * ends it.  Only the first `scan` bytes are looked at: a value that is
+ * longer than the field it belongs to is refused by its length, so one
+ * record cannot ask for the same long value to be scanned again and again.
  */
 static int
 value_is_terminated(const uint8_t *data, uint64_t total, uint64_t offset,
-    uint64_t size)
+    uint64_t size, uint64_t scan)
 {
 	uint64_t i;
 
-	/* Time: O(value length).  Space: O(1). */
-	for (i = offset; i < offset + size; i++) {
+	if (scan > size)
+		scan = size;
+	/* Time: O(bytes looked at).  Space: O(1). */
+	for (i = offset; i < offset + scan; i++) {
 		if (data[i] == '\0')
 			return 0;
 	}
@@ -478,16 +489,22 @@ known_key(const uint8_t *data, uint64_t total, uint64_t key_offset,
 }
 
 /*
- * Copy a value into the field it belongs to.  A value that does not fit
- * the field is refused with its own error and is never truncated.
+ * Copy the value of a key we know into the field it belongs to.  The value
+ * must fit the field and must be NUL terminated, and it is never
+ * truncated.  Only the bytes that could fit the field are looked at, so
+ * the work one record asks for does not grow with the size the value
+ * claims.
  */
 static enum cnfatbin_error
-copy_value(char *field, size_t field_size, const uint8_t *value,
-    uint64_t value_size)
+read_value(char *field, size_t field_size, const uint8_t *data,
+    uint64_t total, uint64_t value_offset, uint64_t value_size)
 {
+	if (!value_is_terminated(data, total, value_offset, value_size,
+	    field_size))
+		return CNFATBIN_E_STRING_NOT_TERMINATED;
 	if (value_size >= field_size)
 		return CNFATBIN_E_VALUE_TOO_LONG;
-	memcpy(field, value, (size_t)value_size);
+	memcpy(field, data + value_offset, (size_t)value_size);
 	field[value_size] = '\0';
 	return CNFATBIN_OK;
 }
@@ -520,34 +537,41 @@ read_entry_strings(const uint8_t *data, uint64_t total, uint64_t string_offset,
 
 		if (!in_range(value_offset, value_size, total))
 			return CNFATBIN_E_STRING_OUT_OF_RANGE;
-		if (!value_is_terminated(data, total, value_offset, value_size))
-			return CNFATBIN_E_STRING_NOT_TERMINATED;
+		/* The key is resolved before the value is looked at.  The
+		 * value of a key we do not know is ignored, and a value
+		 * that fits no field is refused by its length, so no
+		 * record can ask for a long value to be scanned again
+		 * and again. */
 		err = known_key(data, total, key_offset, &which);
 		if (err != CNFATBIN_OK)
 			return err;
 		switch (which) {
 		case KEY_TRIPLE:
-			err = copy_value(member->triple, sizeof(member->triple),
-			    data + value_offset, value_size);
+			err = read_value(member->triple, sizeof(member->triple),
+			    data, total, value_offset, value_size);
 			if (err != CNFATBIN_OK)
 				return err;
 			break;
 		case KEY_ARCH:
-			err = copy_value(member->arch, sizeof(member->arch),
-			    data + value_offset, value_size);
+			err = read_value(member->arch, sizeof(member->arch),
+			    data, total, value_offset, value_size);
 			if (err != CNFATBIN_OK)
 				return err;
 			break;
 		case KEY_FORMAT:
-			err = copy_value(member->format, sizeof(member->format),
-			    data + value_offset, value_size);
+			err = read_value(member->format,
+			    sizeof(member->format), data, total, value_offset,
+			    value_size);
 			if (err != CNFATBIN_OK)
 				return err;
 			member->has_format = 1;
 			break;
 		case KEY_SHA256:
-			/* The digest is exactly 64 hexadecimal digits, and it
-			 * is measured before it is copied. */
+			/* The digest is exactly 64 hexadecimal digits, and
+			 * it is measured before it is copied. */
+			if (!value_is_terminated(data, total, value_offset,
+			    value_size, CNFATBIN_SHA256_HEX_MAX))
+				return CNFATBIN_E_STRING_NOT_TERMINATED;
 			if (value_size != CNFATBIN_SHA256_HEX_MAX)
 				return CNFATBIN_E_SHA256_FORMAT;
 			memcpy(member->sha256, data + value_offset,
@@ -633,9 +657,45 @@ cnfatbin_peek_size(const uint8_t *data, size_t available, uint64_t *size)
 }
 
 /*
+ * Does the entry carry a digest?  The key of the string record is read
+ * where it lies, so the answer needs no copy.  An entry whose string table
+ * is out of range carries nothing we know: the reader that reads the entry
+ * says so.
+ */
+static int
+entry_has_sha256(const uint8_t *data, uint64_t total, uint64_t string_offset,
+    uint64_t num_strings)
+{
+	uint64_t i;
+
+	if (num_strings > CNFATBIN_MAX_STRINGS_PER_ENTRY)
+		return 0;
+	if (num_strings > (uint64_t)total / CNFATBIN_STRING_ENTRY_SIZE)
+		return 0;
+	if (!in_range(string_offset, num_strings * CNFATBIN_STRING_ENTRY_SIZE,
+	    total))
+		return 0;
+	/* Time: O(strings in the entry).  Space: O(1). */
+	for (i = 0; i < num_strings; i++) {
+		const uint8_t *record = data + string_offset +
+		    i * CNFATBIN_STRING_ENTRY_SIZE;
+		uint64_t key_offset = read_le64(record);
+		size_t length = sizeof(CNFATBIN_KEY_SHA256);
+
+		if (key_offset >= total || length > total - key_offset)
+			continue;
+		if (memcmp(data + key_offset, CNFATBIN_KEY_SHA256, length) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/*
  * The hashing work a container may ask for: the sum of the sizes of the
- * images it names may not be larger than the container itself.  Two
- * members that name the same image range ask for twice the work of one,
+ * images whose members carry a digest may not be larger than the container
+ * itself.  Only the images that are hashed are counted: a member without a
+ * digest is not hashed and asks for no work.  Two members that name the
+ * same image range and both carry a digest ask for twice the work of one,
  * and a container that asks for more is refused before any digest is
  * computed.
  */
@@ -650,9 +710,14 @@ check_hash_budget(const uint8_t *data, uint64_t total, uint64_t entries_offset,
 	for (i = 0; i < entries_count; i++) {
 		const uint8_t *entry = data + entries_offset +
 		    i * CNFATBIN_ENTRY_SIZE;
+		uint64_t string_offset = read_le64(entry + 8);
+		uint64_t num_strings = read_le64(entry + 16);
 		uint64_t image_start = read_le64(entry + 24);
 		uint64_t image_length = read_le64(entry + 32);
 
+		/* Only the images that are hashed are counted. */
+		if (!entry_has_sha256(data, total, string_offset, num_strings))
+			continue;
 		/* An image that leaves the container is reported by the
 		 * reader that reads the member; it is not this check. */
 		if (!in_range(image_start, image_length, total))
@@ -669,6 +734,8 @@ cnfatbin_open(const uint8_t *data, size_t size,
     struct cnfatbin_container *container)
 {
 	uint64_t total, entries_offset, entries_count;
+	struct cnfatbin_member *members = NULL;
+	uint32_t version;
 	size_t i;
 	enum cnfatbin_error err;
 
@@ -677,8 +744,8 @@ cnfatbin_open(const uint8_t *data, size_t size,
 		return CNFATBIN_E_SHORT_INPUT;
 	if (!cnfatbin_has_magic(data, size))
 		return CNFATBIN_E_BAD_MAGIC;
-	container->version = read_le32(data + 4);
-	if (container->version != CNFATBIN_VERSION)
+	version = read_le32(data + 4);
+	if (version != CNFATBIN_VERSION)
 		return CNFATBIN_E_BAD_VERSION;
 	total = read_le64(data + 8);
 	if (total > (uint64_t)size)
@@ -695,33 +762,38 @@ cnfatbin_open(const uint8_t *data, size_t size,
 	    total))
 		return CNFATBIN_E_ENTRIES_OUT_OF_RANGE;
 
-	container->data = data;
-	container->size = size;
-	container->entries_count = entries_count;
-	if (entries_count == 0)
+	if (entries_count == 0) {
+		container->version = version;
+		container->data = data;
+		container->size = size;
 		return CNFATBIN_OK;
+	}
 	/* The hashing work is checked before any member is read, so that a
 	 * container that asks for more work than its size allows never has
 	 * a digest computed. */
 	err = check_hash_budget(data, total, entries_offset, entries_count);
 	if (err != CNFATBIN_OK)
 		return err;
-	container->members = calloc((size_t)entries_count,
-	    sizeof(*container->members));
-	if (container->members == NULL) {
-		container->entries_count = 0;
+	members = calloc((size_t)entries_count, sizeof(*members));
+	if (members == NULL)
 		return CNFATBIN_E_NOMEM;
-	}
 	/* Time: O(entries in the container).  Space: O(entries). */
 	for (i = 0; i < (size_t)entries_count; i++) {
 		err = read_member(data, total,
 		    entries_offset + (uint64_t)i * CNFATBIN_ENTRY_SIZE,
-		    &container->members[i]);
+		    &members[i]);
 		if (err != CNFATBIN_OK) {
-			cnfatbin_close(container);
+			free(members);
 			return err;
 		}
 	}
+	/* Nothing is published before every check has passed: a container
+	 * that is refused leaves an empty container behind. */
+	container->version = version;
+	container->data = data;
+	container->size = size;
+	container->entries_count = entries_count;
+	container->members = members;
 	return CNFATBIN_OK;
 }
 

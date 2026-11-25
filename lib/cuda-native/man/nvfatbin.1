@@ -51,8 +51,11 @@ A container that would be larger is refused, because the runtime stub
 refuses one that is, and no output is left at the requested path.
 .Pp
 A file that cannot be read says why: it is not there, the permission is
-refused, the input is a directory, the input is empty, the read failed, or
-the host is out of memory.
+refused, the input is a directory, the input is empty, the input is larger
+than the 268435456 byte limit, the read failed, or the host is out of
+memory.
+The limit is checked before anything is allocated for the file, so a file
+that is too large costs nothing.
 .Pp
 Each image is one of
 .Cm elf
@@ -91,6 +94,8 @@ and
 are accepted for clang compatibility.
 .Fl -create
 also accepts an equals sign before its value.
+It requires a file name: an empty value is a usage problem, and nothing is
+written.
 .Fl h
 and
 .Fl -help
@@ -104,7 +109,7 @@ prints
 where
 .Ql NAME
 is the name the program was invoked as.
-With
+It takes no operand: with
 .Fl -json
 it prints one JSON object containing
 .Dv tool ,

@@ -157,14 +157,24 @@ open_copy(const uint8_t *data, size_t size)
 /*
  * Check that one broken container is refused with the message the case
  * expects.  The message is the oracle of the case.
+ *
+ * A refused container is left empty: the data pointer, the size, the member
+ * count and the member table are all zero.  The container is poisoned
+ * before the open, so a reader that leaves something of the container
+ * behind is caught.
  */
 static void
 expect_error(const char *name, const uint8_t *data, size_t size,
     const char *message)
 {
-	enum cnfatbin_error got = open_copy(data, size);
+	struct cnfatbin_container opened;
+	enum cnfatbin_error got;
 
-	if (got != CNFATBIN_OK && strcmp(cnfatbin_strerror(got), message) == 0)
+	memset(&opened, 0xaa, sizeof(opened));
+	got = cnfatbin_open(data, size, &opened);
+	if (got != CNFATBIN_OK && strcmp(cnfatbin_strerror(got), message) == 0 &&
+	    opened.data == NULL && opened.size == 0 &&
+	    opened.entries_count == 0 && opened.members == NULL)
 		ok(name);
 	else
 		bad(name);
@@ -590,6 +600,42 @@ struct raw_member {
 	size_t image_size;
 };
 
+/*
+ * The size of a container, rounded up to the alignment the manual
+ * documents.  One place rounds, so the two builders below cannot lay a
+ * container out differently.
+ */
+static uint64_t
+align_size(uint64_t size)
+{
+	return (size + CNFATBIN_ALIGNMENT - 1) &
+	    ~(uint64_t)(CNFATBIN_ALIGNMENT - 1);
+}
+
+/*
+ * The memory of a container and the header every container starts with:
+ * the magic, the version, the size of the whole container and the number
+ * of members.  One place allocates and writes them, so the builders below
+ * cannot drift apart.  The size is the size of the whole container and
+ * must already be aligned; align_size() rounds it.
+ */
+static uint8_t *
+alloc_container(uint64_t total, uint64_t member_count, size_t *size)
+{
+	uint8_t *out;
+
+	out = calloc(1, (size_t)total);
+	if (out == NULL)
+		return NULL;
+	memcpy(out, "\x10\xff\x10\xad", 4);
+	put_le32(out + 4, CNFATBIN_VERSION);
+	put_le64(out + 8, total);
+	put_le64(out + 16, CNFATBIN_HEADER_SIZE);
+	put_le64(out + 24, member_count);
+	*size = (size_t)total;
+	return out;
+}
+
 static uint8_t *
 build_raw(const struct raw_member *members, size_t count, size_t *size)
 {
@@ -617,21 +663,14 @@ build_raw(const struct raw_member *members, size_t count, size_t *size)
 		}
 	}
 	for (i = 0; i < count; i++) {
-		cursor = (cursor + CNFATBIN_ALIGNMENT - 1) &
-		    ~(uint64_t)(CNFATBIN_ALIGNMENT - 1);
+		cursor = align_size(cursor);
 		image_offset[i] = cursor;
 		cursor += (uint64_t)members[i].image_size;
 	}
-	total = (cursor + CNFATBIN_ALIGNMENT - 1) &
-	    ~(uint64_t)(CNFATBIN_ALIGNMENT - 1);
-	out = calloc(1, (size_t)total);
+	total = align_size(cursor);
+	out = alloc_container(total, count, size);
 	if (out == NULL)
 		return NULL;
-	memcpy(out, "\x10\xff\x10\xad", 4);
-	put_le32(out + 4, CNFATBIN_VERSION);
-	put_le64(out + 8, total);
-	put_le64(out + 16, CNFATBIN_HEADER_SIZE);
-	put_le64(out + 24, count);
 	for (i = 0; i < count; i++) {
 		uint8_t *entry = out + CNFATBIN_HEADER_SIZE +
 		    i * CNFATBIN_ENTRY_SIZE;
@@ -671,7 +710,6 @@ build_raw(const struct raw_member *members, size_t count, size_t *size)
 			memcpy(out + image_offset[i], members[i].image,
 			    members[i].image_size);
 	}
-	*size = (size_t)total;
 	return out;
 }
 
@@ -728,6 +766,7 @@ static const uint8_t arch_control[] = {
 static uint8_t arch_long[200];
 static uint8_t unknown_long[300];
 static uint8_t digest_long[65];
+static uint8_t zero_digest[64];
 static uint8_t big_image[1024 * 1024];
 
 /* A member with the two keys every case starts from. */
@@ -845,6 +884,101 @@ build_overlap_case(void)
 }
 
 /*
+ * The same two members, each one with a digest.  Only the images that
+ * carry a digest are hashed, so these two ask for twice the hashing work
+ * one image is worth and the container is refused before any digest is
+ * computed.
+ */
+static void
+build_overlap_digest_case(void)
+{
+	struct raw_member members[2];
+	uint8_t *container;
+	size_t size = 0;
+	size_t i;
+
+	for (i = 0; i < 2; i++) {
+		plain_member(&members[i]);
+		members[i].image = big_image;
+		members[i].image_size = sizeof(big_image);
+		/* The third key is the digest: 64 hexadecimal digits. */
+		members[i].string_count = 3;
+		members[i].strings[2].key = CNFATBIN_KEY_SHA256;
+		members[i].strings[2].value = zero_digest;
+		members[i].strings[2].value_size = sizeof(zero_digest);
+	}
+	members[1].image_size = 0;
+	container = build_raw(members, 2, &size);
+	if (container != NULL) {
+		uint64_t first_image =
+		    get_le64(container + CNFATBIN_HEADER_SIZE + 24);
+
+		put_le64(container + CNFATBIN_HEADER_SIZE + CNFATBIN_ENTRY_SIZE +
+		    24, first_image);
+		put_le64(container + CNFATBIN_HEADER_SIZE + CNFATBIN_ENTRY_SIZE +
+		    32, sizeof(big_image));
+	}
+	add_case("overlapping-images-digested", container, size);
+}
+
+/*
+ * A container whose members all name the same long value: 262144 string
+ * records name one value of 4 MiB.  A reader that checks the value once
+ * for every record scans a terabyte on a container of ten megabytes; a
+ * reader that checks it once does the work of reading the container.  The
+ * case is written to a file and the shell test opens it under a timeout.
+ */
+#define SHARED_ENTRIES 16
+#define SHARED_RECORDS CNFATBIN_MAX_STRINGS_PER_ENTRY
+#define SHARED_VALUE_SIZE (4u * 1024u * 1024u)
+
+static uint8_t *
+build_shared_value_case(size_t *size)
+{
+	uint64_t table_size =
+	    (uint64_t)SHARED_RECORDS * CNFATBIN_STRING_ENTRY_SIZE;
+	uint64_t cursor = CNFATBIN_HEADER_SIZE +
+	    (uint64_t)SHARED_ENTRIES * CNFATBIN_ENTRY_SIZE;
+	uint64_t key_offset = cursor + (uint64_t)SHARED_ENTRIES * table_size;
+	uint64_t value_offset = key_offset + 12;
+	uint64_t total;
+	uint8_t *out;
+	size_t i, j;
+
+	total = align_size(value_offset + SHARED_VALUE_SIZE + 1);
+	out = alloc_container(total, SHARED_ENTRIES, size);
+	if (out == NULL)
+		return NULL;
+	/* Time: O(records in the container).  Space: O(container). */
+	for (i = 0; i < SHARED_ENTRIES; i++) {
+		uint64_t table = cursor + (uint64_t)i * table_size;
+		uint8_t *entry = out + CNFATBIN_HEADER_SIZE +
+		    i * CNFATBIN_ENTRY_SIZE;
+
+		put_le16(entry, CNFATBIN_IMG_PTX);
+		put_le16(entry + 2, CNFATBIN_OFK_CUDA);
+		put_le32(entry + 4, 0);
+		put_le64(entry + 8, table);
+		put_le64(entry + 16, SHARED_RECORDS);
+		put_le64(entry + 24, total);
+		put_le64(entry + 32, 0);
+		for (j = 0; j < SHARED_RECORDS; j++) {
+			uint8_t *record = out + table +
+			    j * CNFATBIN_STRING_ENTRY_SIZE;
+
+			put_le64(record, key_offset);
+			put_le64(record + 8, value_offset);
+			put_le64(record + 16, SHARED_VALUE_SIZE);
+		}
+	}
+	/* The key every record names, and the value they all share. */
+	memcpy(out + key_offset, "unknown.key", 12);
+	memset(out + value_offset, 'x', SHARED_VALUE_SIZE);
+	out[value_offset + SHARED_VALUE_SIZE] = '\0';
+	return out;
+}
+
+/*
  * Build the containers the cases need: the values that do not fit, the key
  * we do not know, the digest that is not a digest and the two members that
  * name the same image.
@@ -852,17 +986,27 @@ build_overlap_case(void)
 static void
 build_cases(void)
 {
+	uint8_t *shared = NULL;
+	size_t shared_size = 0;
 	size_t i;
 
 	memset(arch_long, 'a', sizeof(arch_long));
 	memset(unknown_long, 'x', sizeof(unknown_long));
 	for (i = 0; i < sizeof(digest_long); i++)
 		digest_long[i] = (uint8_t)('0' + (i % 10));
+	for (i = 0; i < sizeof(zero_digest); i++)
+		zero_digest[i] = '0';
 	memset(big_image, 'y', sizeof(big_image));
 	build_arch_cases();
 	build_key_cases();
 	build_many_strings_case();
 	build_overlap_case();
+	build_overlap_digest_case();
+	/* The case whose work the shell test measures: it is written to a
+	 * file and opened there under a timeout, because opening it here
+	 * would take the work the case is about. */
+	shared = build_shared_value_case(&shared_size);
+	add_case("shared-long-value", shared, shared_size);
 }
 
 /*
@@ -901,7 +1045,16 @@ check_value_rules(void)
 	} else
 		expect_ok("an entry with more strings than we know still opens",
 		    c->data, c->size);
+	/* Only the images that carry a digest are hashed, so two members
+	 * that share one image and carry no digest ask for no hashing at
+	 * all and the container opens. */
 	c = find_case("overlapping-images");
+	if (c == NULL) {
+		bad("two members that share an image and carry no digest open");
+	} else
+		expect_ok("two members that share an image and carry no digest open",
+		    c->data, c->size);
+	c = find_case("overlapping-images-digested");
 	if (c == NULL) {
 		bad("a container that asks for more hashing than its size allows "
 		    "is refused");
@@ -909,6 +1062,27 @@ check_value_rules(void)
 		expect_error("a container that asks for more hashing than its size "
 		    "allows is refused", c->data, c->size,
 		    "the container asks for more hashing than its size allows");
+}
+
+/*
+ * The registry of the mappings a program tells the reader about grows: a
+ * program that registers many mappings is not refused for want of space.
+ */
+static void
+check_mapping_registry(void)
+{
+	static char areas[64][128];
+	int i;
+	int good = 1;
+
+	for (i = 0; i < 64; i++) {
+		if (cnfatbin_register_mapping(areas[i], sizeof(areas[i])) != 0)
+			good = 0;
+	}
+	if (good)
+		ok("the registry of mappings takes more than sixteen mappings");
+	else
+		bad("the registry of mappings takes more than sixteen mappings");
 }
 
 /*
@@ -1119,6 +1293,7 @@ main(int argc, char **argv)
 	build_cases();
 	check_value_rules();
 	check_writer_limits();
+	check_mapping_registry();
 	check_error_table();
 
 	cnfatbin_buffer_free(container, size);
