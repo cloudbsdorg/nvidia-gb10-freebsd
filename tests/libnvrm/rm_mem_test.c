@@ -35,9 +35,11 @@
 #include <nvstatus.h>
 #include <nvmisc.h>
 #include <nvos.h>
+#include <nvgputypes.h>
 #include <nv-ioctl.h>
 #include <nv_escape.h>
 #include <nv-unix-nvos-params-wrappers.h>
+#include <alloc/alloc_channel.h>
 #include <class/cl0000.h>
 #include <class/cl003e.h>
 #include <class/cl0040.h>
@@ -45,6 +47,7 @@
 #include <class/cl0071.h>
 #include <class/cl0080.h>
 #include <class/cl2080.h>
+#include <class/cl2080_notification.h>
 #include <class/cl50a0.h>
 #include <class/cl90f1.h>
 #include <ctrl/ctrl0000/ctrl0000client.h>
@@ -59,6 +62,8 @@
 #include <ctrl/ctrl2080/ctrl2080gr.h>
 #include <ctrl/ctrl2080/ctrl2080gsp.h>
 #include <ctrl/ctrl2080/ctrl2080mc.h>
+#include <ctrl/ctrlc36f.h>
+#include <ctrl/ctrla06c.h>
 
 #include "nvrm_rm_priv.h"	/* struct nvrm_gpu: the card-list test below */
 #include "nvrm_rm_sys.h"
@@ -81,6 +86,22 @@ fail_calloc_at(int n)
 #define COOKIE		0x7000000000ULL
 #define MOBJ		256
 #define NOVERRIDE	0xffffffffu
+
+/* The classes the RM backend binds for a channel (the RM's own names, as
+ * numbers: the model is the RM, not the library). */
+#define CLS_GROUP	0xa06c		/* the channel group */
+#define CLS_GPFIFO_A	0xc96f		/* the channel, first kind */
+#define CLS_GPFIFO_B	0xca6f		/* the channel, second kind */
+#define CLS_3D		0xce97		/* the 3D engine */
+#define CLS_COMPUTE_A	0xcdc0		/* the compute engine, first kind */
+#define CLS_COMPUTE_B	0xcec0		/* the compute engine, second kind */
+#define CLS_I2M		0xcd40		/* the inline-to-memory engine */
+#define CLS_2D		0x902d		/* the 2D engine */
+#define CLS_COPY	0xcab5		/* the copy engine */
+#define CLS_USERMODE	0xc761		/* the usermode object */
+#define CLS_MAX		200		/* the class list of a device */
+#define MAPS_MAX	32
+#define SESS_MAX	32
 
 /* ---- the memory model of the scripted kernel ---------------------------- */
 
@@ -105,6 +126,8 @@ static struct {
 	uint64_t	surf_size;
 	int		map_dev_null;	/* /dev/nvidiaN is a node that cannot be mapped */
 	int		fail_map_open;	/* opening /dev/nvidiaN fails */
+	int		map_dev_null_n;	/* the Nth /dev/nvidiaN cannot be mapped */
+	int		fail_map_open_n;	/* the Nth /dev/nvidiaN cannot be opened */
 	/* hand out a descriptor limited already to less than the library
 	 * limits it to, so that its limit fails (rights only narrow) */
 	int		prelimit_session, prelimit_map;
@@ -125,7 +148,90 @@ static struct {
 	char		last_map_path[64];
 	struct { int fd; int obj; } ex[32];
 	int		nex;
+	/* the channel model */
+	uint32_t	classes[CLS_MAX];	/* the class list of the device */
+	unsigned	nclasses;
+	uint32_t	want_entries;	/* the ring size the test asks for */
+	uint32_t	token;		/* the work submit token answered */
+	int		ntoken;
+	int		sched_enable;	/* the schedule asked to enable */
+	int		fail_alloc_n;	/* the Nth allocation of the session fails */
+	int		fail_ctl_n;	/* the Nth control of the session fails */
+	int		fail_free_n;	/* the Nth free of the session fails */
+	uint32_t	tsg_engine;	/* the engine type of the group */
+	NvHandle	tsg_h, chan_h;
+	uint32_t	chan_cls;	/* the class of the channel */
+	uint32_t	chan_entries;	/* the ring size the channel was given */
+	NvHandle	chan_userd, chan_notif, um_h;
+	uint32_t	eng_cls[8];
+	struct { int fd; uint64_t length; NvHandle h; } maps[MAPS_MAX];
+	int		nmaps;
 } M;
+
+/* The counters of one session: the allocations and the controls it has
+ * seen, and the objects it owns.  The failure seams count with them. */
+static struct {
+	int	fd;
+	int	nalloc;
+	int	nctl;
+	int	nfree;
+	NvHandle	device, vaspace;
+} S[SESS_MAX];
+static int nS;
+
+static int
+sess_index(int fd)
+{
+	int i;
+
+	/* Time: O(the sessions of the test).  Space: O(1). */
+	for (i = 0; i < nS; i++)
+		if (S[i].fd == fd)
+			return (i);
+	if (nS == SESS_MAX) {
+		bad("too many sessions");
+		return (0);
+	}
+	S[nS].fd = fd;
+	S[nS].nalloc = 0;
+	S[nS].nctl = 0;
+	S[nS].nfree = 0;
+	S[nS].device = 0;
+	S[nS].vaspace = 0;
+	return (nS++);
+}
+
+static int
+sess_nalloc(int fd)
+{
+	return (S[sess_index(fd)].nalloc);
+}
+
+static int
+sess_nctl(int fd)
+{
+	return (S[sess_index(fd)].nctl);
+}
+
+static int
+sess_nfree(int fd)
+{
+	return (S[sess_index(fd)].nfree);
+}
+
+/* A new session on a descriptor: its counters start again (a descriptor
+ * that was closed may be given out again). */
+static void
+sess_new(int fd)
+{
+	int i = sess_index(fd);
+
+	S[i].nalloc = 0;
+	S[i].nctl = 0;
+	S[i].nfree = 0;
+	S[i].device = 0;
+	S[i].vaspace = 0;
+}
 
 static void
 reset_all(void)
@@ -133,6 +239,8 @@ reset_all(void)
 	reset_kernel();
 	K.have_card[0] = 1;
 	memset(&M, 0, sizeof(M));
+	memset(S, 0, sizeof(S));
+	nS = 0;
 	M.enum_fd = -1;
 	M.va_base = 0x100000;
 	M.va_size = 1ULL << 40;
@@ -141,6 +249,18 @@ reset_all(void)
 	M.fail_nr = M.status_nr = -1;
 	M.fail_cls = NOVERRIDE;
 	M.fail_ctl = NOVERRIDE;
+	/* the class list of a GB20x: every class the backend binds */
+	M.classes[0] = CLS_GPFIFO_B;
+	M.classes[1] = CLS_GPFIFO_A;
+	M.classes[2] = CLS_COMPUTE_B;
+	M.classes[3] = CLS_COMPUTE_A;
+	M.classes[4] = CLS_3D;
+	M.classes[5] = CLS_I2M;
+	M.classes[6] = CLS_2D;
+	M.classes[7] = CLS_COPY;
+	M.nclasses = 8;
+	M.want_entries = NVRM_CHAN_ENTRIES_DEFAULT;
+	M.token = 0x1234;
 }
 
 /* Interpose the memory backend's process-local unmap as part of mem_sys. */
@@ -265,12 +385,12 @@ m_open(const char *path, int flags)
 		bad("opened a device node that is not the GPU's");
 	if ((flags & O_RDWR) == 0)
 		bad("device node not opened read-write");
-	if (M.fail_map_open) {
+	M.map_opens++;
+	if (M.fail_map_open || M.fail_map_open_n == M.map_opens) {
 		errno = EACCES;
 		return (-1);
 	}
-	M.map_opens++;
-	if (M.map_dev_null)
+	if (M.map_dev_null || M.map_dev_null_n == M.map_opens)
 		return (open("/dev/null", O_RDWR | O_CLOEXEC));
 	fd = shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600);
 	if (fd >= 0 && ftruncate(fd, 64 * MiB) != 0)
@@ -358,6 +478,7 @@ m_alloc_device(int fd, NVOS21_PARAMETERS *p)
 	    a->vaMode != NV_DEVICE_ALLOCATION_VAMODE_MULTIPLE_VASPACES)
 		bad("device allocation parameters");
 	add(fd, p->hObjectNew, p->hClass);
+	S[sess_index(fd)].device = p->hObjectNew;
 	M.ndevice++;
 }
 
@@ -374,6 +495,7 @@ m_alloc_vaspace(int fd, NVOS21_PARAMETERS *p)
 	v->vaBase = M.va_base;
 	v->vaSize = M.va_size;
 	add(fd, p->hObjectNew, p->hClass);
+	S[sess_index(fd)].vaspace = p->hObjectNew;
 	M.nvaspace++;
 }
 
@@ -394,13 +516,168 @@ m_alloc_osdesc(int fd, NVOS21_PARAMETERS *p)
 	M.nos++;
 }
 
+/* The subchannel slot of an engine class, or -1 when the class is not an
+ * engine class. */
+static int
+engine_slot(uint32_t cls)
+{
+	switch (cls) {
+	case CLS_3D:
+		return (0);
+	case CLS_COMPUTE_A:
+	case CLS_COMPUTE_B:
+		return (1);
+	case CLS_I2M:
+		return (2);
+	case CLS_2D:
+		return (3);
+	case CLS_COPY:
+		return (4);
+	default:
+		return (-1);
+	}
+}
+
+/* A live system memory object of the session. */
+static int
+live_system(int fd, NvHandle h)
+{
+	mobj *o = find(fd, h);
+
+	return (o != NULL && o->cls == NV01_MEMORY_SYSTEM);
+}
+
+/* The subdevice of the client: the parent of the usermode object. */
+static void
+chan_alloc_subdevice(int fd, NVOS21_PARAMETERS *p)
+{
+	NV2080_ALLOC_PARAMETERS *a = NvP64_VALUE(p->pAllocParms);
+	mobj *par;
+
+	if (p->paramsSize != sizeof(*a) || a->subDeviceId != 0)
+		bad("the subdevice allocation parameters");
+	par = find(fd, p->hObjectParent);
+	if (par == NULL || par->cls != NV01_DEVICE_0)
+		bad("the subdevice is not under the device");
+}
+
+/* The channel group: one per channel, the parent of the channel. */
+static void
+chan_alloc_group(int fd, NVOS21_PARAMETERS *p)
+{
+	NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS *a =
+	    NvP64_VALUE(p->pAllocParms);
+	mobj *par;
+
+	if (p->paramsSize != sizeof(*a))
+		bad("the channel group allocation parameter size");
+	par = find(fd, p->hObjectParent);
+	if (par == NULL || par->cls != NV01_DEVICE_0)
+		bad("the channel group is not under the device");
+	if (a->hVASpace != S[sess_index(fd)].vaspace)
+		bad("the channel group is not in the session's VA space");
+	if (a->engineType != NV2080_ENGINE_TYPE_GRAPHICS &&
+	    a->engineType != NV2080_ENGINE_TYPE_COPY0)
+		bad("the channel group's engine type");
+	if (!live_system(fd, a->hObjectError))
+		bad("the channel group's error notifier is not live");
+	M.tsg_engine = a->engineType;
+	M.tsg_h = p->hObjectNew;
+}
+
+/* The channel itself: under the group, with the ring and the pages. */
+static void
+chan_alloc_channel(int fd, NVOS21_PARAMETERS *p)
+{
+	NV_CHANNEL_ALLOC_PARAMS *a = NvP64_VALUE(p->pAllocParms);
+	mobj *par;
+
+	if (p->paramsSize != sizeof(*a))
+		bad("the channel allocation parameter size");
+	par = find(fd, p->hObjectParent);
+	if (par == NULL || par->cls != CLS_GROUP)
+		bad("the channel is not under a channel group");
+	if (a->gpFifoEntries != M.want_entries ||
+	    (a->gpFifoEntries & (a->gpFifoEntries - 1)) != 0)
+		bad("the channel's ring size");
+	if (!live_system(fd, a->hUserdMemory[0]))
+		bad("the channel's userd memory is not live");
+	if (!live_system(fd, a->hObjectError))
+		bad("the channel's error notifier is not live");
+	if (a->hVASpace != S[sess_index(fd)].vaspace)
+		bad("the channel is not in the session's VA space");
+	M.chan_cls = p->hClass;
+	M.chan_entries = a->gpFifoEntries;
+	M.chan_userd = a->hUserdMemory[0];
+	M.chan_notif = a->hObjectError;
+	M.chan_h = p->hObjectNew;
+}
+
+/* The usermode object: under the subdevice, where the doorbell is. */
+static void
+chan_alloc_usermode(int fd, NVOS21_PARAMETERS *p)
+{
+	mobj *par;
+
+	par = find(fd, p->hObjectParent);
+	if (par == NULL || par->cls != NV20_SUBDEVICE_0)
+		bad("the usermode object is not under the subdevice");
+	M.um_h = p->hObjectNew;
+}
+
+/* An engine object: under the channel, in its subchannel slot. */
+static void
+chan_alloc_engine(int fd, NVOS21_PARAMETERS *p, int slot)
+{
+	mobj *par;
+
+	par = find(fd, p->hObjectParent);
+	if (par == NULL || (par->cls != CLS_GPFIFO_A &&
+	    par->cls != CLS_GPFIFO_B))
+		bad("the engine object is not under the channel");
+	M.eng_cls[slot] = p->hClass;
+}
+
+/* The channel model: what the RM backend makes for a channel.  The checks
+ * are the ones the RM itself would make. */
+static void
+chan_alloc(int fd, NVOS21_PARAMETERS *p)
+{
+	int slot;
+
+	if (p->hClass == NV20_SUBDEVICE_0)
+		chan_alloc_subdevice(fd, p);
+	else if (p->hClass == CLS_GROUP)
+		chan_alloc_group(fd, p);
+	else if (p->hClass == CLS_GPFIFO_A || p->hClass == CLS_GPFIFO_B)
+		chan_alloc_channel(fd, p);
+	else if (p->hClass == CLS_USERMODE)
+		chan_alloc_usermode(fd, p);
+	else if ((slot = engine_slot(p->hClass)) >= 0)
+		chan_alloc_engine(fd, p, slot);
+	else {
+		bad("a class the channel backend should not allocate");
+		p->status = NV_ERR_INVALID_CLASS;
+		return;
+	}
+	add(fd, p->hObjectNew, p->hClass);
+}
+
 static void
 m_alloc(int fd, NVOS21_PARAMETERS *p)
 {
+	int n;
+
 	p->status = NV_OK;
 	if (p->hClass == M.fail_cls) {
 		M.fail_cls = NOVERRIDE;
 		p->status = NV_ERR_NO_MEMORY;
+		return;
+	}
+	n = ++S[sess_index(fd)].nalloc;
+	if (M.fail_alloc_n > 0 && M.fail_alloc_n == n) {
+		M.fail_alloc_n = 0;
+		p->status = NV_ERR_INSUFFICIENT_RESOURCES;
 		return;
 	}
 	switch (p->hClass) {
@@ -419,8 +696,8 @@ m_alloc(int fd, NVOS21_PARAMETERS *p)
 		m_alloc_osdesc(fd, p);
 		return;
 	default:
-		bad("a class the memory backend should not allocate");
-		p->status = NV_ERR_INVALID_CLASS;
+		chan_alloc(fd, p);
+		return;
 	}
 }
 
@@ -431,8 +708,15 @@ static int
 m_control(int fd, NVOS54_PARAMETERS *p)
 {
 	mobj *o;
-	int i;
+	int i, n;
 
+	n = ++S[sess_index(fd)].nctl;
+	if (M.fail_ctl_n > 0 && M.fail_ctl_n == n) {
+		M.fail_ctl_n = 0;
+		p->status = M.status_val != NV_OK ? M.status_val :
+		    NV_ERR_INVALID_STATE;
+		return (1);
+	}
 	if (p->cmd == M.fail_ctl) {
 		M.fail_ctl = NOVERRIDE;
 		p->status = M.status_val;
@@ -516,6 +800,38 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 			}
 		return (1);
 	}
+	case NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2: {
+		NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *a =
+		    NvP64_VALUE(p->params);
+
+		if (p->paramsSize != sizeof(*a) ||
+		    p->hObject != S[sess_index(fd)].device)
+			bad("the class list is not asked of the device");
+		a->numClasses = M.nclasses;
+		/* Time: O(the classes the device lists).  Space: O(1). */
+		for (i = 0; i < (int)M.nclasses; i++)
+			a->classList[i] = M.classes[i];
+		return (1);
+	}
+	case NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN: {
+		NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *a =
+		    NvP64_VALUE(p->params);
+
+		if (p->paramsSize != sizeof(*a) || p->hObject != M.chan_h)
+			bad("the work submit token is not asked of the "
+			    "channel");
+		M.token = 0x1234 + M.ntoken++;
+		a->workSubmitToken = M.token;
+		return (1);
+	}
+	case NVA06C_CTRL_CMD_GPFIFO_SCHEDULE: {
+		NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS *a = NvP64_VALUE(p->params);
+
+		if (p->paramsSize != sizeof(*a) || p->hObject != M.tsg_h)
+			bad("the schedule is not asked of the channel group");
+		M.sched_enable = a->bEnable;
+		return (1);
+	}
 	default:
 		return (0);	/* discovery: scripted_rm.h */
 	}
@@ -552,6 +868,7 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 			v->reply = NV_RM_API_VERSION_REPLY_RECOGNIZED;
 			M.nversion++;
 			M.session_fd = fd;
+			sess_new(fd);
 			return (0);
 		}
 		break;
@@ -582,7 +899,7 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 	case NV_ESC_RM_FREE: {
 		NVOS00_PARAMETERS *p = arg;
 		mobj *o;
-		int i;
+		int i, n;
 
 		if (!mine)
 			break;
@@ -601,6 +918,14 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 		}
 		if (p->hRoot != CLIENT)
 			bad("free without the session's client");
+		n = ++S[sess_index(fd)].nfree;
+		if (M.fail_free_n > 0 && M.fail_free_n == n) {
+			M.fail_free_n = 0;
+			p->status = M.status_val != NV_OK ? M.status_val :
+			    NV_ERR_INVALID_STATE;
+			M.nmine_free++;
+			return (0);
+		}
 		p->status = status_now(nr);
 		if (p->status == NV_OK) {
 			o->live = 0;
@@ -646,6 +971,14 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 		    p->fd < 0 || p->params.length == 0)
 			bad("CPU map parameters");
 		M.nmapmem++;
+		/* The descriptor the mapping was made on: the test maps it
+		 * too, as the GPU would. */
+		if (M.nmaps < MAPS_MAX) {
+			M.maps[M.nmaps].fd = p->fd;
+			M.maps[M.nmaps].length = p->params.length;
+			M.maps[M.nmaps].h = p->params.hMemory;
+			M.nmaps++;
+		}
 		p->params.status = status_now(nr);
 		p->params.pLinearAddress = NV_PTR_TO_NvP64((void *)(uintptr_t)
 		    (COOKIE + M.nmapmem));
@@ -1512,20 +1845,747 @@ test_fork_child(void)
 	down("fork child");
 }
 
+/* ---- the channel backend ------------------------------------------------- */
+
+/* The GPFIFO control words of the channel, in the userd page, and the
+ * doorbell, in the usermode page. */
+#define GP_GET_OFF	0x88
+#define GP_PUT_OFF	0x8c
+#define DOORBELL_OFF	0x90
+
+/* The descriptor a CPU mapping was made on: the test maps it too, as the
+ * GPU would. */
+static int
+map_fd(NvHandle h)
+{
+	int i;
+
+	for (i = 0; i < M.nmaps; i++)
+		if (M.maps[i].h == h)
+			return (M.maps[i].fd);
+	return (-1);
+}
+
+/* The test's own mapping of a page the model was given. */
+static void *
+map_page(NvHandle h, size_t len)
+{
+	int fd = map_fd(h);
+	void *p;
+
+	if (fd < 0) {
+		bad("no descriptor was given for the mapping");
+		return (NULL);
+	}
+	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (p == MAP_FAILED) {
+		bad("cannot map the page the model was given");
+		return (NULL);
+	}
+	return (p);
+}
+
+/* The handle of the ring: the client's memory object of the ring's size. */
+static NvHandle
+ring_handle(int fd, uint64_t bytes)
+{
+	int i;
+
+	for (i = 0; i < M.n; i++)
+		if (M.o[i].fd == fd && M.o[i].live &&
+		    M.o[i].cls == NV01_MEMORY_SYSTEM && M.o[i].size == bytes)
+			return (M.o[i].h);
+	return (0);
+}
+
+/* The objects of a class the model made. */
+static int
+count_class(uint32_t cls)
+{
+	int i, n = 0;
+
+	for (i = 0; i < M.n; i++)
+		if (M.o[i].cls == cls)
+			n++;
+	return (n);
+}
+
+/* The parameters of a channel with the compute engine. */
+static const nvrm_chan_params p_compute = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+
+/* A channel with one engine: the compute engine. */
+static nvrm_chan *
+make_chan(nvrm_client *cl, uint32_t engines)
+{
+	nvrm_chan_params p = { 0, engines, 0, 0 };
+	nvrm_chan *ch = NULL;
+
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	return (ch);
+}
+
+static void
+test_chan_create(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_info info = { 0 };
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	/* the group names the graphics engine of the runlist */
+	CHECK_EQ(M.tsg_engine, NV2080_ENGINE_TYPE_GRAPHICS);
+	/* the classes bound: the channel and the compute engine */
+	CHECK_EQ(M.chan_cls, CLS_GPFIFO_B);
+	CHECK_EQ(M.eng_cls[1], CLS_COMPUTE_B);
+	CHECK_EQ(M.chan_entries, NVRM_CHAN_ENTRIES_DEFAULT);
+	/* the group was enabled */
+	CHECK_EQ(M.sched_enable, NV_TRUE);
+	/* the information reports exactly the granted classes */
+	CHECK_EQ(nvrm_chan_info_get(ch, &info), NVRM_OK);
+	CHECK_EQ(info.engines, NVRM_ENG_COMPUTE);
+	CHECK_EQ(info.runlist, NVRM_RUNLIST_GRAPHICS);
+	CHECK_EQ(info.entries, NVRM_CHAN_ENTRIES_DEFAULT);
+	CHECK_EQ(info.cls_gpfifo, CLS_GPFIFO_B);
+	CHECK_EQ(info.subch_class[0], 0);
+	CHECK_EQ(info.subch_class[1], CLS_COMPUTE_B);
+	CHECK_EQ(info.subch_class[2], 0);
+	CHECK_EQ(info.subch_class[3], 0);
+	CHECK_EQ(info.subch_class[4], 0);
+	/* the backend adds no escape to the session */
+	CHECK(session_allows(fd, IOC_MAP_MEMORY_T));
+	CHECK(session_allows(fd, IOC_UNMAP_MEMORY_T));
+	nvrm_chan_destroy(ch);
+	/* the client keeps its own objects: the device, the VA space, the
+	 * subdevice and the usermode object */
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan create");
+}
+
+static void
+test_chan_copy(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_info info = { 0 };
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COPY);
+	/* a copy runlist: the group names the copy engine */
+	CHECK_EQ(M.tsg_engine, NV2080_ENGINE_TYPE_COPY0);
+	CHECK_EQ(M.eng_cls[4], CLS_COPY);
+	CHECK_EQ(nvrm_chan_info_get(ch, &info), NVRM_OK);
+	CHECK_EQ(info.runlist, NVRM_RUNLIST_COPY);
+	CHECK_EQ(info.subch_class[4], CLS_COPY);
+	CHECK_EQ(info.subch_class[1], 0);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan copy");
+}
+
+static void
+test_chan_engines(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_3D | NVRM_ENG_COMPUTE |
+	    NVRM_ENG_I2M | NVRM_ENG_2D, 0, 0 };
+	nvrm_chan_info info = { 0 };
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	/* one engine object per engine of the mask, in the subchannel
+	 * order of the RM */
+	CHECK_EQ(M.eng_cls[0], CLS_3D);
+	CHECK_EQ(M.eng_cls[1], CLS_COMPUTE_B);
+	CHECK_EQ(M.eng_cls[2], CLS_I2M);
+	CHECK_EQ(M.eng_cls[3], CLS_2D);
+	CHECK_EQ(M.eng_cls[4], 0);
+	CHECK_EQ(nvrm_chan_info_get(ch, &info), NVRM_OK);
+	CHECK_EQ(info.subch_class[0], CLS_3D);
+	CHECK_EQ(info.subch_class[1], CLS_COMPUTE_B);
+	CHECK_EQ(info.subch_class[2], CLS_I2M);
+	CHECK_EQ(info.subch_class[3], CLS_2D);
+	CHECK_EQ(info.subch_class[4], 0);
+	nvrm_chan_destroy(ch);
+	/* the copy class is not bound on a graphics runlist: the backend
+	 * does not do that pairing */
+	p.engines = NVRM_ENG_3D | NVRM_ENG_COPY;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan engines");
+}
+
+static void
+test_chan_submit(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_gp_entry e[1] = { { 0x1000, 4, 0 } };
+	nvrm_submit_opts so = { 0, 0, 0 };
+	nvrm_submit_result sr = { 0 };
+	nvrm_chan_status st = { 0 };
+	volatile uint32_t *userd, *um;
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	/* the pages the GPU sees: the userd page and the usermode page */
+	userd = map_page(M.chan_userd, 4096);
+	um = map_page(M.um_h, 65536);
+	CHECK(userd != NULL && um != NULL);
+	/* the submit publishes the put offset and rings the doorbell */
+	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
+	CHECK_EQ(sr.accepted, 1);
+	CHECK_EQ(sr.point, 1);
+	CHECK_EQ(userd[GP_PUT_OFF / 4], 2);
+	CHECK_EQ(um[DOORBELL_OFF / 4], M.token);
+	/* the channel reports the put offset it published */
+	CHECK_EQ(nvrm_chan_status_get(ch, &st), NVRM_OK);
+	CHECK_EQ(st.state, NVRM_CHAN_ALIVE);
+	CHECK_EQ(st.gp_put, 2);
+	CHECK_EQ(st.gp_get, 0);
+	CHECK_EQ(st.submitted, 1);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan submit");
+}
+
+static void
+test_chan_wait(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_gp_entry e[1] = { { 0x1000, 4, 0 } };
+	nvrm_submit_opts so = { 0, 0, 0 };
+	nvrm_submit_result sr = { 0 };
+	volatile uint32_t *userd;
+	volatile uint64_t *sem;
+	void *ring;
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	userd = map_page(M.chan_userd, 4096);
+	ring = map_page(ring_handle(fd, NVRM_CHAN_BYTES(M.want_entries)),
+	    NVRM_CHAN_BYTES(M.want_entries));
+	CHECK(userd != NULL && ring != NULL);
+	sem = (volatile uint64_t *)((char *)ring +
+	    NVRM_CHAN_SEM_OFF(M.want_entries));
+	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
+	/* the GPU fetched the entry: the get offset moves */
+	userd[GP_GET_OFF / 4] = 1;
+	/* the progress semaphore did not: the wait times out */
+	CHECK_EQ(nvrm_chan_wait(ch, 1, 1000000), NVRM_E_TIMEOUT);
+	/* the semaphore reaches the point: the wait is satisfied */
+	*sem = 1;
+	CHECK_EQ(nvrm_chan_wait(ch, 1, 1000000), NVRM_OK);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan wait");
+}
+
+static void
+test_chan_error(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_gp_entry e[1] = { { 0x1000, 4, 0 } };
+	nvrm_submit_opts so = { 0, 0, 0 };
+	nvrm_submit_result sr = { 0 };
+	nvrm_chan_status st = { 0 };
+	volatile NvNotification *notif;
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	notif = map_page(M.chan_notif, 4096);
+	CHECK(notif != NULL);
+	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
+	/* the RM writes the error in the notifier: the channel is dead */
+	notif->status = 0x1234;
+	CHECK_EQ(nvrm_chan_wait(ch, 1, 1000000), NVRM_E_LOST);
+	CHECK_EQ(nvrm_chan_status_get(ch, &st), NVRM_OK);
+	CHECK_EQ(st.state, NVRM_CHAN_DEAD);
+	CHECK_EQ(st.error, 0x1234);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan error");
+}
+
+static void
+test_chan_class(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd, i;
+
+	up();
+	/* the device lists no class of ours */
+	M.nclasses = 1;
+	M.classes[0] = 0x2080;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "class for gpfifo not in the "
+	    "class list") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	nvrm_client_close(cl);
+
+	/* the channel's class is there, the 3D engine's is not */
+	M.nclasses = 1;
+	M.classes[0] = CLS_GPFIFO_B;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	p.engines = NVRM_ENG_3D | NVRM_ENG_COMPUTE;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "class for 3D not in the class "
+	    "list") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	nvrm_client_close(cl);
+
+	/* the second candidate of the channel's class is used when the
+	 * first is not listed */
+	M.nclasses = 2;
+	M.classes[0] = CLS_GPFIFO_A;
+	M.classes[1] = CLS_COMPUTE_B;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	p.engines = NVRM_ENG_COMPUTE;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	CHECK_EQ(M.chan_cls, CLS_GPFIFO_A);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+
+	/* a device with more classes than the library keeps */
+	M.nclasses = CLS_MAX;
+	/* Time: O(the classes of the device).  Space: O(1). */
+	for (i = 0; i < (int)CLS_MAX; i++)
+		M.classes[i] = 0x2080;
+	M.classes[0] = CLS_GPFIFO_B;
+	M.classes[1] = CLS_COMPUTE_B;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	CHECK_EQ(M.chan_cls, CLS_GPFIFO_B);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	down("chan class");
+}
+
+static void
+test_chan_alloc_fail(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int before, fd, n, total;
+
+	up();
+	/* one create: count the allocations it makes */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	before = live_in_session(fd);
+	n = sess_nalloc(fd);
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	total = sess_nalloc(fd) - n;
+	/* the core's VA reservation and its ring, then the subdevice, the
+	 * usermode, two pages, the group, the channel and the engine */
+	CHECK_EQ(total, 9);
+	nvrm_chan_destroy(ch);
+	/* the client keeps its own objects: the subdevice and the usermode
+	 * object */
+	CHECK_EQ(live_in_session(fd), before + 2);
+	nvrm_client_close(cl);
+
+	/* every allocation of a create can fail: the create is refused and
+	 * nothing is left behind */
+	/* Time: O(the allocations of a create).  Space: O(1). */
+	for (n = 1; n <= total; n++) {
+		cl = client(NVRM_OPEN_ALLOW_MAP);
+		fd = M.session_fd;
+		before = live_in_session(fd);
+		M.fail_alloc_n = sess_nalloc(fd) + n;
+		CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+		CHECK(ch == NULL);
+		CHECK_EQ(live_in_session(fd), before);
+		M.fail_alloc_n = 0;
+		nvrm_client_close(cl);
+	}
+	down("chan alloc fail");
+}
+
+static void
+test_chan_ctl_fail(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd;
+
+	up();
+	/* the controls of a create: the class list, the work submit token
+	 * and the schedule */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.fail_ctl_n = sess_nctl(fd) + 2;	/* the token */
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "WORK_SUBMIT_TOKEN") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	nvrm_client_close(cl);
+
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.fail_ctl_n = sess_nctl(fd) + 3;	/* the schedule */
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "GPFIFO_SCHEDULE") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	nvrm_client_close(cl);
+
+	/* the class list itself fails */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.fail_ctl_n = sess_nctl(fd) + 1;
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "GET_CLASSLIST") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	nvrm_client_close(cl);
+	down("chan control fail");
+}
+
+/* A create whose device node cannot be opened: the create is refused,
+ * nothing is left behind, and the message says what failed.  n is the
+ * device node the backend opens (0 = the first one). */
+static void
+chan_open_fails(int n, const char *text)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd;
+
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	if (n == 0)
+		M.fail_map_open = 1;
+	else
+		M.fail_map_open_n = M.map_opens + n;
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	M.fail_map_open = 0;
+	M.fail_map_open_n = 0;
+	nvrm_client_close(cl);
+}
+
+/* A create whose mapping fails: the create is refused and nothing is left
+ * behind.  n is the device node the backend opens. */
+static void
+chan_mmap_fails(int n, const char *text)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd;
+
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.map_dev_null_n = M.map_opens + n;
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	M.map_dev_null_n = 0;
+	nvrm_client_close(cl);
+}
+
+static void
+test_chan_map_fail(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd;
+
+	up();
+	/* the RM refuses a CPU mapping: the create is refused */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.status_nr = NV_ESC_RM_MAP_MEMORY;
+	M.status_val = NV_ERR_INVALID_ARGUMENT;
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "NV_ESC_RM_MAP_MEMORY") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	M.status_nr = -1;
+	nvrm_client_close(cl);
+
+	/* the device node of the GPU cannot be opened: the usermode page
+	 * cannot be mapped */
+	chan_open_fails(0, "cannot open /dev/nvidia1");
+	/* the mapping of the userd page fails: the second device node the
+	 * backend opens is the one of the userd page */
+	chan_open_fails(2, "cannot open /dev/nvidia1");
+	/* the mmap of the usermode page fails */
+	chan_mmap_fails(1, "mmap of the device failed");
+	/* the mmap of the userd page fails */
+	chan_mmap_fails(2, "mmap of the device failed");
+	down("chan map fail");
+}
+
+static void
+test_chan_free_refused(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	/* the RM refuses the first free: the channel is held */
+	M.status_nr = NV_ESC_RM_FREE;
+	M.status_val = NV_ERR_INVALID_STATE;
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(failed(cl), 1);
+	/* the client close forgets the channel: the RM client takes what
+	 * is left */
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan free refused");
+}
+
+
+static void
+test_chan_free_failures(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	int fd, n;
+
+	up();
+	/* every free of a destroy can be refused: the channel is held and
+	 * the client close forgets it */
+	/* Time: O(the frees of a destroy).  Space: O(1). */
+	for (n = 1; n <= 4; n++) {
+		cl = client(NVRM_OPEN_ALLOW_MAP);
+		fd = M.session_fd;
+		ch = make_chan(cl, NVRM_ENG_COMPUTE);
+		M.fail_free_n = sess_nfree(fd) + n;
+		nvrm_chan_destroy(ch);
+		CHECK_EQ(failed(cl), 1);
+		M.fail_free_n = 0;
+		nvrm_client_close(cl);
+		CHECK_EQ(live_in_session(fd), 0);
+	}
+	/* the unmap of a page can be refused too */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	M.status_nr = NV_ESC_RM_UNMAP_MEMORY;
+	M.status_val = NV_ERR_INVALID_STATE;
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(failed(cl), 1);
+	M.status_nr = -1;
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan free failures");
+}
+
+static void
+test_chan_no_memory(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	int before, n, rc, total;
+
+	up();
+	/* how many allocations a create makes */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	calloc_calls = 0;
+	calloc_fail_at = 0;
+	CHECK_EQ(nvrm_chan_create(cl, &p_compute, &ch), NVRM_OK);
+	total = calloc_calls;
+	nvrm_chan_destroy(ch);
+	nvrm_client_close(cl);
+
+	/* The record of the backend is the last allocation before it asks
+	 * the class list: the first allocation that stops the create
+	 * earlier is the one after it. */
+	/* Time: O(the allocations of a create).  Space: O(1). */
+	for (n = 1; n <= total; n++) {
+		cl = client(NVRM_OPEN_ALLOW_MAP);
+		calloc_calls = 0;
+		calloc_fail_at = n;
+		before = sess_nctl(M.session_fd);
+		rc = nvrm_chan_create(cl, &p_compute, &ch);
+		calloc_fail_at = 0;
+		if (sess_nctl(M.session_fd) > before) {
+			nvrm_client_close(cl);
+			break;
+		}
+		CHECK_EQ(rc, NVRM_E_NOMEM);
+		nvrm_client_close(cl);
+	}
+	CHECK(n <= total);
+
+	/* the record of the backend fails: the create says no memory */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	calloc_calls = 0;
+	calloc_fail_at = n - 1;
+	CHECK_EQ(nvrm_chan_create(cl, &p_compute, &ch), NVRM_E_NOMEM);
+	CHECK(ch == NULL);
+	calloc_fail_at = 0;
+	nvrm_client_close(cl);
+	down("chan no memory");
+}
+
+static void
+test_chan_two_channels(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch, *ch2;
+	int after1, fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	after1 = live_in_session(fd);
+	/* the second channel of a client: the client keeps its own objects */
+	ch2 = make_chan(cl, NVRM_ENG_COMPUTE);
+	CHECK(ch != NULL && ch2 != NULL);
+	CHECK_EQ(count_class(CLS_USERMODE), 1);
+	/* the second channel adds the ring, its VA reservation, the two
+	 * pages, the group, the channel and the engine */
+	CHECK_EQ(live_in_session(fd), after1 + 7);
+	/* a failing second create leaves the client's own objects alone
+	 * (the class list is cached, so the token is its first control) */
+	M.fail_ctl_n = sess_nctl(fd) + 1;
+	CHECK(nvrm_chan_create(cl, &p_compute, &ch2) != NVRM_OK);
+	M.fail_ctl_n = 0;
+	CHECK_EQ(count_class(CLS_USERMODE), 1);
+	CHECK_EQ(live_in_session(fd), after1 + 7);
+	nvrm_chan_destroy(ch);
+	nvrm_chan_destroy(ch2);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan two channels");
+}
+
+static void
+test_chan_lazy(void)
+{
+	nvrm_client *cl;
+
+	up();
+	/* a client that never creates a channel has no usermode object */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	CHECK_EQ(count_class(CLS_USERMODE), 0);
+	nvrm_client_close(cl);
+	CHECK_EQ(count_class(CLS_USERMODE), 0);
+	down("chan lazy");
+}
+
+static void
+test_chan_two_clients(void)
+{
+	nvrm_client *cl, *cl2;
+	nvrm_chan *ch, *ch2;
+	int fd, fd2;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	cl2 = client(NVRM_OPEN_ALLOW_MAP);
+	fd2 = M.session_fd;
+	ch2 = make_chan(cl2, NVRM_ENG_COMPUTE);
+	/* each client has a subdevice and a usermode object of its own */
+	CHECK_EQ(count_class(CLS_USERMODE), 2);
+	CHECK(fd != fd2);
+	CHECK(M.um_h != 0);
+	nvrm_chan_destroy(ch);
+	nvrm_chan_destroy(ch2);
+	nvrm_client_close(cl);
+	nvrm_client_close(cl2);
+	CHECK_EQ(count_class(CLS_USERMODE), 2);
+	down("chan two clients");
+}
+
+#define RM_MEM_TESTS(X, N)						\
+	X("open", test_open) \
+	X("open-fail", test_open_failures) \
+	X("reserve", test_reserve) \
+	X("alloc", test_alloc) \
+	X("alloc-page", test_alloc_page_writeback) \
+	X("alloc-sysmem", test_alloc_sysmem) \
+	X("map-gpu", test_map_gpu) \
+	X("map-cpu", test_map_cpu) \
+	X("share", test_share) \
+	X("chan", test_chan_create) \
+	X("chan", test_chan_copy) \
+	X("chan", test_chan_engines) \
+	X("chan", test_chan_submit) \
+	X("chan", test_chan_wait) \
+	X("chan", test_chan_error) \
+	X("chan", test_chan_class) \
+	X("chan", test_chan_alloc_fail) \
+	X("chan", test_chan_ctl_fail) \
+	X("chan", test_chan_map_fail) \
+	X("chan", test_chan_free_refused) \
+	X("chan", test_chan_free_failures) \
+	X("chan", test_chan_no_memory) \
+	X("chan", test_chan_two_channels) \
+	X("chan", test_chan_lazy) \
+	X("chan", test_chan_two_clients) \
+	X("fork", test_fork_child)
+
+T_TABLE(tests, RM_MEM_TESTS);
+
 int
 main(void)
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	nvrm_rm_set_sys(&mem_sys);
-	test_open();
-	test_open_failures();
-	test_reserve();
-	test_alloc();
-	test_alloc_page_writeback();
-	test_alloc_sysmem();
-	test_map_gpu();
-	test_map_cpu();
-	test_share();
-	test_fork_child();
+	t_run(tests, sizeof(tests) / sizeof(tests[0]));
 	return (t_done("rm_mem_test"));
 }
