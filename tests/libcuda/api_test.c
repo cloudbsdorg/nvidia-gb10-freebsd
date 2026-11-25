@@ -890,14 +890,14 @@ init_stress_test(void)
 			/* The child has its own checks and its own failure
 			 * count: the parent sees only the exit status, so
 			 * a failure of the child has to be in it.  The result
-			 * of the round is checked as well as the count of
-			 * the checks: the round reports the threads that
-			 * saw another count in its return value, and that
-			 * value is not the count of the checks. */
+			 * of the round is checked, and the check is the one
+			 * source of the failure: it counts the failure, so
+			 * the exit status reads the count of the checks
+			 * and nothing else. */
 			rc = stress_round();
 			CHECK_EQ(rc, 0);
 			fflush(NULL);
-			_exit((rc == 0 && t_fails == 0) ? 0 : 1);
+			_exit(t_fails == 0 ? 0 : 1);
 		}
 		CHECK_EQ(waitpid(pid, &status, 0), pid);
 		CHECK(WIFEXITED(status));
@@ -933,6 +933,10 @@ providers_test(void)
 		printf("profile %s\n", cudaNativeFakeProfileName(i));
 	printf("default-profile %s\n", cudaNativeFakeProfileDefault());
 	printf("default-backend %s\n", cudaNativeDefaultBackend());
+	/* The provider that is in use: before the first initialization
+	 * attempt there is none. */
+	name = cudaNativeProviderInUse();
+	printf("provider-in-use %s\n", name != NULL ? name : "none");
 	return (0);
 }
 
@@ -961,8 +965,14 @@ reason_name(cudaNativeInitReason reason)
 static int
 init_reason_test(void)
 {
+	const char *provider;
+
 	(void)cuInit(0);
 	printf("reason %s\n", reason_name(cudaNativeInitFailureReason()));
+	/* The provider that is in use is the one the registry selected, not
+	 * the name the environment held. */
+	provider = cudaNativeProviderInUse();
+	printf("provider-in-use %s\n", provider != NULL ? provider : "none");
 	return (0);
 }
 
@@ -1072,12 +1082,36 @@ failed_init_test(CUresult expected, const char *name)
 	return (t_done(name));
 }
 
+/* The registry refuses a selection that names more devices than it holds,
+ * and it names the reason of the refusal.  The test runs with such a
+ * selection in the environment: the count of the provider is above the
+ * limit of the registry, so the initialization fails before the filter is
+ * applied. */
+static int
+limit_refusal_test(void)
+{
+	CUresult result;
+	cudaNativeInitReason reason;
+	int count = -1;
+
+	result = cuInit(0);
+	reason = cudaNativeInitFailureReason();
+	printf("init %d\n", (int)result);
+	printf("reason %s\n", reason_name(reason));
+	CHECK_EQ(result, CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(reason, CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT);
+	/* The count of the devices is not reported after a refusal. */
+	CHECK_EQ(cuDeviceGetCount(&count), CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(count, -1);
+	return (t_done("api refuses a selection over the limit of the registry"));
+}
+
 static int
 mode_usage(void)
 {
 	fprintf(stderr, "usage: api_test core|native-queries|profiles|threads|"
 	    "init-race|init-stress|init-observer|init-reason|preinit-reason|"
-	    "providers|"
+	    "providers|limit-refusal|"
 	    "proc-preinit|proc-version|proc-from-stdin|attribute-error|"
 	    "visibility-cap|nvrm|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
@@ -1103,6 +1137,7 @@ DEFINE_SIMPLE_MODE(init_race_mode, init_race_test)
 DEFINE_SIMPLE_MODE(init_stress_mode, init_stress_test)
 DEFINE_SIMPLE_MODE(init_observer_mode, init_observer_test)
 DEFINE_SIMPLE_MODE(providers_mode, providers_test)
+DEFINE_SIMPLE_MODE(limit_refusal_mode, limit_refusal_test)
 DEFINE_SIMPLE_MODE(init_reason_mode, init_reason_test)
 DEFINE_SIMPLE_MODE(preinit_reason_mode, preinit_reason_test)
 DEFINE_SIMPLE_MODE(proc_preinit_mode, proc_preinit_test)
@@ -1157,6 +1192,7 @@ main(int argc, char **argv)
 		{ "init-reason", init_reason_mode },
 		{ "preinit-reason", preinit_reason_mode },
 		{ "providers", providers_mode },
+		{ "limit-refusal", limit_refusal_mode },
 		{ "proc-preinit", proc_preinit_mode },
 		{ "proc-version", proc_version_mode },
 		{ "proc-from-stdin", proc_from_stdin_mode },

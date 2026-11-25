@@ -15,7 +15,7 @@
 #include <string.h>
 
 #include "cuda_internal.h"
-#include "control_ranges.h"
+#include "escape.h"
 
 static const char schema_text[] =
 #include "schema.inc"
@@ -174,161 +174,6 @@ parse_args(int argc, char **argv, enum output_mode *mode)
 		return (2);
 	}
 	return (-1);
-}
-
-/* The length of the UTF-8 sequence at p, and the code point it encodes.  A
- * zero length means the bytes are not a valid sequence. */
-static size_t
-utf8_decode(const unsigned char *p, uint32_t *code)
-{
-	uint32_t minimum;
-	size_t i, length;
-
-	if (p[0] >= 0xc2 && p[0] <= 0xdf) {
-		length = 2;
-		*code = p[0] & 0x1f;
-		minimum = 0x80;
-	} else if (p[0] >= 0xe0 && p[0] <= 0xef) {
-		length = 3;
-		*code = p[0] & 0x0f;
-		minimum = 0x800;
-	} else if (p[0] >= 0xf0 && p[0] <= 0xf4) {
-		length = 4;
-		*code = p[0] & 0x07;
-		minimum = 0x10000;
-	} else {
-		return (0);
-	}
-	/* Time: O(sequence length), at most four bytes; Space: O(1). */
-	for (i = 1; i < length; i++) {
-		if ((p[i] & 0xc0) != 0x80)
-			return (0);
-		*code = (*code << 6) | (p[i] & 0x3f);
-	}
-	if (*code < minimum || *code > 0x10ffff ||
-	    (*code >= 0xd800 && *code <= 0xdfff))
-		return (0);
-	return (length);
-}
-
-/* The code points that are written as text instead of being copied through.
- * The table is the one list of them: it lives in control_ranges.h, which the
- * test reads as well, so a code point that is added to the table is added to
- * the test with it. */
-static const struct control_range {
-	uint32_t first;
-	uint32_t last;
-} control_ranges[] = {
-	CUDA_NATIVE_CONTROL_RANGES
-};
-
-static int
-is_control_code(uint32_t code)
-{
-	size_t i;
-
-	/* Time: O(table length); Space: O(1). */
-	for (i = 0; i < sizeof(control_ranges) / sizeof(control_ranges[0]); i++)
-		if (code >= control_ranges[i].first &&
-		    code <= control_ranges[i].last)
-			return (1);
-	return (0);
-}
-
-/* The one escaping table.  A sink is either a bounded buffer or the standard
- * output, so the text report and the JSON records cannot drift apart. */
-typedef struct escape_sink {
-	char *buffer;
-	size_t size;
-	size_t used;
-	FILE *stream;
-} escape_sink;
-
-static void
-sink_write(escape_sink *sink, const char *text, size_t length)
-{
-	if (sink->buffer == NULL) {
-		fwrite(text, 1, length, sink->stream);
-		return;
-	}
-	/* A piece that does not fit is dropped whole: an escape sequence is
-	 * never cut in half. */
-	if (sink->used + length >= sink->size)
-		return;
-	memcpy(sink->buffer + sink->used, text, length);
-	sink->used += length;
-}
-
-static void
-escape_bytes(escape_sink *sink, const char *text, size_t length)
-{
-	const unsigned char *p = (const unsigned char *)text;
-	uint32_t code;
-	size_t i, used;
-
-	/* Time: O(length); Space: O(1). */
-	for (i = 0; i < length; i++) {
-		if (p[i] >= 0x80) {
-			used = utf8_decode(p + i, &code);
-			if (used == 0 || i + used > length) {
-				sink_write(sink, "\\ufffd", 6);
-				continue;
-			}
-			if (is_control_code(code)) {
-				char form[8];
-
-				snprintf(form, sizeof(form), "\\u%04x",
-				    (unsigned)code);
-				sink_write(sink, form, strlen(form));
-			} else
-				sink_write(sink, (const char *)(p + i), used);
-			i += used - 1;
-			continue;
-		}
-		switch (p[i]) {
-		case '"':
-			sink_write(sink, "\\\"", 2);
-			break;
-		case '\\':
-			sink_write(sink, "\\\\", 2);
-			break;
-		default:
-			if (is_control_code(p[i])) {
-				char form[8];
-
-				snprintf(form, sizeof(form), "\\u%04x",
-				    (unsigned)p[i]);
-				sink_write(sink, form, strlen(form));
-			} else
-				sink_write(sink, (const char *)(p + i), 1);
-			break;
-		}
-	}
-}
-
-/* The escaped form of a whole string, as the JSON records write it. */
-static void
-escaped_string(const char *text)
-{
-	escape_sink sink = { NULL, 0, 0, stdout };
-
-	putchar('"');
-	escape_bytes(&sink, text, strlen(text));
-	putchar('"');
-}
-
-/* The escaped form of a string in a bounded buffer: the same table, without
- * the quotes, and never a byte that a terminal would act on. */
-static void
-escaped_buffer(char *buffer, size_t size, const char *text, size_t length)
-{
-	escape_sink sink = { buffer, size, 0, NULL };
-
-	if (size == 0)
-		return;
-	buffer[0] = '\0';
-	escape_bytes(&sink, text, length);
-	buffer[sink.used] = '\0';
 }
 
 static int
@@ -588,9 +433,16 @@ static int
 report_error(enum output_mode mode, CUresult result, const char *detail)
 {
 	const char *backend = cudaNativeGetBackendName();
+	/* The provider that is in use: the library answers with the provider
+	 * the registry selected and not with the name the environment held.
+	 * The name of the environment is the fallback for the case where no
+	 * provider is in use. */
+	const char *provider = cudaNativeProviderInUse();
 	const char *name = NULL, *message = NULL, *hint = NULL;
 	char hint_text[256];
 
+	if (provider == NULL)
+		provider = backend;
 	if (cuGetErrorName(result, &name) != CUDA_SUCCESS)
 		name = "CUDA_ERROR_UNKNOWN";
 	if (cuGetErrorString(result, &message) != CUDA_SUCCESS)
@@ -601,7 +453,7 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 	 * says why the initialization failed; the tool carries no provider
 	 * name of its own. */
 	if (result == CUDA_ERROR_NOT_SUPPORTED &&
-	    cudaNativeProviderHint(backend, hint_text, sizeof(hint_text)))
+	    cudaNativeProviderHint(provider, hint_text, sizeof(hint_text)))
 		hint = hint_text;
 	else if (detail == NULL &&
 	    cudaNativeInitFailureReason() == CUDA_NATIVE_INIT_DEVICE_LIMIT) {
@@ -619,20 +471,25 @@ report_error(enum output_mode mode, CUresult result, const char *detail)
 		/* The provider reported more devices than the registry holds.
 		 * The registry refuses that count before it applies the
 		 * visibility filter, so CUDA_VISIBLE_DEVICES cannot lower
-		 * it: the advice names the setting of the provider that
-		 * can, and says what to do when the provider has none. */
-		if (cudaNativeProviderTakesFakeProfiles(backend))
+		 * it.  The advice is about the provider that is in use: the
+		 * library answers with the provider the registry selected
+		 * and not with the name the environment held.  The step it
+		 * names can be taken: a provider that takes the fake
+		 * profiles is shortened by naming fewer of them, and any
+		 * other provider is shortened by its own device list. */
+		if (cudaNativeProviderTakesFakeProfiles(provider))
 			snprintf(hint_text, sizeof(hint_text),
-			    "the provider reports more devices than the registry "
-			    "holds, at most %d; name fewer profiles in "
+			    "the %s provider reports more devices than the "
+			    "registry holds, at most %d; name fewer profiles in "
 			    "CUDA_NATIVE_FAKE_PROFILE",
-			    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+			    provider, CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
 		else
 			snprintf(hint_text, sizeof(hint_text),
-			    "the provider reports more devices than the registry "
-			    "holds, at most %d; reduce the number of devices the "
-			    "provider reports: no setting of this library changes "
-			    "it",
+			    "the %s provider reports more devices than the "
+			    "registry holds, at most %d; reduce the number of "
+			    "devices the provider reports: its device list has "
+			    "to name at most %d of them",
+			    provider, CUDA_NATIVE_MAX_PHYSICAL_DEVICES,
 			    CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
 		hint = hint_text;
 	} else if (detail == NULL &&

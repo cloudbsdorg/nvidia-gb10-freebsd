@@ -155,6 +155,13 @@ the provider names.
 The provider kind is the one fact about a provider: the library applies the
 profile selection under the same kind, so the answer of this function cannot
 drift from what the provider does with the variable.
+.Fn cudaNativeProviderInUse
+returns the name of the provider the registry selected, or null before the
+first initialization attempt and after an attempt that named no registered
+provider.
+It is the answer of the library about the provider that is in use: a caller
+that gives advice about a failure names the provider that failed and not the
+name the environment held.
 .Fn cudaNativeProviderHint
 writes into the caller's buffer the advice for a provider whose discovery is
 not implemented in this release, and returns nonzero when it wrote the whole
@@ -242,8 +249,8 @@ The registry holds at most 128 provider devices.
 A provider that reports more devices than that is an invalid value, and the
 reason of the failure is
 .Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT .
-The count of the provider is refused before the visibility filter is applied,
-so
+For that reason the count of the provider is refused before the visibility
+filter is applied, so
 .Ev CUDA_VISIBLE_DEVICES
 cannot lower it: the device list of the provider is what has to change.
 A provider may report more devices than the limit of 64: the devices that no

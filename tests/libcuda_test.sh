@@ -401,16 +401,34 @@ expect_rc "api_test compiles against the shared library" "$rc" 0
 # cannot link the runtime has failed for a reason of its own: that is a
 # failure of the toolchain and not a compiler without the feature.  The three
 # are never the same answer.
-tsan_build() {	# tsan_build CC LOG ARGS...; 0 built, 1 no flag, 2 build failed, 3 probe failed
+tsan_build() {	# tsan_build CC LOG ARGS...
+	# 0 built, 1 no flag, 2 build failed, 3 the link probe failed,
+	# 4 the compile probe failed for another reason
 	_cc=$1
 	_log=$2
 	shift 2
 	printf 'int main(void) { return 0; }\n' >"$W/tsan-probe.c"
-	# The flag is probed by compiling alone: a compiler that does not
-	# take it fails here, whatever it says about it.
+	# The probe is compiled without the flag first.  A compiler that
+	# cannot compile the probe at all has failed for a reason of its
+	# own, and that is never a compiler without the feature.
+	if ! "$_cc" -c "$W/tsan-probe.c" -o "$W/tsan-probe.o" \
+	    >"$_log.probe" 2>&1; then
+		return 4
+	fi
+	# The flag is probed by compiling alone.  Only a compiler that says
+	# it does not know the flag is a compiler without the feature: any
+	# other failure is a failure of the toolchain, and it is reported
+	# with the output of the compiler.
 	if ! "$_cc" -fsanitize=thread -c "$W/tsan-probe.c" \
-	    -o "$W/tsan-probe.o" >"$_log.probe" 2>&1; then
-		return 1
+	    -o "$W/tsan-probe.o" >"$_log.flag" 2>&1; then
+		cat "$_log.flag" >>"$_log.probe"
+		if grep -qiE 'unrecognized|unknown|unsupported|invalid|not supported|not recognised' \
+		    "$_log.flag" &&
+		    grep -qiE 'fsanitize|option|argument|flag|command-line' \
+		    "$_log.flag"; then
+			return 1
+		fi
+		return 4
 	fi
 	# The runtime is probed by linking: a compiler that takes the flag
 	# and cannot link the runtime has failed for a reason of its own.
@@ -442,6 +460,10 @@ case $? in
 1)
 	skip "the base compiler has no thread sanitizer: the race check is skipped"
 	sed -n '1,5p' "$W/build-tsan.log.probe"
+	;;
+4)
+	bad "the thread sanitizer probe failed: the compiler cannot compile the probe"
+	sed -n '1,20p' "$W/build-tsan.log.probe"
 	;;
 2)
 	bad "the thread sanitizer build of the project sources fails"
@@ -500,12 +522,21 @@ expect_rc "a compiler without the sanitizer flag is a skip" "$rc" 0
 cat >"$W/tsan-no-link-cc" <<'EOF'
 #!/bin/sh
 # A compiler that takes the sanitizer flag and compiles, but cannot link the
-# sanitizer runtime: the link of the probe fails.
+# sanitizer runtime: the link of the probe fails.  The compile branch drops
+# the sanitizer flag, so the case does not depend on the host compiler
+# supporting the sanitizer at all.
 mode=link
-for arg in "$@"; do
+count=$#
+index=0
+while [ "$index" -lt "$count" ]; do
+	arg="$1"
+	shift
 	case $arg in
 	-c) mode=compile ;;
+	-fsanitize=*) ;;
+	*) set -- "$@" "$arg" ;;
 	esac
+	index=$((index + 1))
 done
 if [ "$mode" = compile ]; then
 	exec cc "$@"
@@ -520,6 +551,20 @@ rc=$?
 [ "$rc" -eq 3 ]
 rc=$?
 expect_rc "a compiler that cannot link the sanitizer runtime is a failure, not a skip" "$rc" 0
+cat >"$W/tsan-dead-cc" <<'EOF'
+#!/bin/sh
+# A compiler that cannot compile anything: the probe of the sanitizer flag
+# fails for a reason that has nothing to do with the flag.
+echo "cc: error: the compiler cannot compile" >&2
+exit 1
+EOF
+chmod +x "$W/tsan-dead-cc"
+tsan_build "$W/tsan-dead-cc" "$W/build-tsan-dead.log" \
+    -pthread -I"$W" "$T/api_test.c" -o "$W/bin/api_test_dead"
+rc=$?
+[ "$rc" -eq 4 ]
+rc=$?
+expect_rc "a compiler that cannot compile the probe is a failure, not a skip" "$rc" 0
 cc $CFLAGS -I"$L" -I"$SDK" -I"$T" "$T/version_test.c" "$L/cuda_version.c" \
     -o "$W/bin/version_test" >"$W/build-version.log" 2>&1
 rc=$?
@@ -542,10 +587,49 @@ library_profiles=$(awk '/^profile /{ if (n++) printf ","; printf "%s", $2 }' \
     "$W/providers.out")
 library_default_profile=$(sed -n 's/^default-profile //p' "$W/providers.out")
 library_hint=$(sed -n 's/^hint //p' "$W/providers.out")
+library_default_backend=$(sed -n 's/^default-backend //p' "$W/providers.out")
 [ -n "$library_providers" ] && [ -n "$library_synthetic" ] &&
-    [ -n "$library_profiles" ] && [ -n "$library_hint" ]
+    [ -n "$library_profiles" ] && [ -n "$library_hint" ] &&
+    [ -n "$library_default_backend" ]
 rc=$?
 expect_rc "the library names its providers, its profiles and its advice" "$rc" 0
+# The number of devices the registry holds is a macro of the header of the
+# library: the program below prints it, so the test names no number of its
+# own and a change of the limit is followed by the test.
+cat >"$W/limit.c" <<'EOF'
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * The number of devices the registry holds: the macro of the header of the
+ * library, so the test names no number of its own.
+ */
+#include <stdio.h>
+
+#include "cuda_internal.h"
+
+int
+main(void)
+{
+	printf("%d\n", CUDA_NATIVE_MAX_PHYSICAL_DEVICES);
+	return (0);
+}
+EOF
+limit_of() {	# limit_of NAME TREE; the number of devices the tree holds
+	cc $CFLAGS -I"$2" -I"$SDK" "$W/limit.c" -o "$W/bin/limit-$1" \
+	    >"$W/build-limit-$1.log" 2>&1 || return 1
+	"$W/bin/limit-$1"
+}
+registry_limit=$(limit_of production "$L")
+rc=$?
+expect_rc "the limit of the registry comes from the header of the library" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,20p' "$W/build-limit-production.log"
+# The selection that is over the limit: the limit of the registry plus one
+# profile.  The profile is one the library names.
+first_profile=${library_profiles%%,*}
+over_limit_profiles=$(python3 -I -c 'import sys
+print(",".join([sys.argv[1]] * (int(sys.argv[2]) + 1)))' \
+    "$first_profile" "$registry_limit")
 run_case "version parser and formatter assertions" "$W/bin/version_test"
 run_case "C++ header and pre-initialization context check" "$W/bin/header_test"
 run_case "API core, errors and every proc export" env CUDA_NATIVE_BACKEND=fake "$API" core
@@ -701,7 +785,7 @@ rc=$?
 expect_rc "the library names the device limit as the reason" "$rc" 0
 # A failure that is not the overflow gets no device-limit hint: a provider
 # list longer than the registry holds fails with an invalid value too.
-profiles129=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
+profiles129=$over_limit_profiles
 env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$profiles129" "$INFO" \
     >"$W/provider-limit.txt" 2>"$W/provider-limit.err"
 rc=$?
@@ -743,6 +827,186 @@ expect_rc "the reason query runs for a failing provider" "$rc" 0
 grep -q '^reason provider-device-limit$' "$W/reason-provider.out"
 rc=$?
 expect_rc "the library names the provider device limit as the reason" "$rc" 0
+# The provider that is in use is the one the registry selected, and the
+# library answers with it: the advice is about that provider and not about
+# the name the environment held.
+grep -q "^provider-in-use $library_synthetic$" "$W/reason-provider.out"
+rc=$?
+expect_rc "the library names the provider that is in use" "$rc" 0
+# With the environment naming no provider, the provider in use is the
+# provider the library selects by itself.
+env -u CUDA_NATIVE_BACKEND "$API" init-reason >"$W/reason-default.out" 2>&1
+rc=$?
+expect_rc "the reason query runs with the default provider" "$rc" 0
+grep -q "^provider-in-use $library_default_backend$" "$W/reason-default.out"
+rc=$?
+expect_rc "the provider in use without an environment name is the default one" \
+    "$rc" 0
+# The advice for a provider that takes no profile names a step that can be
+# taken: the device list of the provider has to be shorter.  The mutant is
+# a provider that reports more devices than the registry holds and takes no
+# profile: the registry refuses the count, and the advice must be the one
+# of that provider.
+MP=$W/native-limit-mutant
+mkdir -p "$MP"
+cp "$L"/*.c "$L"/*.h "$MP/"
+python3 -I - "$MP/cuda_nvrm.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = """	if (count == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	return (CUDA_ERROR_NOT_SUPPORTED);
+}"""
+new = """	if (count == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	*count = CUDA_NATIVE_MAX_PHYSICAL_DEVICES + 1;
+	return (CUDA_SUCCESS);
+}"""
+assert old in text, "the enumeration of the native provider is not in the source"
+open(path, "w").write(text.replace(old, new, 1))
+PYEOF
+rc=$?
+expect_rc "the native provider over the registry mutant changed the library" \
+    "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	(
+	    cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
+		-Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$MP" -I"$SDK" \
+		"$MP"/*.c -lthr -o "$MP/libcuda.so.1" &&
+	    ln -s libcuda.so.1 "$MP/libcuda.so" &&
+	    cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
+		"$L/cuda-native-info/cuda-native-info.c" \
+		"$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
+		"$L/cuda_uuid.c" -L"$MP" -lcuda -lthr -o "$MP/cuda-native-info"
+	) >"$MP/build.log" 2>&1
+	rc=$?
+	expect_rc "the native provider over the registry library and tool build" \
+	    "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$MP/build.log"
+fi
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND="$library_native" LD_LIBRARY_PATH="$MP" \
+	    "$MP/cuda-native-info" >"$MP/output.txt" 2>"$MP/error.txt"
+	rc=$?
+	expect_rc "a provider over the limit of the registry fails" "$rc" 1
+	grep -q "the $library_native provider reports more devices" \
+	    "$MP/error.txt" &&
+	    grep -q 'reduce the number of devices the provider reports' \
+	    "$MP/error.txt"
+	rc=$?
+	expect_rc "the advice names the provider in use and a step that can be taken" \
+	    "$rc" 0
+	if grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$MP/error.txt" ||
+	    grep -q 'CUDA_VISIBLE_DEVICES' "$MP/error.txt"; then
+		bad "the advice of a provider over the limit names no setting of this library"
+		sed -n '1,10p' "$MP/error.txt"
+	else
+		ok "the advice of a provider over the limit names no setting of this library"
+	fi
+fi
+# The advice keys on the provider that is in use.  The mutant answers the
+# question with the default provider name instead of the provider the
+# registry selected: with the fake provider in use the advice would name
+# the default provider and would not name the setting that lowers the count
+# of the fake provider.  The case fails when the mutant is not caught, and
+# the evidence is the advice of the mutant with the status of the run.
+MU=$W/provider-in-use-mutant
+mkdir -p "$MU"
+cp "$L"/*.c "$L"/*.h "$MU/"
+python3 -I - "$MU/cuda_registry.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = """	return (registry.provider != NULL ? registry.provider->backend :
+	    NULL);"""
+new = """	return (cudaNativeDefaultBackend());"""
+assert old in text, "the provider in use is not answered in the registry"
+open(path, "w").write(text.replace(old, new, 1))
+PYEOF
+rc=$?
+expect_rc "the provider in use mutant changed the library" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	(
+	    cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
+		-Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$MU" -I"$SDK" \
+		"$MU"/*.c -lthr -o "$MU/libcuda.so.1" &&
+	    ln -s libcuda.so.1 "$MU/libcuda.so" &&
+	    cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
+		"$L/cuda-native-info/cuda-native-info.c" \
+		"$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
+		"$L/cuda_uuid.c" -L"$MU" -lcuda -lthr -o "$MU/cuda-native-info"
+	) >"$MU/build.log" 2>&1
+	rc=$?
+	expect_rc "the provider in use mutant library and tool build" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$MU/build.log"
+fi
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND="$library_synthetic" \
+	    CUDA_NATIVE_FAKE_PROFILE="$profiles129" LD_LIBRARY_PATH="$MU" \
+	    "$MU/cuda-native-info" >"$MU/provider.out" 2>"$MU/provider.err"
+	rc=$?
+	expect_rc "the mutant that names the wrong provider fails" "$rc" 1
+	if grep -q 'CUDA_NATIVE_FAKE_PROFILE' "$MU/provider.err"; then
+		bad "the advice keys on the provider that is in use"
+		sed -n '1,10p' "$MU/provider.err"
+	elif grep -q "the $library_default_backend provider reports more devices" \
+	    "$MU/provider.err"; then
+		ok "the advice keys on the provider that is in use"
+		sed -n '1,10p' "$MU/provider.err"
+	else
+		bad "the advice keys on the provider that is in use: the mutant said nothing"
+		sed -n '1,10p' "$MU/provider.err"
+	fi
+fi
+# The registry refuses a selection that names more devices than it holds,
+# and it names the reason of the refusal.  The case asks the library
+# itself, not the tool.
+env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$over_limit_profiles" \
+    "$API" limit-refusal >"$W/limit-refusal.out" 2>&1
+rc=$?
+expect_rc "the registry refuses a selection over the limit" "$rc" 0
+cat "$W/limit-refusal.out"
+grep -q '^reason provider-device-limit$' "$W/limit-refusal.out"
+rc=$?
+expect_rc "the refusal names the reason of the provider limit" "$rc" 0
+# The case has teeth: a registry that accepts the count of the provider
+# over the limit is caught by it.  The mutant removes the refusal, so the
+# selection over the limit is accepted.
+RL=$W/limit-mutant
+mkdir -p "$RL"
+cp "$L"/*.c "$L"/*.h "$RL/"
+python3 -I - "$RL/cuda_registry.c" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = "\tif (count > CUDA_NATIVE_MAX_PHYSICAL_DEVICES) {"
+assert old in text, "the refusal of the count of the provider is not in the registry"
+open(path, "w").write(text.replace(old, "\tif (0) {", 1))
+PY
+rc=$?
+expect_rc "the registry without the refusal mutant changed the library" "$rc" 0
+if [ "$rc" -eq 0 ]; then
+	cc $CFLAGS -pthread -I"$W" -I"$O/lib" -I"$RL" -I"$SDK" -I"$T" \
+	    "$T/api_test.c" "$RL"/*.c -lthr -o "$RL/api_test" \
+	    >"$RL/build.log" 2>&1
+	rc=$?
+	expect_rc "the library without the refusal builds" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$RL/build.log"
+	if [ "$rc" -eq 0 ]; then
+		env CUDA_NATIVE_BACKEND=fake \
+		    CUDA_NATIVE_FAKE_PROFILE="$over_limit_profiles" \
+		    "$RL/api_test" limit-refusal >"$RL/refusal.out" 2>&1
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			ok "the case of the refusal catches a registry that accepts the count"
+			sed -n '1,20p' "$RL/refusal.out"
+		else
+			bad "the case of the refusal catches a registry that accepts the count"
+			sed -n '1,20p' "$RL/refusal.out"
+		fi
+	fi
+fi
 # A visibility entry that names no device ends the list; it is not a count
 # overflow and gets no device-limit hint.
 for bad in not-an-index 999 0,0; do
@@ -975,6 +1239,9 @@ expect_rc "the program of the table of the control code points is there" "$rc" 0
 control_points() {	# control_points; one code point per line, in hex
 	"$W/bin/control_points"
 }
+control_ranges() {	# control_ranges; one range per line, first:last, in hex
+	"$W/bin/control_points" ranges
+}
 # The UTF-8 bytes of a code point as the octal escapes of printf: the shell
 # of the test has no \u in its printf.
 utf8_escapes() {	# utf8_escapes CODEPOINT
@@ -1051,22 +1318,66 @@ done
 # The list starts at the first code point above the ASCII block, so the C1
 # controls are in it: a code point that is not ASCII is a code point a
 # reader cannot see.
-profile_points=$(control_points | awk '$0 >= "0080"')
+# The comparison is numeric: a code point of a supplementary plane sorts
+# before U+0080 as a string, so a string comparison would leave it out.
+profile_points=$(control_points | python3 -I -c '
+import sys
+for line in sys.stdin:
+    code = int(line.strip(), 16)
+    if code > 0x7f:
+        sys.stdout.write("%04x\n" % code)
+')
 for cp in $profile_points; do
 	profile_control_case "$cp"
 done
-# The C1 block is in the list of the profile cases: its first code point
-# and its last one.
-for cp in 0080 009f; do
+# The block of the controls above the ASCII one is the first range of the
+# table that reaches above it.  Its ends and its middle come from the
+# table: the test names no code point of the table.
+block=$(control_ranges | python3 -I -c '
+import sys
+for line in sys.stdin:
+    first, last = line.strip().split(":")
+    if int(last, 16) > 0x7f:
+        sys.stdout.write("%s %s\n" % (first, last))
+        break
+')
+block_first=$(printf '%s\n' "$block" | cut -d' ' -f1)
+block_last=$(printf '%s\n' "$block" | cut -d' ' -f2)
+[ -n "$block_first" ] && [ -n "$block_last" ]
+rc=$?
+expect_rc "the table holds a block of controls above the ASCII one" "$rc" 0
+# The ends of the block that the profile cases must hold: the last code
+# point of the block and the first one of it that is not ASCII.  They come
+# from the list of the profile cases, so a block that starts in the ASCII
+# range does not break the check.
+block_ends=$(printf '%s\n' "$profile_points" | python3 -I -c '
+import sys
+first, last = int(sys.argv[1], 16), int(sys.argv[2], 16)
+codes = [int(line, 16) for line in sys.stdin]
+inside = [code for code in codes if first <= code <= last]
+assert inside, "the block holds no code point above the ASCII one"
+sys.stdout.write("%04x %04x\n" % (min(inside), max(inside)))
+' "$block_first" "$block_last")
+rc=$?
+expect_rc "the ends of the block of controls above the ASCII one are found" \
+    "$rc" 0
+block_first=$(printf '%s\n' "$block_ends" | cut -d' ' -f1)
+block_last=$(printf '%s\n' "$block_ends" | cut -d' ' -f2)
+block_middle=$(python3 -I -c 'import sys
+print("%04x" % ((int(sys.argv[1], 16) + int(sys.argv[2], 16)) // 2))' \
+    "$block_first" "$block_last")
+# The block is in the list of the profile cases: its first code point above
+# the ASCII one and its last one.
+for cp in "$block_first" "$block_last"; do
 	if printf '%s\n' "$profile_points" | grep -qx "$cp"; then
-		ok "the profile cases hold the C1 control U+$cp"
+		ok "the profile cases hold the control U+$cp of the block above ASCII"
 	else
-		bad "the profile cases hold the C1 control U+$cp"
+		bad "the profile cases hold the control U+$cp of the block above ASCII"
 	fi
 done
-# A C1 control of the middle of the block is checked by name, so a range
-# that loses its middle is caught even when its ends are still there.
-profile_control_case 0085
+# A control of the middle of the block is checked by name, so a range that
+# loses its middle is caught even when its ends are still there.
+profile_control_case "$block_middle"
 # The profile diagnostic wraps the bad value in the delimiter it escapes: a
 # value that holds a quote cannot close the value and hide what follows it.
 # The delimiter is the double quote, the one the escaping helper escapes, so
@@ -1114,7 +1425,8 @@ expect_rc "the shared backend-default mutant changed the library default" "$rc" 
         "$L/cuda_version.c" "$L/cuda_uuid.c" -lthr -o "$DB/libcuda.so.1" &&
     ln -s libcuda.so.1 "$DB/libcuda.so" &&
     cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
-        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda-native-info/cuda-native-info.c" \
+        "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
         "$L/cuda_uuid.c" -L"$DB" -lcuda -lthr -o "$DB/cuda-native-info"
 ) >"$DB/build.log" 2>&1
 rc=$?
@@ -1174,7 +1486,8 @@ PY
         -I"$O/lib" -I"$PT" -I"$SDK" "$PT"/*.c -lthr -o "$PT/libcuda.so.1" &&
     ln -s libcuda.so.1 "$PT/libcuda.so" &&
     cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
-        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda-native-info/cuda-native-info.c" \
+        "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
         "$L/cuda_uuid.c" -L"$PT" -lcuda -lthr -o "$PT/cuda-native-info"
 ) >"$PT/build.log" 2>&1
 rc=$?
@@ -1226,7 +1539,8 @@ expect_rc "the renamed provider mutant changed the library" "$rc" 0
         "$SP"/*.c -lthr -o "$SP/libcuda.so.1" &&
     ln -s libcuda.so.1 "$SP/libcuda.so" &&
     cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
-        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda-native-info/cuda-native-info.c" \
+        "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
         "$L/cuda_uuid.c" -L"$SP" -lcuda -lthr -o "$SP/cuda-native-info" &&
     cc $CFLAGS -pthread -I"$W" -I"$O/lib" -I"$SP" -I"$SDK" -I"$T" \
         "$T/api_test.c" "$SP"/*.c -lthr -o "$SP/api_test"
@@ -1309,7 +1623,8 @@ expect_rc "the profile-ignoring mutant changed the library" "$rc" 0
         "$PI"/*.c -lthr -o "$PI/libcuda.so.1" &&
     ln -s libcuda.so.1 "$PI/libcuda.so" &&
     cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \
-        "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+        "$L/cuda-native-info/cuda-native-info.c" \
+        "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
         "$L/cuda_uuid.c" -L"$PI" -lcuda -lthr -o "$PI/cuda-native-info"
 ) >"$PI/build.log" 2>&1
 rc=$?
@@ -1905,19 +2220,24 @@ fi
 # a table that changes does not break the change.
 MT=$W/table-mutant
 mkdir -p "$MT"
-python3 -I - "$L/control_ranges.h" "$MT/control_ranges.h" \
-    "$W/table-mutation.txt" <<'PYEOF'
+# The change is a program of its own: it is run on the table of the
+# production code and on a table whose ranges are in another order, so the
+# check knows that it narrows the range that ends highest and not the
+# range that is written last.
+cat >"$W/table-mutation.py" <<'PYEOF'
 import re, sys
 source, target, report = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(source).read()
 # The ranges of the table, found by their shape.
 ranges = list(re.finditer(r"\{ 0x([0-9a-f]+), 0x([0-9a-f]+) \}", text))
 assert ranges, "the table of the control code points is not in the header"
-last = max(int(entry.group(2), 16) for entry in ranges)
+# The range under test is the one that ends highest: the order of the
+# ranges in the header is not the order of their ends.
+final = max(ranges, key=lambda entry: int(entry.group(2), 16))
+last = int(final.group(2), 16)
 synthetic = last + 1
-final = ranges[-1]
 first = int(final.group(1), 16)
-assert last > first, "the last range of the table holds one code point"
+assert last > first, "the range that ends highest holds one code point"
 narrowed = (text[:final.start()] + "{ 0x%04x, 0x%04x }" % (first, last - 1) +
     text[final.end():])
 # The range that is added is written where the table is written: after the
@@ -1931,6 +2251,8 @@ for line in narrowed.split("\n"):
 open(target, "w").write("\n".join(out))
 open(report, "w").write("%04x\n%04x\n" % (synthetic, last))
 PYEOF
+python3 -I "$W/table-mutation.py" "$L/control_ranges.h" \
+    "$MT/control_ranges.h" "$W/table-mutation.txt"
 rc=$?
 expect_rc "the table of the control code points with an added range is written" "$rc" 0
 synthetic=
@@ -1957,10 +2279,92 @@ if [ -x "$W/bin/control_points-mutant" ]; then
 	else
 		ok "the list of the code points holds no code point the table does not have"
 	fi
-	if "$W/bin/control_points-mutant" | grep -qx "$dropped"; then
-		bad "the changed table of the control code points is changed"
-	else
-		ok "the changed table of the control code points is changed"
+	# The changed table holds every code point of the table but the one
+	# the change dropped, and it holds no other: a change that narrows
+	# another range widens the table, and that is caught here.
+	control_points >"$W/points-production.txt"
+	python3 -I - "$W/points-production.txt" "$W/bin/control_points-mutant" \
+	    "$dropped" "$synthetic" <<'PY'
+import subprocess, sys
+production = open(sys.argv[1]).read().split()
+mutant = subprocess.run([sys.argv[2]], capture_output=True,
+    text=True).stdout.split()
+dropped, synthetic = sys.argv[3], sys.argv[4]
+missing = [code for code in production if code not in set(mutant)]
+extra = [code for code in mutant if code not in set(production)]
+assert missing == [dropped], (missing, dropped)
+assert extra == [synthetic], extra
+PY
+	rc=$?
+	expect_rc "the changed table of the control code points lost one code point" \
+	    "$rc" 0
+	# The same change on a table whose ranges are in another order: the
+	# change narrows the range that ends highest, and the table that
+	# comes of it loses the same code point and nothing else.
+	RO=$W/table-reordered
+	RM=$W/table-reordered-mutant
+	mkdir -p "$RO" "$RM"
+	python3 -I - "$L/control_ranges.h" "$RO/control_ranges.h" <<'PY'
+import re, sys
+source, target = sys.argv[1], sys.argv[2]
+text = open(source).read()
+ranges = re.findall(r"\{ 0x([0-9a-f]+), 0x([0-9a-f]+) \}", text)
+assert len(ranges) > 1, "the table of the control code points has no ranges"
+# The ranges of the table in another order: the table does not depend on
+# the order of its ranges.
+body = []
+for position, (first, last) in enumerate(reversed(ranges)):
+    line = "\t{ 0x%s, 0x%s }" % (first, last)
+    if position != len(ranges) - 1:
+        line += ","
+    if position != len(ranges) - 1:
+        line += " \\"
+    body.append(line)
+open(target, "w").write("#define CUDA_NATIVE_CONTROL_RANGES \\\n" +
+    "\n".join(body) + "\n")
+PY
+	rc=$?
+	expect_rc "the table of the control code points in another order is written" \
+	    "$rc" 0
+	if [ "$rc" -eq 0 ]; then
+		python3 -I "$W/table-mutation.py" "$RO/control_ranges.h" \
+		    "$RM/control_ranges.h" "$W/table-mutation-reordered.txt"
+		rc=$?
+		expect_rc "the change runs on the table in another order" "$rc" 0
+		if [ "$rc" -eq 0 ]; then
+			cc $CFLAGS -I"$RM" -I"$L" "$T/control_points.c" \
+			    -o "$W/bin/control_points-reordered-mutant" \
+			    >"$W/build-control-points-reordered.log" 2>&1
+			rc=$?
+			expect_rc "the program of the changed table in another order compiles" \
+			    "$rc" 0
+			[ "$rc" -eq 0 ] ||
+			    sed -n '1,40p' "$W/build-control-points-reordered.log"
+			if [ "$rc" -eq 0 ]; then
+				reordered_dropped=$(sed -n '2p' \
+				    "$W/table-mutation-reordered.txt")
+				[ "$reordered_dropped" = "$dropped" ]
+				rc=$?
+				expect_rc "the change drops the same code point in another order" \
+				    "$rc" 0
+				python3 -I - "$W/points-production.txt" \
+				    "$W/bin/control_points-reordered-mutant" \
+				    "$dropped" "$synthetic" <<'PY'
+import subprocess, sys
+production = open(sys.argv[1]).read().split()
+mutant = subprocess.run([sys.argv[2]], capture_output=True,
+    text=True).stdout.split()
+dropped, synthetic = sys.argv[3], sys.argv[4]
+missing = [code for code in production if code not in set(mutant)]
+extra = [code for code in mutant if code not in set(production)]
+assert missing == [dropped], (missing, dropped)
+assert extra == [synthetic], extra
+PY
+				rc=$?
+				expect_rc "the change narrows the range that ends highest" \
+				    "$rc" 0
+			fi
+		fi
 	fi
 fi
 # The case for a C1 control has teeth: a table without the C1 block copies
@@ -1969,42 +2373,63 @@ fi
 # its value, so the mutant names no code point of the table.
 MC=$W/table-c1-mutant
 mkdir -p "$MC"
-python3 -I - "$L/control_ranges.h" "$MC/control_ranges.h" <<'PYEOF'
+python3 -I - "$L/control_ranges.h" "$MC/control_ranges.h" \
+    "$block_first" "$block_last" <<'PYEOF'
 import re, sys
 source, target = sys.argv[1], sys.argv[2]
+first, last = int(sys.argv[3], 16), int(sys.argv[4], 16)
 lines = open(source).read().split("\n")
 out = []
 dropped = False
 for line in lines:
     match = re.search(r"\{ 0x([0-9a-f]+), 0x([0-9a-f]+) \}", line)
-    # The C1 block is the one above the ASCII block: the range is found by
-    # its value, not named.
-    if match and 0x80 <= int(match.group(1), 16) <= 0xff:
-        dropped = True
-        continue
+    # Every range that overlaps the block above the ASCII one is dropped:
+    # the ends of the block come from the table, so a range that holds
+    # the block in another way is dropped as well.
+    if match:
+        low, high = int(match.group(1), 16), int(match.group(2), 16)
+        if low <= last and high >= first:
+            dropped = True
+            continue
     out.append(line)
-assert dropped, "the table of the control code points has no C1 range"
+assert dropped, "the table of the control code points has no block above ASCII"
 open(target, "w").write("\n".join(out))
 PYEOF
 rc=$?
 expect_rc "the table without the C1 controls is written" "$rc" 0
 if [ "$rc" -eq 0 ]; then
 	cc $CFLAGS -I"$O/info" -I"$MC" -I"$L" -I"$SDK" \
-	    "$L/cuda-native-info/cuda-native-info.c" "$L/cuda_version.c" \
+	    "$L/cuda-native-info/cuda-native-info.c" \
+	    "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
 	    "$L/cuda_uuid.c" -L"$O/lib" -lcuda -lthr \
 	    -o "$MC/cuda-native-info" >"$MC/build.log" 2>&1
 	rc=$?
 	expect_rc "the tool of the table without the C1 controls builds" "$rc" 0
 	[ "$rc" -eq 0 ] || sed -n '1,40p' "$MC/build.log"
 	if [ "$rc" -eq 0 ]; then
-		_raw=$(printf "gb$(utf8_escapes 0085)")
+		_raw=$(printf "gb$(utf8_escapes "$block_middle")")
 		env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$_raw" \
 		    "$MC/cuda-native-info" >"$MC/profile.out" 2>"$MC/profile.err"
 		rc=$?
-		if grep -qF "\\u0085" "$MC/profile.err"; then
-			bad "the profile case catches a table without the C1 controls"
-		else
+		# The check needs the evidence that the mutant ran and
+		# copied the code point through: the tool refused the
+		# profile, and the raw bytes of the code point are in the
+		# diagnostic.  A mutant that never ran, or one that escaped
+		# the code point, does not pass this check.
+		if [ "$rc" -eq 0 ]; then
+			bad "the profile case catches a table without the C1 controls: the mutant did not refuse the profile"
+			sed -n '1,10p' "$MC/profile.err"
+		elif grep -qF "\\u$block_middle" "$MC/profile.err"; then
+			bad "the profile case catches a table without the C1 controls: the mutant escaped the code point"
+			sed -n '1,10p' "$MC/profile.err"
+		elif grep -q 'unknown profile' "$MC/profile.err" &&
+		    grep -q "$(printf "$(utf8_escapes "$block_middle")")" \
+		    "$MC/profile.err"; then
 			ok "the profile case catches a table without the C1 controls"
+			sed -n '1,10p' "$MC/profile.err"
+		else
+			bad "the profile case catches a table without the C1 controls: the mutant did not copy the code point through"
+			sed -n '1,10p' "$MC/profile.err"
 		fi
 	fi
 fi
@@ -2012,14 +2437,22 @@ fi
 # cannot carry a NUL, so the code points are checked at the C level, against
 # the one table of the tool.
 cc $CFLAGS -I"$O/info" -I"$L" -I"$L/cuda-native-info" -I"$SDK" -I"$T" \
-    "$T/escape_test.c" "$L/cuda_version.c" "$L/cuda_uuid.c" \
-    -L"$O/lib" -lcuda -lthr -o "$W/bin/escape_test" \
+    "$T/escape_test.c" "$L/cuda-native-info/escape.c" "$L/cuda_version.c" \
+    "$L/cuda_uuid.c" -L"$O/lib" -lcuda -lthr -o "$W/bin/escape_test" \
     >"$W/build-escape.log" 2>&1
 rc=$?
 expect_rc "the escape test compiles against the tool" "$rc" 0
 [ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-escape.log"
-if [ -x "$W/bin/escape_test" ]; then
+# The binary must be there.  A test that is not built is not a test, and a
+# check that is skipped is a check that cannot fail: the escaping of the
+# table would then be checked by nothing.
+[ -x "$W/bin/escape_test" ]
+rc=$?
+expect_rc "the escape test binary is built" "$rc" 0
+if [ "$rc" -eq 0 ]; then
 	run_case "every code point of the table is escaped" "$W/bin/escape_test"
+else
+	bad "the escaping of the table of the control code points is not checked"
 fi
 
 # ---- the count of the profiles of the fake provider -----------------------
@@ -2110,14 +2543,18 @@ open(path, "w").write(patched)
 PYEOF
 rc=$?
 expect_rc "the unbounded write mutant changed the fake provider" "$rc" 0
-overflow_profiles=$(python3 -I -c 'print(",".join(["gb206"] * 129))')
 asan_build() {	# asan_build NAME TREE; the address sanitizer driver of a tree
 	cc $CFLAGS -fsanitize=address -pthread -I"$W" -I"$O/lib" -I"$2" -I"$SDK" \
 	    "$W/asan-driver.c" "$2"/cuda_*.c -lthr -o "$W/bin/asan-driver-$1" \
 	    >"$W/build-asan-$1.log" 2>&1
 }
-asan_run() {	# asan_run NAME TREE; the driver with the selection over the limit
-	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$overflow_profiles" \
+asan_run() {	# asan_run NAME TREE; the driver of the tree, with a selection
+	# of more profiles than the registry of that tree holds
+	_limit=$(limit_of "$1" "$2") || return 1
+	_over=$(python3 -I -c 'import sys
+print(",".join([sys.argv[1]] * (int(sys.argv[2]) + 1)))' \
+	    "$first_profile" "$_limit")
+	env CUDA_NATIVE_BACKEND=fake CUDA_NATIVE_FAKE_PROFILE="$_over" \
 	    "$W/bin/asan-driver-$1" >"$W/asan-$1.out" 2>&1
 }
 asan_build production "$AS"
@@ -2199,15 +2636,13 @@ python3 -I - "$SM/api_test.c" <<'PYEOF'
 import sys
 path = sys.argv[1]
 text = open(path).read()
+# The mutant drops the check on the result of the round: the failure of the
+# round is then not in the count of the checks of the child, and the child
+# exits with a success.  The result is still read, so the mutant compiles
+# and the change is one substitution.
 checked = "rc = stress_round();\n\t\t\tCHECK_EQ(rc, 0);"
 assert checked in text, "the check on the result of the round is not in the child"
-text = text.replace(checked, "(void)stress_round();", 1)
-status = "_exit((rc == 0 && t_fails == 0) ? 0 : 1);"
-assert status in text, "the exit status of the child is not in the test program"
-text = text.replace(status, "_exit(t_fails == 0 ? 0 : 1);", 1)
-declared = "\tint status, rc;"
-assert declared in text, "the status of the child is not declared"
-text = text.replace(declared, "\tint status;", 1)
+text = text.replace(checked, "rc = stress_round();\n\t\t\t(void)rc;", 1)
 open(path, "w").write(text)
 PYEOF
 rc=$?
@@ -2292,6 +2727,21 @@ awk 'length($0) > 80 {
 END { exit failed }' "$W/info-man.txt"
 rc=$?
 expect_rc "rendered cuda-native-info manual fits 80 columns" "$rc" 0
+# The sentence about the count of the provider belongs to the device-limit
+# reason and to no other: the manual names the reason it belongs to, and it
+# does not state it as a rule of its own.
+grep -q 'For that reason the count of the provider is refused' \
+    "$L/man/libcuda.3"
+rc=$?
+expect_rc "the manual scopes the count of the provider to the device-limit reason" \
+    "$rc" 0
+grep -q '^The count of the provider is refused' "$L/man/libcuda.3"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	bad "the manual states the count of the provider as a rule of its own"
+else
+	ok "the manual states the count of the provider as a rule of its own"
+fi
 for man in "$L/man/libcuda.3" "$L/cuda-native-info/cuda-native-info.1"; do
 	mandoc -T lint -W warning "$man" >"$W/mandoc.log" 2>&1
 	rc=$?

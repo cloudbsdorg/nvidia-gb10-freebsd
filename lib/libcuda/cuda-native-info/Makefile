@@ -3,7 +3,7 @@
 
 PROG=		cuda-native-info
 BINDIR?=	/usr/bin
-SRCS=		cuda-native-info.c cuda_version.c cuda_uuid.c
+SRCS=		cuda-native-info.c escape.c cuda_version.c cuda_uuid.c
 DPSRCS=		${.OBJDIR}/schema.inc
 CLEANFILES=	schema.inc
 MAN=		cuda-native-info.1

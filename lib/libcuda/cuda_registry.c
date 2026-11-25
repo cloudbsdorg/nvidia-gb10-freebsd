@@ -118,6 +118,19 @@ cudaNativeProviderTakesFakeProfiles(const char *name)
 	return (provider_takes_profiles(provider_find(name)));
 }
 
+/* The provider the registry selected: the one that is in use.  It is the
+ * answer of the library and not a name read from the environment: the
+ * registry resolved the environment to this provider, and a caller that
+ * asks for advice about a failure needs the provider that failed.  The
+ * answer is null before the first initialization attempt and after an
+ * attempt that named no registered provider. */
+const char *
+cudaNativeProviderInUse(void)
+{
+	return (registry.provider != NULL ? registry.provider->backend :
+	    NULL);
+}
+
 /* The library's advice for a provider whose discovery is not implemented.  The
  * text names the provider and the one to use instead, so a caller does not
  * have to know the provider names to write it.  The advice is written whole

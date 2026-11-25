@@ -130,6 +130,7 @@ int cudaNativeProviderKnown(const char *name);
 unsigned cudaNativeProviderCount(void);
 const char *cudaNativeProviderName(unsigned index);
 int cudaNativeProviderTakesFakeProfiles(const char *name);
+const char *cudaNativeProviderInUse(void);
 int cudaNativeProviderHint(const char *name, char *buffer, size_t size);
 int cudaNativeFakeProfileKnown(const char *name, size_t length);
 unsigned cudaNativeFakeProfileCount(void);

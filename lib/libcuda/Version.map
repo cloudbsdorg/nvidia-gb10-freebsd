@@ -29,6 +29,7 @@ CUDA_1.0 {
 		cudaNativeProviderCount;
 		cudaNativeProviderName;
 		cudaNativeProviderTakesFakeProfiles;
+		cudaNativeProviderInUse;
 		cudaNativeProviderHint;
 		cudaNativeInitFailureReason;
 		cudaNativeFakeProfileKnown;

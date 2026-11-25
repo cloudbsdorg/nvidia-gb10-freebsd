@@ -88,6 +88,13 @@ is set, the report carries the raw value of that variable in a
 field, which explains a list that parsing truncated.
 That value is escaped, so no control byte from the environment reaches the
 terminal.
+The text of the report is escaped by one rule: a code point of the table of
+the control code points is written as a \(rsuXXXX escape, a quote and a
+backslash are written as escapes, and every other code point is copied
+through byte for byte.
+A byte that is not part of a valid UTF-8 sequence is not copied through: it
+is written as the escape of the replacement character, \(rsufffd , so that
+the output is text.
 A query failure produces a JSON error record in either JSON mode and a diagnostic
 on standard error in text mode.
 The committed schema is installed as

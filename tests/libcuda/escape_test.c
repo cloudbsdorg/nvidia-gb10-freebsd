@@ -9,13 +9,10 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The escaping of the tool is a static function of the tool: the test takes
- * the source of the tool in, with the entry point of the tool renamed, so
- * that the table and the escaping that are under test are the ones of the
- * production code and not a copy of them. */
-#define main cuda_native_info_main
-#include "cuda-native-info.c"
-#undef main
+/* The escaping of the tool is its own source file: the test links it with
+ * the tool, so that the table and the escaping that are under test are the
+ * ones of the production code and not a copy of them. */
+#include "escape.h"
 
 #include "t.h"
 
@@ -59,7 +56,9 @@ check_control(uint32_t code)
 	CHECK_STR(escaped, expected);
 }
 
-/* A code point that is not in the table is copied through, byte for byte. */
+/* A code point that is not in the table is copied through, byte for byte.
+ * The replacement character is one of them: it is a valid code point, so
+ * it is copied through like any other. */
 static void
 check_ordinary(uint32_t code)
 {
@@ -81,11 +80,11 @@ main(void)
 
 	/* The table is not empty, and it starts at the NUL: a table that
 	 * lost a range would pass every other check of this test. */
-	CHECK(sizeof(control_ranges) / sizeof(control_ranges[0]) >= 8);
+	CHECK(control_range_count >= 8);
 	CHECK_EQ(control_ranges[0].first, 0x0000);
 	CHECK_EQ(control_ranges[0].last, 0x001f);
 	/* Every code point of the table is escaped, the NUL included. */
-	for (i = 0; i < sizeof(control_ranges) / sizeof(control_ranges[0]); i++) {
+	for (i = 0; i < control_range_count; i++) {
 		for (code = control_ranges[i].first;
 		    code <= control_ranges[i].last; code++)
 			check_control(code);
@@ -94,7 +93,13 @@ main(void)
 	 * characters: they are copied through unchanged. */
 	check_ordinary(0x20ac);
 	check_ordinary(0x00e9);
-	/* A byte that is not a UTF-8 sequence is replaced, not copied. */
+	/* The replacement character is a valid code point and it is not in
+	 * the table: it is copied through, byte for byte. */
+	check_ordinary(0xfffd);
+	/* A byte that is not part of a valid UTF-8 sequence is not copied
+	 * through: it is written as the escape of the replacement
+	 * character, so the output is text and the invalid byte is gone.
+	 * The man page states the rule. */
 	text[0] = (char)0xff;
 	text[1] = '\0';
 	escaped_buffer(escaped, sizeof(escaped), text, 1);

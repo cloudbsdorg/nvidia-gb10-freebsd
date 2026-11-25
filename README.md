@@ -860,7 +860,7 @@ without LLVM 23).
 
 ## libcuda (native CUDA Driver API)
 
-`lib/libcuda/` builds `libcuda.so.1` from NVIDIA's public API documentation, with 29 device, context, error, entry-point and native-query calls.
+`lib/libcuda/` builds `libcuda.so.1` from NVIDIA's public API documentation, with 30 device, context, error, entry-point and native-query calls.
 The default `nvrm` provider is a stub; `CUDA_NATIVE_BACKEND=fake` selects synthetic devices without hardware.
 `CUDA_NATIVE_FAKE_PROFILE=gb206,gb10` selects both fake profiles; `CUDA_VISIBLE_DEVICES` filters and reorders them.
 `cuda-native-info [--json | --jsonl | --schema]` reports versions and devices; its schema is under `lib/libcuda/schema/`.

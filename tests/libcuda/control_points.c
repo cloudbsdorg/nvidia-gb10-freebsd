@@ -14,6 +14,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "control_ranges.h"
 
@@ -31,10 +32,22 @@ static const struct control_range ranges[] = {
 #define RANGE_COUNT (sizeof(ranges) / sizeof(ranges[0]))
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	size_t i;
 	uint64_t code;
+
+	/* The ranges of the table, when they are asked for: the shell reads
+	 * the ends of the ranges from here, so it keeps no copy of the
+	 * table and names no code point of it. */
+	if (argc == 2 && strcmp(argv[1], "ranges") == 0) {
+		for (i = 0; i < RANGE_COUNT; i++)
+			printf("%04x:%04x\n", (unsigned)ranges[i].first,
+			    (unsigned)ranges[i].last);
+		return (0);
+	}
+	if (argc != 1)
+		return (2);
 
 	/* Time: O(code points of the table); Space: O(1). */
 	for (i = 0; i < RANGE_COUNT; i++) {
