@@ -71,6 +71,9 @@ plant_work() {
 	printf 'prog\n' > "$_l/info/nvrm-info"
 	printf 'drm\n' > "$_w/build/drm.ko"
 	printf 'dmabuf\n' > "$_w/build/dmabuf.ko"
+	# Our own module: the install writes it on arm64, and it refuses to
+	# install a build that has not produced it.
+	printf 'gb10smmu\n' > "$_w/build/gb10smmu.ko"
 	printf 'NVIDIA Driver License Agreement (test copy)\n' > "$_w/sources/$top/doc/license.txt"
 	tar -cJf "$_w/sources/$top.tar.xz" -C "$_w/sources" "$top"
 	printf 'X=1\n' > "$_drm/linuxkpi_version.mk"

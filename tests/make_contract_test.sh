@@ -217,6 +217,9 @@ printf 'a\n' > "$L/lib/libnvrm.a"
 printf 'prog\n' > "$L/info/nvrm-info"
 printf 'drm\n' > "$W/build/drm.ko"
 printf 'dmabuf\n' > "$W/build/dmabuf.ko"
+# Our own module: the install writes it on arm64, and it refuses to
+# install a build that has not produced it.
+printf 'gb10smmu\n' > "$W/build/gb10smmu.ko"
 mkdir -p "$W/sources/$top/doc" "$W/sources/open-gpu-kernel-modules-$ogkm_tag/.git" \
     "$W/src/sys/sys" "$W/src/include" "$S/drm-kmod"
 printf 'NVIDIA Driver License Agreement (test copy)\n' > "$W/sources/$top/doc/license.txt"
@@ -276,7 +279,10 @@ if [ "$rc" = 0 ] && [ -f "$M" ]; then
 	done
 	grep -q '^/boot/modules dir' "$M" && bad "manifest claims /boot/modules, which existed before"
 	got=$(awk '$1 ~ /^\/boot\/modules\// { sub(/.*\//, "", $1); print $1 }' "$M" | sort)
-	want=$(printf '%s\n' $mods drm.ko dmabuf.ko | sed 's|.*/||' | sort)
+	# The modules we install: the NVIDIA ones, ours (gb10smmu.ko on arm64)
+	# and the DRM modules of ours (drm.ko and dmabuf.ko).  The one list
+	# says all of them, so there is no second list here.
+	want=$(mk _install-module-list | sed 's|.*/||' | sort)
 	[ "$got" = "$want" ] && ok "install: the modules are the module list" || bad "modules: $got"
 	n=$(awk '$2 ~ /^[0-7]+$/' "$M" | wc -l | tr -d ' ')
 	ns=$(find "$W/stage" -type f | wc -l | tr -d ' ')
@@ -648,9 +654,30 @@ done)
 # (owners as a root install sets them)
 awk '$1 ~ /^@/ || $2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, "root:wheel" }' \
     "$S/q.manifest" 2>/dev/null | sort > "$S/q.got"
-grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF' | sort > "$S/q.want"
+# The manifest of this architecture: the common file, plus the arm64-only
+# file on arm64.
+{
+	grep -v '^#' "$repo/tests/install-e2e/expected.manifest" | awk 'NF'
+	case $(uname -m) in
+	arm64|aarch64)
+		grep -v '^#' "$repo/tests/install-e2e/expected.manifest.arm64" | awk 'NF'
+		;;
+	esac
+} | sort > "$S/q.want"
 [ -s "$S/q.got" ] && cmp -s "$S/q.got" "$S/q.want" && ok "tests/install-e2e/expected.manifest matches what install writes" \
     || bad "expected.manifest differs: $(diff "$S/q.want" "$S/q.got" | head -4 | tr '\n' ' ')"
+# The arm64-only module is in the arm64 file and in no other file, so the
+# manifest of another architecture does not ask for a module that is not
+# installed there.
+if [ "$(uname -m)" = arm64 ] || [ "$(uname -m)" = aarch64 ]; then
+	grep -q '^/boot/modules/gb10smmu.ko ' "$repo/tests/install-e2e/expected.manifest.arm64" \
+	    && ok "the arm64-only module is in the arm64 manifest" \
+	    || bad "the arm64-only module is not in the arm64 manifest"
+else
+	grep -q 'gb10smmu.ko' "$repo/tests/install-e2e/expected.manifest" \
+	    && bad "the common manifest asks for the arm64-only module" \
+	    || ok "the common manifest does not ask for the arm64-only module"
+fi
 
 if [ "$fail" = 0 ]; then
 	echo "make_contract_test: PASS"

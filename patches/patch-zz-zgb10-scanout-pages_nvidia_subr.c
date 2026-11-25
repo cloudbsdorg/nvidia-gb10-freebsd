@@ -1,5 +1,5 @@
---- nvidia/nvidia_subr.c.orig	2026-11-24 03:21:15.411317000 +0000
-+++ nvidia/nvidia_subr.c	2026-11-24 03:21:15.453463000 +0000
+--- nvidia/nvidia_subr.c.orig
++++ nvidia/nvidia_subr.c
 @@ -1680,6 +1680,93 @@
      free(at, M_NVIDIA);
  
@@ -94,24 +94,16 @@
  }
  
  static NvS32 nv_free_aliased_pages(
-@@ -1688,6 +1775,8 @@
+@@ -1687,6 +1774,8 @@
+ )
  {
      struct nvidia_alloc *at = private;
- 
-+    nv_alias_fict_unregister(at);
 +
++    nv_alias_fict_unregister(at);
+ 
      NV_VM_OBJECT_DEALLOCATE(at->object);
      NV_SGLIST_FREE(at->sg_list);
- 
-@@ -2469,6 +2558,7 @@
- {
-     nvidia_alloc_t *at = pAllocPrivate;
-     vm_page_t *pages = (vm_page_t *)pPages;
-+    vm_paddr_t pa;
-     NvU32 page_count;
-     int i;
- 
-@@ -2476,10 +2566,28 @@
+@@ -2477,6 +2566,11 @@
          return NV_ERR_INVALID_ARGUMENT;
      }
  
@@ -123,21 +115,3 @@
      page_count = NV_MIN(*pNumPages, at->num_pages);
  
      for (i = 0; i < page_count; i++) {
--        pages[i] = PHYS_TO_VM_PAGE(at->pte_array[i].physical_address);
-+        /*
-+         * A contiguous allocation has one pte_array entry, not one per
-+         * page: indexing it by page read past the array.
-+         */
-+        if (at->alloc_type_contiguous) {
-+            pa = (vm_paddr_t)at->pte_array[0].physical_address +
-+                (vm_paddr_t)i * PAGE_SIZE;
-+        } else {
-+            pa = (vm_paddr_t)at->pte_array[i].physical_address;
-+        }
-+        pages[i] = PHYS_TO_VM_PAGE(pa);
-+        if (pages[i] == NULL) {
-+            return NV_ERR_INVALID_STATE;
-+        }
-     }
- 
-     *pNumPages = page_count;

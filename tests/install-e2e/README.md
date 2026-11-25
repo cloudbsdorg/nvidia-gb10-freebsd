@@ -33,7 +33,7 @@ sh tests/install-e2e/run.sh --repo-url URL [--ref REF] [--os OS] [--arch ARCH] \
 | `--backend` | `vmm`: a new VM from the FreeBSD project's BASIC-CLOUDINIT image through cloudbsd-vmm, deleted afterwards. `ssh`: a fresh stock machine you made, reached as `USER@HOST` | `vmm` |
 | `--ssh-key` | the private key for reaching the guest (a path; the key itself is never printed or put on a command line) | ssh's own |
 | `--installed-manifest` | the manifest `make install` writes (`path mode owner:group sha256`, `path link -> target`, `path dir`; `@prefix PREFIX` is metadata, not a path) | none |
-| `--expected-manifest` | the manifest the repository commits (`path mode owner:group`, `path link target`; `#` comments), relative to the checkout | none |
+| `--expected-manifest` | the manifest the repository commits (`path mode owner:group`, `path link target`; `#` comments), relative to the checkout. The manifest of the architecture is this file plus `<name>.arm64` on arm64: the module of ours (`gb10smmu.ko`) is arm64 only and is in that second file | none |
 | `--load` | a kernel module to `kldload` after install and unload after (the VM only); it must load or be refused cleanly, with no panic | none |
 | `--make-arg` | added to every make command line in the guest, for example `ACCEPT_NVIDIA_LICENSE=1` when the person running the test accepts that licence (a repository never gets a licence accepted any other way) | none |
 | `--results` | where the run goes | `tests/install-e2e/results/<os>-<arch>-<UTC time>` |
@@ -83,7 +83,7 @@ Exit status: `0` pass, `1` fail, `2` usage (or run as root).
 ## In this repository
 
 `make test-install ACCEPT_NVIDIA_LICENSE=1` runs `run.sh` with this repository's manifest
-(`/var/db/nvidia-gb10-freebsd/installed.manifest`), `expected.manifest`, `--load nvidia-drm`
+(`/var/db/nvidia-gb10-freebsd/installed.manifest`), `expected.manifest` (plus `expected.manifest.arm64` on arm64), `--load nvidia-drm`
 and, because you gave it, `--make-arg ACCEPT_NVIDIA_LICENSE=1`; without a licence setting
 the guest stops at the licence, as any install would. The default `--ref` is the checkout's
 `git rev-parse HEAD`; the mirror must carry that commit. Set `E2E_REF=` to override it.
