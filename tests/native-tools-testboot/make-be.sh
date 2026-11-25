@@ -254,11 +254,9 @@ for _f in $FILES; do
 	[ "$(sha256 -q "$STAGE/$_f")" = "$_w" ] || { echo "make-be.sh: $STAGE/$_f differs from the list" >&2; exit 1; }
 	echo "checked $_f $_w"
 done
-# deps <ko>: the dependency names kldxref reads from one module (a copy in its own directory: kldxref reads a directory)
-deps() {
-	rm -rf "$SCRATCH/kodep"; mkdir "$SCRATCH/kodep"; cp "$1" "$SCRATCH/kodep/" || return 2
-	kldxref -d -v "$SCRATCH/kodep" 2> /dev/null | sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' | sort -u
-}
+# deps <ko>: the dependency names kldxref reads from one module (guard_kld_deps copies the file into a directory of
+# its own: kldxref reads a directory)
+deps() { guard_kld_deps "$SCRATCH/kodep" "$1"; }
 for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	_d=$(deps "$STAGE/$_k") || { echo "make-be.sh: cannot read the dependencies of $_k" >&2; exit 1; }
 	[ -n "$_d" ] || { echo "make-be.sh: kldxref reports no dependency at all for $_k (not even kernel): it could not read it" >&2; exit 1; }
@@ -337,6 +335,9 @@ run $BECTL mount "$BE" "$MNT"
 for _d in boot/modules boot/kernel; do
 	if ls "$MNT/$_d"/nvidia*.ko > /dev/null 2>&1; then echo "make-be.sh: $_d of $BASE holds an nvidia module" >&2; exit 1; fi
 done
+# the modules of the clone that depend on the Linux layer: devmatch loads a driver of its own when it sees the device
+# of it (a Wi-Fi card in the host brings a LinuxKPI driver with it), so every one of them is blocked below
+_lkm=$(guard_linux_modules "$SCRATCH/lkmod" "$MNT/boot/kernel" "$MNT/boot/modules")
 _lf=
 for _f in boot/loader.conf boot/loader.conf.local; do [ -f "$MNT/$_f" ] && _lf="$_lf $MNT/$_f"; done
 [ -d "$MNT/boot/loader.conf.d" ] && _lf="$_lf $(find "$MNT/boot/loader.conf.d" -type f | tr '\n' ' ')"
@@ -373,7 +374,16 @@ for _k in $_kl; do
 done
 run sysrc -f "$RCC" linux_enable=NO
 run sysrc -f "$RCC" kld_list="${_keep# }"
-run sysrc -f "$RCC" devmatch_blocklist="$BLOCK"
+# the blocklist of the clone: what the kit blocks, what the base blocked and every module of the clone that depends
+# on the Linux layer (devmatch would load such a module by itself)
+_prev=$(sysrc -f "$RCC" -n devmatch_blocklist 2> /dev/null || :)
+_blk=
+for _b in $_prev $BLOCK $_lkm; do
+	case " $_blk " in *" $_b "*) continue ;; esac
+	_blk="$_blk $_b"
+done
+run sysrc -f "$RCC" devmatch_blocklist="${_blk# }"
+for _m in $_lkm; do echo "blocked $_m: it depends on the Linux layer"; done
 for _f in etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local; do
 	[ -f "$MNT/$_f" ] || continue
 	if grep -Eq '^[[:space:]]*(linux_enable|kld_list|devmatch_blocklist)[[:space:]]*=' "$MNT/$_f"; then
@@ -399,13 +409,27 @@ done
 # An enabled rc.d service that loads a forbidden module by itself must not run in the clone: rc(8) loads the module of
 # its required_modules entry after kld_list was stripped (drm_ready loads amdgpu).  The rule is generic: every rc
 # script of the clone is read, and the modules its required_modules names are expanded with the rc.conf variables it
-# uses (drm_ready_modules for drm_ready).  A service whose rcvar or whose modules cannot be read is refused, not
-# ignored: a service that is not read is a service that is not known.  Only cloudbsd_hwprobe is named: its loading
-# is not through a required_modules entry, but through the probe it runs.
+# uses (drm_ready_modules for drm_ready).  A service whose modules cannot be read is refused, not ignored: a service
+# that is not read is a service that is not known.  A service whose enable state cannot be read (its script has no
+# rcvar: devd starts it per device) cannot be turned off, so it is refused only when the modules it loads are
+# forbidden.  Only cloudbsd_hwprobe is named: its loading is not through a required_modules entry, but through the
+# probe it runs.
+# rc_refuse <service> <modules>: the reason the service cannot be turned off safely, on standard error
+rc_refuse()
+{
+	case $2 in
+	unknown-enable\|*)
+		echo "make-be.sh: the rc.d service $1 has an enable state that cannot be read and its required_modules loads ${2#unknown-enable|}: it cannot be turned off safely; use a base without it" >&2
+		;;
+	*)
+		echo "make-be.sh: the rc.d service $1 has a required_modules entry that could not be read ($2): it cannot be turned off safely; use a base without it" >&2
+		;;
+	esac
+}
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCRATCH/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		echo "make-be.sh: the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be turned off safely; use a base without it" >&2
+		rc_refuse "$_svc" "$_mods"
 		exit 1
 	fi
 	run sysrc -f "$RCC" "$_rcvar=NO"
@@ -415,7 +439,7 @@ done < "$SCRATCH/rc-offenders.txt"
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCRATCH/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		echo "make-be.sh: the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be turned off safely; use a base without it" >&2
+		rc_refuse "$_svc" "$_mods"
 		exit 1
 	fi
 	echo "make-be.sh: $_svc ($_rcvar) is still enabled and its required_modules loads $_mods: another rc.conf file of the base sets it; use a base without it" >&2
@@ -442,7 +466,7 @@ while IFS='|' read -r _f _w; do
 	echo "make-be.sh: the devd rule $_f $_w loads a driver by itself: it cannot be made safe in the clone; use a base without it" >&2
 	exit 1
 done < "$SCRATCH/devd-loaders.txt"
-printf '\n# nvidia native tools test boot (Track #2362): a panic restarts in 5 seconds, no debugger; devmatch loads no LinuxKPI, Linux or nvidia driver\nkern.panic_reboot_wait_time="5"\ndebug.debugger_on_panic="0"\ndevmatch_blocklist="%s"\n' "$BLOCK" >> "$MNT/boot/loader.conf"
+printf '\n# nvidia native tools test boot (Track #2362): a panic restarts in 5 seconds, no debugger; devmatch loads no LinuxKPI, Linux or nvidia driver\n# (every module of the clone that depends on the Linux layer is blocked as well)\nkern.panic_reboot_wait_time="5"\ndebug.debugger_on_panic="0"\ndevmatch_blocklist="%s"\n' "${_blk# }" >> "$MNT/boot/loader.conf"
 
 # 6. the staged files and the kit
 MODS=$MNT/boot/modules.nvnative-test

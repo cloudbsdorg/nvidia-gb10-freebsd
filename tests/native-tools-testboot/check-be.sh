@@ -15,6 +15,8 @@
 #   -U         do not check root ownership (the host test installs without root; only with -m)
 # Environment: with GB10_TEST_HOOKS=1, not root and NVNT_NO_GIT_CHECK=1, an archive without git metadata is still
 # checked; the commit comparisons fail, as the host test already expects, instead of hiding every later check.
+# NVNT_TEST_PATH names a directory of stub tools that come first on PATH (the hook make-be.sh has): the host test
+# uses it to give the kit a kldxref that reads the name of the file it is given.
 #
 # Checks, each printed "ok" or "FAIL"; exit 0 when all are ok, 1 when one failed, 2 on a usage error:
 #   - staged files: the seven files of the list equal their full hashes, are root-owned (0444, nvrm-info,
@@ -43,6 +45,9 @@ set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
+# the stub tools of the host test come first (the same hook make-be.sh has: NVNT_TEST_PATH is a directory of stub
+# tools, and the kit reads the dependencies of a module with kldxref)
+[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
 KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
 . "$KITDIR/guard.sh"
@@ -143,8 +148,7 @@ _extra=$(ls "$MODS" 2> /dev/null | grep -vxE 'nvidia_gsp_ga10x_fw\.ko|nvidia\.ko
 [ -z "$_extra" ] && ok "no other file is staged (no nvidia-drm.ko, no Linux bridge)" || bad "other files are staged: $_extra"
 for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	[ -f "$MODS/$_k" ] || continue
-	rm -rf "$SCR/kd"; mkdir "$SCR/kd"; cp "$MODS/$_k" "$SCR/kd/"
-	_d=$(kldxref -d -v "$SCR/kd" 2> /dev/null | sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' | sort -u | tr '\n' ' ')
+	_d=$(guard_kld_deps "$SCR/kd" "$MODS/$_k" | tr '\n' ' ')
 	if [ -z "$_d" ]; then bad "kldxref reports no dependency for $_k: it could not read it"
 	elif printf '%s\n' $_d | grep -Eiq 'linux|drm|dmabuf'; then bad "$_k depends on $_d: not native"
 	else ok "$_k depends only on $_d"; fi
@@ -165,6 +169,16 @@ for _k in $(_v kld_list); do _b=${_k##*/}; _b=${_b%.ko}; printf '%s\n' "$_b" | g
 _bl=" $(_v devmatch_blocklist) "
 case $_bl in *" amdgpu "*" linuxkpi "*) ok "rc.conf: devmatch_blocklist names amdgpu and linuxkpi" ;; *) bad "rc.conf: devmatch_blocklist does not name amdgpu and linuxkpi: '$_bl'" ;; esac
 grep -Eq '^devmatch_blocklist="(.* )?amdgpu .*linuxkpi.*"' "$MNT/boot/loader.conf" 2> /dev/null && ok "loader.conf: devmatch_blocklist kenv names amdgpu and linuxkpi" || bad "loader.conf: no devmatch_blocklist kenv naming amdgpu and linuxkpi"
+# every module of the clone that depends on the Linux layer must be blocked: devmatch loads a driver of its own when
+# it sees the device of it (Track #2437: a Wi-Fi card in the host brought a LinuxKPI driver with it)
+_lkm=$(guard_linux_modules "$SCR/lkmod" "$MNT/boot/kernel" "$MNT/boot/modules")
+_lfbl=$(sed -n 's/^devmatch_blocklist="\(.*\)"$/\1/p' "$MNT/boot/loader.conf" 2> /dev/null | tail -1)
+_lkmiss=
+for _m in $_lkm; do
+	case "$_bl" in *" $_m "*) ;; *) _lkmiss="$_lkmiss $_m" ;; esac
+	case " $_lfbl " in *" $_m "*) ;; *) bad "loader.conf: the devmatch_blocklist kenv does not name $_m" ;; esac
+done
+[ -z "$_lkmiss" ] && ok "rc.conf: devmatch_blocklist names every module that depends on the Linux layer (${_lkm:-none})" || bad "rc.conf: devmatch_blocklist does not name$_lkmiss: devmatch would load them"
 _ov=0
 for _f in etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local; do
 	[ -f "$MNT/$_f" ] || continue
@@ -187,11 +201,25 @@ _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/nu
 # an enabled rc.d service that loads a forbidden module by itself: rc(8) loads the module of its required_modules
 # entry after kld_list was stripped (drm_ready loads amdgpu).  The rule is generic: every rc script of the clone is
 # read, and the modules its required_modules names are expanded with the rc.conf variables it uses.  A service whose
-# rcvar or whose modules cannot be read is a FAIL too: a service that is not read is a service that is not known.
+# modules cannot be read is a FAIL too: a service that is not read is a service that is not known.  A service whose
+# enable state cannot be read (its script has no rcvar: devd starts it per device) cannot be turned off, so it is a
+# FAIL only when the modules it loads are forbidden.
+# rc_refuse <service> <modules>: the reason the service cannot be known to load nothing, as a FAIL
+rc_refuse()
+{
+	case $2 in
+	unknown-enable\|*)
+		bad "the rc.d service $1 has an enable state that cannot be read and its required_modules loads ${2#unknown-enable|}: rc(8) loads it by itself"
+		;;
+	*)
+		bad "the rc.d service $1 has a required_modules entry that could not be read ($2): it cannot be known to load nothing"
+		;;
+	esac
+}
 guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCR/rc-offenders.txt"
 while IFS='|' read -r _svc _rcvar _mods; do
 	if [ "$_rcvar" = '?' ]; then
-		bad "the rc.d service $_svc has a required_modules entry that could not be read ($_mods): it cannot be known to load nothing"
+		rc_refuse "$_svc" "$_mods"
 		continue
 	fi
 	bad "the rc.d service $_svc ($_rcvar) is enabled and its required_modules loads $_mods: rc(8) loads it by itself"

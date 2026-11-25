@@ -841,7 +841,9 @@ memory, and a usermode page the doorbell is written in.
 
 - `linux_enable="NO"`;
 - no Linuxulator or LinuxKPI module (amdgpu and drm are stripped from `kld_list` and blocked in
-  devmatch);
+  devmatch; every module of the clone that depends on the Linux layer is blocked by name as well,
+  because devmatch loads a driver of its own when it sees the device of it — a Wi-Fi card in the
+  host brought `if_rtw89.ko`, which pulls in `linuxkpi_wlan.ko`);
 - no rc.d service that loads such a module by itself: `make-be.sh` reads every rc script of the
   clone, expands the `required_modules` of each with the rc.conf variables it uses (the variables of
   the script itself and the rc.conf of the service), and turns off every service that is enabled and

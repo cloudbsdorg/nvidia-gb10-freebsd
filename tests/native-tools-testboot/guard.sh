@@ -8,11 +8,11 @@
 # it is never read as "found nothing".
 #
 # The rc.conf and rc.d helpers (guard_rcconf_values, guard_rcconf_value, guard_rcconf_isset, guard_rc_expand,
-# guard_rc_services, guard_rc_offenders, guard_rc_forbidden, guard_hwprobe_loads, guard_devd_loaders,
-# guard_rc_loaders) read the configuration of a tree as well: which service is enabled, and which module an enabled
-# service loads by itself (a required_modules entry).  make-be.sh and check-be.sh use them for the clone, and the
-# guard uses them (with GUARD_ROOT set) to name the loader it can see.  The rule is one list (GUARD_FORBID_RE) and
-# one reader (guard_rcconf_pairs), so every caller reads the configuration the same way.
+# guard_rc_modules, guard_rc_services, guard_rc_offenders, guard_rc_forbidden, guard_hwprobe_loads,
+# guard_devd_loaders, guard_rc_loaders) read the configuration of a tree as well: which service is enabled, and
+# which module an enabled service loads by itself (a required_modules entry).  make-be.sh and check-be.sh use them
+# for the clone, and the guard uses them (with GUARD_ROOT set) to name the loader it can see.  The rule is one list
+# (GUARD_FORBID_RE) and one reader (guard_rcconf_pairs), so every caller reads the configuration the same way.
 #
 # The rule (Mark, 2026-11-22: native test results, not going through Linux):
 #   - modules: no loaded kld FILE other than the kernel whose name contains "linux" (the Linuxulator linux.ko,
@@ -65,6 +65,41 @@ GUARD_LINUX_RE='linux|(^|/)(lkpi|lindebugfs|linsysfs|linprocfs|drm|dmabuf|ttm|am
 # The service that loads a driver without a required_modules entry: the hwprobe runs a probe that loads the KMS
 # driver of the card it finds.  Its command "probe" loads nothing.  It is the only service the kit names.
 GUARD_HWPROBE=cloudbsd_hwprobe
+
+# guard_kld_deps <scratch dir> <module file>: the names of the modules this file depends on, one per line.  kldxref
+# reads a directory, so the file is copied into one of its own.  A file that cannot be copied is an error (2).
+guard_kld_deps()
+{
+	_gd=$1; _gf=$2
+	rm -rf "$_gd"; mkdir -p "$_gd" 2> /dev/null || return 2
+	cp "$_gf" "$_gd/" 2> /dev/null || return 2
+	kldxref -d -v "$_gd" 2> /dev/null | sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' | sort -u
+}
+
+# guard_linux_modules <scratch dir> <module dir>...: the names (without .ko) of the modules of these directories that
+# depend on the Linux layer, one per line.  devmatch loads a driver of its own when it sees the device of it (a Wi-Fi
+# card in the host brings a LinuxKPI driver with it), so a module that pulls the Linux layer in has to be blocked in
+# a boot environment without the driver.  The modules of the kit (nvidia*) are never named: the kit loads its own
+# nvidia.ko and refuses every other one.
+guard_linux_modules()
+{
+	_gd=$1; shift
+	for _gdir in "$@"; do
+		[ -d "$_gdir" ] || continue
+		for _gko in "$_gdir"/*.ko; do
+			[ -f "$_gko" ] || continue
+			_gname=${_gko##*/}; _gname=${_gname%.ko}
+			case $_gname in nvidia*) continue ;; esac
+			for _gdep in $(guard_kld_deps "$_gd" "$_gko"); do
+				if guard_layer_name "$_gdep"; then
+					printf '%s\n' "$_gname"
+					break
+				fi
+			done
+		done
+	done
+	rm -rf "$_gd"
+}
 
 # The loader of a module is not always the loader list: an enabled rc.d service with a required_modules entry loads a
 # module by itself (drm_ready loads amdgpu, and the base BE has it enabled), and a devd hotplug rule can start such a
@@ -346,14 +381,48 @@ guard_rc_service_rcvar()
 	esac
 }
 
+# guard_rc_modules <raw>: the modules of a required_modules entry, expanded with the values in effect for the
+# service (the values come on standard input, as for guard_rc_expand).  The entry may be more than one line: the
+# modules of the lines are accumulated, as rc(8) reads them.  Prints the modules and returns 0; prints nothing and
+# returns 1 when the modules cannot be read: a variable the entry names without an operator is not set, or a
+# reference is left after the expansion.  A service whose modules cannot be read is a service that is not known.
+guard_rc_modules()
+{
+	_raw=$1
+	_vals=$(cat)
+	_acc=; _unknown=
+	while IFS= read -r _r; do
+		[ -n "$_r" ] || continue
+		# every variable the entry names without an operator must be set, or the modules are unknown
+		while IFS='|' read -r _rn _rk; do
+			[ "$_rk" = bare ] || continue
+			[ "$_rn" = required_modules ] && continue
+			printf '%s\n' "$_vals" | guard_rcconf_isset "$_rn" || _unknown=1
+		done <<EOF
+$(guard_rc_refs "$_r")
+EOF
+		_exp=$(printf '%s\n' "$_vals" | guard_rc_expand "$_r" "$_acc")
+		case $_exp in
+		*'$'*) _unknown=1 ;;
+		esac
+		_acc="$_acc $_exp"
+	done <<EOF
+$_raw
+EOF
+	[ -z "$_unknown" ] || return 1
+	printf '%s' "$_acc" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
 # guard_rc_services <root>: one line per rc script of the tree that has a required_modules entry:
-# "<service>|<rcvar>|<yes|no|unknown>|<modules>".
+# "<service>|<rcvar>|<state>|<modules>".
 #   - the rcvar of the script is read from its rcvar= line; the common "rcvar=${name}_enable" idiom is resolved with
 #     the name= of the script;
 #   - the modules of the entry are expanded with the values of the script (its own defaults) and of the rc.conf of
 #     the tree, the rc.conf.d file of the service last;
-#   - a script whose rcvar cannot be read, or whose modules name a variable that is not set, is reported as unknown:
-#     the caller must refuse it, not ignore it (a service that is not read is a service that is not known).
+#   - the state of the service is yes when it is enabled, no when it is disabled, unknown when the enable state
+#     cannot be read (the script has no rcvar: devd starts such a service per device) and unreadable when the
+#     modules cannot be read (the entry names a variable that is not set).  A service that is not read is a service
+#     that is not known: the caller must refuse it, not ignore it.
 guard_rc_services()
 {
 	_root=$1
@@ -367,38 +436,18 @@ guard_rc_services()
 			_name=$(guard_rc_service_name "$_s")
 			_rv=$(guard_rc_service_rcvar "$_s" "$_name")
 			_vals=$(guard_rc_values "$_root" "$_svc")
+			if ! _mods=$(printf '%s\n' "$_vals" | guard_rc_modules "$_raw"); then
+				# the modules cannot be read: the caller must refuse the service
+				printf '%s|%s|unreadable|%s\n' "$_svc" "$_rv" "$_raw"
+				continue
+			fi
 			if [ -z "$_rv" ]; then
-				printf '%s|?|unknown|%s\n' "$_svc" "$_raw"
+				# the enable state cannot be read: the service has no rcvar
+				printf '%s|?|unknown|%s\n' "$_svc" "$_mods"
 				continue
 			fi
 			_rcval=$(printf '%s\n' "$_vals" | guard_rcconf_value "$_rv")
 			case $_rcval in [Yy][Ee][Ss]) _en=yes ;; *) _en=no ;; esac
-			_mods=; _acc=; _unknown=
-			_ifs=$IFS; IFS='
-'; set -f
-			set -- $_raw
-			IFS=$_ifs; set +f
-			for _r in "$@"; do
-				[ -n "$_r" ] || continue
-				# every variable the entry names without an operator must be set, or the modules are unknown
-				while IFS='|' read -r _rn _rk; do
-					[ "$_rk" = bare ] || continue
-					[ "$_rn" = required_modules ] && continue
-					printf '%s\n' "$_vals" | guard_rcconf_isset "$_rn" || _unknown=1
-				done <<EOF
-$(guard_rc_refs "$_r")
-EOF
-				_exp=$(printf '%s\n' "$_vals" | guard_rc_expand "$_r" "$_acc")
-				case $_exp in
-				*'$'*) _unknown=1 ;;
-				esac
-				_acc="$_acc $_exp"
-			done
-			if [ -n "$_unknown" ]; then
-				printf '%s|%s|unknown|%s\n' "$_svc" "$_rv" "$_raw"
-				continue
-			fi
-			_mods=$(printf '%s' "$_acc" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 			printf '%s|%s|%s|%s\n' "$_svc" "$_rv" "$_en" "$_mods"
 		done
 	done
@@ -415,16 +464,29 @@ guard_rc_forbidden()
 }
 
 # guard_rc_offenders <root> [<regex>]: the rc.d services of the tree that load a forbidden module by themselves, one
-# per line: "<service>|<rcvar>|<modules>".  A service whose rcvar or whose modules could not be read is a line of
-# its own: "<service>|?|unknown|<raw modules>": the caller must refuse it, not ignore it.
+# per line: "<service>|<rcvar>|<modules>".  A service whose modules could not be read is a line of its own:
+# "<service>|?|unknown|<raw modules>": the caller must refuse it, not ignore it (a service that is not read is a
+# service that is not known).  A service whose enable state could not be read (its script has no rcvar: devd starts
+# it per device) cannot be turned off, so it is an offender only when the modules it loads are forbidden; it is then
+# a line of its own too: "<service>|?|unknown-enable|<modules>".
 guard_rc_offenders()
 {
 	_root=$1; _re=${2:-$GUARD_FORBID_RE}
 	guard_rc_services "$_root" | while IFS='|' read -r _svc _rcvar _en _mods; do
-		if [ "$_en" = unknown ]; then
+		case $_en in
+		unreadable)
+			# the modules cannot be read: the caller must refuse the service
 			printf '%s|?|unknown|%s\n' "$_svc" "$_mods"
 			continue
-		fi
+			;;
+		unknown)
+			# the enable state cannot be read, so the service may run: it is an offender only when the modules
+			# it loads are forbidden.  One that loads no forbidden driver is skipped like any other.
+			_bad=$(guard_rc_forbidden "$_mods" "$_re" | tr '\n' ' ')
+			[ -z "$_bad" ] || printf '%s|?|unknown-enable|%s\n' "$_svc" "${_bad% }"
+			continue
+			;;
+		esac
 		[ "$_en" = yes ] || continue
 		_bad=$(guard_rc_forbidden "$_mods" "$_re" | tr '\n' ' ')
 		[ -z "$_bad" ] || printf '%s|%s|%s\n' "$_svc" "$_rcvar" "${_bad% }"
@@ -460,7 +522,9 @@ guard_devd_loaders()
 {
 	_root=$1; _re=${2:-$GUARD_FORBID_RE}
 	_dload=$(guard_rc_services "$_root" | while IFS='|' read -r _s4 _rv4 _en4 _m4; do
-		[ "$_en4" = unknown ] && continue
+		case $_en4 in
+		unknown|unreadable) continue ;;
+		esac
 		_b4=$(guard_rc_forbidden "$_m4" "$_re" | tr '\n' ' ')
 		[ -z "$_b4" ] || printf '%s|%s\n' "$_s4" "${_b4% }"
 	done)
@@ -511,6 +575,14 @@ guard_rc_loaders()
 	done
 	IFS=$_ifs
 	guard_rc_offenders "$_root" "$_re" | while IFS='|' read -r _svc _rcvar _mods; do
+		case $_mods in
+		unknown-enable\|*)
+			# the enable state of the service cannot be read, but the modules it loads are forbidden: it is a
+			# loader whatever its rcvar says
+			printf 'rc.d service %s (required_modules %s)\n' "$_svc" "${_mods#unknown-enable|}"
+			continue
+			;;
+		esac
 		[ "$_rcvar" = '?' ] && continue
 		printf 'rc.d service %s (required_modules %s)\n' "$_svc" "$_mods"
 	done
