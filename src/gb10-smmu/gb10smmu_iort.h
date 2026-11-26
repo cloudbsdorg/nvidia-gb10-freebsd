@@ -30,6 +30,17 @@
  *       it sits at node + sizeof(ACPI_IORT_NODE) (16 bytes), a fixed offset
  *       from the start of the node.  The parser still checks that the
  *       structure it reads fits inside the node before it reads it.
+ *   ACPI_IORT_ID_MAPPING.IdCount
+ *       the number of IDs in the range minus one (Arm DEN 0049D).  FreeBSD's
+ *       own reader says so in sys/arm64/acpica/acpi_iort.c: it compares an
+ *       ID with the mapping when
+ *
+ *           entry->base <= id && id <= entry->end
+ *
+ *       with entry->end = InputBase + IdCount, and it notes that the field
+ *       is "the number of IDs in the range minus one".  The inclusive last
+ *       ID of a range is therefore InputBase + IdCount, a count of zero is
+ *       a range of one ID, and the parser works that way.
  */
 #ifndef _GB10SMMU_IORT_H_
 #define _GB10SMMU_IORT_H_
@@ -75,6 +86,7 @@ struct gb10smmu_iort_error {
 	uint32_t	node_len;	/* the length the node claims */
 	uint32_t	node_type;	/* the type of the node */
 	uint64_t	value;	/* the value that was wrong */
+	uint32_t	seen;	/* the nodes the walk did see, when it counts */
 };
 
 /* What the parser found. */

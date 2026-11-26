@@ -61,6 +61,7 @@
 #include <sys/callout.h>
 #include <sys/sysctl.h>
 #include <sys/bus.h>
+#include <sys/mutex.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
 #include <machine/atomic.h>
@@ -68,6 +69,27 @@
 #include <contrib/dev/acpica/include/acpi.h>
 
 #include "gb10smmu_iort.h"
+#include "gb10smmu_gpu.h"
+
+/*
+ * The PCI ivars the module reads.  They are named in dev/pci/pcivar.h, a
+ * header a module cannot include (it pulls in the generated PCI interface
+ * header of the kernel build), so the ones the module reads are named
+ * here: they are the third, the fourth and the twelfth to the fifteenth
+ * of the list that starts at BUS_IVARS_PRIVATE.
+ */
+#define	GB10_PCI_IVAR_VENDOR	(BUS_IVARS_PRIVATE + 2)
+#define	GB10_PCI_IVAR_DEVICE	(BUS_IVARS_PRIVATE + 3)
+#define	GB10_PCI_IVAR_DOMAIN	(BUS_IVARS_PRIVATE + 11)
+#define	GB10_PCI_IVAR_BUS	(BUS_IVARS_PRIVATE + 12)
+#define	GB10_PCI_IVAR_SLOT	(BUS_IVARS_PRIVATE + 13)
+#define	GB10_PCI_IVAR_FUNCTION	(BUS_IVARS_PRIVATE + 14)
+
+/*
+ * Is this device on a PCI bus?  The kernel declares it in
+ * sys/dev/pci/pcivar.h, a header a module cannot include.
+ */
+extern bool is_pci_device(device_t dev);
 
 #define	R_IDR0		0x000
 #define	R_IDR1		0x004
@@ -129,6 +151,13 @@ static const struct { uint64_t start, size; } xcheck_rmrs[] = {
 	{ 0x0a1600000ULL, 0x18200000ULL },	/* WPR carveout, 386 MiB */
 };
 
+/*
+ * The GPU the module programs the SMMU of is an NVIDIA GB10 (GB20B): the
+ * module finds that device in the device tree of the running machine
+ * before it touches anything, and the SMMU it programs is the one the
+ * machine says stands in front of that GPU.  The identity of the device
+ * and the rules about it are in gb10smmu_gpu.h.
+ */
 static MALLOC_DEFINE(M_GB10SMMU, "gb10smmu", "gb10smmu tables");
 
 static struct {
@@ -156,6 +185,14 @@ static struct {
 	struct gb10smmu_sidrange sid[GB10SMMU_MAX_SIDRANGE];
 	struct gb10smmu_rmr	*rmrs;		/* the memory reserved for it */
 	int		nrmrs;
+
+	/* The GPU in the machine, found in the device tree. */
+	device_t	gpu_dev;		/* the GPU itself */
+	uint32_t	gpu_vendor;		/* its PCI vendor ID */
+	uint32_t	gpu_device;		/* its PCI device ID */
+	uint32_t	gpu_seg;		/* its PCI segment number */
+	uint32_t	gpu_rid;		/* its PCI requester ID */
+	char		gpu_name[64];		/* its name in the device tree */
 } sc;
 
 static uint32_t
@@ -219,7 +256,113 @@ nvidia_dev_attached(device_t dev)
 static int
 nvidia_attached(void)
 {
+	/* The GPU's own device says who drives it. */
+	if (sc.gpu_dev != NULL && device_get_driver(sc.gpu_dev) != NULL)
+		return (1);
 	return (nvidia_dev_attached(root_bus));
+}
+
+/*
+ * gb10smmu_gpu_pci - the PCI facts of a device.
+ *
+ * The facts are read from the PCI bus the device is on, which is where the
+ * kernel keeps them: its vendor and device ID, its segment (domain)
+ * number, and where it sits on the bus.  The requester ID of a PCI device
+ * is the bus it is on, its slot and its function, in the PCI's own layout.
+ */
+struct gb10smmu_pci {
+	uint32_t	vendor;
+	uint32_t	device;
+	uint32_t	domain;
+	uint32_t	rid;
+};
+
+static int
+gb10smmu_gpu_pci(device_t dev, struct gb10smmu_pci *pci)
+{
+	uintptr_t vendor, deviceid, domain, bus, slot, func;
+	device_t parent = device_get_parent(dev);
+
+	if (parent == NULL)
+		return (EINVAL);
+	if (BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_VENDOR, &vendor) != 0 ||
+	    BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_DEVICE, &deviceid) != 0 ||
+	    BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_DOMAIN, &domain) != 0 ||
+	    BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_BUS, &bus) != 0 ||
+	    BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_SLOT, &slot) != 0 ||
+	    BUS_READ_IVAR(parent, dev, GB10_PCI_IVAR_FUNCTION, &func) != 0)
+		return (EINVAL);
+	pci->vendor = (uint32_t)vendor;
+	pci->device = (uint32_t)deviceid;
+	pci->domain = (uint32_t)domain;
+	pci->rid = gb10smmu_requester_id((uint32_t)bus, (uint32_t)slot,
+	    (uint32_t)func);
+	return (0);
+}
+
+/*
+ * gb10smmu_find_gpu - the GB10 GPU in the running machine.
+ *
+ * The module programs the SMMU of one device: the NVIDIA GB10.  It finds
+ * that device in the device tree of the running machine and takes its PCI
+ * identity from there, so the SMMU the module programs is the one the
+ * machine says stands in front of that GPU.  A machine without the GPU has
+ * no SMMU of ours to program: the module refuses to attach rather than
+ * program an SMMU that belongs to another device.
+ */
+static int
+gb10smmu_find_gpu(device_t dev)
+{
+	device_t *children;
+	struct gb10smmu_pci pci;
+	int n, i, found;
+
+	if (is_pci_device(dev) && gb10smmu_gpu_pci(dev, &pci) == 0 &&
+	    gb10smmu_is_gb10(pci.vendor, pci.device)) {
+		sc.gpu_dev = dev;
+		sc.gpu_vendor = pci.vendor;
+		sc.gpu_device = pci.device;
+		sc.gpu_seg = pci.domain;
+		sc.gpu_rid = pci.rid;
+		strlcpy(sc.gpu_name, device_get_name(dev), sizeof(sc.gpu_name));
+		return (1);
+	}
+	if (device_get_children(dev, &children, &n) != 0)
+		return (0);
+	found = 0;
+	for (i = 0; i < n; i++) {
+		if (gb10smmu_find_gpu(children[i]))
+			found = 1;
+	}
+	/* The list of the children is the kernel's own allocation. */
+	free(children, M_DEVBUF);
+	return (found);
+}
+
+/*
+ * gb10smmu_hold - the holds that keep the nvidia driver out.
+ *
+ * The check for the nvidia driver and the change of the SMMU have to be
+ * one thing: if the driver can attach between the check and the change,
+ * the module programs an SMMU under a running driver, or takes the tables
+ * away from one.  The module's own lock and the bus-level hold are taken
+ * before the check and given up after the change, so a device that comes
+ * in at that moment waits for the module and not the other way round.
+ */
+static struct mtx sc_lock;
+
+static void
+gb10smmu_hold(void)
+{
+	mtx_lock(&sc_lock);
+	bus_topo_lock();
+}
+
+static void
+gb10smmu_unhold(void)
+{
+	bus_topo_unlock();
+	mtx_unlock(&sc_lock);
 }
 
 /*
@@ -228,6 +371,12 @@ nvidia_attached(void)
  * The table is read by the parser in gb10smmu_iort.c, which bounds every
  * read and fails on anything it cannot make sense of.  Every failure here
  * stops the module: it does not attach with half an answer.
+ *
+ * The question the table is asked is about the GPU the machine has: its
+ * PCI segment number and its PCI requester ID come from the device tree,
+ * so the table is read for that device and for no other.  The loader
+ * variables override them for a machine whose firmware describes the GPU
+ * somewhere else.
  */
 static int
 read_iort(void)
@@ -239,8 +388,8 @@ read_iort(void)
 	int error, i;
 	int seg, rid;
 
-	seg = 0;
-	rid = 0;
+	seg = (int)sc.gpu_seg;
+	rid = (int)sc.gpu_rid;
 	TUNABLE_INT_FETCH("gb10smmu.seg", &seg);
 	TUNABLE_INT_FETCH("gb10smmu.rid", &rid);
 	if (seg < 0 || rid < 0) {
@@ -285,10 +434,10 @@ read_iort(void)
 	}
 	if (error != GB10SMMU_IORT_OK) {
 		printf("gb10smmu: refusing to attach: the IORT cannot be used: "
-		    "%s (node %#x, type %#x, length %u, value %ju)\n",
+		    "%s (node %#x, type %#x, length %u, value %ju, seen %u)\n",
 		    err.what != NULL ? err.what : "it does not make sense",
 		    err.node, err.node_type, err.node_len,
-		    (uintmax_t)err.value);
+		    (uintmax_t)err.value, err.seen);
 		free(sc.rmrs, M_GB10SMMU);
 		sc.rmrs = NULL;
 		AcpiPutTable(hdr);
@@ -972,8 +1121,14 @@ gb10smmu_enable(void)
 	return (0);
 }
 
+/*
+ * gb10smmu_start_held - the attach, with the holds taken.
+ *
+ * The nvidia driver is checked for and the SMMU is changed under the same
+ * holds, so nothing comes in between them.
+ */
 static int
-gb10smmu_start(void)
+gb10smmu_start_held(void)
 {
 	int error;
 
@@ -981,9 +1136,6 @@ gb10smmu_start(void)
 	 * The enable path, one step at a time.  Every step that fails stops
 	 * the enable: the module does not load and the SMMU stays off.
 	 */
-	error = gb10smmu_tunables();
-	if (error != 0)
-		return (error);
 	error = gb10smmu_before_nvidia();
 	if (error != 0)
 		return (error);
@@ -1048,10 +1200,55 @@ gb10smmu_start(void)
 }
 
 static int
-gb10smmu_stop(void)
+gb10smmu_start(void)
 {
-	if (sc.va == NULL)
-		return (0);
+	int error;
+
+	mtx_init(&sc_lock, "gb10smmu", "gb10smmu", 0);
+	error = gb10smmu_tunables();
+	if (error != 0) {
+		mtx_destroy(&sc_lock);
+		return (error);
+	}
+
+	/*
+	 * The GPU has to be in the machine before anything else: the module
+	 * programs the SMMU of that GPU and of no other device.  A machine
+	 * without it has no SMMU of ours to program, and the module says so
+	 * instead of programming one that belongs to something else.
+	 */
+	if (!gb10smmu_find_gpu(root_bus)) {
+		printf("gb10smmu: refusing to attach: this machine has no "
+		    "NVIDIA GB10 GPU (PCI %04x:%04x); the module programs the "
+		    "SMMU in front of that GPU and nothing else\n",
+		    GB10SMMU_PCI_VENDOR, GB10SMMU_PCI_DEVICE);
+		mtx_destroy(&sc_lock);
+		return (ENXIO);
+	}
+	printf("gb10smmu: GPU %s: PCI %04x:%04x segment %u requester ID "
+	    "%#x\n", sc.gpu_name, sc.gpu_vendor, sc.gpu_device, sc.gpu_seg,
+	    sc.gpu_rid);
+
+	/*
+	 * From here on the module's own lock and the bus topology are held:
+	 * the check for the nvidia driver and the change of the SMMU are one
+	 * thing, and a device that comes in between them waits for the
+	 * module.
+	 */
+	gb10smmu_hold();
+	error = gb10smmu_start_held();
+	gb10smmu_unhold();
+	if (error != 0)
+		mtx_destroy(&sc_lock);
+	return (error);
+}
+
+/*
+ * gb10smmu_stop_held - the unload, with the holds taken.
+ */
+static int
+gb10smmu_stop_held(void)
+{
 	/*
 	 * Unloading puts the SMMU back into global bypass.  A GPU that runs
 	 * with a translation table it can no longer answer faults, so the
@@ -1090,6 +1287,22 @@ gb10smmu_stop(void)
 	sc.rmrs = NULL;
 	sc.nrmrs = 0;
 	return (0);
+}
+
+static int
+gb10smmu_stop(void)
+{
+	int error;
+
+	if (sc.va == NULL)
+		return (0);
+	/* The check for the nvidia driver and the change of the SMMU are
+	 * one thing, under the same holds as the load path. */
+	gb10smmu_hold();
+	error = gb10smmu_stop_held();
+	gb10smmu_unhold();
+	mtx_destroy(&sc_lock);
+	return (error);
 }
 
 static int

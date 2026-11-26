@@ -856,7 +856,8 @@ kv_unset() {
 # device, and the mode it needs is required, so the loader configuration
 # has to carry both.  It comes first: the loader loads the modules of the
 # file in the order of the file, and the nvidia driver is loaded later, by
-# devd.
+# devd.  The module is only loaded on a machine that has the GB10 GPU: it
+# has nothing to program without it.
 config_lines() {
 	if gb10smmu_wanted; then
 		printf '%s\n' "/boot/loader.conf gb10smmu_load YES" \
@@ -1025,11 +1026,42 @@ module_list() {
 # gb10smmu.ko is ours, not NVIDIA's: it programs the SMMUv3 in front of the
 # GB10 GPU and is built from src/gb10-smmu on its own.  It is an arm64
 # thing, so it is built and installed on arm64 only.
-gb10smmu_wanted() {
+gb10smmu_buildable() {
 	case $(uname -m) in
 	arm64|aarch64) return 0 ;;
 	esac
 	return 1
+}
+
+# The PCI identity of the GB10 GPU: the module programs the SMMU in front
+# of that GPU and of no other device.  The vendor is NVIDIA's, the device
+# ID is the GB10's.
+GB10_PCI_VENDOR=10de
+GB10_PCI_DEVICE=2e12
+
+# gb10_gpu_present - has this machine the GB10 GPU?
+#
+# The probe reads the PCI devices of the running machine.  A configuration
+# written for another machine (an image build) says what that machine has:
+# MK_GB10_PCI=1 for a machine with the GPU, MK_GB10_PCI=0 for one without.
+gb10_gpu_present() {
+	case ${MK_GB10_PCI:-} in
+	1) return 0 ;;
+	0) return 1 ;;
+	esac
+	pciconf -v 2>/dev/null |
+	    grep -q "vendor=0x$GB10_PCI_VENDOR device=0x$GB10_PCI_DEVICE"
+}
+
+# gb10smmu_wanted - is the loader to load the module of ours?
+#
+# The module is loaded on arm64, but only on a machine that has the GB10
+# GPU: it has nothing to program without the GPU, and a machine that has
+# the GPU without the module answering faults the GPU's firmware.
+gb10smmu_wanted() {
+	gb10smmu_buildable || return 1
+	gb10_gpu_present || return 1
+	return 0
 }
 
 # Every module this repository installs, by the path it is installed at:
@@ -1042,7 +1074,7 @@ install_module_list() {
 	if drm_wanted; then
 		printf '%s\n' "/boot/modules/drm.ko" "/boot/modules/dmabuf.ko"
 	fi
-	if gb10smmu_wanted; then
+	if gb10smmu_buildable; then
 		printf '%s\n' "/boot/modules/gb10smmu.ko"
 	fi
 }
@@ -1107,7 +1139,7 @@ EOF
 	done
 	# Our own module, next to the other ones: the SMMU in front of the
 	# GB10 GPU.  It is arm64 only and it is built, never loaded.
-	if gb10smmu_wanted; then
+	if gb10smmu_buildable; then
 		step gb10smmu sh "$repo/scripts/build-gb10smmu.sh"
 		[ -s "$WORK/build/gb10smmu.ko" ] || die "missing after the build: $WORK/build/gb10smmu.ko"
 		readelf -p .comment "$WORK/build/gb10smmu.ko" 2>/dev/null | grep -q 'Linker: LLD' \
@@ -1201,7 +1233,7 @@ stage() {
 	for _ko in $(module_list); do
 		install -m 555 -- "$TREE/$_ko" "$_m/"
 	done
-	if gb10smmu_wanted; then
+	if gb10smmu_buildable; then
 		[ -s "$WORK/build/gb10smmu.ko" ] || die "stage: $WORK/build/gb10smmu.ko is missing: run make build"
 		install -m 555 -- "$WORK/build/gb10smmu.ko" "$_m/gb10smmu.ko"
 	fi
@@ -1655,7 +1687,7 @@ do_install() {
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || _ok=0
 	done
-	if gb10smmu_wanted; then
+	if gb10smmu_buildable; then
 		[ -s "$WORK/build/gb10smmu.ko" ] || _ok=0
 	fi
 	[ -f "$LIBOBJ/info/nvrm-info" ] || _ok=0

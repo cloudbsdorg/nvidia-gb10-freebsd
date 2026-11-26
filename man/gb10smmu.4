@@ -54,7 +54,16 @@ on, and it programs the SMMU by hand.
 The proper fix is an IOMMU in the kernel: a device attachment that goes
 through it, with IORT RMR support.
 .Pp
-The module is built and installed on arm64 only.
+The module finds the GB10 in the device tree of the running machine before
+it touches anything, and it programs the SMMU that stands in front of that
+GPU and of no other SMMU.
+A machine without the GPU has nothing for the module to program: it refuses
+to load and says so.
+The SMMU it programs is the one the machine's own description names, never
+one that is hardcoded in the module.
+.Pp
+The module is built and installed on arm64 only, and the loader is told to
+load it only on a machine that has the GB10 GPU.
 .Sh THE FACTS IT READS
 Every address and every ID the module programs comes from the machine
 itself, from the ACPI IORT table, which the firmware writes and
@@ -83,12 +92,17 @@ gives up on anything it cannot make sense of.
 There is no best effort: when the table does not add up, the module
 refuses to load and says which node and which offset are at fault.
 The same goes for a table that describes no SMMU for the GPU, or that maps
-no requester ID to one.
+no requester ID to one, or that holds fewer nodes than it claims, or more
+than it claims.
 It does not fall back to an address of another board.
 .Pp
 The addresses the first version of the module used are kept only as a
 cross-check: when the IORT says something else, the module says so and
 programs what the IORT says.
+.Pp
+One thing does not come from the table: the PCI identity of the GPU.
+The module reads it from the device tree of the running machine, and it
+programs nothing when the machine has no such GPU.
 .Sh MODES
 The mode is chosen with the
 .Ev gb10smmu.mode
@@ -123,9 +137,10 @@ It is 1 by default.
 .It Va gb10smmu.seg
 .It Va gb10smmu.rid
 The PCI segment number and the PCI requester ID of the GPU.
-They say which node of the IORT is the GPU's, and they are 0 by default,
-which is where a single-segment machine has the GPU.
-Set them when the machine puts the GPU somewhere else.
+They say which node of the IORT is the GPU's.
+They default to the ones the GPU has in the device tree of the running
+machine, which is where a single-segment machine has it.
+Set them when the machine's firmware describes the GPU somewhere else.
 .El
 .Sh LOAD ORDER
 .Nm
@@ -135,6 +150,11 @@ the driver opens the device, so the SMMU has to be answering by then.
 .Pp
 The module refuses to load while the nvidia(4) driver is attached to a
 device, and it says so.
+.Pp
+The check for the driver and the change of the SMMU are one thing: they
+happen under the same holds, the module's own lock and the bus-level
+hold, so a driver that attaches at that moment waits for the module
+instead of finding the SMMU half programmed.
 .Pp
 Never unload
 .Nm

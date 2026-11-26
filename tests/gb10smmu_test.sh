@@ -23,6 +23,17 @@
 #       driver is loaded
 #   (f) the IORT parser: the unit test builds the same parser source the
 #       module builds and runs it over hand-made IORT tables
+#   (g) the boot configuration: the loader is told to load the module only
+#       on a machine that has the GB10 GPU, and it does so before anything
+#       of NVIDIA is loaded
+#   (h) the build script: its help, the path it refuses, and the make
+#       environment it does not take from the caller
+#   (i) the rules that recognise the GB10 GPU: the unit test builds the
+#       same header the module builds
+#   (j) the module programs the SMMU of that GPU and of no other device:
+#       it refuses to attach without it
+#   (k) the check for the nvidia driver and the change of the SMMU happen
+#       under one hold: there is no check-then-use
 #
 # Run: sh tests/gb10smmu_test.sh
 
@@ -203,12 +214,15 @@ fi
 
 # (g) the boot configuration: on arm64 the loader configuration has to load
 # the module and to give it the mode it needs, and it has to do that
-# before anything of NVIDIA is loaded.
+# before anything of NVIDIA is loaded.  The module programs the SMMU in
+# front of the GB10 GPU, so the loader is told to load it only on a
+# machine that has that GPU.
 CDIR=$TESTROOT/destdir
 mkdir -p "$CDIR/boot" "$CDIR/etc" "$CDIR/var/db"
 rc=0
 MK_WORK="$WORK" MK_DESTDIR="$CDIR" MK_SYSDIR="$WORK/src/sys" \
     MK_BSDSRCTOP="$WORK/src" MK_DRMKMODDIR="$WORK/drm-kmod" MK_YES=1 \
+    MK_GB10_PCI=1 \
     sh "$REPO/scripts/make.sh" configure > "$TESTROOT/configure.log" 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then
 	fail "(g) make configure failed (rc $rc): $(tail -n 3 "$TESTROOT/configure.log" | tr '\n' ' ')"
@@ -236,6 +250,23 @@ else
 	else
 		ok "(g) the loader configuration does not load gb10smmu.ko on $(uname -m)"
 	fi
+fi
+
+# (g) a machine without the GB10 GPU must not be told to load the module:
+# it has nothing to program, and the SMMU of another device is not ours.
+CDIR2=$TESTROOT/destdir-nogpu
+mkdir -p "$CDIR2/boot" "$CDIR2/etc" "$CDIR2/var/db"
+rc=0
+MK_WORK="$WORK" MK_DESTDIR="$CDIR2" MK_SYSDIR="$WORK/src/sys" \
+    MK_BSDSRCTOP="$WORK/src" MK_DRMKMODDIR="$WORK/drm-kmod" MK_YES=1 \
+    MK_GB10_PCI=0 \
+    sh "$REPO/scripts/make.sh" configure > "$TESTROOT/configure-nogpu.log" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+	fail "(g) make configure failed (rc $rc): $(tail -n 3 "$TESTROOT/configure-nogpu.log" | tr '\n' ' ')"
+elif grep -q 'gb10smmu' "$CDIR2/boot/loader.conf"; then
+	fail "(g) the loader configuration loads gb10smmu.ko on a machine without the GPU"
+else
+	ok "(g) the loader configuration does not load gb10smmu.ko without the GPU"
 fi
 
 # (h) the build script: its help, the path it refuses, and the make
@@ -297,6 +328,73 @@ else
 			fail "(f) the IORT parser test fails: $(grep '^FAIL' "$TESTROOT/iort_test.log" | tr '\n' ' ')"
 		fi
 	fi
+fi
+
+# (i) the rules that recognise the GB10 GPU: the unit test builds the
+# same header the module builds.
+rc=0
+cc -O2 -Wall -Wextra -I"$REPO/src/gb10-smmu" -o "$TESTROOT/gpu_test" \
+    "$REPO/tests/gb10smmu_gpu_test.c" > "$TESTROOT/gpu_build.log" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+	fail "(i) the GPU rules test does not build: $(tail -n 3 "$TESTROOT/gpu_build.log" | tr '\n' ' ')"
+else
+	ok "(i) the GPU rules test builds"
+	rc=0
+	"$TESTROOT/gpu_test" > "$TESTROOT/gpu_test.log" 2>&1 || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		ok "(i) the GPU rules test passes: $(tail -n 1 "$TESTROOT/gpu_test.log")"
+	else
+		fail "(i) the GPU rules test fails: $(grep '^FAIL' "$TESTROOT/gpu_test.log" | tr '\n' ' ')"
+	fi
+fi
+
+# (j) the module programs the SMMU of the GB10 GPU and of no other
+# device: it looks for that GPU in the device tree and refuses to attach
+# without it.
+MODULE=$REPO/src/gb10-smmu/gb10smmu.c
+if grep -q 'gb10smmu_is_gb10' "$MODULE" && \
+    grep -q 'refusing to attach: this machine has no' "$MODULE"; then
+	ok "(j) the module looks for the GB10 GPU and refuses without it"
+else
+	fail "(j) the module does not look for the GB10 GPU in the device tree"
+fi
+
+# (k) the check for the nvidia driver and the change of the SMMU happen
+# under one hold: there is no check-then-use.
+_body() {
+	sed -n "/^$1(void)\$/,/^}/p" "$MODULE"
+}
+_ln() {
+	printf '%s\n' "$1" | grep -n "$2" | head -1 | cut -d: -f1
+}
+_start_body=$(_body gb10smmu_start)
+_stop_body=$(_body gb10smmu_stop)
+_held_body=$(_body gb10smmu_start_held)
+_sheld_body=$(_body gb10smmu_stop_held)
+_hold=$(_ln "$_start_body" 'gb10smmu_hold();')
+_call=$(_ln "$_start_body" 'gb10smmu_start_held();')
+_unhold=$(_ln "$_start_body" 'gb10smmu_unhold();')
+if [ -n "$_hold" ] && [ -n "$_call" ] && [ -n "$_unhold" ] && \
+    [ "$_hold" -lt "$_call" ] && [ "$_call" -lt "$_unhold" ]; then
+	ok "(k) the load path holds the lock across the check and the change"
+else
+	fail "(k) the load path does not hold the lock across the check and the change"
+fi
+_hold=$(_ln "$_stop_body" 'gb10smmu_hold();')
+_call=$(_ln "$_stop_body" 'gb10smmu_stop_held();')
+_unhold=$(_ln "$_stop_body" 'gb10smmu_unhold();')
+if [ -n "$_hold" ] && [ -n "$_call" ] && [ -n "$_unhold" ] && \
+    [ "$_hold" -lt "$_call" ] && [ "$_call" -lt "$_unhold" ]; then
+	ok "(k) the unload path holds the lock across the check and the change"
+else
+	fail "(k) the unload path does not hold the lock across the check and the change"
+fi
+if printf '%s\n' "$_held_body" | grep -q 'gb10smmu_before_nvidia();' && \
+    printf '%s\n' "$_held_body" | grep -q 'gb10smmu_enable();' && \
+    printf '%s\n' "$_sheld_body" | grep -q 'nvidia_attached()'; then
+	ok "(k) the check and the change are in the held part of the paths"
+else
+	fail "(k) the check and the change are not both in the held part"
 fi
 
 printf 'passed: %s failed: %s\n' "$PASSED" "$FAILED"

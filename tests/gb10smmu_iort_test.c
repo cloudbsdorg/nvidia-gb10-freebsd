@@ -19,6 +19,13 @@
  *   (g) an RMR descriptor array that does not fit in its node
  *   (h) a malformed node before the RMR node: the error is not swallowed
  *   (i) a requester ID that leads to two SMMUs: refused, not guessed
+ *   (j) a table that claims more nodes than it holds: refused, not used
+ *   (k) a table that holds more nodes than it claims: refused, not used
+ *   (l) a mapping whose count leaves the ID space: refused
+ *   (m) the count is the number of IDs minus one: the range and the IDs
+ *       that are not in it
+ *   (n) a chain of root complex and SMMU: the stream ID of the SMMUv3
+ *   (o) the requester ID of the GPU picks the SMMU
  *
  * Run: sh tests/gb10smmu_test.sh (this file is built and run by it)
  */
@@ -209,6 +216,29 @@ add_rmr(struct tbl *t, uint32_t holder, uint32_t count)
 	return (off);
 }
 
+/*
+ * An SMMU (v2) node with one mapping; the offset of the node is returned.
+ *
+ * The node is the one in the middle of a chain: the root complex maps the
+ * GPU's requester ID onto it, and it maps that ID on to the SMMUv3.
+ */
+static uint32_t
+add_smmuv2(struct tbl *t, uint32_t in_base, uint32_t id_count,
+    uint32_t out_base, uint32_t out_ref)
+{
+	uint32_t off = node_new(t, ACPI_IORT_NODE_SMMU);
+	ACPI_IORT_SMMU *smmu;
+
+	smmu = (ACPI_IORT_SMMU *)(t->buf + node_data(t, 32));
+	smmu->BaseAddress = 0x12000000;
+	smmu->Span = 0x1000;
+	smmu->Model = 0;
+	smmu->Flags = 0;
+	node_map(t, off, in_base, id_count, out_base, out_ref);
+	node_end(t, off);
+	return (off);
+}
+
 static const struct gb10smmu_iort_query gpu_query = { 0, 0x00 };
 
 /* What the parser is given, and what it said about it. */
@@ -224,13 +254,21 @@ static struct gb10smmu_rmr rmrs[64];
  * cannot see what another one left behind.
  */
 static int
-parse(struct tbl *t, int nrmr_max)
+parse_rid(struct tbl *t, int nrmr_max, uint32_t rid)
 {
+	struct gb10smmu_iort_query query = { 0, rid };
+
 	memset(&out, 0, sizeof(out));
 	memset(&err, 0, sizeof(err));
 	out.rmr = rmrs;
 	out.nrmr_max = nrmr_max;
-	return (gb10smmu_iort_parse(t->buf, t->len, &gpu_query, &out, &err));
+	return (gb10smmu_iort_parse(t->buf, t->len, &query, &out, &err));
+}
+
+static int
+parse(struct tbl *t, int nrmr_max)
+{
+	return (parse_rid(t, nrmr_max, gpu_query.rid));
 }
 
 /*
@@ -443,6 +481,30 @@ case_bad_node_before_rmr(void)
 }
 
 /*
+ * add_two_smmus - a table with two SMMUv3 nodes and a root complex node
+ * that has no mappings yet; the caller adds the mappings it needs.
+ *
+ * The offset of the root complex node is returned.
+ */
+static uint32_t
+add_two_smmus(struct tbl *t, uint32_t *first, uint32_t *second)
+{
+	uint32_t rc;
+
+	*first = add_smmuv3(t, 0x11111000);
+	*second = add_smmuv3(t, 0x22222000);
+	rc = node_new(t, ACPI_IORT_NODE_PCI_ROOT_COMPLEX);
+	{
+		ACPI_IORT_ROOT_COMPLEX *r;
+
+		r = (ACPI_IORT_ROOT_COMPLEX *)(t->buf + node_data(t, 20));
+		r->PciSegmentNumber = 0;
+		r->MemoryAddressLimit = 40;
+	}
+	return (rc);
+}
+
+/*
  * case_two_smmus_one_rid - (i) a requester ID that leads to two SMMUs:
  * refused, not guessed.
  */
@@ -453,22 +515,200 @@ case_two_smmus_one_rid(void)
 	uint32_t first, second, rc;
 
 	tbl_init(&t);
-	first = add_smmuv3(&t, 0x11111000);
-	second = add_smmuv3(&t, 0x22222000);
-	rc = node_new(&t, ACPI_IORT_NODE_PCI_ROOT_COMPLEX);
-	{
-		ACPI_IORT_ROOT_COMPLEX *r;
-
-		r = (ACPI_IORT_ROOT_COMPLEX *)(t.buf + node_data(&t, 20));
-		r->PciSegmentNumber = 0;
-		r->MemoryAddressLimit = 40;
-		node_map(&t, rc, 0x000, 0x01f, 0x000, first);
-		node_map(&t, rc, 0x000, 0x01f, 0x100, second);
-		node_end(&t, rc);
-	}
+	rc = add_two_smmus(&t, &first, &second);
+	node_map(&t, rc, 0x000, 0x01f, 0x000, first);
+	node_map(&t, rc, 0x000, 0x01f, 0x100, second);
+	node_end(&t, rc);
 	tbl_end(&t);
 	CHECK(parse(&t, 64) == GB10SMMU_IORT_EAMBIG,
 	    "(i) a requester ID that leads to two SMMUs is refused, not guessed");
+}
+
+/*
+ * case_short_node_list - (j) a table that claims more nodes than it holds:
+ * refused, not used.  The parser never answers from half a table.
+ */
+static void
+case_short_node_list(void)
+{
+	struct tbl t;
+	uint32_t smmu, rc;
+	ACPI_TABLE_IORT *iort;
+
+	tbl_init(&t);
+	smmu = add_smmuv3(&t, 0x13000000);
+	rc = add_root_complex(&t, 0, 0x000, 0x1ff, 0x000, smmu);
+	add_rmr(&t, rc, 1);
+	tbl_end(&t);
+	/* The header claims one node more than the table holds. */
+	iort = (ACPI_TABLE_IORT *)t.buf;
+	iort->NodeCount = t.nodes + 1;
+	CHECK(parse(&t, 64) == GB10SMMU_IORT_EFORMAT,
+	    "(j) a table that claims more nodes than it holds is refused");
+	CHECK(err.seen == t.nodes,
+	    "(j) the error says how many nodes the table held");
+	CHECK(err.value == t.nodes + 1,
+	    "(j) the error says how many nodes the table claimed");
+	CHECK(err.node != 0, "(j) the error names the offset it stopped at");
+}
+
+/*
+ * case_long_node_list - (k) a table that holds more nodes than it claims:
+ * refused, not used.  The node the header does not count may be the one
+ * that matters.
+ */
+static void
+case_long_node_list(void)
+{
+	struct tbl t;
+	uint32_t smmu, rc;
+	ACPI_TABLE_IORT *iort;
+
+	tbl_init(&t);
+	smmu = add_smmuv3(&t, 0x13000000);
+	rc = add_root_complex(&t, 0, 0x000, 0x1ff, 0x000, smmu);
+	add_rmr(&t, rc, 1);
+	tbl_end(&t);
+	/* The header claims one node fewer than the table holds. */
+	iort = (ACPI_TABLE_IORT *)t.buf;
+	iort->NodeCount = t.nodes - 1;
+	CHECK(parse(&t, 64) == GB10SMMU_IORT_EFORMAT,
+	    "(k) a table that holds more nodes than it claims is refused");
+	CHECK(err.seen == t.nodes - 1,
+	    "(k) the error says how many nodes the walk did see");
+}
+
+/*
+ * case_bad_count - (l) a mapping whose count leaves the ID space: the
+ * mapping describes no range at all, and it is refused.
+ */
+static void
+case_bad_count(void)
+{
+	struct tbl t;
+	uint32_t smmu, rc;
+
+	tbl_init(&t);
+	smmu = add_smmuv3(&t, 0x13000000);
+	/* The range would end above the largest ID there is. */
+	rc = add_root_complex(&t, 0, 0x000, 0x00f, 0x000, smmu);
+	{
+		ACPI_IORT_ID_MAPPING *m =
+		    (ACPI_IORT_ID_MAPPING *)(t.buf + rc +
+		    ((ACPI_IORT_NODE *)(t.buf + rc))->MappingOffset);
+
+		m->InputBase = 0x00000100;
+		m->IdCount = 0xffffff00;
+	}
+	tbl_end(&t);
+	CHECK(parse(&t, 64) == GB10SMMU_IORT_EFORMAT,
+	    "(l) a mapping whose range leaves the ID space is refused");
+	CHECK(err.node == rc, "(l) the error names the node");
+}
+
+/*
+ * case_count_range - (m) the count is the number of IDs minus one, as Arm
+ * DEN 0049D defines it and as FreeBSD's own reader reads it: the last ID
+ * of the range is InputBase + IdCount, and a count of zero is a range of
+ * one ID.  The IDs that are not in the range are not in it.
+ */
+static void
+case_count_range(void)
+{
+	struct tbl t;
+	uint32_t smmu, rc;
+
+	tbl_init(&t);
+	smmu = add_smmuv3(&t, 0x13000000);
+	rc = add_root_complex(&t, 0, 0x000, 0x1ff, 0x000, smmu);
+	tbl_end(&t);
+	/* The count is 0x1ff, so the range is 0x000-0x1ff: 0x200 IDs. */
+	CHECK(parse_rid(&t, 64, 0x1ff) == GB10SMMU_IORT_OK,
+	    "(m) the last ID of the range is the one the count names");
+	CHECK(out.nsid == 1 && out.sid[0].lo == 0x000 &&
+	    out.sid[0].hi == 0x1ff, "(m) the range is the one the count names");
+	CHECK(out.holder_node == rc, "(m) the node that holds the mapping");
+	CHECK(parse_rid(&t, 64, 0x200) == GB10SMMU_IORT_ENODE,
+	    "(m) the ID after the range is not in the range");
+	/* A count of zero is a range of one ID, not a range of none. */
+	{
+		uint32_t one = add_root_complex(&t, 0, 0x300, 0x000, 0x300,
+		    smmu);
+
+		tbl_end(&t);
+		CHECK(parse_rid(&t, 64, 0x300) == GB10SMMU_IORT_OK,
+		    "(m) a count of zero is a range of one ID");
+		CHECK(out.nsid == 1 && out.sid[0].lo == 0x300 &&
+		    out.sid[0].hi == 0x300,
+		    "(m) a count of zero covers exactly one ID");
+		CHECK(parse_rid(&t, 64, 0x301) == GB10SMMU_IORT_ENODE,
+		    "(m) the ID after a one-ID range is not in it");
+		(void)one;
+	}
+}
+
+/*
+ * case_nested_chain - (n) a chain of root complex and SMMU: the stream ID
+ * that is programmed is the one the SMMUv3 has, not the one of the node in
+ * between.
+ */
+static void
+case_nested_chain(void)
+{
+	struct tbl t;
+	uint32_t smmu, smmu2, rc;
+
+	tbl_init(&t);
+	smmu = add_smmuv3(&t, 0x13000000);
+	/* The SMMU (v2) maps the ID 0x40 onto the stream ID 0x100. */
+	smmu2 = add_smmuv2(&t, 0x040, 0x000, 0x100, smmu);
+	/* The root complex maps the requester ID 0 onto the ID 0x40. */
+	rc = add_root_complex(&t, 0, 0x000, 0x000, 0x040, smmu2);
+	tbl_end(&t);
+	CHECK(parse(&t, 64) == GB10SMMU_IORT_OK,
+	    "(n) the table with a chain parses");
+	CHECK(out.smmu_node == smmu,
+	    "(n) the SMMU of the GPU is the one the chain ends at");
+	CHECK(out.holder_node == rc, "(n) the node that holds the mapping");
+	CHECK(out.nsid == 1, "(n) the GPU has one stream-ID range");
+	CHECK(out.nsid == 1 && out.sid[0].lo == 0x100 &&
+	    out.sid[0].hi == 0x100,
+	    "(n) the stream ID is the one the chain resolves to");
+	CHECK(out.nsid == 1 && out.sid[0].lo != 0x040,
+	    "(n) the stream ID is not the one of the node in between");
+}
+
+/*
+ * case_rid_picks_smmu - (o) the requester ID of the GPU picks the SMMU:
+ * the SMMU of the mapping that covers it, and no other.
+ */
+static void
+case_rid_picks_smmu(void)
+{
+	struct tbl t;
+	uint32_t first, second, rc;
+
+	tbl_init(&t);
+	rc = add_two_smmus(&t, &first, &second);
+	node_map(&t, rc, 0x000, 0x00f, 0x000, first);
+	node_map(&t, rc, 0x100, 0x00f, 0x100, second);
+	node_end(&t, rc);
+	tbl_end(&t);
+	CHECK(parse_rid(&t, 64, 0x008) == GB10SMMU_IORT_OK,
+	    "(o) the table with two mappings parses");
+	CHECK(out.smmu_node == first,
+	    "(o) the requester ID in the first mapping gets the first SMMU");
+	CHECK(out.smmu_base == 0x11111000,
+	    "(o) the base address is the first SMMU's");
+	CHECK(parse_rid(&t, 64, 0x108) == GB10SMMU_IORT_OK,
+	    "(o) the requester ID in the second mapping parses");
+	CHECK(out.smmu_node == second,
+	    "(o) the requester ID in the second mapping gets the second SMMU");
+	CHECK(out.smmu_base == 0x22222000,
+	    "(o) the base address is the second SMMU's");
+	CHECK(out.nsid == 1 && out.sid[0].lo == 0x100 &&
+	    out.sid[0].hi == 0x10f,
+	    "(o) the stream IDs are the ones of the mapping that covers it");
 }
 
 /*
@@ -493,6 +733,16 @@ static const struct {
 	    case_bad_node_before_rmr },
 	{ "(i) a requester ID that leads to two SMMUs",
 	    case_two_smmus_one_rid },
+	{ "(j) a table that claims more nodes than it holds",
+	    case_short_node_list },
+	{ "(k) a table that holds more nodes than it claims",
+	    case_long_node_list },
+	{ "(l) a mapping whose count leaves the ID space",
+	    case_bad_count },
+	{ "(m) the count is the number of IDs minus one", case_count_range },
+	{ "(n) a chain of root complex and SMMU", case_nested_chain },
+	{ "(o) the requester ID of the GPU picks the SMMU",
+	    case_rid_picks_smmu },
 };
 
 int

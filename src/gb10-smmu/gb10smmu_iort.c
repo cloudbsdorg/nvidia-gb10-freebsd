@@ -42,6 +42,9 @@
 #define	IORT_SMMUV3_DATASIZE	52	/* SMMUv3: to IdMappingIndex */
 #define	IORT_RMR_DATASIZE	12	/* RMR: to RmrOffset */
 
+/* The largest ID an IORT can name: the IDs are 32 bits wide. */
+#define	IORT_ID_MAX	0xffffffffU
+
 struct iort_ctx {
 	char		*base;		/* the table */
 	size_t		len;		/* the bytes of the table we may read */
@@ -63,6 +66,27 @@ iort_err(struct gb10smmu_iort_error *err, int code, const char *what,
 		err->node_len = node_len;
 		err->node_type = node_type;
 		err->value = value;
+	}
+	return (code);
+}
+
+/*
+ * iort_err_count - record what went wrong where the counts do not add up.
+ *
+ * The node offset says where the walk stopped and the two counts say what
+ * the table claimed and what it held.
+ */
+static int
+iort_err_count(struct gb10smmu_iort_error *err, int code, const char *what,
+    uint32_t off, uint32_t expected, uint32_t seen)
+{
+	if (err != NULL) {
+		err->what = what;
+		err->node = off;
+		err->node_len = 0;
+		err->node_type = 0;
+		err->value = expected;
+		err->seen = seen;
 	}
 	return (code);
 }
@@ -145,17 +169,58 @@ iort_nodedata(ACPI_IORT_NODE *node, uint32_t off, size_t size,
 }
 
 /*
- * iort_resolve - the SMMUv3 node an ID mapping leads to, and the stream ID
- * it leads to.
+ * A range of IDs: the first of it and the last of it, both inclusive.
+ */
+struct iort_range {
+	uint64_t	lo;
+	uint64_t	hi;
+};
+
+/*
+ * iort_id_range - the IDs a mapping covers.
+ *
+ * IdCount is the number of IDs in the range minus one (Arm DEN 0049D, and
+ * FreeBSD's own reader in sys/arm64/acpica/acpi_iort.c, which compares an
+ * ID with the mapping when "entry->base <= id && id <= entry->end" with
+ * entry->end = InputBase + IdCount).  The inclusive last ID of the range
+ * is therefore InputBase + IdCount, and a count of zero is a range of one
+ * ID.
+ *
+ * A count that carries the range past the end of the ID space describes
+ * nothing: such a mapping is refused, and so is the table that holds it.
+ */
+static int
+iort_id_range(const ACPI_IORT_ID_MAPPING *map, uint32_t off,
+    struct iort_range *range, struct gb10smmu_iort_error *err)
+{
+	uint64_t base = map->InputBase;
+	uint64_t count = map->IdCount;
+
+	if (base + count > IORT_ID_MAX)
+		return (iort_err(err, GB10SMMU_IORT_EFORMAT,
+		    "the ID mapping's range leaves the ID space", off, 0, 0,
+		    count));
+	range->lo = base;
+	range->hi = base + count;
+	return (0);
+}
+
+/*
+ * iort_resolve_range - the SMMUv3 node a range of IDs leads to, and the
+ * range of stream IDs it leads to.
  *
  * A mapping of a root complex names the SMMU it feeds.  When it names an
  * SMMU (v2) node, that node's own mapping carries the stream ID on, the
  * way FreeBSD's iort_smmu_trymap() follows it.
+ *
+ * The IDs that come out are the ones the whole chain resolves to: the
+ * stream IDs of the SMMUv3, never the IDs of a node in between.  A range
+ * that is split over two mappings has no single answer and is refused.
  */
 static int
-iort_resolve(const struct iort_ctx *c, uint32_t ref, uint32_t id,
-    uint32_t *smmu_off, uint32_t *out_id, int depth,
-    struct gb10smmu_iort_error *err)
+iort_resolve_range(const struct iort_ctx *c, uint32_t ref,
+    struct iort_range in, struct iort_range *out, uint32_t *smmu_off,
+    int depth, struct gb10smmu_iort_error *err)
 {
 	ACPI_IORT_NODE *node;
 	ACPI_IORT_ID_MAPPING *maps;
@@ -170,7 +235,7 @@ iort_resolve(const struct iort_ctx *c, uint32_t ref, uint32_t id,
 		return (error);
 	if (node->Type == ACPI_IORT_NODE_SMMU_V3) {
 		*smmu_off = ref;
-		*out_id = id;
+		*out = in;
 		return (0);
 	}
 	if (node->Type != ACPI_IORT_NODE_SMMU)
@@ -179,17 +244,34 @@ iort_resolve(const struct iort_ctx *c, uint32_t ref, uint32_t id,
 	if (error != 0)
 		return (error);
 	for (i = 0; maps != NULL && i < node->MappingCount; i++) {
-		uint64_t lo = maps[i].InputBase;
-		uint64_t hi = lo + maps[i].IdCount;
-		uint32_t next;
+		struct iort_range here, next;
+		int error;
 
-		if ((uint64_t)id < lo || (uint64_t)id > hi)
+		error = iort_id_range(&maps[i], ref, &here, err);
+		if (error != 0)
+			return (error);
+		if (in.lo < here.lo || in.lo > here.hi)
 			continue;
-		next = maps[i].OutputBase;
-		if ((maps[i].Flags & ACPI_IORT_ID_SINGLE_MAPPING) == 0)
-			next += id - maps[i].InputBase;
-		return (iort_resolve(c, maps[i].OutputReference, next, smmu_off,
-		    out_id, depth + 1, err));
+		if (in.hi > here.hi)
+			return (iort_err(err, GB10SMMU_IORT_EFORMAT,
+			    "the ID range is split over two mappings", ref,
+			    node->Length, node->Type, in.hi));
+		if (maps[i].Flags & ACPI_IORT_ID_SINGLE_MAPPING) {
+			next.lo = next.hi = maps[i].OutputBase;
+		} else {
+			if ((uint64_t)maps[i].OutputBase + (here.hi - here.lo) >
+			    IORT_ID_MAX)
+				return (iort_err(err, GB10SMMU_IORT_EFORMAT,
+				    "the ID mapping's stream IDs leave the ID "
+				    "space", ref, node->Length, node->Type,
+				    maps[i].IdCount));
+			next.lo = (uint64_t)maps[i].OutputBase +
+			    (in.lo - maps[i].InputBase);
+			next.hi = (uint64_t)maps[i].OutputBase +
+			    (in.hi - maps[i].InputBase);
+		}
+		return (iort_resolve_range(c, maps[i].OutputReference, next,
+		    out, smmu_off, depth + 1, err));
 	}
 	return (GB10SMMU_IORT_ENODE);
 }
@@ -211,18 +293,33 @@ iort_holder(const uint32_t *holders, int nholders, uint32_t off)
 
 /*
  * iort_map_range - the requester IDs and the stream IDs of a mapping.
+ *
+ * The range of the requester IDs comes from the one helper, so the places
+ * that read a mapping cannot disagree about it.  The stream IDs are the
+ * same range on the other side of the mapping: the same number of IDs,
+ * one for one, unless the mapping is a single one.
  */
-static void
-iort_map_range(ACPI_IORT_ID_MAPPING *map, uint64_t *in_lo, uint64_t *in_hi,
-    uint64_t *sid_lo, uint64_t *sid_hi)
+static int
+iort_map_range(ACPI_IORT_ID_MAPPING *map, uint32_t off,
+    struct iort_range *rid, struct iort_range *sid,
+    struct gb10smmu_iort_error *err)
 {
-	*in_lo = map->InputBase;
-	*in_hi = (uint64_t)map->InputBase + map->IdCount;
-	*sid_lo = map->OutputBase;
-	if (map->Flags & ACPI_IORT_ID_SINGLE_MAPPING)
-		*sid_hi = map->OutputBase;
-	else
-		*sid_hi = (uint64_t)map->OutputBase + map->IdCount;
+	int error;
+
+	error = iort_id_range(map, off, rid, err);
+	if (error != 0)
+		return (error);
+	sid->lo = map->OutputBase;
+	if (map->Flags & ACPI_IORT_ID_SINGLE_MAPPING) {
+		sid->hi = map->OutputBase;
+		return (0);
+	}
+	if ((uint64_t)map->OutputBase + (rid->hi - rid->lo) > IORT_ID_MAX)
+		return (iort_err(err, GB10SMMU_IORT_EFORMAT,
+		    "the ID mapping's stream IDs leave the ID space", off, 0,
+		    0, map->IdCount));
+	sid->hi = (uint64_t)map->OutputBase + (rid->hi - rid->lo);
+	return (0);
 }
 
 /*
@@ -364,12 +461,10 @@ iort_read_node(struct iort_ctx *c, uint32_t off, ACPI_IORT_NODE **nodep,
  * What one ID mapping says.
  */
 struct iort_mapinfo {
-	uint64_t	lo;		/* the first requester ID */
-	uint64_t	hi;		/* the last requester ID */
-	uint64_t	sid_lo;		/* the first stream ID */
-	uint64_t	sid_hi;		/* the last stream ID */
-	uint32_t	next;		/* the stream ID it leads to */
-	int		covers;		/* does it cover the GPU's ID? */
+	struct iort_range	rid;		/* the requester IDs */
+	struct iort_range	sid;		/* the stream IDs */
+	uint32_t		next;		/* the stream ID it leads to */
+	int			covers;		/* does it cover the GPU's ID? */
 };
 
 /*
@@ -379,18 +474,26 @@ struct iort_mapinfo {
  * become, whether it covers the GPU's requester ID, and the stream ID it
  * leads to: the output base, plus the offset of the GPU's requester ID
  * unless the mapping is a single one.
+ *
+ * A mapping whose count does not describe a range is refused: the caller
+ * must not act on half of a mapping.
  */
-static void
-iort_map_info(ACPI_IORT_ID_MAPPING *map,
-    const struct gb10smmu_iort_query *query, struct iort_mapinfo *info)
+static int
+iort_map_info(ACPI_IORT_ID_MAPPING *map, uint32_t off,
+    const struct gb10smmu_iort_query *query, struct iort_mapinfo *info,
+    struct gb10smmu_iort_error *err)
 {
-	iort_map_range(map, &info->lo, &info->hi, &info->sid_lo,
-	    &info->sid_hi);
-	info->covers = ((uint64_t)query->rid >= info->lo &&
-	    (uint64_t)query->rid <= info->hi);
-	info->next = (uint32_t)info->sid_lo;
+	int error;
+
+	error = iort_map_range(map, off, &info->rid, &info->sid, err);
+	if (error != 0)
+		return (error);
+	info->covers = ((uint64_t)query->rid >= info->rid.lo &&
+	    (uint64_t)query->rid <= info->rid.hi);
+	info->next = (uint32_t)info->sid.lo;
 	if ((map->Flags & ACPI_IORT_ID_SINGLE_MAPPING) == 0 && info->covers)
 		info->next += query->rid - map->InputBase;
+	return (0);
 }
 
 /*
@@ -416,11 +519,35 @@ typedef int iort_walk_fn(struct iort_parse *p, uint32_t off,
     ACPI_IORT_NODE *node, ACPI_IORT_ID_MAPPING *maps);
 
 /*
+ * iort_all_zero - are these bytes all zero?
+ *
+ * What is left of a table after its nodes is the padding of the table, and
+ * padding is zero.  Anything else is a node the header does not count.
+ */
+static int
+iort_all_zero(const char *p, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (p[i] != 0)
+			return (0);
+	}
+	return (1);
+}
+
+/*
  * iort_walk - walk the table's nodes, one at a time.
  *
  * Every node's mapping array is checked, whether the node is one the
  * callback uses.  An error from the callback stops the walk: the table is
  * not walked past what does not make sense.
+ *
+ * The walk covers exactly the nodes the header counts.  A table that holds
+ * fewer nodes than it claims is an error, and so is one that holds more:
+ * a table that is cut short says nothing about the devices it describes,
+ * and a node the header does not count may be the one that matters.  The
+ * parser never answers from half a table.
  */
 static int
 iort_walk(struct iort_parse *p, iort_walk_fn *fn)
@@ -429,10 +556,15 @@ iort_walk(struct iort_parse *p, iort_walk_fn *fn)
 	int error;
 
 	p->c.seen = 0;
-	while (p->c.seen < p->c.count && off < p->c.len) {
+	while (p->c.seen < p->c.count) {
 		ACPI_IORT_NODE *node;
 		ACPI_IORT_ID_MAPPING *maps;
 
+		if (off >= p->c.len)
+			return (iort_err_count(p->err,
+			    GB10SMMU_IORT_EFORMAT,
+			    "the table holds fewer nodes than it claims", off,
+			    p->c.count, p->c.seen));
 		error = iort_read_node(&p->c, off, &node, &maps, p->err);
 		if (error != 0)
 			return (error);
@@ -441,6 +573,10 @@ iort_walk(struct iort_parse *p, iort_walk_fn *fn)
 			return (error);
 		off += node->Length;
 	}
+	if (off < p->c.len && !iort_all_zero(p->c.base + off, p->c.len - off))
+		return (iort_err_count(p->err, GB10SMMU_IORT_EFORMAT,
+		    "the table holds more nodes than it claims", off, p->c.count,
+		    p->c.seen));
 	return (0);
 }
 
@@ -496,14 +632,18 @@ iort_pass1_mappings(struct iort_parse *p, uint32_t off, ACPI_IORT_NODE *node,
 
 	for (i = 0; maps != NULL && i < node->MappingCount; i++) {
 		struct iort_mapinfo info;
-		uint32_t smmu_off, out_id;
+		struct iort_range in, out;
+		uint32_t smmu_off;
 		int error;
 
-		iort_map_info(&maps[i], p->query, &info);
+		error = iort_map_info(&maps[i], off, p->query, &info, p->err);
+		if (error != 0)
+			return (error);
 		if (!info.covers)
 			continue;
-		error = iort_resolve(&p->c, maps[i].OutputReference, info.next,
-		    &smmu_off, &out_id, 0, p->err);
+		in.lo = in.hi = info.next;
+		error = iort_resolve_range(&p->c, maps[i].OutputReference, in,
+		    &out, &smmu_off, 0, p->err);
 		if (error == GB10SMMU_IORT_ENODE)
 			continue;	/* it leads elsewhere */
 		if (error != 0)
@@ -573,6 +713,11 @@ iort_read_smmu(struct iort_parse *p)
  * Every mapping of a holder that leads to the GPU's SMMU is the GPU's:
  * its requester IDs can be split over several mappings, and all of them
  * are counted.
+ *
+ * The stream IDs are the ones the chain resolves to: the IDs of the
+ * SMMUv3 the GPU is behind, not the IDs of a node in between.  A chain
+ * that goes from a root complex to an SMMU (v2) and on to the SMMUv3
+ * gives the stream IDs of the SMMUv3.
  */
 static int
 iort_pass2_mappings(struct iort_parse *p, uint32_t off, ACPI_IORT_NODE *node,
@@ -582,12 +727,15 @@ iort_pass2_mappings(struct iort_parse *p, uint32_t off, ACPI_IORT_NODE *node,
 
 	for (i = 0; maps != NULL && i < node->MappingCount; i++) {
 		struct iort_mapinfo info;
-		uint32_t smmu_off, out_id;
+		struct iort_range out;
+		uint32_t smmu_off;
 		int error;
 
-		iort_map_info(&maps[i], p->query, &info);
-		error = iort_resolve(&p->c, maps[i].OutputReference, info.next,
-		    &smmu_off, &out_id, 0, p->err);
+		error = iort_map_info(&maps[i], off, p->query, &info, p->err);
+		if (error != 0)
+			return (error);
+		error = iort_resolve_range(&p->c, maps[i].OutputReference,
+		    info.sid, &out, &smmu_off, 0, p->err);
 		if (error == GB10SMMU_IORT_ENODE)
 			continue;
 		if (error != 0)
@@ -596,24 +744,21 @@ iort_pass2_mappings(struct iort_parse *p, uint32_t off, ACPI_IORT_NODE *node,
 			continue;
 
 		if (!p->have_rid) {
-			p->rid_lo = info.lo;
-			p->rid_hi = info.hi;
+			p->rid_lo = info.rid.lo;
+			p->rid_hi = info.rid.hi;
 			p->have_rid = 1;
 		} else {
-			if (info.lo < p->rid_lo)
-				p->rid_lo = info.lo;
-			if (info.hi > p->rid_hi)
-				p->rid_hi = info.hi;
+			if (info.rid.lo < p->rid_lo)
+				p->rid_lo = info.rid.lo;
+			if (info.rid.hi > p->rid_hi)
+				p->rid_hi = info.rid.hi;
 		}
 		if (p->out->nsid == GB10SMMU_MAX_SIDRANGE)
 			return (iort_err(p->err, GB10SMMU_IORT_ETOOBIG,
 			    "too many stream-ID ranges for the GPU", off,
 			    node->Length, node->Type, p->out->nsid));
-		p->out->sid[p->out->nsid].lo = maps[i].OutputBase;
-		if (maps[i].Flags & ACPI_IORT_ID_SINGLE_MAPPING)
-			p->out->sid[p->out->nsid].hi = maps[i].OutputBase;
-		else
-			p->out->sid[p->out->nsid].hi = (uint32_t)info.sid_hi;
+		p->out->sid[p->out->nsid].lo = (uint32_t)out.lo;
+		p->out->sid[p->out->nsid].hi = (uint32_t)out.hi;
 		p->out->nsid++;
 	}
 	return (0);
