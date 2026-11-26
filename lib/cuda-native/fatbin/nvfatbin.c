@@ -246,15 +246,14 @@ parse_image_kind(const char *start, const char *end,
 	else if (length == 3 && memcmp(start, "ptx", 3) == 0)
 		image->kind = CNFATBIN_KIND_PTX;
 	else {
-		char kind[16];
 		char escaped[CNTOOL_ESCAPED_MAX];
 
-		if (length >= sizeof(kind))
-			length = sizeof(kind) - 1;
-		memcpy(kind, start, length);
-		kind[length] = '\0';
+		/* The field is escaped as it is: it is not cut short before
+		 * it is escaped, so the diagnostic shows every byte the
+		 * user wrote. */
 		cntool_fail(program_name, 2, "unsupported image kind: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), kind));
+		    cntool_escape_bytes(escaped, sizeof(escaped), start,
+		    length));
 	}
 }
 
@@ -264,18 +263,13 @@ parse_image_kind(const char *start, const char *end,
 static void
 parse_image_sm(const char *start, const char *end, struct image_spec *image)
 {
-	char text[64];
 	char escaped[CNTOOL_ESCAPED_MAX];
 	const char *p = start;
 	size_t length = (size_t)(end - start);
 
-	/* The text of the field is copied out and escaped before it goes in
-	 * a diagnostic. */
-	if (length >= sizeof(text))
-		length = sizeof(text) - 1;
-	memcpy(text, start, length);
-	text[length] = '\0';
-	cntool_escape_text(escaped, sizeof(escaped), text);
+	/* The field is escaped as it is: it is not cut short before it is
+	 * escaped, so the diagnostic shows the bytes that are wrong. */
+	cntool_escape_bytes(escaped, sizeof(escaped), start, length);
 
 	image->sm = 0;
 	/* Time: O(digits).  Space: O(1). */
@@ -484,31 +478,29 @@ check_output_path(const char *create)
 		    cntool_escape_text(escaped, sizeof(escaped), create));
 }
 
-/* The directory the output goes in must exist. */
+/*
+ * Open the directory the output goes in.  The directory is opened once and
+ * stays open, so that the file is written in the directory that was opened
+ * and not in one that replaced it: a name that is changed after this
+ * cannot redirect the write.
+ */
 static void
-check_output_directory(const char *create)
+open_output_directory(const char *create, struct cntool_output *output)
 {
 	char escaped[CNTOOL_ESCAPED_MAX];
-	char *parent = strdup(create);
-	char *slash;
-	struct stat st;
+	enum cntool_write_result result;
 
-	if (parent == NULL)
-		cntool_fail(program_name, 1, "host memory exhausted");
-	slash = strrchr(parent, '/');
-	if (slash == NULL) {
-		free(parent);
-		parent = strdup(".");
-		if (parent == NULL)
-			cntool_fail(program_name, 1, "host memory exhausted");
-	} else if (slash == parent)
-		parent[1] = '\0';
-	else
-		*slash = '\0';
-	if (stat(parent, &st) != 0 || !S_ISDIR(st.st_mode))
-		cntool_fail(program_name, 1, "output directory does not exist: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), parent));
-	free(parent);
+	result = cntool_output_open(create, output);
+	if (result == CNTOOL_WRITE_OK)
+		return;
+	if (result == CNTOOL_WRITE_NOENT)
+		cntool_fail(program_name, 1,
+		    "output directory does not exist: %s",
+		    cntool_escape_text(escaped, sizeof(escaped),
+		    output->directory[0] != '\0' ? output->directory : create));
+	cntool_fail(program_name, 1, "cannot write output: %s: %s",
+	    cntool_escape_text(escaped, sizeof(escaped), create),
+	    cntool_write_reason(result));
 }
 
 /*
@@ -519,6 +511,7 @@ load_images(struct image_spec *images, size_t count, uint8_t **payloads,
     struct cnfatbin_input *inputs)
 {
 	char escaped[CNTOOL_ESCAPED_MAX];
+	char why[CNTOOL_REASON_MAX];
 	size_t i;
 
 	/* Time: O(images).  Space: O(total image bytes). */
@@ -533,7 +526,8 @@ load_images(struct image_spec *images, size_t count, uint8_t **payloads,
 			cntool_fail(program_name, 1, "cannot read %s: %s",
 			    cntool_escape_text(escaped, sizeof(escaped),
 			    images[i].file),
-			    cntool_read_reason(reason, CNTOOL_MAX_FILE_SIZE));
+			    cntool_read_reason(why, sizeof(why), reason,
+			    CNTOOL_MAX_FILE_SIZE));
 		if (images[i].kind == CNFATBIN_KIND_CUBIN) {
 			static const char magic[] = CNFATBIN_CUBIN_MAGIC;
 			size_t magic_len = sizeof(magic) - 1;
@@ -565,86 +559,17 @@ load_images(struct image_spec *images, size_t count, uint8_t **payloads,
  * filesystem allows can still be written.
  */
 static void
-write_container_file(const char *create, const uint8_t *container,
+write_container_file(struct cntool_output *output, const uint8_t *container,
     size_t container_size)
 {
 	char escaped[CNTOOL_ESCAPED_MAX];
-	char *temporary = NULL;
-	char *directory = NULL;
-	const char *slash;
-	size_t namelen;
-	int fd;
+	enum cntool_write_result result;
 
-	slash = strrchr(create, '/');
-	if (slash == NULL) {
-		directory = strdup(".");
-		if (directory == NULL)
-			cntool_fail(program_name, 1, "host memory exhausted");
-	} else {
-		size_t length = (size_t)(slash - create);
-
-		directory = malloc(length + 1);
-		if (directory == NULL)
-			cntool_fail(program_name, 1, "host memory exhausted");
-		if (length == 0)
-			directory[0] = '/';
-		else {
-			memcpy(directory, create, length);
-			directory[length] = '\0';
-		}
-	}
-	namelen = strlen(directory) + sizeof("/.nvfatbin.XXXXXX");
-	temporary = malloc(namelen);
-	if (temporary == NULL) {
-		free(directory);
-		cntool_fail(program_name, 1, "host memory exhausted");
-	}
-	snprintf(temporary, namelen, "%s/.nvfatbin.XXXXXX", directory);
-	free(directory);
-	fd = mkstemp(temporary);
-	if (fd < 0) {
-		free(temporary);
-		cntool_fail(program_name, 1, "cannot create output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), create));
-	}
-	/* Time: O(container size).  Space: O(1). */
-	{
-		size_t written = 0;
-
-		while (written < container_size) {
-			ssize_t n = write(fd, container + written,
-			    container_size - written);
-
-			if (n < 0) {
-				if (errno == EINTR)
-					continue;
-				close(fd);
-				unlink(temporary);
-				cntool_fail(program_name, 1,
-				    "cannot write output: %s",
-				    cntool_escape_text(escaped, sizeof(escaped),
-				    create));
-			}
-			written += (size_t)n;
-		}
-	}
-	if (fchmod(fd, 0644) != 0) {
-		close(fd);
-		unlink(temporary);
-		cntool_fail(program_name, 1, "cannot set output permissions: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), create));
-	}
-	if (close(fd) != 0) {
-		unlink(temporary);
-		cntool_fail(program_name, 1, "cannot write output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), create));
-	}
-	if (rename(temporary, create) != 0) {
-		unlink(temporary);
-		cntool_fail(program_name, 1, "cannot write output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), create));
-	}
-	free(temporary);
+	result = cntool_output_write(output, container, container_size, 0644);
+	if (result != CNTOOL_WRITE_OK)
+		cntool_fail(program_name, 1, "cannot write output: %s: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), output->name),
+		    cntool_write_reason(result));
 }
 
 /* Give back everything the images took. */
@@ -667,6 +592,7 @@ main(int argc, char **argv)
 {
 	struct nvfatbin_options options;
 	struct cnfatbin_input *inputs = NULL;
+	struct cntool_output output;
 	uint8_t **payloads = NULL;
 	uint8_t *container = NULL;
 	size_t container_size = 0;
@@ -709,7 +635,7 @@ main(int argc, char **argv)
 		cntool_fail(program_name, 2, "at least one --image3 is required");
 	validate_argument(options.create, "the output path");
 	check_output_path(options.create);
-	check_output_directory(options.create);
+	open_output_directory(options.create, &output);
 
 	payloads = calloc(options.count, sizeof(*payloads));
 	inputs = calloc(options.count, sizeof(*inputs));
@@ -722,7 +648,8 @@ main(int argc, char **argv)
 	if (err != CNFATBIN_OK)
 		cntool_fail(program_name, 1, "%s", cnfatbin_strerror(err));
 
-	write_container_file(options.create, container, container_size);
+	write_container_file(&output, container, container_size);
+	cntool_output_close(&output);
 
 	write_trace(options.create, options.images, options.count);
 

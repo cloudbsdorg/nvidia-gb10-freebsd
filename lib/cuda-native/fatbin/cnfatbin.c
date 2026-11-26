@@ -104,19 +104,29 @@ align_up(uint64_t value, uint64_t alignment)
  * reader makes there comes from here.
  *
  * The registry grows as it is used: a program that registers many mappings
- * is not refused for want of space.
+ * is not refused for want of space.  It also has a bound:
+ * CNFATBIN_MAX_MAPPINGS mappings at most, so a program that registers
+ * mappings for ever cannot make the host hold more than that many of them.
  */
 struct cnfatbin_mapping {
 	const uint8_t *base;
 	size_t length;
 };
 
+_Static_assert(sizeof(struct cnfatbin_mapping) == CNFATBIN_MAPPING_SIZE,
+    "the size of one registry entry must be the one the header names");
+
 static struct cnfatbin_mapping *cnfatbin_mappings;
 static size_t cnfatbin_mapping_count;
 static size_t cnfatbin_mapping_capacity;
 static atomic_flag cnfatbin_mapping_lock = ATOMIC_FLAG_INIT;
 
-/* Time: O(1).  Space: O(1). */
+/*
+ * The lock that guards the registry.  Taking it and giving it back are
+ * both constant time and use no space of their own.  The registry they
+ * guard holds O(mappings) space, and a lookup in it is O(mappings) time
+ * with at most CNFATBIN_MAX_MAPPINGS mappings to look at.
+ */
 static void
 mapping_lock(void)
 {
@@ -125,7 +135,7 @@ mapping_lock(void)
 		;
 }
 
-/* Time: O(1).  Space: O(1). */
+/* The same for giving the lock back. */
 static void
 mapping_unlock(void)
 {
@@ -227,25 +237,112 @@ cnfatbin_bound(const void *data)
 	return bound;
 }
 
-int
+/*
+ * The number of the bound, in words, so the message that names the bound
+ * cannot drift away from the bound itself.
+ */
+#define CNFATBIN_TEXT_(x)	#x
+#define CNFATBIN_TEXT(x)	CNFATBIN_TEXT_(x)
+#define CNFATBIN_MAX_MAPPINGS_TEXT CNFATBIN_TEXT(CNFATBIN_MAX_MAPPINGS)
+
+/*
+ * Every way a registration can fail, and what the tools say about it.  One
+ * table, so the code and the message cannot disagree, and one entry per
+ * code, so a code cannot lose its message.
+ */
+static const char *const register_table[] = {
+	[CNFATBIN_REGISTER_OK] = "the mapping was registered",
+	[CNFATBIN_REGISTER_BAD_ARGUMENT] =
+	    "a mapping needs a base and a length",
+	[CNFATBIN_REGISTER_TOO_MANY] =
+	    "the registry of mappings is full: at most " CNFATBIN_MAX_MAPPINGS_TEXT
+	    " mappings may be registered",
+	[CNFATBIN_REGISTER_OVERFLOW] =
+	    "the size of the registry of mappings does not fit in memory",
+	[CNFATBIN_REGISTER_NOMEM] = "host memory exhausted"
+};
+
+_Static_assert(sizeof(register_table) / sizeof(register_table[0]) ==
+    CNFATBIN_REGISTER_COUNT,
+    "the registration table must have one entry for every result");
+
+const char *
+cnfatbin_register_reason(enum cnfatbin_register_result result)
+{
+	if ((int)result < 0 || (size_t)result >= CNFATBIN_REGISTER_COUNT)
+		return "unknown error";
+	return register_table[result];
+}
+
+/*
+ * The capacity the registry of mappings grows to, and the number of bytes
+ * that is.  The registry grows by doubling, and the doubling is checked
+ * before it is multiplied: a capacity that cannot be doubled, or a size
+ * that cannot be multiplied, is refused with
+ * CNFATBIN_REGISTER_OVERFLOW, and the registry is left as it was.
+ */
+enum cnfatbin_register_result
+cnfatbin_registry_growth(size_t capacity, size_t *grown, size_t *bytes)
+{
+	size_t next;
+	size_t total;
+
+	if (grown == NULL || bytes == NULL)
+		return CNFATBIN_REGISTER_BAD_ARGUMENT;
+	if (capacity > SIZE_MAX / 2)
+		return CNFATBIN_REGISTER_OVERFLOW;
+	next = capacity == 0 ? 8 : capacity * 2;
+	if (next > SIZE_MAX / sizeof(struct cnfatbin_mapping))
+		return CNFATBIN_REGISTER_OVERFLOW;
+	total = next * sizeof(struct cnfatbin_mapping);
+	*grown = next;
+	*bytes = total;
+	return CNFATBIN_REGISTER_OK;
+}
+
+size_t
+cnfatbin_registered_mappings(void)
+{
+	size_t count;
+
+	mapping_lock();
+	count = cnfatbin_mapping_count;
+	mapping_unlock();
+	return count;
+}
+
+enum cnfatbin_register_result
 cnfatbin_register_mapping(const void *base, size_t length)
 {
-	int recorded = -1;
-
 	if (base == NULL || length == 0)
-		return -1;
+		return CNFATBIN_REGISTER_BAD_ARGUMENT;
 	mapping_lock();
-	/* The registry grows as it is used: there is no limit on the number
-	 * of mappings a program may tell the reader about. */
+	/* The registry has a bound: a program that registers mappings for
+	 * ever is refused with the bound named, and the registry keeps the
+	 * mappings it has. */
+	if (cnfatbin_mapping_count >= (size_t)CNFATBIN_MAX_MAPPINGS) {
+		mapping_unlock();
+		return CNFATBIN_REGISTER_TOO_MANY;
+	}
 	if (cnfatbin_mapping_count == cnfatbin_mapping_capacity) {
-		size_t grown = cnfatbin_mapping_capacity == 0 ? 8 :
-		    cnfatbin_mapping_capacity * 2;
-		struct cnfatbin_mapping *bigger =
-		    realloc(cnfatbin_mappings, grown * sizeof(*bigger));
+		struct cnfatbin_mapping *bigger;
+		size_t grown = 0;
+		size_t bytes = 0;
+		enum cnfatbin_register_result result;
 
+		/* The growth is checked before anything is allocated, so a
+		 * size that has wrapped around is never asked of the
+		 * host. */
+		result = cnfatbin_registry_growth(cnfatbin_mapping_capacity,
+		    &grown, &bytes);
+		if (result != CNFATBIN_REGISTER_OK) {
+			mapping_unlock();
+			return result;
+		}
+		bigger = realloc(cnfatbin_mappings, bytes);
 		if (bigger == NULL) {
 			mapping_unlock();
-			return -1;
+			return CNFATBIN_REGISTER_NOMEM;
 		}
 		cnfatbin_mappings = bigger;
 		cnfatbin_mapping_capacity = grown;
@@ -253,9 +350,8 @@ cnfatbin_register_mapping(const void *base, size_t length)
 	cnfatbin_mappings[cnfatbin_mapping_count].base = base;
 	cnfatbin_mappings[cnfatbin_mapping_count].length = length;
 	cnfatbin_mapping_count++;
-	recorded = 0;
 	mapping_unlock();
-	return recorded;
+	return CNFATBIN_REGISTER_OK;
 }
 
 /*
@@ -510,6 +606,30 @@ read_value(char *field, size_t field_size, const uint8_t *data,
 }
 
 /*
+ * The digest of one member: the value of the record whose key is
+ * cloudbsd.sha256.  The digest is exactly 64 hexadecimal digits, the bytes
+ * it names are inside the container, and the byte after them is the NUL
+ * that ends it.  A value that is not a digest is refused with the error
+ * that says so.  The field must have room for the digest and its
+ * terminator.
+ */
+static enum cnfatbin_error
+read_digest(char *field, const uint8_t *data, uint64_t total,
+    uint64_t value_offset, uint64_t value_size)
+{
+	if (!value_is_terminated(data, total, value_offset, value_size,
+	    CNFATBIN_SHA256_HEX_MAX))
+		return CNFATBIN_E_STRING_NOT_TERMINATED;
+	if (value_size != CNFATBIN_SHA256_HEX_MAX)
+		return CNFATBIN_E_SHA256_FORMAT;
+	memcpy(field, data + value_offset, CNFATBIN_SHA256_HEX_MAX);
+	field[CNFATBIN_SHA256_HEX_MAX] = '\0';
+	if (!is_hex64(field))
+		return CNFATBIN_E_SHA256_FORMAT;
+	return CNFATBIN_OK;
+}
+
+/*
  * Read the strings of one entry.  The strings the reader knows go into the
  * member; a string whose key the reader does not know is ignored, and its
  * value may be as long as it likes.
@@ -535,16 +655,20 @@ read_entry_strings(const uint8_t *data, uint64_t total, uint64_t string_offset,
 		enum known_key which;
 		enum cnfatbin_error err;
 
-		if (!in_range(value_offset, value_size, total))
-			return CNFATBIN_E_STRING_OUT_OF_RANGE;
-		/* The key is resolved before the value is looked at.  The
-		 * value of a key we do not know is ignored, and a value
+		/* The key is resolved before the value is looked at: the
+		 * value of a key we do not know is ignored, and it is not
+		 * even looked at, so a record that names a key we do not
+		 * know may point at a value that is not there.  A value
 		 * that fits no field is refused by its length, so no
 		 * record can ask for a long value to be scanned again
 		 * and again. */
 		err = known_key(data, total, key_offset, &which);
 		if (err != CNFATBIN_OK)
 			return err;
+		if (which == KEY_UNKNOWN)
+			continue;
+		if (!in_range(value_offset, value_size, total))
+			return CNFATBIN_E_STRING_OUT_OF_RANGE;
 		switch (which) {
 		case KEY_TRIPLE:
 			err = read_value(member->triple, sizeof(member->triple),
@@ -569,16 +693,10 @@ read_entry_strings(const uint8_t *data, uint64_t total, uint64_t string_offset,
 		case KEY_SHA256:
 			/* The digest is exactly 64 hexadecimal digits, and
 			 * it is measured before it is copied. */
-			if (!value_is_terminated(data, total, value_offset,
-			    value_size, CNFATBIN_SHA256_HEX_MAX))
-				return CNFATBIN_E_STRING_NOT_TERMINATED;
-			if (value_size != CNFATBIN_SHA256_HEX_MAX)
-				return CNFATBIN_E_SHA256_FORMAT;
-			memcpy(member->sha256, data + value_offset,
-			    CNFATBIN_SHA256_HEX_MAX);
-			member->sha256[CNFATBIN_SHA256_HEX_MAX] = '\0';
-			if (!is_hex64(member->sha256))
-				return CNFATBIN_E_SHA256_FORMAT;
+			err = read_digest(member->sha256, data, total, value_offset,
+			    value_size);
+			if (err != CNFATBIN_OK)
+				return err;
 			member->has_sha256 = 1;
 			break;
 		case KEY_UNKNOWN:
@@ -657,10 +775,15 @@ cnfatbin_peek_size(const uint8_t *data, size_t available, uint64_t *size)
 }
 
 /*
- * Does the entry carry a digest?  The key of the string record is read
- * where it lies, so the answer needs no copy.  An entry whose string table
- * is out of range carries nothing we know: the reader that reads the entry
- * says so.
+ * Does the entry carry a digest that will be hashed?  The key of the
+ * string record is read where it lies, so the answer needs no copy of the
+ * key, and the value is checked the way the reader that reads the member
+ * checks it: inside the container, NUL terminated, and exactly 64
+ * hexadecimal digits.  An entry whose digest value is not one of those
+ * carries no digest that will be hashed, so the work it asks for is not
+ * counted, and the reader that reads the member is the one that says the
+ * digest is malformed.  An entry whose string table is out of range
+ * carries nothing we know: the reader that reads the entry says so.
  */
 static int
 entry_has_sha256(const uint8_t *data, uint64_t total, uint64_t string_offset,
@@ -680,12 +803,23 @@ entry_has_sha256(const uint8_t *data, uint64_t total, uint64_t string_offset,
 		const uint8_t *record = data + string_offset +
 		    i * CNFATBIN_STRING_ENTRY_SIZE;
 		uint64_t key_offset = read_le64(record);
+		uint64_t value_offset = read_le64(record + 8);
+		uint64_t value_size = read_le64(record + 16);
 		size_t length = sizeof(CNFATBIN_KEY_SHA256);
+		char digest[CNFATBIN_SHA256_HEX_MAX + 1];
 
 		if (key_offset >= total || length > total - key_offset)
 			continue;
-		if (memcmp(data + key_offset, CNFATBIN_KEY_SHA256, length) == 0)
-			return 1;
+		if (memcmp(data + key_offset, CNFATBIN_KEY_SHA256, length) != 0)
+			continue;
+		/* The value must be a digest that the reader would hash: the
+		 * image is hashed only when its digest is one. */
+		if (!in_range(value_offset, value_size, total))
+			return 0;
+		if (read_digest(digest, data, total, value_offset, value_size) !=
+		    CNFATBIN_OK)
+			return 0;
+		return 1;
 	}
 	return 0;
 }
@@ -739,6 +873,9 @@ cnfatbin_open(const uint8_t *data, size_t size,
 	size_t i;
 	enum cnfatbin_error err;
 
+	/* The container is emptied before anything else is looked at: a
+	 * container that is refused leaves an empty container behind, with
+	 * no data pointer, no size, no member count and no member table. */
 	memset(container, 0, sizeof(*container));
 	if (size < CNFATBIN_HEADER_SIZE)
 		return CNFATBIN_E_SHORT_INPUT;
@@ -763,9 +900,14 @@ cnfatbin_open(const uint8_t *data, size_t size,
 		return CNFATBIN_E_ENTRIES_OUT_OF_RANGE;
 
 	if (entries_count == 0) {
+		/* A container with no members has no member table: the count
+		 * is zero and the table is empty, even when the caller handed
+		 * us a container that had one. */
 		container->version = version;
 		container->data = data;
 		container->size = size;
+		container->entries_count = 0;
+		container->members = NULL;
 		return CNFATBIN_OK;
 	}
 	/* The hashing work is checked before any member is read, so that a

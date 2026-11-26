@@ -27,7 +27,10 @@
 # - a file that is neither a container nor an ELF is not read after its
 #   buffer is freed, and no raw control byte reaches a diagnostic;
 # - a file that is larger than the limit is refused with the limit named;
-# - the version takes no operand, the alias names itself, and an output
+# - the output lands in the directory that was opened, and a directory that
+#   is replaced after that cannot redirect the write;
+# - the diagnostic keeps the field it is about, whole and escaped;
+# - the version takes no other operand, the alias names itself, and an output
 #   name of 240 bytes is written;
 # - LLVM reads our container (llvm-objdump --offloading) and we read the
 #   container LLVM writes;
@@ -126,13 +129,27 @@ done
 # reader the tools use, so a check there is a check of the tools.
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$CN/fatbin" \
     -o "$W/fatbin_reader_test" "$K/fatbin_reader_test.c" \
-    "$CN/fatbin/cnfatbin.c" -lmd >"$W/reader-build.log" 2>&1
+    "$CN/fatbin/cnfatbin.c" -lmd -Wl,--wrap=calloc \
+    >"$W/reader-build.log" 2>&1
 expect_rc "the reader test builds with the base compiler" $? 0
 "$W/fatbin_reader_test" >"$W/reader.out" 2>&1
 rc=$?
 [ $rc -eq 0 ]
 expect_rc "every reader and writer check passes" $rc 0
 sed -n 1,40p "$W/reader.out"
+
+# ---- the parts the two tools share ---------------------------------------
+# The escaper is the one place where the bytes of an untrusted string
+# become a diagnostic, so its bounds are tested on their own.
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$CN/fatbin" \
+    -o "$W/cntool_test" "$K/cntool_test.c" "$CN/fatbin/cntool.c" \
+    >"$W/cntool-build.log" 2>&1
+expect_rc "the shared tool test builds with the base compiler" $? 0
+"$W/cntool_test" >"$W/cntool.out" 2>&1
+rc=$?
+[ $rc -eq 0 ]
+expect_rc "every shared tool check passes" $rc 0
+sed -n 1,20p "$W/cntool.out"
 
 # ---- a round trip --------------------------------------------------------
 PTX1=$W/one.ptx
@@ -281,7 +298,9 @@ check_case hash-mismatch.bin "a member sha256 does not match its image"
 # The same directory holds the containers the C test builds by hand.
 for name in arch-invalid-utf8 arch-control-bytes value-too-long \
     unknown-long-key digest-too-long overlapping-images \
-    overlapping-images-digested many-strings shared-long-value; do
+    overlapping-images-digested many-strings shared-long-value \
+    unknown-key-out-of-range value-out-of-range value-not-terminated \
+    overlapping-images-bad-digest; do
 	[ -s "$W/cases/$name.bin" ]
 	expect_rc "the crafted container $name is written" $? 0
 done
@@ -291,6 +310,21 @@ check_case digest-too-long.bin \
     "a member sha256 is not 64 hexadecimal digits"
 check_case overlapping-images-digested.bin \
     "the container asks for more hashing than its size allows"
+check_case value-out-of-range.bin "a member string is out of range"
+check_case value-not-terminated.bin \
+    "a member string value is not NUL terminated"
+check_case overlapping-images-bad-digest.bin \
+    "a member sha256 is not 64 hexadecimal digits"
+
+# The value of a key we do not know is ignored, and it is not looked at:
+# a record that names it may point at a value that is not there.
+"$SDK/bin/cuda-objdump" --json "$W/cases/unknown-key-out-of-range.bin" \
+    >"$W/unknown-key-out-of-range.json" 2>"$W/unknown-key-out-of-range.err"
+rc=$?
+[ $rc -eq 0 ] && [ ! -s "$W/unknown-key-out-of-range.err" ]
+check=$?
+expect_rc "a key we do not know with a value that is not there is ignored" \
+    $check 0
 
 # Only the images that carry a digest are hashed.  Two members that share
 # one image and carry no digest ask for no hashing at all, so the container
@@ -654,6 +688,45 @@ rc=$?
 check=$?
 expect_rc "the container with the long name is read back" $check 0
 
+# ---- the output cannot be redirected by replacing its directory ----------
+# The directory the output goes in is opened once, and the file is made and
+# renamed inside that open directory.  A directory that is replaced after it
+# was opened cannot move the write: the file lands in the directory that
+# was opened, and the directory the symlink names is not written at all.
+mkdir -p "$W/swap-parent" "$W/swap-target"
+GB10_TEST_HOOKS=1 CUDA_NATIVE_TEST_PARENT_SWAP="$W/swap-target" \
+    "$SDK/bin/nvfatbin" -64 --create "$W/swap-parent/container.bin" \
+    --image3=kind=ptx,sm=120,file="$PTX1" >"$W/swap.out" 2>"$W/swap.err"
+rc=$?
+[ $rc -eq 0 ] && [ -s "$W/swap-parent.swapped/container.bin" ] &&
+    [ ! -e "$W/swap-target/container.bin" ]
+check=$?
+expect_rc "the output lands in the directory that was opened" $check 0
+sed -n 1,3p "$W/swap.err"
+
+# ---- the diagnostic keeps the field it is about --------------------------
+# The field is escaped as it is: it is not cut short before it is escaped,
+# so the bytes that are wrong are in the message.
+zeros=$(python3 -I -c "print('0' * 100)")
+"$SDK/bin/nvfatbin" -64 --create "$W/bad-sm.bin" \
+    --image3="kind=ptx,sm=${zeros}x,file=$PTX1" \
+    >"$W/bad-sm.out" 2>"$W/bad-sm.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -e "$W/bad-sm.bin" ] &&
+    grep -q -- "image sm must be a decimal number: ${zeros}x" "$W/bad-sm.err"
+check=$?
+expect_rc "the sm diagnostic shows the whole field" $check 0
+kind=$(python3 -I -c "print('elf' + 'x' * 20)")
+"$SDK/bin/nvfatbin" -64 --create "$W/bad-kind.bin" \
+    --image3="kind=${kind},sm=120,file=$PTX1" \
+    >"$W/bad-kind.out" 2>"$W/bad-kind.err"
+rc=$?
+[ $rc -eq 2 ] && [ ! -e "$W/bad-kind.bin" ] &&
+    grep -q -- "unsupported image kind: ${kind}" "$W/bad-kind.err"
+check=$?
+expect_rc "the image kind diagnostic shows the whole field" $check 0
+sed -n 1,3p "$W/bad-sm.err"
+
 # ---- an empty --create is a usage problem ----------------------------------
 "$SDK/bin/nvfatbin" --create= --image3=kind=ptx,sm=120,file="$PTX1" \
     >"$W/empty-create.out" 2>"$W/empty-create.err"
@@ -681,14 +754,14 @@ rc=$?
 check=$?
 expect_rc "the alias keeps the canonical name in its JSON version" $check 0
 
-# ---- the version takes no operand -----------------------------------------
+# ---- the version takes no other operand ------------------------------------
 "$SDK/bin/cuda-objdump" --version --json junk \
     >"$W/version-extra.out" 2>"$W/version-extra.err"
 rc=$?
 [ $rc -eq 2 ] && [ ! -s "$W/version-extra.out" ] &&
     grep -q 'unexpected argument junk' "$W/version-extra.err"
 check=$?
-expect_rc "--version takes no operand" $check 0
+expect_rc "--version takes no other operand" $check 0
 "$SDK/bin/cuda-objdump" --version --json >"$W/version-json.out" \
     2>"$W/version-json.err"
 rc=$?
@@ -696,6 +769,15 @@ rc=$?
     grep -q '"tool":"cuda-objdump"' "$W/version-json.out"
 check=$?
 expect_rc "--version --json still prints the version" $check 0
+
+# ---- the manual and the tools agree about --version ------------------------
+# The tools accept --version --json, so a manual that says that --version
+# takes no operand tells the reader that a valid invocation is invalid.
+for man in nvfatbin.1 cuda-objdump.1; do
+	! grep -q 'takes no operand' "$CN/man/$man" &&
+	    grep -q 'only an optional trailing' "$CN/man/$man"
+done
+expect_rc "the manual agrees with the tools about --version" $? 0
 
 # ---- the manual and the tools agree on the fields --------------------------
 # The field sha256_ok was removed from the reader, the tools and the
@@ -845,7 +927,8 @@ grep -q 'in_range(image_offset, image_size, total)' "$W/mutant/cnfatbin.c"
 expect_rc "the mutant fixture still holds the check that is removed" $? 1
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$CN/fatbin" \
     -o "$W/mutant/fatbin_reader_test" "$K/fatbin_reader_test.c" \
-    "$W/mutant/cnfatbin.c" -lmd >"$W/mutant-build.log" 2>&1
+    "$W/mutant/cnfatbin.c" -lmd -Wl,--wrap=calloc \
+    >"$W/mutant-build.log" 2>&1
 expect_rc "the mutant reader builds" $? 0
 "$W/mutant/fatbin_reader_test" "$W/cases/image.bin" >"$W/mutant.out" 2>&1
 rc=$?

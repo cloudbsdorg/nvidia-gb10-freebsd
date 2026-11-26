@@ -33,6 +33,24 @@
 static int passed = 0;
 static int failures = 0;
 
+/*
+ * The reader asks the host for the members of a container.  The test makes
+ * that ask fail, so the refusal is seen without the host running out of
+ * memory.  The build of this test links with --wrap=calloc, so the ask
+ * goes through the wrapper below.
+ */
+static int calloc_fails;
+
+void *__real_calloc(size_t count, size_t size);
+
+void *
+__wrap_calloc(size_t count, size_t size)
+{
+	if (calloc_fails)
+		return NULL;
+	return __real_calloc(count, size);
+}
+
 static void
 ok(const char *name)
 {
@@ -853,9 +871,17 @@ build_many_strings_case(void)
 	add_case("many-strings", container, size);
 }
 
-/* Two members that name the same image range. */
+/*
+ * Two members that name the same image range.  The second member holds no
+ * image of its own: it names the image of the first, so the container asks
+ * for the hashing work of one image twice.  The digest is the value of the
+ * third key of each member: no digest at all, a digest that is one byte too
+ * long, or 64 hexadecimal digits.  One builder, so the three cases cannot
+ * lay the container out differently.
+ */
 static void
-build_overlap_case(void)
+build_overlap_case(const char *name, const uint8_t *digest,
+    size_t digest_size)
 {
 	struct raw_member members[2];
 	uint8_t *container;
@@ -866,9 +892,13 @@ build_overlap_case(void)
 		plain_member(&members[i]);
 		members[i].image = big_image;
 		members[i].image_size = sizeof(big_image);
+		if (digest != NULL) {
+			members[i].string_count = 3;
+			members[i].strings[2].key = CNFATBIN_KEY_SHA256;
+			members[i].strings[2].value = digest;
+			members[i].strings[2].value_size = digest_size;
+		}
 	}
-	/* The second member holds no image of its own: it names the image
-	 * of the first, so the container asks for twice the hashing work. */
 	members[1].image_size = 0;
 	container = build_raw(members, 2, &size);
 	if (container != NULL) {
@@ -880,45 +910,85 @@ build_overlap_case(void)
 		put_le64(container + CNFATBIN_HEADER_SIZE + CNFATBIN_ENTRY_SIZE +
 		    32, sizeof(big_image));
 	}
-	add_case("overlapping-images", container, size);
+	add_case(name, container, size);
 }
 
 /*
- * The same two members, each one with a digest.  Only the images that
- * carry a digest are hashed, so these two ask for twice the hashing work
- * one image is worth and the container is refused before any digest is
- * computed.
+ * A record whose key is one the reader does not know, and whose value is
+ * outside the container.  The value of a key we do not know is ignored, so
+ * the container opens.
  */
 static void
-build_overlap_digest_case(void)
+build_unknown_key_case(void)
 {
-	struct raw_member members[2];
+	struct raw_member member;
 	uint8_t *container;
 	size_t size = 0;
-	size_t i;
+	long record;
 
-	for (i = 0; i < 2; i++) {
-		plain_member(&members[i]);
-		members[i].image = big_image;
-		members[i].image_size = sizeof(big_image);
-		/* The third key is the digest: 64 hexadecimal digits. */
-		members[i].string_count = 3;
-		members[i].strings[2].key = CNFATBIN_KEY_SHA256;
-		members[i].strings[2].value = zero_digest;
-		members[i].strings[2].value_size = sizeof(zero_digest);
-	}
-	members[1].image_size = 0;
-	container = build_raw(members, 2, &size);
+	plain_member(&member);
+	member.string_count = 3;
+	member.strings[2].key = "some.unknown.key";
+	member.strings[2].value = unknown_long;
+	member.strings[2].value_size = sizeof(unknown_long);
+	container = build_raw(&member, 1, &size);
 	if (container != NULL) {
-		uint64_t first_image =
-		    get_le64(container + CNFATBIN_HEADER_SIZE + 24);
-
-		put_le64(container + CNFATBIN_HEADER_SIZE + CNFATBIN_ENTRY_SIZE +
-		    24, first_image);
-		put_le64(container + CNFATBIN_HEADER_SIZE + CNFATBIN_ENTRY_SIZE +
-		    32, sizeof(big_image));
+		/* The value of the key we do not know points outside the
+		 * container. */
+		record = find_string_record(container, size, "xxxx");
+		if (record >= 0) {
+			put_le64(container + record + 8, (uint64_t)size + 16);
+			put_le64(container + record + 16, 1);
+		}
 	}
-	add_case("overlapping-images-digested", container, size);
+	add_case("unknown-key-out-of-range", container, size);
+}
+
+/*
+ * A known value that points outside the container.  The key is a key we
+ * know, so its value is looked at, and a value that is not there is
+ * refused.
+ */
+static void
+build_value_out_of_range_case(void)
+{
+	struct raw_member member;
+	uint8_t *container;
+	size_t size = 0;
+	long record;
+
+	plain_member(&member);
+	container = build_raw(&member, 1, &size);
+	if (container != NULL) {
+		record = find_string_record(container, size, "sm_120");
+		if (record >= 0) {
+			put_le64(container + record + 8, (uint64_t)size + 16);
+			put_le64(container + record + 16, 1);
+		}
+	}
+	add_case("value-out-of-range", container, size);
+}
+
+/*
+ * A known value whose terminator is not there: the byte after the value is
+ * not a NUL, so the value is not the string it claims to be.
+ */
+static void
+build_unterminated_value_case(void)
+{
+	struct raw_member member;
+	uint8_t *container;
+	size_t size = 0;
+	long record;
+
+	plain_member(&member);
+	container = build_raw(&member, 1, &size);
+	if (container != NULL) {
+		record = find_string_record(container, size, "sm_120");
+		if (record >= 0)
+			container[value_offset_of(container, record) + 6] = 'X';
+	}
+	add_case("value-not-terminated", container, size);
 }
 
 /*
@@ -1000,8 +1070,16 @@ build_cases(void)
 	build_arch_cases();
 	build_key_cases();
 	build_many_strings_case();
-	build_overlap_case();
-	build_overlap_digest_case();
+	/* The three cases that share one image: no digest, a digest, and a
+	 * digest that is not a digest. */
+	build_overlap_case("overlapping-images", NULL, 0);
+	build_overlap_case("overlapping-images-digested", zero_digest,
+	    sizeof(zero_digest));
+	build_overlap_case("overlapping-images-bad-digest", digest_long,
+	    sizeof(digest_long));
+	build_unknown_key_case();
+	build_value_out_of_range_case();
+	build_unterminated_value_case();
 	/* The case whose work the shell test measures: it is written to a
 	 * file and opened there under a timeout, because opening it here
 	 * would take the work the case is about. */
@@ -1083,6 +1161,184 @@ check_mapping_registry(void)
 		ok("the registry of mappings takes more than sixteen mappings");
 	else
 		bad("the registry of mappings takes more than sixteen mappings");
+}
+
+/*
+ * The registry of the mappings a program tells the reader about has a
+ * bound: it takes every mapping up to the bound, and the mapping past the
+ * bound is refused with the bound named.  A refused registration leaves
+ * the registry as it was.
+ */
+static void
+check_registry_bound(void)
+{
+	static char areas[CNFATBIN_MAX_MAPPINGS][CNFATBIN_MAPPING_SIZE];
+	size_t before = cnfatbin_registered_mappings();
+	size_t i;
+	int good = 1;
+
+	for (i = before; i < CNFATBIN_MAX_MAPPINGS; i++) {
+		if (cnfatbin_register_mapping(areas[i], sizeof(areas[i])) !=
+		    CNFATBIN_REGISTER_OK)
+			good = 0;
+	}
+	if (cnfatbin_registered_mappings() != CNFATBIN_MAX_MAPPINGS)
+		good = 0;
+	if (good)
+		ok("the registry of mappings takes every mapping up to its bound");
+	else
+		bad("the registry of mappings takes every mapping up to its bound");
+	/* One mapping past the bound is refused, and the registry does not
+	 * grow. */
+	if (cnfatbin_register_mapping(areas[0], sizeof(areas[0])) ==
+	    CNFATBIN_REGISTER_TOO_MANY &&
+	    cnfatbin_registered_mappings() == CNFATBIN_MAX_MAPPINGS)
+		ok("the registry of mappings refuses one mapping past its bound");
+	else
+		bad("the registry of mappings refuses one mapping past its bound");
+	/* The reason names the bound. */
+	if (strstr(cnfatbin_register_reason(CNFATBIN_REGISTER_TOO_MANY),
+	    "4096") != NULL)
+		ok("the reason for a full registry names the bound");
+	else
+		bad("the reason for a full registry names the bound");
+}
+
+/*
+ * The arithmetic that grows the registry is checked before it is
+ * multiplied: a capacity that cannot be doubled, and a size that cannot be
+ * multiplied, are refused, and the registry is not touched.
+ */
+static void
+check_registry_overflow(void)
+{
+	size_t grown = 0;
+	size_t bytes = 0;
+	size_t count = cnfatbin_registered_mappings();
+
+	grown = 0;
+	bytes = 0;
+	if (cnfatbin_registry_growth(SIZE_MAX / 2 + 1, &grown, &bytes) ==
+	    CNFATBIN_REGISTER_OVERFLOW && grown == 0 && bytes == 0)
+		ok("a capacity that cannot be doubled is refused");
+	else
+		bad("a capacity that cannot be doubled is refused");
+	grown = 0;
+	bytes = 0;
+	if (cnfatbin_registry_growth(SIZE_MAX / CNFATBIN_MAPPING_SIZE + 1,
+	    &grown, &bytes) == CNFATBIN_REGISTER_OVERFLOW && grown == 0 &&
+	    bytes == 0)
+		ok("a size that cannot be multiplied is refused");
+	else
+		bad("a size that cannot be multiplied is refused");
+	if (cnfatbin_registered_mappings() == count)
+		ok("a refused growth leaves the registry as it was");
+	else
+		bad("a refused growth leaves the registry as it was");
+}
+
+/*
+ * A container with no members opens, and it has no member table: the count
+ * is zero and the table is empty, even when the caller handed us a
+ * container that had one.
+ */
+static void
+check_empty_container(void)
+{
+	struct cnfatbin_container opened;
+	uint8_t *container;
+	size_t size = 0;
+	int good;
+
+	container = build_raw(NULL, 0, &size);
+	if (container == NULL) {
+		bad("a container with no members has no member table");
+		return;
+	}
+	memset(&opened, 0xaa, sizeof(opened));
+	good = cnfatbin_open(container, size, &opened) == CNFATBIN_OK;
+	good = good && opened.entries_count == 0 && opened.members == NULL;
+	good = good && opened.version == CNFATBIN_VERSION;
+	good = good && opened.data == container && opened.size == size;
+	cnfatbin_close(&opened);
+	free(container);
+	if (good)
+		ok("a container with no members has no member table");
+	else
+		bad("a container with no members has no member table");
+}
+
+/*
+ * The reader that cannot hold the members refuses the container, and the
+ * container it leaves behind is empty.
+ */
+static void
+check_out_of_memory(void)
+{
+	struct cnfatbin_container opened;
+	uint8_t *container;
+	size_t size = 0;
+	size_t members = 0;
+	size_t ptx_size = 0;
+	int good;
+
+	container = build_container(&size, &members, &ptx_size);
+	if (container == NULL) {
+		bad("a container that cannot be held is refused");
+		return;
+	}
+	calloc_fails = 1;
+	memset(&opened, 0xaa, sizeof(opened));
+	good = cnfatbin_open(container, size, &opened) == CNFATBIN_E_NOMEM;
+	good = good && opened.data == NULL && opened.size == 0 &&
+	    opened.entries_count == 0 && opened.members == NULL;
+	calloc_fails = 0;
+	cnfatbin_buffer_free(container, size);
+	if (good)
+		ok("a container that cannot be held is refused and leaves an empty "
+		    "container");
+	else
+		bad("a container that cannot be held is refused and leaves an empty "
+		    "container");
+}
+
+/*
+ * The cases that tell a value from a key: a key we do not know with a
+ * value that is not there is ignored, a known value that is not there is
+ * refused, a known value whose terminator is not there is refused, and a
+ * digest that is not a digest is refused before the hashing budget.
+ */
+static void
+check_value_rules_2(void)
+{
+	const struct test_case *c;
+
+	c = find_case("unknown-key-out-of-range");
+	if (c == NULL)
+		bad("a key we do not know with a value that is not there is ignored");
+	else
+		expect_ok("a key we do not know with a value that is not there is "
+		    "ignored", c->data, c->size);
+	c = find_case("value-out-of-range");
+	if (c == NULL)
+		bad("a known value that is not there is refused");
+	else
+		expect_error("a known value that is not there is refused",
+		    c->data, c->size, "a member string is out of range");
+	c = find_case("value-not-terminated");
+	if (c == NULL)
+		bad("a known value whose terminator is not there is refused");
+	else
+		expect_error("a known value whose terminator is not there is refused",
+		    c->data, c->size, "a member string value is not NUL terminated");
+	c = find_case("overlapping-images-bad-digest");
+	if (c == NULL)
+		bad("a digest that is not a digest is refused before the hashing "
+		    "budget");
+	else
+		expect_error("a digest that is not a digest is refused before the "
+		    "hashing budget", c->data, c->size,
+		    "a member sha256 is not 64 hexadecimal digits");
 }
 
 /*
@@ -1292,8 +1548,13 @@ main(int argc, char **argv)
 
 	build_cases();
 	check_value_rules();
+	check_value_rules_2();
 	check_writer_limits();
 	check_mapping_registry();
+	check_registry_bound();
+	check_registry_overflow();
+	check_empty_container();
+	check_out_of_memory();
 	check_error_table();
 
 	cnfatbin_buffer_free(container, size);

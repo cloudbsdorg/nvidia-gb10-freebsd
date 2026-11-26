@@ -229,15 +229,71 @@ size_t cnfatbin_bound(const void *data);
 #define CNFATBIN_HAVE_MAPPING_HOOK 1
 
 /*
+ * The most mappings a program may tell the reader about.  The registry of
+ * mappings grows as it is used, so a program that registers many mappings
+ * is not refused for want of space, but the registry has a bound: a
+ * program that registers mappings for ever cannot make the host hold more
+ * than this many of them.  A registration past the bound is refused with
+ * CNFATBIN_REGISTER_TOO_MANY, and the reason names the bound.
+ */
+#define CNFATBIN_MAX_MAPPINGS 4096
+
+/*
+ * The size of one entry in the registry of mappings.  The registry grows by
+ * doubling, and the doubling is checked against this size, so the size the
+ * registry asks the host for is known to the caller.
+ */
+#define CNFATBIN_MAPPING_SIZE 16
+
+/*
+ * Why a mapping was not registered.  Every cause has its own name and its
+ * own message, so a caller can say what happened without a table of its
+ * own.  The zero result is the one that says the mapping was recorded.
+ */
+enum cnfatbin_register_result {
+	CNFATBIN_REGISTER_OK = 0,
+	CNFATBIN_REGISTER_BAD_ARGUMENT,	/* no base, or an empty mapping */
+	CNFATBIN_REGISTER_TOO_MANY,	/* the registry is full */
+	CNFATBIN_REGISTER_OVERFLOW,	/* the size does not fit */
+	CNFATBIN_REGISTER_NOMEM,	/* the host is out of memory */
+	CNFATBIN_REGISTER_COUNT
+};
+
+/*
+ * The message of one named registration result.  Never NULL.
+ */
+const char *cnfatbin_register_reason(enum cnfatbin_register_result result);
+
+/*
+ * The capacity the registry of mappings grows to, and the number of bytes
+ * that is.  The registry grows by doubling, and the doubling is checked
+ * before it is multiplied: a capacity that cannot be doubled, or a size
+ * that cannot be multiplied, is refused with CNFATBIN_REGISTER_OVERFLOW
+ * and the registry is left as it was.  The reader grows the registry with
+ * this, and the test proves that the arithmetic is checked.
+ */
+enum cnfatbin_register_result
+cnfatbin_registry_growth(size_t capacity, size_t *grown, size_t *bytes);
+
+/*
+ * How many mappings the registry holds.  The count is at most
+ * CNFATBIN_MAX_MAPPINGS, and a registration that is refused does not
+ * change it.
+ */
+size_t cnfatbin_registered_mappings(void);
+
+/*
  * Tell the reader that a mapping of ours holds a container, so that it can
  * bound the reads it makes there.  The runtime uses this for a container a
  * program built in memory of its own; the pointer must lie inside the
- * registered mapping.  The registry grows as it is used, so there is no
- * limit on the number of mappings a program may tell the reader about.
- * Returns zero when the mapping was recorded, and -1 when it was not: a
- * null pointer, an empty mapping, or a registry that cannot grow.
+ * registered mapping.  The registry grows as it is used and has a bound:
+ * CNFATBIN_MAX_MAPPINGS mappings at most.  Returns CNFATBIN_REGISTER_OK
+ * when the mapping was recorded, and another named result when it was
+ * not: a null pointer, an empty mapping, a full registry, an arithmetic
+ * that does not fit, or a host that is out of memory.
  */
-int cnfatbin_register_mapping(const void *base, size_t length);
+enum cnfatbin_register_result
+cnfatbin_register_mapping(const void *base, size_t length);
 
 /*
  * Write a container.  The result is a malloc'd buffer of *size bytes; the

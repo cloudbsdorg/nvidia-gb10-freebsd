@@ -342,6 +342,7 @@ load_container(const char *path, uint8_t **owned, uint8_t **section,
     const uint8_t **bytes, size_t *container_size, const char **source)
 {
 	char escaped[CNTOOL_ESCAPED_MAX];
+	char why[CNTOOL_REASON_MAX];
 	size_t size = 0;
 	size_t offset = 0;
 	enum cntool_read_result reason;
@@ -351,7 +352,8 @@ load_container(const char *path, uint8_t **owned, uint8_t **section,
 	if (reason != CNTOOL_READ_OK)
 		cntool_fail(TOOL_NAME, 1, "cannot read %s: %s",
 		    cntool_escape_text(escaped, sizeof(escaped), path),
-		    cntool_read_reason(reason, CNTOOL_MAX_FILE_SIZE));
+		    cntool_read_reason(why, sizeof(why), reason,
+		    CNTOOL_MAX_FILE_SIZE));
 	*bytes = *owned;
 	*container_size = size;
 	if (looks_like_container(*owned, size))
@@ -391,13 +393,18 @@ load_container(const char *path, uint8_t **owned, uint8_t **section,
 	*container_size = size - offset;
 }
 
-/* Write the image of one member to a file. */
+/*
+ * Write the image of one member to a file.  The directory the file goes in
+ * is opened once and the file is written inside it, so a directory that is
+ * replaced after the name was checked cannot redirect the write.
+ */
 static void
 extract_member(unsigned long index, const char *out_path,
     const struct cnfatbin_container *container, const uint8_t *bytes)
 {
 	char escaped[CNTOOL_ESCAPED_MAX];
-	FILE *stream;
+	struct cntool_output output;
+	enum cntool_write_result result;
 
 	if (index >= container->entries_count) {
 		if (container->entries_count == 0)
@@ -407,21 +414,19 @@ extract_member(unsigned long index, const char *out_path,
 		    "valid indexes are 0-%llu", index,
 		    (unsigned long long)(container->entries_count - 1));
 	}
-	stream = fopen(out_path, "wb");
-	if (stream == NULL)
-		cntool_fail(TOOL_NAME, 1, "cannot create output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), out_path));
-	if (container->members[index].image_size > 0 &&
-	    fwrite(bytes + container->members[index].image_offset,
-	    1, (size_t)container->members[index].image_size,
-	    stream) != container->members[index].image_size) {
-		fclose(stream);
-		cntool_fail(TOOL_NAME, 1, "cannot write output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), out_path));
-	}
-	if (fclose(stream) != 0)
-		cntool_fail(TOOL_NAME, 1, "cannot write output: %s",
-		    cntool_escape_text(escaped, sizeof(escaped), out_path));
+	result = cntool_output_open(out_path, &output);
+	if (result != CNTOOL_WRITE_OK)
+		cntool_fail(TOOL_NAME, 1, "cannot create output: %s: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), out_path),
+		    cntool_write_reason(result));
+	result = cntool_output_write(&output,
+	    bytes + container->members[index].image_offset,
+	    (size_t)container->members[index].image_size, 0644);
+	cntool_output_close(&output);
+	if (result != CNTOOL_WRITE_OK)
+		cntool_fail(TOOL_NAME, 1, "cannot write output: %s: %s",
+		    cntool_escape_text(escaped, sizeof(escaped), out_path),
+		    cntool_write_reason(result));
 }
 
 /* The text listing: one line per member. */
