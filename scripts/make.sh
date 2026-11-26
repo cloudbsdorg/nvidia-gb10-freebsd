@@ -6,8 +6,8 @@
 # project-makefile-contract).  The Makefile passes its switches as MK_*
 # variables and one target name; this script does the work in sh(1), so the
 # Makefile stays portable between bmake and GNU make.  It is written for any
-# user on a stock FreeBSD arm64 install: nothing on the machine is assumed
-# beyond the base system.
+# user on a stock FreeBSD arm64 or amd64 install: nothing on the machine is
+# assumed beyond the base system.
 #
 # Usage: sh scripts/make.sh TARGET
 #   preflight [--json] [--purpose NAME]
@@ -66,6 +66,10 @@
 # [A-Za-z0-9_./-].  An accepted hook says so on stderr, and so does a refused
 # one (pkgs_needed_list passes those notices on; they are never part of a
 # package list or a failure reason).  Only the tests set them:
+#   GB10_TEST_OS            the operating system the run reports, instead of
+#                           the one uname -s names
+#   GB10_TEST_ARCH          the architecture the run reports, instead of the
+#                           one uname -p names
 #   GB10_TEST_ROOT_METHOD   root, doas, sudo, su or none: the root method
 #   GB10_TEST_PKG_NEEDED    a package name added to the packages to install
 #   GB10_TEST_PKG_FAIL      one word: the package query fails with that reason
@@ -180,17 +184,33 @@ prefix() {
 	_p=${MK_PREFIX:-}
 	[ -n "$_p" ] || _p=/usr/local
 	case $_p in
-	/*) printf '%s\n' "$_p" ;;
+	/*) ;;
 	*) die "PREFIX must be an absolute path: $_p" ;;
 	esac
+	# The next steps of an install travel one command per line, and a path
+	# with a newline in it would become two of them.  It is refused here,
+	# before any command is built from it.  tr turns the newline into a
+	# mark: a command substitution would eat it.
+	_inl=$(printf '%s' "$_p" | tr '\n' '@')
+	case $_inl in
+	*@*) die "PREFIX must not contain a newline" ;;
+	esac
+	printf '%s\n' "$_p"
 }
 
 destdir() {
 	_d=${MK_DESTDIR:-}
 	case $_d in
-	''|/*) printf '%s\n' "$_d" ;;
+	''|/*) ;;
 	*) die "DESTDIR must be an absolute path: $_d" ;;
 	esac
+	# The same reason as in prefix(): a path with a newline in it would
+	# split a line of the summary into two.
+	_inl=$(printf '%s' "$_d" | tr '\n' '@')
+	case $_inl in
+	*@*) die "DESTDIR must not contain a newline" ;;
+	esac
+	printf '%s\n' "$_d"
 }
 
 running_osreldate() {
@@ -249,6 +269,10 @@ _installing=0
 # licence_run: the command named in a licence fix.  make preflight shows what
 # install-prereqs needs; do_install sets it to make install, the command run.
 licence_run='make install-prereqs'
+# licence_settings: the settings that change where the install goes, as they
+# would be typed on the command line.  Empty for a command that installs
+# nothing (make install-prereqs); do_install and do_preflight fill it in.
+licence_settings=
 mk_hook() {
 	_mh_name=$1
 	eval "_mh_val=\${$_mh_name:-}"
@@ -267,6 +291,35 @@ mk_hook() {
 		fi
 	fi
 	test_hook make.sh "$_mh_name" "$2"
+}
+
+# HookOS: the operating system this run reports: the value of the
+# GB10_TEST_OS hook when the test hooks are on and the hook is accepted,
+# else the running system.  hookarch: the same for the architecture
+# (GB10_TEST_ARCH, else uname -p).  A hook value is one word of
+# [A-Za-z0-9_./-]; anything else is ignored and the running system is
+# reported.  The hook is read on every call, so each call says on stderr
+# that it is in use.
+HookOS() {
+	_ho=$(uname -s)
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ]; then
+		_ho=$(mk_hook GB10_TEST_OS "$_ho") || _ho=$(uname -s)
+	fi
+	case $_ho in
+	'' | *[!A-Za-z0-9_./-]*) _ho=$(uname -s) ;;
+	esac
+	printf '%s' "$_ho"
+}
+
+hookarch() {
+	_ha=$(uname -p 2>/dev/null || uname -m)
+	if [ "${GB10_TEST_HOOKS:-0}" = 1 ]; then
+		_ha=$(mk_hook GB10_TEST_ARCH "$_ha") || _ha=$(uname -p 2>/dev/null || uname -m)
+	fi
+	case $_ha in
+	'' | *[!A-Za-z0-9_./-]*) _ha=$(uname -p 2>/dev/null || uname -m) ;;
+	esac
+	printf '%s' "$_ha"
 }
 
 # --- root -----------------------------------------------------------------
@@ -902,14 +955,14 @@ collect_preflight() {
 	items=
 	_pciconf=$(mk_hook GB10_TEST_PCICONF pciconf) || _pciconf=pciconf
 	_sysctl=$(mk_hook GB10_TEST_SYSCTL sysctl) || _sysctl=sysctl
-	_os=$(uname -s)
-	_arch=$(uname -p 2>/dev/null || uname -m)
+	_os=$(HookOS)
+	_arch=$(hookarch)
 	_machine=$(mk_hook GB10_TEST_MACHINE_ARCH "$_arch") || _machine=$_arch
 	_run=$(running_osreldate)
-	if [ "$_os" = FreeBSD ] && [ "$_arch" = aarch64 ]; then
+	if [ "$_os" = FreeBSD ] && { [ "$_arch" = aarch64 ] || [ "$_arch" = amd64 ]; }; then
 		add_item platform ok "FreeBSD $(uname -r) $_arch" ""
 	else
-		add_item platform missing "$_os $_arch: this repository builds the FreeBSD arm64 (aarch64) driver" "on amd64, NVIDIA's FreeBSD driver: pkg install nvidia-driver"
+		add_item platform missing "$_os $_arch: this repository builds the FreeBSD driver for aarch64 and amd64" "run this on FreeBSD aarch64 or amd64"
 	fi
 	if ! _tt=$(tool_table) || [ -z "$_tt" ]; then
 		add_item tools missing "the tool table could not be read" "fix scripts/make.sh: tool_table must name the tools this install needs"
@@ -940,11 +993,17 @@ EOF
 	if licence_current; then
 		add_item licence ok "NVIDIA driver licence $(sed -n 2p "$licence_ok")" ""
 	elif [ -f "$licence_ok" ] && [ -f "$tarball" ]; then
-		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
+		# The acceptance on record is for another licence text: it is not
+		# an acceptance of the licence now required, so the install stays
+		# blocked.  The reason names both: the licence now required and
+		# the one the record names.
+		_lnow=$(licence_text_hash) || _lnow=
+		_lold=$(sed -n 1p "$licence_ok" 2>/dev/null || true)
+		add_item licence missing "the NVIDIA driver licence in the tarball changed since it was accepted; the licence now required is $(licence_identity "$_lnow"); the acceptance on record is for sha256:$_lold$(licence_alternatives)" "$(licence_fix)"
 	elif [ -n "$(licence_setting)" ]; then
-		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; $licence_run records the acceptance" "$licence_run"
+		add_item licence warn "NVIDIA driver licence: $(licence_setting) is set; $licence_run records the acceptance" "$licence_run$licence_settings $(licence_setting)"
 	else
-		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it" "$licence_run ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run $licence_run on a terminal and answer the licence question"
+		add_item licence missing "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it$(licence_alternatives)" "$(licence_fix)"
 	fi
 	_have=$(os_version_of "$SYSDIR")
 	if tree_fits "$SYSDIR"; then
@@ -966,6 +1025,8 @@ EOF
 	fi
 	if foreign_drm "$DESTDIR"; then
 		add_item drm.ko ok "$DESTDIR/boot/modules/drm.ko is installed by someone else: nvidia-drm builds against DRMKMODDIR, which must be its source" ""
+	elif [ "$_arch" = amd64 ]; then
+		add_item drm.ko missing "no drm.ko in $DESTDIR/boot/modules: on amd64 the DRM module comes from FreeBSD's drm-kmod packages, not from this repository" "pkg install drm-kmod (FreeBSD's drm-kmod packages provide drm.ko and dmabuf.ko)"
 	else
 		add_item drm.ko ok "make install installs drm.ko and dmabuf.ko built from $DRMKMODDIR (FreeBSD's drm-kmod packages are amd64-only)" ""
 	fi
@@ -1089,6 +1150,9 @@ EOF
 }
 
 do_preflight() {
+	# The licence fix of this view names install-prereqs, but it keeps the
+	# settings that change where the install goes, like every other fix.
+	licence_settings=$(install_settings)
 	collect_preflight
 	render_preflight
 }
@@ -1120,13 +1184,80 @@ licence_setting() {
 	fi
 }
 
+# install_settings: the settings the user gave that change where the install
+# goes, as they would be typed on the command line, shell-quoted so the line
+# can be pasted.  A PREFIX of /usr/local is the default: it changes nothing,
+# so it is left out.
+install_settings() {
+	_is=
+	if [ -n "${MK_DESTDIR:-}" ]; then
+		_is="$_is DESTDIR=$(sh_quote "$MK_DESTDIR")"
+	fi
+	if [ -n "${MK_PREFIX:-}" ] && [ "$MK_PREFIX" != /usr/local ]; then
+		_is="$_is PREFIX=$(sh_quote "$MK_PREFIX")"
+	fi
+	printf '%s' "$_is"
+}
+
+# licence_fix: the fix for a licence that is not accepted: one command, the
+# one the user ran with the accept setting and the settings that change
+# where the install goes, so the line the user pastes is the one they ran.
+# The other ways to accept the licence are prose (licence_alternatives), not
+# part of the command: the fix is a command that can be pasted as it stands.
+# The command accepts the licence the blocker named: the one in the tarball
+# now, which the blocker names with its hash (licence_identity).  It never
+# accepts an older licence: the acceptance it records is the one for the
+# licence now required, never the one an older record carried (show_licence).
+licence_fix() {
+	printf '%s%s ACCEPT_NVIDIA_LICENSE=1' "$licence_run" "$licence_settings"
+}
+
+# licence_alternatives: the other ways to accept the licence, as prose for
+# the reason of the licence item: accept every licence this install meets,
+# or read the licence and answer the question on a terminal.  Both name the
+# command the user ran with the settings that change where the install goes,
+# so following one installs where the install was going to install.
+licence_alternatives() {
+	printf '; to accept every licence instead run %s ACCEPT_ALL_LICENSES=1, or run %s on a terminal and answer the licence question' \
+	    "$licence_run$licence_settings" "$licence_run$licence_settings"
+}
+
+# licence_name: the name of NVIDIA's driver licence.  A licence is named by
+# its name and by the hash of its text (licence_identity): the text is the
+# version of the licence, so a new text is a new licence.
+licence_name() {
+	printf '%s\n' "NVIDIA driver licence"
+}
+
+# licence_text_hash: the sha256 of the licence text in the tarball now, or
+# nothing when there is no tarball yet.  It is the version of the licence
+# text: a new tarball can bring a new text, which is a new licence.
+licence_text_hash() {
+	[ -f "$tarball" ] || return 1
+	_lth=$(basename "$tarball" .tar.xz)
+	tar -xOf "$tarball" "$_lth/doc/license.txt" 2>/dev/null | sha256 -q
+}
+
+# licence_identity HASH: the identity of a licence: its name and the hash of
+# its text.  Two licences are the same licence only when both parts are the
+# same, so an acceptance of another text is never carried over to this one.
+# Without a hash the name is all there is to say.
+licence_identity() {
+	if [ -n "$1" ]; then
+		printf '%s sha256:%s' "$(licence_name)" "$1"
+	else
+		printf '%s' "$(licence_name)"
+	fi
+}
+
 # licence_current: 0 when the recorded acceptance is for the licence in
 # the tarball now in WORK/sources (a new tarball brings a new licence text,
-# which must be accepted again).
+# which must be accepted again).  The record names the licence it accepted
+# by the hash of its text, so a record for another text is not an acceptance
+# of this one.
 licence_current() {
 	[ -f "$licence_ok" ] && [ -f "$tarball" ] || return 1
-	_top=$(basename "$tarball" .tar.xz)
-	_now=$(tar -xOf "$tarball" "$_top/doc/license.txt" 2>/dev/null | sha256 -q) || return 1
+	_now=$(licence_text_hash) || return 1
 	[ "$(sed -n 1p "$licence_ok")" = "$_now" ]
 }
 
@@ -1147,15 +1278,25 @@ show_licence() {
 		note "NVIDIA driver licence: accepted earlier ($_lic)"
 		return 0
 	fi
+	# The acceptance on record, when there is one, is for another licence
+	# text: it is never carried over to this one, and the note says which
+	# licence the record named and which one is required now.
+	_old=$(sed -n 1p "$licence_ok" 2>/dev/null || true)
 	_set=$(licence_setting)
 	if [ -n "$_set" ]; then
-		printf '%s\n%s\n' "$_sum" "accepted by $_set" > "$licence_ok"
-		note "NVIDIA driver licence ($_lic) accepted by $_set"
+		# The record names the licence it accepted: the hash of its text
+		# and, with it, the identity of the licence.
+		printf '%s\n%s\n%s\n' "$_sum" "accepted by $_set" "$(licence_identity "$_sum")" > "$licence_ok"
+		if [ -n "$_old" ]; then
+			note "NVIDIA driver licence ($_lic) accepted by $_set; the acceptance on record was for sha256:$_old, and the licence now required is $(licence_identity "$_sum")"
+		else
+			note "NVIDIA driver licence ($_lic) accepted by $_set"
+		fi
 		return 0
 	fi
 	if yes_set || [ ! -t 0 ]; then
 		licence_explain "$_lic" >&2
-		die "stopped: the NVIDIA driver licence is not accepted yet"
+		die "stopped: the NVIDIA driver licence is not accepted yet; the licence now required is $(licence_identity "$_sum")"
 	fi
 	# The explanation and the question go to the terminal itself: the
 	# standard streams of a make install phase are captured in a log the
@@ -1175,10 +1316,11 @@ show_licence() {
 	y|Y|yes|YES|Yes) ;;
 	*)
 		licence_explain "$_lic" >&2
-		die "the NVIDIA driver licence was not accepted; nothing NVIDIA ships is used"
+		die "the NVIDIA driver licence was not accepted; nothing NVIDIA ships is used; the licence now required is $(licence_identity "$_sum")"
 		;;
 	esac
-	printf '%s\n%s\n' "$_sum" "accepted on a terminal by $(id -un)" > "$licence_ok"
+	# The record names the licence it accepted, like the setting does.
+	printf '%s\n%s\n%s\n' "$_sum" "accepted on a terminal by $(id -un)" "$(licence_identity "$_sum")" > "$licence_ok"
 	return 0
 }
 
@@ -1425,9 +1567,35 @@ module_list() {
 }
 
 # drm_wanted: build and install our drm.ko and dmabuf.ko unless someone
-# else's drm.ko is installed.
+# else's drm.ko is installed.  On amd64 we never build them: FreeBSD's
+# drm-kmod packages provide the DRM module there.
 drm_wanted() {
+	_dw_arch=$(hookarch)
+	if [ "$_dw_arch" = amd64 ]; then
+		return 1
+	fi
 	! foreign_drm "$DESTDIR"
+}
+
+# lld_check FILE: fail the build unless FILE was linked by LLD.  The
+# .comment section names the linker only on some hosts: older FreeBSD
+# wrote "Linker: LLD" there, while FreeBSD 16 with LLD 21.1.8 writes only
+# "FreeBSD clang version 21.1.8" (ld.lld -r and /usr/bin/ld alike).  So
+# the historic signal passes, a module linked by GNU ld never passes, and
+# when .comment says nothing about the linker the base linker this tree
+# requires decides.
+lld_check() {
+	_lc=$(readelf -p .comment "$1" 2>/dev/null || true)
+	if printf '%s\n' "$_lc" | grep -q 'Linker: LLD'; then
+		return 0
+	fi
+	if printf '%s\n' "$_lc" | grep -qi 'GNU ld'; then
+		die "$1 was linked by GNU ld, not by LLD"
+	fi
+	if /usr/bin/ld --version 2>/dev/null | grep -q LLD; then
+		return 0
+	fi
+	die "$1 was not linked by LLD"
 }
 
 do_build() {
@@ -1437,7 +1605,7 @@ do_build() {
 	rm -rf -- "$LOGDIR"
 	mkdir -p -- "$LOGDIR"
 	[ -f "$tarball" ] && [ -d "$ogkm_dir" ] || sh "$repo/scripts/fetch-sources.sh" "$WORK/sources"
-	licence_current || die "the NVIDIA driver licence in $tarball has not been accepted: run make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or on a terminal)"
+	licence_current || die "the NVIDIA driver licence in $tarball has not been accepted: the licence now required is $(licence_identity "$(licence_text_hash || true)"): run make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or on a terminal)"
 	tree_fits "$SYSDIR" || die "no kernel sources of the running kernel at $SYSDIR ($(os_version_of "$SYSDIR"), kernel $(running_osreldate)): run make install-prereqs"
 	[ -d "$BSDSRCTOP/include" ] || die "no FreeBSD source top at $BSDSRCTOP: run make install-prereqs"
 	[ -f "$DRMKMODDIR/linuxkpi_version.mk" ] || die "no drm-kmod sources at $DRMKMODDIR: run make install-prereqs"
@@ -1455,12 +1623,31 @@ do_build() {
 			;;
 		nvidia)
 			step rmcore sh "$repo/scripts/build-rmcore.sh"
-			# Pass 1 compiles the OS layer; it must fail at the
-			# link with exit 3 (no aarch64 RM core linked yet).
-			note "build: shim pass 1 (expected exit 3)"
+			# Pass 1 compiles the OS layer.  On aarch64 it must fail
+			# at the link with exit 3 (no aarch64 RM core linked yet:
+			# NVIDIA's prebuilt nv-kernel.o is an x86-64 object).  On
+			# amd64 that prebuilt object is an amd64 object, so the
+			# link may succeed (exit 0); that is only a compile check.
+			# build-stubs.sh and the second shim pass below must run
+			# either way, so the finished nvidia.ko is linked against
+			# the open core (nv-kernel-gb10.o) and not left on the
+			# prebuilt blob.
+			_shim_arch=$(hookarch)
+			if [ "$_shim_arch" = amd64 ]; then
+				_shim_want='0 or 3'
+			else
+				_shim_want='3'
+			fi
+			note "build: shim pass 1 (expected exit $_shim_want)"
 			_rc=0
 			sh "$repo/scripts/build-shim.sh" > "$LOGDIR/shim-pass1.log" 2>&1 || _rc=$?
-			[ "$_rc" = 3 ] || { tail -n 20 "$LOGDIR/shim-pass1.log" >&2; die "shim pass 1 exited $_rc, not 3; log $LOGDIR/shim-pass1.log"; }
+			# exit 3 is the aarch64 result and is allowed everywhere;
+			# exit 0 is allowed on amd64 only.
+			_shim_ok=0
+			case $_shim_arch:$_rc in
+			amd64:0 | *:3) _shim_ok=1 ;;
+			esac
+			[ "$_shim_ok" = 1 ] || { tail -n 20 "$LOGDIR/shim-pass1.log" >&2; die "shim pass 1 exited $_rc, not $_shim_want; log $LOGDIR/shim-pass1.log"; }
 			step stubs sh "$repo/scripts/build-stubs.sh"
 			step nvidia sh "$repo/scripts/build-shim.sh"
 			;;
@@ -1479,18 +1666,22 @@ EOF
 	build_libnvrm
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || die "missing after the build: $TREE/$_ko"
-		readelf -p .comment "$TREE/$_ko" 2>/dev/null | grep -q 'Linker: LLD' \
-		    || die "$TREE/$_ko was not linked by LLD"
+		lld_check "$TREE/$_ko"
 	done
 	build_stamp > "$WORK/build/stamp"
 	note "build: OK (logs in $LOGDIR)"
 }
 
 # drm.ko and dmabuf.ko from DRMKMODDIR (only those two of drm-kmod: the
-# GPU drivers in it are not needed), objects under WORK.  They are always
-# built (nvidia-drm.ko is built against the same tree); stage() leaves them
-# out when someone else's drm.ko is installed where make install writes.
+# GPU drivers in it are not needed), objects under WORK.  They are built
+# only when drm_wanted says so; otherwise the DRM modules already
+# installed are used (FreeBSD's drm-kmod packages on amd64, or a drm.ko
+# installed by someone else), so nothing is built, checked or copied here.
 build_drm() {
+	if ! drm_wanted; then
+		note "build: the packaged drm.ko is used; drm.ko and dmabuf.ko are not built here"
+		return 0
+	fi
 	mkdir -p -- "$DRMOBJ"
 	step drm-obj env MAKEOBJDIRPREFIX="$DRMOBJ" /usr/bin/make -C "$DRMKMODDIR" \
 	    SYSDIR="$SYSDIR" KMODS="dmabuf drm" WITHOUT_CTF=yes DEBUG_FLAGS= obj
@@ -1499,7 +1690,7 @@ build_drm() {
 	for _k in drm dmabuf; do
 		_f=$(find "$DRMOBJ" -name "$_k.ko" -type f | sed -n 1p)
 		[ -n "$_f" ] || die "build: $_k.ko not found under $DRMOBJ"
-		readelf -p .comment "$_f" 2>/dev/null | grep -q 'Linker: LLD' || die "$_f was not linked by LLD"
+		lld_check "$_f"
 		cp -- "$_f" "$WORK/build/$_k.ko"
 	done
 }
@@ -1539,12 +1730,24 @@ do_test() {
 	for _t in "$repo"/tests/*_test.sh; do
 		_b=$(basename "$_t" .sh)
 		_n=$((_n + 1))
-		if (cd "$repo" && sh "$_t") > "$_d/$_b.log" 2>&1; then
+		# The exit status is what counts: 77 is the conventional skip
+		# status (autotools), so a test that skipped itself is not a
+		# failure.  The status is captured with "|| _rc=$?" because
+		# set -e would stop the run at the first non-zero test.
+		_rc=0
+		(cd "$repo" && sh "$_t") > "$_d/$_b.log" 2>&1 || _rc=$?
+		case $_rc in
+		0)
 			printf 'ok    %s\n' "$_b"
-		else
+			;;
+		77)
+			printf 'skip  %s\n' "$_b"
+			;;
+		*)
 			printf 'FAIL  %s (log %s)\n' "$_b" "$_d/$_b.log"
 			_fail=$((_fail + 1))
-		fi
+			;;
+		esac
 	done
 	note "test: $_n run, $_fail failed"
 	[ "$_fail" = 0 ]
@@ -1765,23 +1968,85 @@ $_install_items
 EOF
 }
 
+# install_schema_version: the version of the machine-readable install
+# contract this build emits.  It is the version of the schema that describes
+# it (schema/make-install-2.schema.json), so a consumer that dispatches on
+# schema_version finds the contract it has.  Version 2.1 adds the summary
+# record's own discriminator (kind: summary) and the resume command of an
+# interrupted install (resume); 2.0 is the same contract without them.
+install_schema_version=2.1
+
+# install_schema_fields: the JSON fields that name the install contract's
+# version: the string and its parts as integers, so no consumer has to parse
+# the string to compare it (skill versions-as-numbers).  One parser feeds
+# both, so the string and the numbers cannot disagree.
+install_schema_fields() {
+	_isv=$install_schema_version
+	case $_isv in
+	''|*[!0-9.]*)
+		printf '"schema_version":"%s","schema_version_major":0,"schema_version_minor":0' "$_isv"
+		return 0
+		;;
+	esac
+	_ismaj=${_isv%%.*}
+	_ismin=${_isv#*.}
+	[ "$_ismin" = "$_isv" ] && _ismin=0
+	printf '"schema_version":"%s","schema_version_major":%s,"schema_version_minor":%s' \
+	    "$_isv" "$_ismaj" "$_ismin"
+}
+
+# install_phase_word PHASE: the word a progress line carries.  A progress
+# line always names its phase, so it never looks like the outcome line
+# ("install: installed", "install: blocked").  Only the English line uses
+# this word: the JSONL phase keeps the machine value it always had.
+install_phase_word() {
+	case $1 in
+	prereqs) echo prerequisites ;;
+	build) echo build ;;
+	stage) echo staging ;;
+	install) echo copying ;;
+	*) echo "$1" ;;
+	esac
+}
+
 install_progress() {
 	if [ "${MK_JSONL:-0}" = 1 ]; then
-		printf '{"schema_version":"1.0","tool":"install","kind":"progress","phase":"%s","message":"%s"}\n' \
-		    "$(json_str "$1")" "$(json_str "$2")"
+		# The phase of a progress record is a machine value and it never
+		# changes: a consumer that filters on phase == "install" keeps
+		# seeing the copy phase.  The clearer word is for the English
+		# line only.
+		printf '{%s,"tool":"install","kind":"progress","phase":"%s","message":"%s"}\n' \
+		    "$(install_schema_fields)" "$(json_str "$1")" "$(json_str "$2")"
 	elif [ "${MK_JSON:-0}" != 1 ]; then
-		# the phase named install already carries the prefix: print it once
-		if [ "$1" = install ]; then
-			printf 'install: %s\n' "$2"
-		else
-			printf 'install: %s: %s\n' "$1" "$2"
-		fi
+		printf 'install: %s %s\n' "$(install_phase_word "$1")" "$2"
 	fi
 }
 
 install_outcome=blocked
 install_logdir=
 install_signalled=0
+# install_next_records: the next steps as records, one per line: the label
+# of the step, the command to run, whether the command needs a root shell
+# and whether the boot-time load replaces it.  The command list, the
+# indexes of the steps that need a root shell and the prose of the boot-load
+# note all come from these records.
+# install_next_cmds: the next steps of a good install, one command per line,
+# each one fit to paste.  Empty for a staged install: the files are only
+# staged there, so there is no step to run on this system.
+# install_next_load: the steps the boot-load note replaces (empty when the
+# install only staged files).
+# install_next_staged: where the files are, when the install only staged
+# them (the explanation is prose, it belongs in the note).
+# install_next_root: the indexes of install_next_cmds that need a root
+# shell: with no root tool those commands are printed bare.
+# install_root_tool: the way this user becomes root, read once for a
+# summary; "none" means this user has no root tool at all.
+install_next_records=
+install_next_cmds=
+install_next_load=
+install_next_staged=
+install_next_root=
+install_root_tool=none
 
 # install_failure_blockers RC LOG: the blockers of a failed install step, and
 # the outcome.  A status above 128 (a signal) or a signal the parent saw is
@@ -1813,37 +2078,207 @@ EOT
 	fi
 }
 
-# root_cmd COMMAND: COMMAND as the root tool this user has would run it: bare
-# as root, behind doas or sudo, inside su root -c, or with a note when this
-# user has no tool.
-root_cmd() {
-	case $(root_method) in
-	root) printf '%s\n' "$1" ;;
-	doas) printf 'doas %s\n' "$1" ;;
-	sudo) printf 'sudo %s\n' "$1" ;;
-	su) printf "su root -c '%s'\n" "$1" ;;
-	*) printf '%s (as root: this user has no doas, sudo or su)\n' "$1" ;;
+# install_root_method: the way this user becomes root, as one word.  Every
+# value that is not a known tool means the same thing: this user has no root
+# tool, so the commands are printed bare and the note says they run as root.
+# One answer per summary, so the commands and the note cannot disagree.
+install_root_method() {
+	_irm=$(root_method)
+	case $_irm in
+	root|doas|sudo|su) printf '%s\n' "$_irm" ;;
+	*) printf 'none\n' ;;
 	esac
 }
 
-# install_next_steps: what to do after a good install, one command per line,
-# each one fit to paste.  With a DESTDIR the files are only staged: nothing is
-# loaded from there.  Otherwise the firmware setting comes first, then the
-# module is loaded, both with the root tool this user has.
-install_next_steps() {
-	if [ -n "$DESTDIR" ]; then
-		printf 'the files are staged under %s; nothing was loaded: install that tree on the target system to use it\n' "$DESTDIR"
-	else
-		root_cmd 'kenv hw.nvidia.registry.EnableGpuFirmware=1'
-		root_cmd 'kldload nvidia-drm'
-	fi
-	printf 'kldstat\nnvrm-info --json\n'
+# root_cmd METHOD COMMAND: COMMAND as the root tool METHOD names would run
+# it: bare as root, behind doas or sudo, inside su root -c.  With no root
+# tool at all the command is printed bare as well: install_next_root_note
+# says, on a line of its own, that root is who runs it.
+root_cmd() {
+	case $1 in
+	root) printf '%s\n' "$2" ;;
+	doas) printf 'doas %s\n' "$2" ;;
+	sudo) printf 'sudo %s\n' "$2" ;;
+	su) printf 'su root -c %s\n' "$(su_quote "$2")" ;;
+	*) printf '%s\n' "$2" ;;
+	esac
 }
 
-# install_next_note: one English line, printed before the next steps of a live
-# install: the boot-time alternative to the first two of them.
+# su_quote COMMAND: COMMAND as the single-quoted word of su root -c '...'.
+# Every single quote in it is escaped, so a command that holds one cannot
+# break out of the quotes.
+su_quote() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# install_nvrm_command: the command that reads the installed driver back.
+# With a PREFIX the tool is not on PATH unless the prefix is the default
+# one, so the command names the installed path.  The path is one quoted
+# word: a prefix with a space or a shell metacharacter in it names the
+# tool that was installed and cannot become another command.
+install_nvrm_command() {
+	_inp=${PREFIX:-/usr/local}
+	if [ "$_inp" != /usr/local ]; then
+		printf '%s --json\n' "$(sh_quote "$_inp/sbin/nvrm-info")"
+	else
+		printf 'nvrm-info --json\n'
+	fi
+}
+
+# install_next_add LABEL COMMAND ROOT-SHELL LOAD: one record of the next
+# steps: what the step does (the label), the command to run, whether the
+# command needs a root shell, and whether the boot-time load replaces it.
+# The command list, the indexes of the steps that need a root shell and the
+# prose of the boot-load note all come from these records, so none of them
+# can disagree with the others.
+install_next_add() {
+	install_next_records="$install_next_records$1|$(blk_esc "$2")|$3|$4
+"
+}
+
+# install_next_list OUTCOME: the next steps of a good install, one command per
+# line, each one fit to paste, in install_next_cmds.  install_next_load names
+# the steps the boot-load note replaces: it is empty when the install only
+# staged files, because nothing was loaded then.  With a DESTDIR the files
+# are only staged: nothing is loaded from there, and the checks of this
+# system say nothing about that tree, so there is no next step and the
+# explanation goes into the note.  Otherwise the firmware setting comes
+# first, then the module is loaded, both with the root tool this user has.
+# Only an installed install has next steps: a blocked install names its
+# blocker and its fix, and an interrupted one names how to resume, so this
+# function clears the next-step state for every other outcome and says so.
+install_next_list() {
+	_inl_outcome=$1
+	install_next_records=
+	install_next_cmds=
+	install_next_load=
+	install_next_staged=
+	install_next_root=
+	if [ "$_inl_outcome" != installed ]; then
+		return 0
+	fi
+	install_root_tool=$(install_root_method)
+	if [ -n "$DESTDIR" ]; then
+		install_next_staged="the files are staged under $DESTDIR; nothing was loaded: install that tree on the target system to use it."
+		return 0
+	fi
+	# With no root tool the two privileged commands are printed bare, so
+	# the user has to run them in a root shell of their own.
+	if [ "$install_root_tool" = none ]; then
+		_inl_rs=root
+	else
+		_inl_rs=
+	fi
+	install_next_add 'the firmware setting' "$(root_cmd "$install_root_tool" 'kenv hw.nvidia.registry.EnableGpuFirmware=1')" "$_inl_rs" load
+	install_next_add 'the module load' "$(root_cmd "$install_root_tool" 'kldload nvidia-drm')" "$_inl_rs" load
+	install_next_add 'the module list' 'kldstat' '' ''
+	install_next_add 'the driver report' "$(install_nvrm_command)" '' ''
+	install_next_render
+}
+
+# install_next_render: the command list, the indexes of the steps that need
+# a root shell and the prose of the boot-load note, all from the records.
+# The index of a step is its place in the list, so a step that comes before
+# the privileged ones moves them.
+install_next_render() {
+	install_next_cmds=
+	install_next_root=
+	install_next_load=
+	_inr_i=0
+	_inr_lbls=
+	while IFS='|' read -r _inr_lbl _inr_cmd _inr_rs _inr_load; do
+		[ -n "$_inr_lbl" ] || continue
+		_inr_cmd=$(blk_unesc "$_inr_cmd")
+		if [ -z "$install_next_cmds" ]; then
+			install_next_cmds=$_inr_cmd
+		else
+			install_next_cmds="$install_next_cmds
+$_inr_cmd"
+		fi
+		if [ "$_inr_rs" = root ]; then
+			if [ -z "$install_next_root" ]; then
+				install_next_root=$_inr_i
+			else
+				install_next_root="$install_next_root
+$_inr_i"
+			fi
+		fi
+		if [ "$_inr_load" = load ]; then
+			if [ -z "$_inr_lbls" ]; then
+				_inr_lbls=$_inr_lbl
+			else
+				_inr_lbls="$_inr_lbls and $_inr_lbl"
+			fi
+		fi
+		_inr_i=$((_inr_i + 1))
+	done <<EOF
+$install_next_records
+EOF
+	install_next_load=$_inr_lbls
+}
+
+# install_next_steps: the next steps, one command per line.
+install_next_steps() {
+	install_next_list installed
+	[ -n "$install_next_cmds" ] || return 0
+	printf '%s\n' "$install_next_cmds"
+}
+
+# install_resume_command: the command that resumes an interrupted install:
+# the same command, with the settings that change where the install goes, so
+# the resumed install goes where the interrupted one was going.  One command,
+# fit to paste.
+install_resume_command() {
+	_irc='make install'
+	if [ -n "${DESTDIR:-}" ]; then
+		_irc="$_irc DESTDIR=$(sh_quote "$DESTDIR")"
+	fi
+	if [ -n "${PREFIX:-}" ] && [ "$PREFIX" != /usr/local ]; then
+		_irc="$_irc PREFIX=$(sh_quote "$PREFIX")"
+	fi
+	printf '%s' "$_irc"
+}
+
+# install_next_root_note: one English line before the next steps when this
+# user has no root tool: the commands are printed bare, and this line says
+# that root is who runs them, and how to become root.  It names a way the
+# user can actually take: there is no root tool on this system, so opening a
+# root shell is the administrator's job or the console's.
+install_next_root_note() {
+	[ -n "$install_next_load" ] || return 0
+	[ "$install_root_tool" = none ] || return 0
+	printf '%s run as root (this user has no doas, sudo or su): ask an administrator to run them as root, or open a root shell on the console and run them there.\n' "$install_next_load"
+}
+
+# install_next_note: one English line, printed after the next steps of a live
+# install: the boot-time alternative to the steps install_next_load names.
 install_next_note() {
-	[ -n "$DESTDIR" ] || printf 'to load the driver at boot instead of the first two next steps, run make configure YES=1 once\n'
+	[ -n "$install_next_load" ] || return 0
+	printf 'To load the driver at boot instead of %s, run make configure YES=1 once.\n' "$install_next_load"
+}
+
+# install_next_staged_note: one English line about a staged install: where
+# the files are, and that nothing was loaded from them.
+install_next_staged_note() {
+	[ -n "$install_next_staged" ] || return 0
+	printf '%s\n' "$install_next_staged"
+}
+
+# install_next_notes: the notes about the next steps, as one English string.
+install_next_notes() {
+	if [ -n "$install_next_staged" ]; then
+		printf '%s' "$install_next_staged"
+		return 0
+	fi
+	_n1=$(install_next_root_note)
+	_n2=$(install_next_note)
+	if [ -n "$_n1" ] && [ -n "$_n2" ]; then
+		printf '%s %s' "$_n1" "$_n2"
+	elif [ -n "$_n1" ]; then
+		printf '%s' "$_n1"
+	else
+		printf '%s' "$_n2"
+	fi
 }
 
 # install_root_plan PACKAGES: the steps this install runs as root, one per
@@ -1920,8 +2355,13 @@ EOF
 
 install_summary() {
 	_outcome=$1
+	# The next steps and the notes about them come from one list, so the
+	# note never depends on where a step sits in it.  Only an installed
+	# install has next steps: a blocked install names its blocker and its
+	# fix, and an interrupted one names how to resume it.
+	install_next_list "$_outcome"
 	if [ "${MK_JSON:-0}" = 1 ] || [ "${MK_JSONL:-0}" = 1 ]; then
-		printf '{"schema_version":"1.0","tool":"install","outcome":"%s","blockers":[' "$_outcome"
+		printf '{%s,"tool":"install","kind":"summary","outcome":"%s","blockers":[' "$(install_schema_fields)" "$_outcome"
 		_i=0
 		printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
 			_n=$(blk_unesc "$_n"); _r=$(blk_unesc "$_r"); _f=$(blk_unesc "$_f")
@@ -1941,13 +2381,42 @@ install_summary() {
 		printf '],"next":['
 		if [ "$_outcome" = installed ]; then
 			_i=0
-			install_next_steps | while read -r _ns; do
+			if [ -n "$install_next_cmds" ]; then
+				printf '%s\n' "$install_next_cmds" | while read -r _ns; do
+					[ "$_i" = 0 ] || printf ','
+					printf '"%s"' "$(json_str "$_ns")"
+					_i=$((_i + 1))
+				done
+			fi
+			printf ']'
+			# the steps that need a root shell: with no root tool they
+			# are printed bare, so the user has to run them as root
+			printf ',"requires_root_shell":['
+			_i=0
+			printf '%s\n' "$install_next_root" | while read -r _rx; do
+				[ -n "$_rx" ] || continue
 				[ "$_i" = 0 ] || printf ','
-				printf '"%s"' "$(json_str "$_ns")"
+				printf '%s' "$_rx"
 				_i=$((_i + 1))
 			done
+			printf ']'
+			# the notes are English prose: they never go into "next",
+			# whose entries are commands to run
+			_note=$(install_next_notes)
+			if [ -n "$_note" ]; then
+				printf ',"note":"%s"' "$(json_str "$_note")"
+			fi
+			printf '}\n'
+			return 0
 		fi
-		printf ']}\n'
+		printf ']'
+		# An interrupted install says how to resume it: one command, fit
+		# to paste.  A blocked install has nothing to resume: its
+		# blockers name their own fixes.
+		if [ "$_outcome" = interrupted ]; then
+			printf ',"resume":"%s"' "$(json_str "$(install_resume_command)")"
+		fi
+		printf '}\n'
 		return 0
 	fi
 	printf '%s' "$install_blockers" | while IFS='|' read -r _n _r _f; do
@@ -1959,10 +2428,19 @@ install_summary() {
 		printf '%s' "$install_records" | while IFS='|' read -r _p _m; do
 			[ -n "$_p" ] && printf 'installed %s %s\n' "$_p" "$_m"
 		done
+		install_next_root_note
+		if [ -n "$install_next_cmds" ]; then
+			printf '%s\n' "$install_next_cmds" | while read -r _ns; do
+				printf 'next: %s\n' "$_ns"
+			done
+		fi
 		install_next_note
-		install_next_steps | while read -r _ns; do
-			printf 'next: %s\n' "$_ns"
-		done
+		install_next_staged_note
+	elif [ "$_outcome" = interrupted ]; then
+		# An interrupted install says how to resume it: one command, fit
+		# to paste.  A blocked install has nothing to resume: its
+		# blockers name their own fixes.
+		printf 'resume: %s\n' "$(install_resume_command)"
 	fi
 	printf 'install: %s\n' "$_outcome"
 }
@@ -1970,6 +2448,7 @@ install_summary() {
 do_install() {
 	_installing=1
 	licence_run='make install'
+	licence_settings=$(install_settings)
 	install_blockers=
 	install_records=
 	install_outcome=blocked
@@ -2044,7 +2523,7 @@ do_install() {
 	done
 	[ -f "$LIBOBJ/info/nvrm-info" ] || _ok=0
 	if [ "$_ok" = 1 ] && [ -f "$WORK/build/stamp" ] && [ "$(build_stamp)" = "$(cat "$WORK/build/stamp")" ]; then
-		install_progress build "the build is current"
+		install_progress build "is current"
 	else
 		if ! install_run_phase build "rerun make install after correcting the build error" \
 		    sh "$repo/scripts/make.sh" build; then
@@ -2058,7 +2537,7 @@ do_install() {
 		return 1
 	fi
 	_n=$(stage_files "$STAGE" | wc -l | tr -d ' ')
-	install_progress install "$_n staged files: modules to $DESTDIR/boot/modules, the rest under $DESTDIR$PREFIX"
+	install_progress install "$_n files: modules to $DESTDIR/boot/modules, the rest under $DESTDIR$PREFIX"
 	# The install step is the only one that may be cut short by a signal: this
 	# process notes it, the step rolls itself back, and the outcome follows
 	# what the step reports, never what was planned.
@@ -2806,10 +3285,14 @@ do_test_install() {
 	[ -n "$_url" ] || _url=$(git -C "$repo" remote get-url origin 2>/dev/null || echo https://github.com/cloudbsdorg/nvidia-gb10-freebsd.git)
 	_ref=${MK_E2E_REF:-}
 	[ -n "$_ref" ] || _ref=$(git -C "$repo" rev-parse HEAD) || die "test-install: cannot resolve checkout HEAD"
+	# the architecture defaults to the running one, so the test runs
+	# where make runs; MK_E2E_ARCH still names another one
+	_arch=${MK_E2E_ARCH:-}
+	[ -n "$_arch" ] || _arch=$(hookarch)
 	set -- --repo-url "$_url" \
 	    --installed-manifest "$STATEDIR/installed.manifest" \
 	    --expected-manifest tests/install-e2e/expected.manifest --load nvidia-drm \
-	    --os "${MK_E2E_OS:-16.0-CURRENT}" --arch "${MK_E2E_ARCH:-aarch64}" --backend "${MK_E2E_BACKEND:-vmm}"
+	    --os "${MK_E2E_OS:-16.0-CURRENT}" --arch "$_arch" --backend "${MK_E2E_BACKEND:-vmm}"
 	set -- "$@" --ref "$_ref"
 	[ -z "${MK_E2E_SSH:-}" ] || set -- "$@" --ssh "$MK_E2E_SSH"
 	# the licence settings reach the guest's make install-prereqs only when
@@ -2880,6 +3363,7 @@ _next-steps)
 	;;
 _next-note)
 	setup
+	install_next_list installed
 	install_next_note
 	;;
 _licence)

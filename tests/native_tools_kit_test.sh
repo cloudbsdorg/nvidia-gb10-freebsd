@@ -7,7 +7,16 @@
 #   (a) guard_env: a listing with a linux module (linux64, nvidia_linux.ko without linux64, linuxkpi) fails; a
 #       compat.linux that answers fails; a kldstat that failed, printed nothing or lacks kernel or a required file is
 #       an error; a sysctl failure that is not "unknown oid" is an error; a clean listing passes; guard_env_delta finds
-#       a module that appeared;
+#       a module that appeared; the capture of the 2026-11-23 boot fails, and the failure names the loader it can see
+#       (the loader list, an rc.d service with required_modules, devd) and points at check-be.sh; it names no service
+#       when it cannot see one; guard_rc_loaders names that service and that devd rule (and stops naming them when
+#       the probe only probes), resolves the rcvar built from the name of the script and the defaults of the script,
+#       and reports a service it cannot read as unknown; a service whose enable state cannot be read (it has no
+#       rcvar: devd starts it per device) is an offender only when the modules it loads are forbidden, and one that
+#       loads none of them is skipped; guard_rc_expand keeps the default of ${var-default}; the
+#       defaults of a script and the rc.conf are read with the same rule; a service that its own script enables is
+#       enabled; a devd rule that starts a service which loads a driver is a loader too; the summary of the capture
+#       has the layout summarize.py writes today;
 #   (b) guard_brand: /bin/sh passes, a #! script passes, a copy of /bin/echo branded Linux fails, a text file fails, a
 #       missing file is an error;
 #   (c) guard_trace on real ktrace runs: a script that runs the Linux-branded copy by absolute path (not declared
@@ -19,13 +28,25 @@
 #       refused;
 #   (e) make-be.sh with the test hooks and a fake clone: amdgpu and linux64 are stripped from kld_list, linux_enable
 #       becomes NO, devmatch_blocklist is set in rc.conf and loader.conf, the staged files are installed, the static
-#       rows are written; a base whose loader.conf loads linux is refused; an existing BE name is refused with the next
-#       free number; check-be.sh -m -U on the fake clone passes every check but the commit comparison;
+#       rows are written; the enabled rc.d service whose required_modules loads amdgpu (drm_ready) is turned off, the
+#       service whose rcvar is built from its name is turned off too, a service that cannot be read is refused, a base
+#       with /etc/rc.d/bluetooth (a service whose enable state cannot be read and whose modules are no driver) is
+#       built, one with a forbidden module in that list is refused, the
+#       hwprobe service gets the command probe (and the base is refused when another rc.conf file sets it back), a base
+#       with a devd rule that starts a service which loads a driver is refused, the
+#       owner of the run directory is recorded (and refused when it is not a user of the boot environment), a
+#       copy-out whose parent is owned by root is refused; a base whose loader.conf loads linux is refused; an existing
+#       BE name is refused with the next free number; check-be.sh -m -U on the fake clone passes every check but the
+#       commit comparison, and refuses a clone with drm_ready enabled, with a service it cannot read, with a devd rule
+#       that loads a driver or starts a service which loads one, or with the hwprobe command apply (naming the service
+#       and the module);
 #   (f) the rc one-shot, run in the foreground with stubbed system commands: the rows come out in order, env-before
 #       and env-loaded pass, nvrm-info-native passes (the real nvrm-info, traced), the static rows carry their status,
-#       testboot-return is called last, the run is copied out;
+#       testboot-return is called last, the run is copied out and given to the recorded owner (0700, the files 0600);
+#       the hand-over of the copy (own_run) gives away only the files of the run, leaves a planted link alone and says
+#       which directory it could not give away;
 #   (g) every script is valid sh; the rc script (comments left out) has no kldload of a linux module, no kldunload
-#       and no bectl activate.
+#       and no bectl activate; the README states the rule of the guard, not the history of the change.
 # (e) and (f) make a stage in the test scratch directory, from NVNT_STAGE when set, else by building the modules from
 # this checkout (with the already-built RM cores) and building libnvrm/nvrm-info in scratch.  Real Linux-dependent
 # control modules are optional: NVNT_PHASE0_KO, NVNT_UVM_KO and NVNT_DRM_KO.  Their absence prints a named skip;
@@ -230,6 +251,237 @@ guard_env "$T/fix-nml" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: 
 { cat "$FIX"; echo '99    1 0xffff0005ea000000    63000 linsysfs.ko (/boot/kernel/linsysfs.ko)'; } > "$T/fix-lsfs"
 guard_env "$T/fix-lsfs" 0 "$T/sys-absent" 1 > /dev/null; expect 1 $? "guard_env: the boot listing plus linsysfs.ko fails"
 guard_env "$FIX" 0 "$T/sys-present" 0 > /dev/null; expect 1 $? "guard_env: the boot listing with compat.linux answering fails"
+# the capture of the 2026-11-23 native-tools boot: the clone had kld_list stripped, yet amdgpu.ko, drm.ko,
+# linuxkpi_video.ko, dmabuf.ko, lindebugfs.ko and ttm.ko were loaded (an rc.d service loads them by itself)
+FIX23=$repo/tests/data/native-tools-boot-20261123T013024Z/env-before.kldstat
+SUM23=$repo/tests/data/native-tools-boot-20261123T013024Z/summary.txt
+if [ -f "$FIX23" ]; then ok "the capture of the 2026-11-23 boot is in the tree"; else no "the capture of the 2026-11-23 boot is missing"; fi
+guard_env "$FIX23" 0 "$T/sys-absent" 1 > "$T/fix23.out"; expect 1 $? "guard_env: the 2026-11-23 boot listing (amdgpu.ko, drm.ko, linuxkpi_video.ko, dmabuf.ko, lindebugfs.ko, ttm.ko) fails"
+_g23=$(head -1 "$T/fix23.out")
+# the message points at check-be.sh, it does not blame kld_list alone, and it names no service it cannot see
+printf '%s' "$_g23" | grep -q 'check-be.sh' && ok "guard_env: the failure of the 2026-11-23 capture points at check-be.sh" || no "guard_env: the failure does not point at check-be.sh: $_g23"
+printf '%s' "$_g23" | grep -q 'not kld_list alone' && no "guard_env: the failure still blames kld_list alone: $_g23" || ok "guard_env: the failure does not blame kld_list alone"
+printf '%s' "$_g23" | grep -q 'drm_ready' && no "guard_env: the failure names drm_ready although no tree was read: $_g23" || ok "guard_env: the failure names no service when no tree was read"
+# the summary of that boot is a fixture of the capture: it must name the files the capture shows
+if [ -f "$SUM23" ]; then
+	ok "the summary of the 2026-11-23 boot is in the tree"
+	_bad=
+	for _f in amdgpu.ko drm.ko linuxkpi_video.ko dmabuf.ko lindebugfs.ko ttm.ko; do
+		grep -q "$_f" "$SUM23" || _bad="$_bad (not in the summary)$_f"
+		grep -q "$_f" "$FIX23" || _bad="$_bad (not in the capture)$_f"
+	done
+	[ -z "$_bad" ] && ok "the summary of the 2026-11-23 boot names the files the capture shows" || no "the summary of the 2026-11-23 boot and its capture disagree:$_bad"
+	[ "$(tail -1 "$SUM23")" = FAIL ] && ok "the summary of the 2026-11-23 boot ends with FAIL" || no "the summary of the 2026-11-23 boot ends with $(tail -1 "$SUM23")"
+	# the summary of the capture has the layout summarize.py writes today: a row line is rendered and the fixture
+	# must start with the same prefix, so the fixture cannot drift away from the format
+	mkdir -p "$T/fmt23"
+	/usr/local/bin/python3 -I -c 'import json,sys; open(sys.argv[1],"w").write(json.dumps({"row":"env-before","status":"fail","detail":"x"})+"\n")' "$T/fmt23/results.jsonl"
+	/usr/local/bin/python3 -I "$KIT/summarize.py" "$T/fmt23" > "$T/fmt23.txt" 2>&1
+	_pre=$(printf '%s\n' "$(grep '^fail  *env-before' "$T/fmt23.txt" | head -1)" | sed -e 's/.$//')
+	case "$(grep '^fail  *env-before' "$SUM23" | head -1)" in
+	"$_pre"*) ok "the summary of the 2026-11-23 boot has the layout summarize.py writes today" ;;
+	*) no "the summary of the 2026-11-23 boot does not have the layout summarize.py writes today" ;;
+	esac
+	case "fail env-before x" in
+	"$_pre"*) no "the summary layout: the control cannot fail: a row line with another layout is accepted" ;;
+	*) ok "control: the summary layout: a row line with another layout is seen (the check can fail)" ;;
+	esac
+else
+	no "the summary of the 2026-11-23 boot is missing"
+fi
+# a fake root with a service that loads amdgpu by itself, and a devd rule that starts the probe: the guard names them
+mkdir -p "$T/fakeroot/etc/rc.d" "$T/fakeroot/usr/local/etc/rc.d" "$T/fakeroot/usr/local/etc/devd"
+printf 'drm_ready_enable="YES"\ndrm_ready_modules="amdgpu"\ncloudbsd_hwprobe_enable="YES"\n' > "$T/fakeroot/etc/rc.conf"
+cat > "$T/fakeroot/usr/local/etc/rc.d/drm_ready" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_ready
+name="drm_ready"
+rcvar="drm_ready_enable"
+load_rc_config $name
+required_modules="${drm_ready_modules:-amdgpu}"
+run_rc_command "$1"
+EOF
+cat > "$T/fakeroot/usr/local/etc/rc.d/cloudbsd_hwprobe" <<'EOF'
+#!/bin/sh
+# PROVIDE: cloudbsd_hwprobe
+name="cloudbsd_hwprobe"
+rcvar="cloudbsd_hwprobe_enable"
+: "${cloudbsd_hwprobe_command:="apply"}"
+load_rc_config $name
+run_rc_command "$1"
+EOF
+chmod 0755 "$T/fakeroot/usr/local/etc/rc.d/drm_ready" "$T/fakeroot/usr/local/etc/rc.d/cloudbsd_hwprobe"
+cat > "$T/fakeroot/usr/local/etc/devd/cloudbsd-gpu-hotplug.conf" <<'EOF'
+attach 100 {
+	match "class" "0x03.*";
+	match "vendor" "0x1002";
+	action "/usr/sbin/service cloudbsd_hwprobe quietstart &";
+};
+EOF
+# a second tree with the idioms a script can use: the rcvar built from the name of the script, the modules as a
+# default of the script, a module list that cannot be read, and a Linux-layer module the first list did not hold
+mkdir -p "$T/fakeroot-idioms/etc/rc.d" "$T/fakeroot-idioms/usr/local/etc/rc.d"
+printf 'drm_named_enable="YES"\ndrm_default_enable="YES"\ndrm_unknown_enable="YES"\ndrm_lsfs_enable="YES"\n' > "$T/fakeroot-idioms/etc/rc.conf"
+cat > "$T/fakeroot-idioms/usr/local/etc/rc.d/drm_named" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_named
+name="drm_named"
+rcvar="${name}_enable"
+required_modules="amdgpu"
+run_rc_command "$1"
+EOF
+cat > "$T/fakeroot-idioms/usr/local/etc/rc.d/drm_default" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_default
+name="drm_default"
+rcvar="drm_default_enable"
+: "${drm_default_modules:=amdgpu}"
+required_modules="$drm_default_modules"
+run_rc_command "$1"
+EOF
+cat > "$T/fakeroot-idioms/usr/local/etc/rc.d/drm_unknown" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_unknown
+name="drm_unknown"
+rcvar="drm_unknown_enable"
+required_modules="${drm_unknown_modules}"
+run_rc_command "$1"
+EOF
+cat > "$T/fakeroot-idioms/usr/local/etc/rc.d/drm_lsfs" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_lsfs
+name="drm_lsfs"
+rcvar="drm_lsfs_enable"
+required_modules="linsysfs"
+run_rc_command "$1"
+EOF
+# a service that its own script enables: the rc.conf says nothing about it
+cat > "$T/fakeroot-idioms/usr/local/etc/rc.d/drm_enab" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_enab
+name="drm_enab"
+rcvar="drm_enab_enable"
+: "${drm_enab_enable:="YES"}"
+required_modules="amdgpu"
+run_rc_command "$1"
+EOF
+chmod 0755 "$T/fakeroot-idioms/usr/local/etc/rc.d/"*
+_l23=$(guard_rc_loaders "$T/fakeroot")
+printf '%s\n' "$_l23" | grep -q 'rc.d service drm_ready (required_modules amdgpu)' && ok "guard_rc_loaders: the service that loads amdgpu by itself is named" || no "guard_rc_loaders: the service is not named: $_l23"
+printf '%s\n' "$_l23" | grep -q 'devd rule cloudbsd-gpu-hotplug.conf starts cloudbsd_hwprobe' && ok "guard_rc_loaders: the devd rule that starts the probe is named" || no "guard_rc_loaders: the devd rule is not named: $_l23"
+_l23i=$(guard_rc_loaders "$T/fakeroot-idioms")
+# the rcvar built from the name of the script is resolved, so the service is known
+printf '%s\n' "$_l23i" | grep -q 'rc.d service drm_named (required_modules amdgpu)' && ok "guard_rc_loaders: a service whose rcvar is built from its name is named" || no "guard_rc_loaders: the service with rcvar=\${name}_enable is not named: $_l23i"
+# the default of the script itself is the module list
+printf '%s\n' "$_l23i" | grep -q 'rc.d service drm_default (required_modules amdgpu)' && ok "guard_rc_loaders: a service whose modules are a default of the script is named" || no "guard_rc_loaders: the service with a script default is not named: $_l23i"
+# the Linux-layer names of the guard list, not only the ones of the first list
+printf '%s\n' "$_l23i" | grep -q 'rc.d service drm_lsfs (required_modules linsysfs)' && ok "guard_rc_loaders: a service that loads linsysfs is named" || no "guard_rc_loaders: the service that loads linsysfs is not named: $_l23i"
+# a service that its own script enables is enabled: the rc.conf says nothing about it
+printf '%s\n' "$(guard_rc_services "$T/fakeroot-idioms")" | grep -q '^drm_enab|drm_enab_enable|yes|amdgpu' \
+    && ok "guard_rc_services: a service that its own script enables is enabled" \
+    || no "guard_rc_services: the service its own script enables is not enabled: $(guard_rc_services "$T/fakeroot-idioms")"
+printf '%s\n' "$_l23i" | grep -q 'rc.d service drm_enab (required_modules amdgpu)' \
+    && ok "guard_rc_loaders: the service that its own script enables is named" \
+    || no "guard_rc_loaders: the service that its own script enables is not named: $_l23i"
+# the control: the reader of the old code, which ignored the defaults of the script, does not know the service
+_ct=$( . "$KIT/guard.sh"; guard_rc_service_defaults() { :; }; guard_rc_services "$T/fakeroot-idioms" | grep '^drm_enab|' )
+printf '%s' "$_ct" | grep -q '|yes|' \
+    && no "guard_rc_services: the check cannot fail: the service is enabled even without the defaults of the script" \
+    || ok "control: guard_rc_services: without the defaults of the script the service is not enabled (the check can fail)"
+# a service that cannot be read is reported as unknown, not ignored
+_l23u=$(guard_rc_offenders "$T/fakeroot-idioms")
+printf '%s\n' "$_l23u" | grep -q '^drm_unknown|?|unknown|' && ok "guard_rc_offenders: a service whose modules cannot be read is reported as unknown" || no "guard_rc_offenders: the service that cannot be read is not reported: $_l23u"
+printf '%s\n' "$_l23u" | grep -q '^drm_unknown|drm_unknown_enable|' && no "guard_rc_offenders: the service that cannot be read is reported as a known offender" || ok "guard_rc_offenders: the service that cannot be read is not reported as a known offender"
+# a service whose enable state cannot be read (it has no rcvar: devd starts it per device) and whose modules are
+# known is an offender only when the modules it loads are forbidden: the kit refused a base because of
+# /etc/rc.d/bluetooth, whose modules are ng_bluetooth and friends, and none of them is a driver (Track #2437)
+mkdir -p "$T/fakeroot-bt/etc/rc.d"
+cat > "$T/fakeroot-bt/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+cat > "$T/fakeroot-bt/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+cat > "$T/fakeroot-bt/etc/rc.d/bt_unreadable" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_unreadable
+required_modules="${bt_unreadable_modules}"
+EOF
+chmod 0755 "$T/fakeroot-bt/etc/rc.d/"*
+_l24=$(guard_rc_offenders "$T/fakeroot-bt")
+printf '%s\n' "$_l24" | grep -q '^bluetooth|' \
+    && no "guard_rc_offenders: a service whose enable state is unknown and whose modules are not forbidden is an offender: $_l24" \
+    || ok "guard_rc_offenders: a service whose enable state is unknown and whose modules are not forbidden is not an offender"
+printf '%s\n' "$_l24" | grep -q '^bt_amd|?|unknown-enable|amdgpu' \
+    && ok "guard_rc_offenders: a service whose enable state is unknown and whose modules are forbidden is an offender" \
+    || no "guard_rc_offenders: the service whose modules are forbidden is not an offender: $_l24"
+printf '%s\n' "$_l24" | grep -q '^bt_unreadable|?|unknown|' \
+    && ok "guard_rc_offenders: a service whose enable state and modules are unknown is refused" \
+    || no "guard_rc_offenders: the service that cannot be read is not refused: $_l24"
+printf '%s\n' "$_l24" | grep -q '^bt_unreadable|?|unknown-enable|' \
+    && no "guard_rc_offenders: the service that cannot be read is reported as one whose enable state is unknown" \
+    || ok "guard_rc_offenders: the service that cannot be read is not reported as one whose enable state is unknown"
+GUARD_ROOT=$T/fakeroot; export GUARD_ROOT
+guard_env "$FIX23" 0 "$T/sys-absent" 1 > "$T/fix23-known.out"; expect 1 $? "guard_env with GUARD_ROOT fails the 2026-11-23 capture"
+grep -q 'rc.d service drm_ready (required_modules amdgpu)' "$T/fix23-known.out" && ok "guard_env: the failure names the loader it can see" || no "guard_env: the failure names no loader: $(head -1 "$T/fix23-known.out")"
+grep -q 'check-be.sh' "$T/fix23-known.out" && ok "guard_env: the failure that names the loader points at check-be.sh" || no "guard_env: the failure does not point at check-be.sh: $(head -1 "$T/fix23-known.out")"
+unset GUARD_ROOT
+# a tree whose only loader is the loader list: the failure names it, and does not claim the loader list is not the
+# loader
+mkdir -p "$T/fakeroot-kl/etc"
+printf 'kld_list="amdgpu"\n' > "$T/fakeroot-kl/etc/rc.conf"
+GUARD_ROOT=$T/fakeroot-kl; export GUARD_ROOT
+guard_env "$FIX23" 0 "$T/sys-absent" 1 > "$T/fix23-kl.out"; expect 1 $? "guard_env with a loader list fails the 2026-11-23 capture"
+_gkl=$(head -1 "$T/fix23-kl.out")
+printf '%s' "$_gkl" | grep -q 'loaded by kld_list amdgpu' && ok "guard_env: the failure names the loader list when it is the loader" || no "guard_env: the loader list is not named: $_gkl"
+printf '%s' "$_gkl" | grep -q 'not kld_list alone' && no "guard_env: the failure claims the loader list is not the loader: $_gkl" || ok "guard_env: the failure does not claim the loader list is not the loader"
+unset GUARD_ROOT
+# the cause comes first: the truncated summary of the failed boot still names the loader and check-be.sh
+mkdir -p "$T/sum23"
+/usr/local/bin/python3 -I -c 'import json,sys; open(sys.argv[1],"w").write(json.dumps({"row":"env-before","status":"fail","detail":sys.argv[2]})+"\n")' "$T/sum23/results.jsonl" "$(head -1 "$T/fix23-known.out")"
+/usr/local/bin/python3 -I "$KIT/summarize.py" "$T/sum23" > "$T/sum23.txt" 2>&1
+_sum=$(grep 'env-before' "$T/sum23.txt" | head -1)
+printf '%s' "$_sum" | grep -q 'check-be.sh' && ok "summarize: the truncated env-before line still points at check-be.sh" || no "summarize: the truncated env-before line lost the pointer: $_sum"
+printf '%s' "$_sum" | grep -q 'drm_ready' && ok "summarize: the truncated env-before line still names the loader" || no "summarize: the truncated env-before line lost the loader: $_sum"
+# the same tree with the probe that only probes: the devd rule loads no KMS driver and is not named any more
+printf 'cloudbsd_hwprobe_command="probe"\n' >> "$T/fakeroot/etc/rc.conf"
+_l23=$(guard_rc_loaders "$T/fakeroot")
+printf '%s\n' "$_l23" | grep -q 'devd rule' && no "guard_rc_loaders: the devd rule is named although the probe only probes: $_l23" || ok "guard_rc_loaders: the devd rule is not named when the probe only probes"
+printf '%s\n' "$_l23" | grep -q 'rc.d service drm_ready' && ok "guard_rc_loaders: the service that loads amdgpu is still named" || no "guard_rc_loaders: the service is not named any more: $_l23"
+# the expansion of a variable reference: a variable that is not set is not one that is set to nothing
+printf '' | guard_rc_expand '${x-amdgpu}' | grep -qx 'amdgpu' && ok "guard_rc_expand: \${x-default} takes the default when the variable is not set" || no "guard_rc_expand: \${x-default} gives $(printf '' | guard_rc_expand '${x-amdgpu}')"
+printf 'x\t\n' | guard_rc_expand '${x-amdgpu}' | grep -qx '' && ok "guard_rc_expand: \${x-default} keeps the value when the variable is set to nothing" || no "guard_rc_expand: \${x-default} gives $(printf 'x\t\n' | guard_rc_expand '${x-amdgpu}')"
+printf '' | guard_rc_expand '${x:=amdgpu}' | grep -qx 'amdgpu' && ok "guard_rc_expand: \${x:=default} takes the default when the variable is not set" || no "guard_rc_expand: \${x:=default} gives $(printf '' | guard_rc_expand '${x:=amdgpu}')"
+printf '' | guard_rc_expand '${x+amdgpu}' | grep -qx '' && ok "guard_rc_expand: \${x+word} is empty when the variable is not set" || no "guard_rc_expand: \${x+word} gives $(printf '' | guard_rc_expand '${x+word}')"
+# the rc.conf.d file of a service is read for that service, and no other file of rc.conf.d is read at all
+mkdir -p "$T/fakeroot/etc/rc.conf.d"
+printf 'drm_ready_enable="NO"\n' > "$T/fakeroot/etc/rc.conf.d/drm_ready"
+guard_rc_services "$T/fakeroot" | grep -q '^drm_ready|drm_ready_enable|no|' && ok "guard_rc_services: the rc.conf.d file of the service wins" || no "guard_rc_services: the rc.conf.d file of the service is not read: $(guard_rc_services "$T/fakeroot")"
+rm "$T/fakeroot/etc/rc.conf.d/drm_ready"
+printf 'drm_ready_enable="NO"\n' > "$T/fakeroot/etc/rc.conf.d/other"
+guard_rc_services "$T/fakeroot" | grep -q '^drm_ready|drm_ready_enable|yes|' && ok "guard_rc_services: a file of rc.conf.d that is not the file of the service is not read" || no "guard_rc_services: a file of rc.conf.d that is not the file of the service was read: $(guard_rc_services "$T/fakeroot")"
+rm "$T/fakeroot/etc/rc.conf.d/other"
+# the value of a variable is read the same way by every reader
+printf 'drm_ready_modules="amdgpu radeonkms" # x\n' > "$T/rcconf"
+_v=$(guard_rcconf_pairs "$T/rcconf" | guard_rcconf_value drm_ready_modules)
+_e=$(guard_rcconf_pairs "$T/rcconf" | guard_rc_expand '$drm_ready_modules' '')
+[ "$_v" = 'amdgpu radeonkms' ] && ok "guard_rcconf_value: the value of a quoted assignment is read as it is" || no "guard_rcconf_value: the value is '$_v'"
+[ "$_e" = "$_v" ] && ok "guard_rcconf_value and guard_rc_expand read the same value" || no "guard_rcconf_value gives '$_v' and guard_rc_expand gives '$_e'"
+# the defaults of a script are read with the same rule as the rc.conf: one rule, one reader
+printf ': "${drm_ready_modules:="amdgpu radeonkms"}" # x\n' > "$T/scriptdef"
+_d=$(guard_rc_service_defaults "$T/scriptdef" | guard_rcconf_value drm_ready_modules)
+[ "$_d" = "$_v" ] && ok "guard_rc_service_defaults and guard_rcconf_pairs read the value with the same rule" || no "guard_rcconf_pairs gives '$_v' and guard_rc_service_defaults gives '$_d'"
+# the control: another value is another value (the check can fail)
+printf ': "${drm_ready_modules:="radeonkms"}"\n' > "$T/scriptdef2"
+_d2=$(guard_rc_service_defaults "$T/scriptdef2" | guard_rcconf_value drm_ready_modules)
+[ "$_d2" = "$_v" ] \
+    && no "guard_rc_service_defaults: the control cannot fail: another value is read like this one" \
+    || ok "control: guard_rc_service_defaults: another value is another value (the check can fail)"
 _live=$T/kld-live; kldstat -v > "$_live" 2>&1; _ks=$?; sysctl compat.linux > "$T/sys-live" 2>&1; _ss=$?
 _l=$(guard_env "$_live" "$_ks" "$T/sys-live" "$_ss"); _s=$?
 if kldstat -q -m linux64elf 2> /dev/null || kldstat -q -m linuxkpi 2> /dev/null || kldstat -q -m linux 2> /dev/null; then
@@ -297,13 +549,13 @@ SUMM="/usr/local/bin/python3 -I $KIT/summarize.py"
 VALID="/usr/local/bin/python3 -I $repo/tests/libnvrm/schema_validate.py $KIT/native-tools-summary.schema.json"
 rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 planned=$($SUMM --planned)
-[ "$(echo $planned | wc -w | tr -d ' ')" = 34 ] && ok "summarize --planned lists the 34 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
+[ "$(echo $planned | wc -w | tr -d ' ')" = 37 ] && ok "summarize --planned lists the 37 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
 mkrun() {	# mkrun <dir> <status of the static rows>
 	mkdir -p "$1"; : > "$1/results.jsonl"
 	for _r in $planned; do
 		case $_r in
 		done) _s=info ;;
-		uvm-* | prime-import | render-uapi | nvrm-s2-memory) _s=$2 ;;
+		uvm-* | prime-import | render-uapi) _s=$2 ;;
 		*) _s=pass ;;
 		esac
 		printf '{"row":"%s","status":"%s","detail":"d"}\n' "$_r" "$_s" >> "$1/results.jsonl"
@@ -330,6 +582,87 @@ $SUMM "$T/r7" > /dev/null; [ "$(rowf "$T/r7/summary.json" load-nvidia status)" =
 mkrun "$T/r6" pass; grep -v '"row":"gpu-verify"' "$T/r6/results.jsonl" > "$T/r6/x"; mv "$T/r6/x" "$T/r6/results.jsonl"; $SUMM "$T/r6" > /dev/null; expect 1 $? "summarize: a planned row missing with no earlier failure fails"
 [ "$(rowf "$T/r6/summary.json" gpu-verify status)" = error ] && ok "summarize: the missing row is an error" || no "summarize: the missing row is not an error"
 
+# (d2) the S2 memory row of the rc one-shot: the row function itself, driven with a fixture
+sed -n '/^row()/,/^}/p; /^s2_memory_row()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/s2.sh"
+if [ -s "$T/s2.sh" ]; then
+	s2case() {	# s2case <line of results.txt> [content of mem_probe.txt]
+		rm -rf "$T/s2"; mkdir -p "$T/s2/nvrm-info"
+		printf '%s\n' "$1" > "$T/s2/nvrm-info/results.txt"
+		if [ -n "${2:-}" ]; then printf '%s\n' "$2" > "$T/s2/nvrm-info/mem_probe.txt"; fi
+		OUT=$T/s2
+		( . "$T/s2.sh"; s2_memory_row ) > "$T/s2.out" 2>&1
+	}
+	s2summary() {	# the row the one-shot wrote, read through summarize.py like any other run
+		rm -rf "$T/s2run"; mkdir -p "$T/s2run"
+		mkrun "$T/s2run" pass
+		grep -v '"row":"nvrm-s2-memory"' "$T/s2run/results.jsonl" > "$T/s2run/x"
+		cat "$T/s2/results.jsonl" >> "$T/s2run/x"
+		mv "$T/s2run/x" "$T/s2run/results.jsonl"
+		$SUMM "$T/s2run" > "$T/s2run.out" 2>&1
+	}
+	s2case 'PASS mem_probe: every memory step passed on every GPU' 'PASS gpu 0 (0000:01:00.0) client_open: ok
+PASS gpu 0 (0000:01:00.0) nothing_left: ok'
+	s2summary
+	_s2s=$(rowf "$T/s2run/summary.json" nvrm-s2-memory status)
+	[ "$_s2s" = pass ] && ok "the S2 memory row: a probe that passed every step is a pass" || no "the S2 memory row: the pass fixture gave $_s2s"
+	_s2d=$(rowf "$T/s2run/summary.json" nvrm-s2-memory detail)
+	printf '%s' "$_s2d" | grep -q '2 GPU' && ok "the S2 memory row: the detail counts the GPUs the probe measured" || no "the S2 memory row: the detail does not count the GPUs: $_s2d"
+	s2case 'FAIL mem_probe exited 3 (nvrm-info/mem_probe.txt)'
+	s2summary
+	_s2s=$(rowf "$T/s2run/summary.json" nvrm-s2-memory status)
+	[ "$_s2s" = fail ] && ok "the S2 memory row: a probe that failed is a fail" || no "the S2 memory row: the fail fixture gave $_s2s"
+	_s2d=$(rowf "$T/s2run/summary.json" nvrm-s2-memory detail)
+	printf '%s' "$_s2d" | grep -q 'FAIL mem_probe exited 3' && ok "the S2 memory row: the detail holds the FAIL line" || no "the S2 memory row: the detail does not hold the FAIL line: $_s2d"
+else
+	no "the S2 memory row: the row function of the rc script could not be read"
+fi
+
+# (d3) the S3 channel row of the rc one-shot: the row function itself, driven with a fixture
+sed -n '/^row()/,/^}/p; /^s3_channel_row()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/s3.sh"
+if [ -s "$T/s3.sh" ]; then
+	s3case() {	# s3case <line of results.txt> [content of chan_probe.txt]
+		rm -rf "$T/s3"; mkdir -p "$T/s3/nvrm-info"
+		printf '%s\n' "$1" > "$T/s3/nvrm-info/results.txt"
+		if [ -n "${2:-}" ]; then printf '%s\n' "$2" > "$T/s3/nvrm-info/chan_probe.txt"; fi
+		OUT=$T/s3
+		( . "$T/s3.sh"; s3_channel_row ) > "$T/s3.out" 2>&1
+	}
+	s3summary() {	# the row the one-shot wrote, read through summarize.py like any other run
+		rm -rf "$T/s3run"; mkdir -p "$T/s3run"
+		mkrun "$T/s3run" pass
+		grep -v '"row":"nvrm-s3-channel"' "$T/s3run/results.jsonl" > "$T/s3run/x"
+		cat "$T/s3/results.jsonl" >> "$T/s3run/x"
+		mv "$T/s3run/x" "$T/s3run/results.jsonl"
+		$SUMM "$T/s3run" > "$T/s3run.out" 2>&1
+	}
+	# every step passed: the row is a pass and the detail holds the latency and the stress
+	s3case 'PASS chan_probe: every channel step passed on every GPU' 'INFO gpu 0 (0000:01:00.0) latency_ns: p50 6000 ns, p99 6400 ns, max 9000 ns
+PASS gpu 0 (0000:01:00.0) stress: done 100000/100000 in 3 s, every wait returned 0
+PASS gpu 0 (0000:01:00.0) isolation: the second channel died (state dead, error 31, gp_get 0, gp_put 2, submitted 1, completed 0)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	[ "$_s3s" = pass ] && ok "the S3 channel row: a probe that passed every step is a pass" || no "the S3 channel row: the pass fixture gave $_s3s"
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	printf '%s' "$_s3d" | grep -q 'p50 6000 ns' && ok "the S3 channel row: the detail holds the latency line" || no "the S3 channel row: the detail does not hold the latency line: $_s3d"
+	printf '%s' "$_s3d" | grep -q 'done 100000/100000' && ok "the S3 channel row: the detail holds the stress line" || no "the S3 channel row: the detail does not hold the stress line: $_s3d"
+	# a FAIL line of the probe: the row is a fail and the detail holds it
+	s3case 'FAIL chan_probe exited 1 (nvrm-info/chan_probe.txt)' 'FAIL gpu 0 (0000:01:00.0) release: wait: the channel is dead (state dead, error 31)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	[ "$_s3s" = fail ] && ok "the S3 channel row: a probe that failed is a fail" || no "the S3 channel row: the fail fixture gave $_s3s"
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	printf '%s' "$_s3d" | grep -q 'FAIL gpu 0' && ok "the S3 channel row: the detail holds the FAIL line" || no "the S3 channel row: the detail does not hold the FAIL line: $_s3d"
+	# a channel that timed out: the row is a fail and the status is in the detail
+	s3case 'FAIL chan_probe exited 1 (nvrm-info/chan_probe.txt)' 'FAIL gpu 0 (0000:01:00.0) isolation: the second channel is alive (state alive, error 0, gp_get 0, gp_put 2, submitted 1, completed 0)'
+	s3summary
+	_s3s=$(rowf "$T/s3run/summary.json" nvrm-s3-channel status)
+	_s3d=$(rowf "$T/s3run/summary.json" nvrm-s3-channel detail)
+	if [ "$_s3s" = fail ] && printf '%s' "$_s3d" | grep -q 'state alive'; then ok "the S3 channel row: a channel that did not die is a fail and the detail holds its status"
+	else no "the S3 channel row: the timeout fixture gave $_s3s: $_s3d"; fi
+else
+	no "the S3 channel row: the row function of the rc script could not be read"
+fi
+
 # (e) make-be.sh with the hooks and a fake clone.  The stage belongs to this run, not to a previous build.
 stage_error=
 stage_file() {
@@ -350,7 +683,7 @@ stage_step() {
 stage_hashes() {
 	_sh_out=$1
 	: > "$_sh_out" || { echo "cannot write the stage hash list $_sh_out"; return 1; }
-	for _sh_f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
+	for _sh_f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		_sh_hash=$(sha256 -q "$STAGE/$_sh_f" 2> /dev/null); _sh_s=$?
 		[ "$_sh_s" = 0 ] || { echo "sha256 failed for $STAGE/$_sh_f (exit $_sh_s)"; return 1; }
 		[ -n "$_sh_hash" ] || { echo "sha256 printed nothing for $STAGE/$_sh_f"; return 1; }
@@ -359,7 +692,7 @@ stage_hashes() {
 }
 mkdir -p "$STAGE"
 if [ -n "${NVNT_STAGE:-}" ]; then
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do stage_file "$NVNT_STAGE/$_f"; done
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do stage_file "$NVNT_STAGE/$_f"; done
 else
 	# A prepared build/tree may predate the checkout.  Prepare and build this checkout in scratch instead; only the
 	# expensive, already-built RM core objects and the pinned sources come from GB10_WORK.
@@ -367,7 +700,12 @@ else
 	if ! (
 		mkdir -p "$BW/build" "$BW/logs" "$BW/tmp" &&
 		ln -s "$WORK/sources" "$BW/sources" &&
-		cp "$WORK/build/nv-kernel-gb10.o" "$WORK/build/nv-modeset-kernel-aarch64.o" "$BW/build/" &&
+		_nt_arch=$(uname -p)
+		case $_nt_arch in
+		x86_64) _nt_arch=amd64 ;;
+		arm64) _nt_arch=aarch64 ;;
+		esac
+		cp "$WORK/build/nv-kernel-gb10.o" "$WORK/build/nv-modeset-kernel-${_nt_arch}.o" "$BW/build/" &&
 		stage_step prepare-tree env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/prepare-tree.sh" &&
 		stage_step build-nvidia env -u NV_CORE_LINUX_COMPAT -u NVKMS_CORE_LINUX_COMPAT GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-shim.sh" &&
 		stage_step build-firmware env GB10_WORK="$BW" TMPDIR="$BW/tmp" sh "$repo/scripts/build-firmware.sh" &&
@@ -393,6 +731,10 @@ else
 			stage_file "$T/obj/lib/libnvrm.so.1"
 			stage_file "$T/obj/info/nvrm-info"
 		fi
+		# the probes of the S2 and S3 rows, built against the library that was just built: the same line as the suite's
+		if ! stage_step probes sh "$repo/tests/libnvrm/build-probes.sh" "$T/obj/lib" "$STAGE"; then
+			stage_error="$stage_error probes-build-failed"
+		fi
 	fi
 fi
 if [ -z "$stage_error" ]; then
@@ -413,10 +755,53 @@ if [ -n "$stage_error" ]; then
 else
 	mkclone() {
 		rm -rf "$1"; mkdir -p "$1/etc/rc.conf.d" "$1/boot/modules" "$1/boot/kernel" "$1/sbin" "$1/usr/local/etc/rc.d"
-		printf 'hostname="t"\nlinux_enable="YES"\nkld_list="filemon amdgpu /boot/kernel/linux64.ko"\nother_testboot_enable="YES"\n' > "$1/etc/rc.conf"
+		printf 'hostname="t"\nlinux_enable="YES"\nkld_list="filemon amdgpu /boot/kernel/linux64.ko"\nother_testboot_enable="YES"\ndrm_ready_enable="YES"\ndrm_ready_modules="amdgpu"\ndrm_named_enable="YES"\ncloudbsd_hwprobe_enable="YES"\n' > "$1/etc/rc.conf"
 		printf 'zfs_load="YES"\n' > "$1/boot/loader.conf"
 		printf '#!/bin/sh\nexit 0\n' > "$1/sbin/shutdown"; chmod 0755 "$1/sbin/shutdown"
 		mkdir -p "$1/usr/local/bin"; printf '#!/bin/sh\n' > "$1/usr/local/bin/python3"; chmod 0755 "$1/usr/local/bin/python3"
+		# the users of the clone: the owner of the run directory must be one of them (the one-shot gives the run to
+		# it with chown(8)), and the one the tests name
+		# the home directories are the one FreeBSD gives system users: no home of a person, so no personal path
+		printf 'root:*:0:0:root:/root:/bin/sh\n%s:*:%s:%s:%s:/nonexistent:/bin/sh\nkitowner:*:1002:1002:kitowner:/nonexistent:/bin/sh\n' \
+		    "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$1/etc/master.passwd"
+		# the two services of the base BE that load a driver by themselves: drm_ready through its required_modules
+		# entry, the hwprobe through the probe it runs
+		cat > "$1/usr/local/etc/rc.d/drm_ready" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_ready
+# REQUIRE: kld
+name="drm_ready"
+rcvar="drm_ready_enable"
+start_precmd="drm_ready_wait"
+start_cmd=":"
+stop_cmd=":"
+load_rc_config $name
+required_modules="${drm_ready_modules:-amdgpu}"
+run_rc_command "$1"
+EOF
+		# the same, with the rcvar built from the name of the script: the common ports idiom
+		cat > "$1/usr/local/etc/rc.d/drm_named" <<'EOF'
+#!/bin/sh
+# PROVIDE: drm_named
+name="drm_named"
+rcvar="${name}_enable"
+load_rc_config $name
+required_modules="amdgpu"
+run_rc_command "$1"
+EOF
+		cat > "$1/usr/local/etc/rc.d/cloudbsd_hwprobe" <<'EOF'
+#!/bin/sh
+# PROVIDE: cloudbsd_hwprobe
+name="cloudbsd_hwprobe"
+rcvar="cloudbsd_hwprobe_enable"
+start_cmd="cloudbsd_hwprobe_start"
+stop_cmd=":"
+: "${cloudbsd_hwprobe_enable:="NO"}"
+: "${cloudbsd_hwprobe_command:="apply"}"
+load_rc_config $name
+run_rc_command "$1"
+EOF
+		chmod 0755 "$1/usr/local/etc/rc.d/drm_ready" "$1/usr/local/etc/rc.d/drm_named" "$1/usr/local/etc/rc.d/cloudbsd_hwprobe"
 	}
 	cat > "$T/bectl" <<EOF
 #!/bin/sh
@@ -432,7 +817,9 @@ EOF
 	MB() {
 		[ -z "$UVMKO" ] || set -- -u "$UVMKO" "$@"
 		[ -z "$DRMKO" ] || set -- -d "$DRMKO" "$@"
-		env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" "$@"
+		# DOAS_USER and SUDO_USER are unset: the owner of the run directory is then the owner of the copy-out
+		# parent, which is what the test checks
+		env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" "$@"
 	}
 	for _opt in u d; do
 		env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/missing-$_opt/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -$_opt "$T/missing-$_opt.ko" > "$T/missing-$_opt.out" 2>&1
@@ -450,8 +837,70 @@ EOF
 	[ "$(sysrc -f "$R/etc/rc.conf" -n kld_list)" = filemon ] && ok "make-be.sh: amdgpu and linux64 are stripped from kld_list" || no "make-be.sh: kld_list is $(sysrc -f "$R/etc/rc.conf" -n kld_list)"
 	sysrc -f "$R/etc/rc.conf" -n devmatch_blocklist | grep -q 'amdgpu .*linuxkpi' && ok "make-be.sh: devmatch_blocklist is set in rc.conf" || no "make-be.sh: no devmatch_blocklist in rc.conf"
 	grep -q '^devmatch_blocklist=".*amdgpu' "$R/boot/loader.conf" && ok "make-be.sh: devmatch_blocklist kenv in loader.conf" || no "make-be.sh: no devmatch_blocklist kenv"
+	# A module of the clone that depends on the Linux layer must be blocked: devmatch loads a driver of its own when
+	# it sees the device of it (Track #2437: a Wi-Fi card in the host brought if_rtw89.ko, which pulled in
+	# linuxkpi_wlan.ko).  The stub of kldxref reads the name of the file it is given.
+	mkdir -p "$T/blkstub"
+	cat > "$T/blkstub/kldxref" <<'EOF'
+#!/bin/sh
+for _d do :; done
+for _k in "$_d"/*; do
+	_n=${_k##*/}; printf '  module %s\n' "${_n%.ko}"
+	case $_n in
+	if_rtw89.ko) printf '    depends on kernel.\n    depends on linuxkpi_wlan.1\n' ;;
+	nvidia_linux.ko) printf '    depends on kernel.\n    depends on linux64elf.1\n' ;;
+	*) printf '    depends on kernel.\n' ;;
+	esac
+done
+EOF
+	chmod 0755 "$T/blkstub/kldxref"
+	mkclone "$T/clone-blk/root"
+	: > "$T/clone-blk/root/boot/modules/if_rtw89.ko"
+	printf 'devmatch_blocklist="basewifi"\n' >> "$T/clone-blk/root/etc/rc.conf"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-blk/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 NVNT_TEST_PATH="$T/blkstub" GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990121 -m "$STAGE" > "$T/mb-blk.out" 2>&1
+	expect 0 $? "make-be.sh builds the fake clone with a module that depends on the Linux layer"
+	_RB=$T/clone-blk/root
+	_blkv=$(sysrc -f "$_RB/etc/rc.conf" -n devmatch_blocklist 2> /dev/null)
+	case "$_blkv" in *if_rtw89*) ok "make-be.sh: the module that depends on the Linux layer is blocked" ;; *) no "make-be.sh: if_rtw89 is not in the blocklist: '$_blkv'" ;; esac
+	case "$_blkv" in *basewifi*) ok "make-be.sh: the blocklist entry of the base is kept" ;; *) no "make-be.sh: the blocklist entry of the base is gone: '$_blkv'" ;; esac
+	# the blocklist of this clone is the list of the kit, the entry of the base and the discovered module, and nothing else
+	_blkkit=$(sysrc -f "$R/etc/rc.conf" -n devmatch_blocklist 2> /dev/null)
+	printf '%s\n' $_blkkit basewifi if_rtw89 | tr ' ' '\n' | sort -u > "$T/blkexpect"
+	printf '%s\n' $_blkv | tr ' ' '\n' | sort -u > "$T/blkgot"
+	cmp -s "$T/blkexpect" "$T/blkgot" && ok "make-be.sh: the blocklist is the list of the kit, the entry of the base and the discovered module" || no "make-be.sh: the blocklist is not that list: $(tr '\n' ' ' < "$T/blkgot")"
+	grep -q '^blocked if_rtw89' "$T/mb-blk.out" && ok "make-be.sh: the blocked module is printed" || no "make-be.sh: the blocked module is not printed: $(grep -c '^blocked' "$T/mb-blk.out") blocked lines"
+	grep -q '^devmatch_blocklist=".*if_rtw89' "$_RB/boot/loader.conf" && ok "make-be.sh: the loader.conf kenv names the blocked module" || no "make-be.sh: the loader.conf kenv does not name if_rtw89"
+	# the modules of the kit are never blocked: the kit loads its own nvidia.ko and refuses every other one
+	mkdir -p "$T/blkmods"; : > "$T/blkmods/if_rtw89.ko"; : > "$T/blkmods/nvidia_linux.ko"
+	_lkm=$( ( PATH="$T/blkstub:$PATH"; export PATH; guard_linux_modules "$T/blkscr" "$T/blkmods" ) )
+	case "$_lkm" in *if_rtw89*) ok "guard_linux_modules: the module that depends on the Linux layer is named" ;; *) no "guard_linux_modules: if_rtw89 is not named: '$_lkm'" ;; esac
+	case "$_lkm" in *nvidia*) no "guard_linux_modules: an nvidia module is named: '$_lkm'" ;; *) ok "guard_linux_modules: no nvidia module is named" ;; esac
+	# check-be.sh: the blocked module of the clone passes, and it is a FAIL that names it when it is not blocked
+	env TMPDIR="$T" NVNT_TEST_PATH="$T/blkstub" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$_RB" -U -s "$SHAFILE" > "$T/cb-blk.out" 2>&1
+	grep -q '^ok   rc.conf: devmatch_blocklist names every module that depends on the Linux layer' "$T/cb-blk.out" && ok "check-be.sh: the module of the clone that depends on the Linux layer and is blocked passes the blocklist check" || no "check-be.sh: the blocklist check of the clone did not pass: $(grep -c '^FAIL' "$T/cb-blk.out") FAIL lines"
+	_cbf2=$(grep '^FAIL' "$T/cb-blk.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf2" ] && ok "check-be.sh: the clone whose module that depends on the Linux layer is blocked passes every check but the commit comparison" || no "check-be.sh on the clone with the blocked module: $_cbf2"
+	_blkv2=$(sysrc -f "$_RB/etc/rc.conf" -n devmatch_blocklist 2> /dev/null | tr ' ' '\n' | grep -v '^if_rtw89$' | tr '\n' ' ')
+	sysrc -f "$_RB/etc/rc.conf" devmatch_blocklist="${_blkv2% }" > /dev/null 2>&1
+	env TMPDIR="$T" NVNT_TEST_PATH="$T/blkstub" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$_RB" -U -s "$SHAFILE" > "$T/cb-blkmiss.out" 2>&1
+	grep -q '^FAIL rc.conf: devmatch_blocklist does not name if_rtw89' "$T/cb-blkmiss.out" && ok "check-be.sh: a module that depends on the Linux layer and is not blocked is a FAIL that names it" || no "check-be.sh: the module that is not blocked is not reported: $(grep '^FAIL' "$T/cb-blkmiss.out" | head -3 | tr '\n' ' ')"
 	grep -q '^other_testboot_enable="NO"' "$R/etc/rc.conf" && ok "make-be.sh: another kit is turned off" || no "make-be.sh: the other kit is still on"
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do
+	# an enabled rc.d service that loads a forbidden module by itself must be turned off in the clone
+	[ "$(sysrc -f "$R/etc/rc.conf" -n drm_ready_enable)" = NO ] && ok "make-be.sh: the service whose required_modules loads amdgpu is turned off" || no "make-be.sh: drm_ready_enable is $(sysrc -f "$R/etc/rc.conf" -n drm_ready_enable)"
+	grep -q '^disabled drm_ready: loads amdgpu' "$T/mb.out" && ok "make-be.sh: the disabled service and the module it loads are printed" || no "make-be.sh: the disabled service is not printed: $(grep -c disabled "$T/mb.out") disabled lines"
+	[ "$(sysrc -f "$R/etc/rc.conf" -n drm_named_enable)" = NO ] && ok "make-be.sh: the service whose rcvar is built from its name is turned off" || no "make-be.sh: drm_named_enable is $(sysrc -f "$R/etc/rc.conf" -n drm_named_enable)"
+	grep -q '^disabled drm_named: loads amdgpu' "$T/mb.out" && ok "make-be.sh: the service with rcvar=\${name}_enable is disabled and printed" || no "make-be.sh: the service with rcvar=\${name}_enable is not printed: $(grep '^disabled' "$T/mb.out")"
+	[ "$(sysrc -f "$R/etc/rc.conf" -n cloudbsd_hwprobe_command)" = probe ] && ok "make-be.sh: the hwprobe service gets the command probe (it loads no KMS driver)" || no "make-be.sh: cloudbsd_hwprobe_command is $(sysrc -f "$R/etc/rc.conf" -n cloudbsd_hwprobe_command)"
+	grep -q '^cloudbsd_hwprobe: command=probe' "$T/mb.out" && ok "make-be.sh: the hwprobe command is printed" || no "make-be.sh: the hwprobe command is not printed"
+	_own=$(sed -n 's/^nvidia_native_tools_testboot_owner="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ -n "$_own" ] && ok "make-be.sh: the owner of the run directory is recorded ($_own)" || no "make-be.sh: no owner of the run directory is recorded"
+	[ "$_own" = "$(stat -f %Su "$WORK/logs" 2> /dev/null)" ] && ok "make-be.sh: the recorded owner is the owner of the copy-out parent ($_own)" || no "make-be.sh: the recorded owner is '$_own', the copy-out parent is owned by $(stat -f %Su "$WORK/logs" 2> /dev/null)"
+	# the two channel knobs of the one-shot, with their defaults
+	_cst=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_cst" = 100000 ] && ok "make-be.sh: the channel stress count is written to rc.conf.d ($_cst)" || no "make-be.sh: the channel stress count is '${_cst:-unset}', wanted 100000"
+	_css=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress_seconds="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_css" = 300 ] && ok "make-be.sh: the channel stress seconds are written to rc.conf.d ($_css)" || no "make-be.sh: the channel stress seconds are '${_css:-unset}', wanted 300"
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		cmp -s "$STAGE/$_f" "$R/boot/modules.nvnative-test/$_f" && ok "make-be.sh: $_f is installed" || no "make-be.sh: $_f is not installed"
 	done
 	[ "$(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null)" = "$UVM_WANT" ] && ok "make-be.sh: the uvm row is $UVM_WANT" || no "make-be.sh: the uvm row is $(head -1 "$R/usr/local/share/nvidia-native-tools-test/static-rows/uvm-ioctl-suite" 2> /dev/null), wanted $UVM_WANT"
@@ -492,6 +941,109 @@ EOF
 	# pass for a work tree installed with NVNT_NO_GIT_CHECK; every other check must
 	_cbf=$(grep '^FAIL' "$T/cb.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
 	[ -z "$_cbf" ] && ok "check-be.sh: every check but the commit comparison passes on the fake clone ($(grep -c '^ok' "$T/cb.out") ok)" || no "check-be.sh on the fake clone: $_cbf"
+	# the clone holds seven staged files: the hash list counts seven and the probes are two of them
+	grep -q '^ok   the list holds seven entries' "$T/cb.out" && ok "check-be.sh: the hash list of the clone holds seven entries" || no "check-be.sh: the list of the clone does not hold seven entries: $(grep 'entries' "$T/cb.out")"
+	grep -q '^ok   mem_probe is ' "$T/cb.out" && ok "check-be.sh: mem_probe is checked in the clone" || no "check-be.sh: mem_probe is not checked in the clone: $(grep 'mem_probe' "$T/cb.out")"
+	grep -q '^ok   chan_probe is ' "$T/cb.out" && ok "check-be.sh: chan_probe is checked in the clone" || no "check-be.sh: chan_probe is not checked in the clone: $(grep 'chan_probe' "$T/cb.out")"
+	# a list of six files is refused: the kit stages seven
+	head -6 "$SHAFILE" > "$T/SHA256.six"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$T/SHA256.six" > "$T/cb-six.out" 2>&1
+	grep -q 'does not hold exactly seven SHA256 entries' "$T/cb-six.out" && ok "check-be.sh: a hash list of six files is refused" || no "check-be.sh: a hash list of six files is not refused: $(grep 'entries' "$T/cb-six.out")"
+	# the clone with the service that loads amdgpu by itself enabled again: check-be.sh must refuse it, naming the
+	# service and the module, and the fixed clone must pass
+	sysrc -f "$R/etc/rc.conf" drm_ready_enable=YES > /dev/null
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-drm.out" 2>&1
+	grep -q '^FAIL the rc.d service drm_ready (drm_ready_enable) is enabled and its required_modules loads amdgpu' "$T/cb-drm.out" \
+	    && ok "check-be.sh: a clone with drm_ready enabled is a FAIL that names the service and the module" \
+	    || no "check-be.sh: the clone with drm_ready enabled is not refused: $(grep '^FAIL' "$T/cb-drm.out" | head -3)"
+	sysrc -f "$R/etc/rc.conf" drm_ready_enable=NO > /dev/null
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-drm-fixed.out" 2>&1
+	_cbf2=$(grep '^FAIL' "$T/cb-drm-fixed.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf2" ] && ok "check-be.sh: the clone with drm_ready turned off passes" || no "check-be.sh on the fixed clone: $_cbf2"
+	# the hwprobe service loads the KMS driver of the card it finds, unless its command is probe
+	sysrc -f "$R/etc/rc.conf" cloudbsd_hwprobe_command=apply > /dev/null
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-hp.out" 2>&1
+	grep -q '^FAIL cloudbsd_hwprobe is enabled with command' "$T/cb-hp.out" \
+	    && ok "check-be.sh: an enabled cloudbsd_hwprobe without the command probe is a FAIL" \
+	    || no "check-be.sh: the clone with the hwprobe command apply is not refused: $(grep '^FAIL' "$T/cb-hp.out" | head -3)"
+	sysrc -f "$R/etc/rc.conf" cloudbsd_hwprobe_command=probe > /dev/null
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-hp-fixed.out" 2>&1
+	_cbf3=$(grep '^FAIL' "$T/cb-hp-fixed.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf3" ] && ok "check-be.sh: the clone with the hwprobe command probe passes" || no "check-be.sh on the clone with the hwprobe command probe: $_cbf3"
+	# a service whose modules cannot be read is a FAIL: a service that is not read is a service that is not known
+	cat > "$R/usr/local/etc/rc.d/drm_unknown" <<'EOF'
+#!/bin/sh
+name="drm_unknown"
+rcvar="drm_unknown_enable"
+required_modules="${drm_unknown_modules}"
+EOF
+	chmod 0755 "$R/usr/local/etc/rc.d/drm_unknown"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-unknown.out" 2>&1
+	grep -q '^FAIL the rc.d service drm_unknown has a required_modules entry that could not be read' "$T/cb-unknown.out" \
+	    && ok "check-be.sh: a service whose modules cannot be read is a FAIL" \
+	    || no "check-be.sh: the service that cannot be read is not refused: $(grep '^FAIL' "$T/cb-unknown.out" | head -3)"
+	rm -f "$R/usr/local/etc/rc.d/drm_unknown"
+	# a service whose enable state cannot be read (its script has no rcvar) and whose modules are not forbidden is not
+	# a FAIL: the base of a machine with /etc/rc.d/bluetooth must pass (Track #2437)
+	cat > "$R/usr/local/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+	chmod 0755 "$R/usr/local/etc/rc.d/bluetooth"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-bt.out" 2>&1
+	_cbf4=$(grep '^FAIL' "$T/cb-bt.out" | grep -v 'differs from the one of commit' | grep -v 'the clone records' | grep -v 'does not equal its VENDOR pin')
+	[ -z "$_cbf4" ] && ok "check-be.sh: a clone with /etc/rc.d/bluetooth passes" || no "check-be.sh on the clone with bluetooth: $_cbf4"
+	rm -f "$R/usr/local/etc/rc.d/bluetooth"
+	# the same service with a forbidden module in its list is a FAIL: it cannot be turned off
+	cat > "$R/usr/local/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+	chmod 0755 "$R/usr/local/etc/rc.d/bt_amd"
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-btamd.out" 2>&1
+	grep -q '^FAIL the rc.d service bt_amd has an enable state that cannot be read and its required_modules loads amdgpu' "$T/cb-btamd.out" \
+	    && ok "check-be.sh: a service whose enable state cannot be read and whose modules are forbidden is a FAIL" \
+	    || no "check-be.sh: the service whose enable state cannot be read is not refused: $(grep '^FAIL' "$T/cb-btamd.out" | head -3)"
+	rm -f "$R/usr/local/etc/rc.d/bt_amd"
+	# a devd rule that loads a driver by itself is a FAIL
+	mkdir -p "$R/usr/local/etc/devd"
+	cat > "$R/usr/local/etc/devd/cloudbsd-gpu-hotplug.conf" <<'EOF'
+attach 100 {
+	match "class" "0x03.*";
+	match "vendor" "0x1002";
+	action "/usr/sbin/kldload -v /boot/kernel/amdgpu.ko";
+};
+EOF
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-devd.out" 2>&1
+	grep -q '^FAIL the devd rule cloudbsd-gpu-hotplug.conf kldloads' "$T/cb-devd.out" \
+	    && ok "check-be.sh: a devd rule that loads a driver by itself is a FAIL" \
+	    || no "check-be.sh: the devd rule that loads a driver is not refused: $(grep '^FAIL' "$T/cb-devd.out" | head -3)"
+	rm -rf "$R/usr/local/etc/devd"
+	# a devd rule that starts a service which loads a driver by itself is a loader too: service X onestart runs the
+	# service even when its rcvar is NO, so the rule is refused although the service itself is off in the clone
+	mkdir -p "$R/usr/local/etc/devd"
+	cat > "$R/usr/local/etc/devd/drm-hotplug.conf" <<'EOF'
+attach 100 {
+	match "class" "0x03.*";
+	match "vendor" "0x1002";
+	action "/usr/sbin/service drm_ready quietstart &";
+};
+EOF
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-devd2.out" 2>&1
+	grep -q '^FAIL the devd rule drm-hotplug.conf starts drm_ready' "$T/cb-devd2.out" \
+	    && ok "check-be.sh: a devd rule that starts a service which loads a driver is a FAIL" \
+	    || no "check-be.sh: the devd rule that starts a driver-loading service is not refused: $(grep '^FAIL' "$T/cb-devd2.out" | head -3)"
+	rm -rf "$R/usr/local/etc/devd"
+	# the owner of the run directory must be a user of the boot environment
+	sed -i.bak 's/^nvidia_native_tools_testboot_owner=.*/nvidia_native_tools_testboot_owner="nobodyhere"/' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null
+	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-owner.out" 2>&1
+	grep -q '^FAIL the owner of the run directory (nobodyhere) is not a user of this boot environment' "$T/cb-owner.out" \
+	    && ok "check-be.sh: an owner that is not a user of the boot environment is a FAIL" \
+	    || no "check-be.sh: the owner that is not a user of the boot environment is not refused: $(grep '^FAIL' "$T/cb-owner.out" | head -3)"
+	mv "$R/etc/rc.conf.d/nvidia_native_tools_testboot.bak" "$R/etc/rc.conf.d/nvidia_native_tools_testboot"
 	chmod u+w "$_marker"; printf 'wrong-be\n' > "$_marker"
 	env TMPDIR="$T" GB10_TEST_HOOKS=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/check-be.sh" -m "$R" -U -s "$SHAFILE" > "$T/cb-marker-mutant.out" 2>&1
 	grep -q "^FAIL the marker holds 'wrong-be'" "$T/cb-marker-mutant.out" && ok "G6 control: a wrong marker is seen" || no "G6 control: check-be.sh did not reject the wrong marker"
@@ -529,6 +1081,114 @@ EOF
 	mkclone "$T/clone2/root"; printf 'linux_load="YES"\n' >> "$T/clone2/root/boot/loader.conf"
 	env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone2/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 sh "$KIT/make-be.sh" -D 20990102 -m "$STAGE" > "$T/mb2.out" 2>&1
 	expect 1 $? "make-be.sh refuses a base whose loader.conf loads linux"
+	# the copy-out parent is owned by root and nobody says who the user is: the run directory would be root-owned and
+	# unreadable by the person who has to read it
+	_bcl=$(wc -l < "$T/bectl.log" 2> /dev/null || echo 0)
+	mkclone "$T/clone-owner/root"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990107 -m "$STAGE" -o /usr/local/etc/nvnt-testboot-owner > "$T/mb-owner.out" 2>&1
+	expect 2 $? "make-be.sh refuses a copy-out whose parent is owned by root when nobody says who the user is"
+	grep -q 'is root and neither DOAS_USER nor SUDO_USER is set' "$T/mb-owner.out" && ok "make-be.sh: the refusal of the root-owned copy-out parent says why" || no "make-be.sh: the refusal is not clear: $(head -2 "$T/mb-owner.out")"
+	[ "$(wc -l < "$T/bectl.log" 2> /dev/null || echo 0)" = "$_bcl" ] && ok "make-be.sh: the refused run created no boot environment" || no "make-be.sh: the refused run still called bectl"
+	# the channel knobs of the one-shot: -c and -C reach rc.conf.d
+	mkclone "$T/clone-chan/root"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-chan/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990103 -m "$STAGE" -c 500 -C 10 > "$T/mb-chan.out" 2>&1
+	expect 0 $? "make-be.sh builds the fake clone with the channel knobs"
+	_cst=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress="\(.*\)"$/\1/p' "$T/clone-chan/root/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	_css=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress_seconds="\(.*\)"$/\1/p' "$T/clone-chan/root/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_cst" = 500 ] && [ "$_css" = 10 ] && ok "make-be.sh: -c and -C reach rc.conf.d ($_cst releases, $_css seconds)" || no "make-be.sh: -c and -C wrote '$_cst' and '$_css' to rc.conf.d, wanted 500 and 10"
+	# a later rc.conf file that enables the service again: make-be.sh cannot turn it off and must refuse the base
+	mkclone "$T/clone-drmready/root"; printf 'drm_ready_enable="YES"\n' > "$T/clone-drmready/root/etc/rc.conf.local"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-drmready/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990109 -m "$STAGE" > "$T/mb-drmready.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base whose rc.conf.local enables a service that loads a forbidden module"
+	grep -q 'is still enabled and its required_modules loads amdgpu' "$T/mb-drmready.out" && ok "make-be.sh: the refusal names the service and the module" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-drmready.out")"
+	# with DOAS_USER the owner is the one doas names
+	mkclone "$T/clone-owner2/root"
+	env DOAS_USER=kitowner GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner2/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990108 -m "$STAGE" > "$T/mb-owner2.out" 2>&1
+	expect 0 $? "make-be.sh builds the clone with the owner doas names"
+	_o2=$(sed -n 's/^nvidia_native_tools_testboot_owner="\(.*\)"$/\1/p' "$T/clone-owner2/root/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_o2" = kitowner ] && ok "make-be.sh: DOAS_USER is the recorded owner of the run directory" || no "make-be.sh: the recorded owner is '$_o2', DOAS_USER said kitowner: $(tail -2 "$T/mb-owner2.out")"
+	# an owner name that starts with a dash would be read as an option by chown(8)
+	mkclone "$T/clone-owner3/root"
+	env DOAS_USER=-h GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner3/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990111 -m "$STAGE" > "$T/mb-owner3.out" 2>&1
+	expect 2 $? "make-be.sh refuses an owner name that starts with a dash"
+	grep -q 'starts with a dash' "$T/mb-owner3.out" && ok "make-be.sh: the refusal of a dash in the owner name says why" || no "make-be.sh: the refusal is not clear: $(head -2 "$T/mb-owner3.out")"
+	# a number is not a user name, and 0 would bypass the root rule
+	mkclone "$T/clone-owner4/root"
+	env DOAS_USER=0 GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner4/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990112 -m "$STAGE" > "$T/mb-owner4.out" 2>&1
+	expect 2 $? "make-be.sh refuses a number as the owner name"
+	grep -q 'a number is not a user name' "$T/mb-owner4.out" && ok "make-be.sh: the refusal of a number as the owner says why" || no "make-be.sh: the refusal is not clear: $(head -2 "$T/mb-owner4.out")"
+	# the owner must be a user of the boot environment: the one-shot gives the run to it with chown(8)
+	mkclone "$T/clone-owner5/root"
+	env DOAS_USER=nobodyhere GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner5/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990113 -m "$STAGE" > "$T/mb-owner5.out" 2>&1
+	expect 1 $? "make-be.sh refuses an owner that is not a user of the boot environment"
+	grep -q 'is not a user of this boot environment' "$T/mb-owner5.out" && ok "make-be.sh: the refusal of an unknown owner says why" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-owner5.out")"
+	# a service whose modules cannot be read is refused, not ignored
+	mkclone "$T/clone-unknown/root"
+	cat > "$T/clone-unknown/root/usr/local/etc/rc.d/drm_unknown" <<'EOF'
+#!/bin/sh
+name="drm_unknown"
+rcvar="drm_unknown_enable"
+required_modules="${drm_unknown_modules}"
+EOF
+	chmod 0755 "$T/clone-unknown/root/usr/local/etc/rc.d/drm_unknown"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-unknown/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990114 -m "$STAGE" > "$T/mb-unknown.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base with a service whose required_modules cannot be read"
+	grep -q 'drm_unknown has a required_modules entry that could not be read' "$T/mb-unknown.out" && ok "make-be.sh: the refusal names the service that cannot be read" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-unknown.out")"
+	# a base with /etc/rc.d/bluetooth is not refused: its enable state cannot be read (the script has no rcvar) but
+	# the modules it loads are none of the drivers the kit refuses (Track #2437)
+	mkclone "$T/clone-bt/root"
+	cat > "$T/clone-bt/root/usr/local/etc/rc.d/bluetooth" <<'EOF'
+#!/bin/sh
+# PROVIDE: bluetooth
+# REQUIRE: DEVFS
+required_modules="ng_bluetooth ng_hci ng_l2cap ng_btsocket"
+EOF
+	chmod 0755 "$T/clone-bt/root/usr/local/etc/rc.d/bluetooth"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-bt/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990119 -m "$STAGE" > "$T/mb-bt.out" 2>&1
+	expect 0 $? "make-be.sh builds a base with /etc/rc.d/bluetooth"
+	grep -q 'bluetooth' "$T/mb-bt.out" && no "make-be.sh: a base with /etc/rc.d/bluetooth is refused: $(grep bluetooth "$T/mb-bt.out" | head -2)" || ok "make-be.sh: a base with /etc/rc.d/bluetooth is not refused"
+	# the same service with a forbidden module in its list is refused: it cannot be turned off
+	mkclone "$T/clone-btamd/root"
+	cat > "$T/clone-btamd/root/usr/local/etc/rc.d/bt_amd" <<'EOF'
+#!/bin/sh
+# PROVIDE: bt_amd
+required_modules="ng_bluetooth amdgpu ng_btsocket"
+EOF
+	chmod 0755 "$T/clone-btamd/root/usr/local/etc/rc.d/bt_amd"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-btamd/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990120 -m "$STAGE" > "$T/mb-btamd.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base with a service whose enable state cannot be read and whose modules are forbidden"
+	grep -q 'bt_amd has an enable state that cannot be read and its required_modules loads amdgpu' "$T/mb-btamd.out" && ok "make-be.sh: the refusal names the service and the module it loads" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-btamd.out")"
+	# a devd rule that starts a service which loads a driver by itself is refused: devd runs it when the device
+	# appears, and the kit cannot make such a rule safe
+	mkclone "$T/clone-devd/root"
+	mkdir -p "$T/clone-devd/root/usr/local/etc/devd"
+	cat > "$T/clone-devd/root/usr/local/etc/devd/drm-hotplug.conf" <<'EOF'
+attach 100 {
+	match "class" "0x03.*";
+	match "vendor" "0x1002";
+	action "/usr/sbin/service drm_ready quietstart &";
+};
+EOF
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-devd/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990117 -m "$STAGE" > "$T/mb-devd.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base with a devd rule that starts a service which loads a driver"
+	grep -q 'the devd rule drm-hotplug.conf starts drm_ready' "$T/mb-devd.out" && ok "make-be.sh: the refusal names the devd rule and the service" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-devd.out")"
+	# the control: the same base without that rule is built, so the refusal is the rule and nothing else
+	mkclone "$T/clone-devd2/root"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-devd2/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990118 -m "$STAGE" > "$T/mb-devd2.out" 2>&1
+	expect 0 $? "control: make-be.sh builds the same base without the devd rule"
+	# the owner of the copy-out parent cannot be read: the refusal says so, and does not claim the owner is root
+	mkdir -p "$T/stub-stat"
+	printf '#!/bin/sh\nexit 1\n' > "$T/stub-stat/stat"; chmod 0755 "$T/stub-stat/stat"
+	mkclone "$T/clone-owner6/root"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-owner6/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 NVNT_TEST_PATH="$T/stub-stat" GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990116 -m "$STAGE" -o "$T/copyout-owner6/out" > "$T/mb-owner6.out" 2>&1
+	expect 2 $? "make-be.sh refuses a copy-out whose parent cannot be read"
+	grep -q 'could not be read' "$T/mb-owner6.out" && ok "make-be.sh: the refusal of an unreadable copy-out parent says so" || no "make-be.sh: the refusal is not clear: $(head -2 "$T/mb-owner6.out")"
+	grep -q 'is root' "$T/mb-owner6.out" && no "make-be.sh: the refusal claims the parent is root although it could not be read" || ok "make-be.sh: the refusal does not claim the parent is root"
+	# the hwprobe command must really be probe: another rc.conf file of the base may set it again
+	mkclone "$T/clone-hwprobe/root"; printf 'cloudbsd_hwprobe_command="apply"\n' > "$T/clone-hwprobe/root/etc/rc.conf.local"
+	env -u DOAS_USER -u SUDO_USER GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/clone-hwprobe/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -D 20990115 -m "$STAGE" > "$T/mb-hwprobe.out" 2>&1
+	expect 1 $? "make-be.sh refuses a base whose rc.conf.local sets the hwprobe command back to apply"
+	grep -q 'cloudbsd_hwprobe_command is' "$T/mb-hwprobe.out" && ok "make-be.sh: the refusal names the hwprobe command" || no "make-be.sh: the refusal is not clear: $(tail -2 "$T/mb-hwprobe.out")"
 	sh "$KIT/make-be.sh" -h > "$T/help.out" 2>&1; grep -q 'NVNT_NO_GIT_CHECK (the work tree is installed)' "$T/help.out" && ok "make-be.sh -h prints the whole header" || no "make-be.sh -h is cut short"
 	grep -q "logs/native-tools-testboot" "$R/etc/rc.conf.d/nvidia_native_tools_testboot" && grep -q "^nvidia_native_tools_testboot_copyout=\"$WORK/logs/native-tools-testboot\"" "$R/etc/rc.conf.d/nvidia_native_tools_testboot" && ok "make-be.sh: the copy-out is under GB10_WORK by default" || no "make-be.sh: copy-out $(grep copyout "$R/etc/rc.conf.d/nvidia_native_tools_testboot")"
 	# the VRAM reserve (make-be.sh -R): written to rc.conf.d (the board default), checked by check-be.sh, malformed refused
@@ -633,7 +1293,7 @@ EOF
 	# (f) the rc one-shot, foreground, stubbed system commands
 	S=$T/stubs; mkdir -p "$S" "$T/dev" "$T/kitroot/static-rows" "$T/mods" "$T/copyout"
 	ln -s /dev/null "$T/dev/nvidia1"; ln -s /dev/null "$T/dev/nvidiactl"; ln -s /dev/null "$T/dev/nvidia-modeset"
-	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1; do cp "$STAGE/$_f" "$T/mods/"; done
+	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do cp "$STAGE/$_f" "$T/mods/"; done
 	cp "$SHAFILE" "$T/kitroot/SHA256.txt"
 	for _f in guard.sh summarize.py gpu-detect.sh; do cp "$KIT/$_f" "$T/kitroot/"; done
 	mkdir -p "$T/kitroot/repo"; ( cd "$repo" && tar -cf - tests/libnvrm SOURCES lib/libnvrm/schema ) | tar -xf - -C "$T/kitroot/repo"
@@ -676,6 +1336,7 @@ esac
 EOF
 	printf '#!/bin/sh\necho "dmesg stub"\n' > "$S/dmesg"; printf '#!/bin/sh\nprintf "t\\tNR\\n"\n' > "$S/bectl"
 	printf '#!/bin/sh\n[ "$*" = "-n linux_enable" ] && echo NO\n' > "$S/sysrc"
+	printf '#!/bin/sh\necho "chown $*" >> "%s/chown.log"\n[ "${RC_CHOWN_FAIL:-0}" = 1 ] && exit 1\nexit 0\n' "$T" > "$S/chown"
 	printf '#!/bin/sh\necho "testboot-return $*" > "%s/returned"\n' "$T" > "$T/return"
 	chmod 0755 "$S"/* "$T/return"
 	rc_env() {
@@ -691,28 +1352,64 @@ EOF
 		    nvidia_native_tools_testboot_work="$1" nvidia_native_tools_testboot_fallback="$1.fallback" \
 		    nvidia_native_tools_testboot_copyout="$2" nvidia_native_tools_testboot_return="$3" \
 		    nvidia_native_tools_testboot_devdir="$T/dev" nvidia_native_tools_testboot_vram=$BOARD_VRAM_BYTES nvidia_native_tools_testboot_vram_reserve=$BOARD_VRAM_RESERVE_MAX_BYTES nvidia_native_tools_testboot_sm=$BOARD_SM \
-		    nvidia_native_tools_testboot_lockfile="${RC_LOCK:-$T/nolock}" nvidia_native_tools_testboot_version="$T/nover" ${RC_EXTRA:-} \
+		    nvidia_native_tools_testboot_lockfile="${RC_LOCK:-$T/nolock}" nvidia_native_tools_testboot_version="$T/nover" nvidia_native_tools_testboot_owner="${RC_OWNER:-}" ${RC_EXTRA:-} \
 		    sh "${RC_SCRIPT:-$KIT/nvidia_native_tools_testboot}" onestart > "$1.out" 2>&1
 		ls -d "$1"/* 2> /dev/null | head -1
 	}
+	RC_OWNER=kitowner
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
 	reap_stub_children
 	grep -q '"row":"deadman","status":"pass","detail":".*stubbed shutdown .* is used' "$RUN/results.jsonl" 2> /dev/null && ok "G3 control: the same stub on a hand run (onestart) is used (decided: a stub cannot reboot)" || no "G3 control: the stub on a hand run was not used: $(grep '"row":"deadman"' "$RUN/results.jsonl" 2> /dev/null)"
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
 		_n=$(st nvrm-info); case $_n in pass | fail) ok "rc one-shot: nvrm-info ran (status $_n; no driver on the host, so fail is expected here)" ;; *) no "rc one-shot: nvrm-info is $_n" ;; esac
+		_n2=$(st nvrm-s2-memory); case $_n2 in pass | fail) ok "rc one-shot: nvrm-s2-memory ran (status $_n2; the memory probe needs the driver, so fail is expected here)" ;; *) no "rc one-shot: nvrm-s2-memory is $_n2" ;; esac
+		_n3=$(st nvrm-s3-channel); case $_n3 in pass | fail) ok "rc one-shot: nvrm-s3-channel ran (status $_n3; the channel probe needs the driver, so fail is expected here)" ;; *) no "rc one-shot: nvrm-s3-channel is $_n3" ;; esac
 		grep -q 'pass .*/mods/nvrm-info is a FreeBSD-branded ELF' "$RUN/nvrm-info.execs" && ok "rc one-shot: the trace checked nvrm-info itself" || no "rc one-shot: nvrm-info is not in nvrm-info.execs"
 		grep -q 'selected_node": "'"$T"'/dev/nvidia1"' "$RUN/gpu-detect.json" && ok "rc one-shot: gpu-detect chose nvidia1 (the BMC and the AMD card excluded)" || no "rc one-shot: gpu-detect did not choose nvidia1"
-		[ "$(cat "$T/returned" 2> /dev/null)" = "testboot-return cloudbsd-rx7600" ] && ok "rc one-shot: testboot-return is called with the normal BE" || no "rc one-shot: testboot-return was not called"
+		[ "$(cat "$T/returned" 2> /dev/null)" = "testboot-return cloudbsd-current" ] && ok "rc one-shot: testboot-return is called with the normal BE" || no "rc one-shot: testboot-return was not called: $(cat "$T/returned" 2> /dev/null)"
 		_c=$T/copyout/$(basename "$RUN")
 		[ -f "$_c/summary.json" ] && ok "rc one-shot: the run is copied out" || no "rc one-shot: the run is not copied out"
 		[ -f "$_c/testboot-return.txt" ] && grep -q 'testboot-return exit' "$_c/rc.log" && ok "rc one-shot: testboot-return.txt and the full rc.log reach the copy-out" || no "rc one-shot: the return record is not in the copy-out"
 		[ "$(stat -f %Lp "$_c")" = 700 ] && ok "rc one-shot: the copy-out directory is 0700" || no "rc one-shot: the copy-out directory is $(stat -f %Lp "$_c")"
+		_m=$(stat -f %Lp "$_c/summary.json" 2> /dev/null)
+		[ "$_m" = 600 ] && ok "rc one-shot: the files of the copy-out are 0600" || no "rc one-shot: summary.json of the copy-out is mode ${_m:-none}, not 0600"
+		grep -q '^chown -h -- kitowner \.$' "$T/chown.log" 2> /dev/null && ok "rc one-shot: the run directory is given to the owner that make-be.sh recorded" || no "rc one-shot: the run directory was not given to the owner: $(head -2 "$T/chown.log" 2> /dev/null)"
+		grep -q '^chown -h -- kitowner summary\.json$' "$T/chown.log" 2> /dev/null && ok "rc one-shot: the files of the run are given to the owner" || no "rc one-shot: the files of the run were not given to the owner: $(head -2 "$T/chown.log" 2> /dev/null)"
 		grep -q '"verdict": "fail"\|"verdict": "incomplete"' "$RUN/summary.json" && ok "rc one-shot: the verdict is not pass with rows that cannot run natively" || no "rc one-shot: verdict $(grep '"verdict"' "$RUN/summary.json")"
+	fi
+	# the hand-over of the copy to the owner, on its own: the function of the rc script, taken out of it
+	sed -n '/^own_run()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/own_run.sh"
+	if [ -s "$T/own_run.sh" ]; then
+		. "$T/own_run.sh"
+		nvidia_native_tools_testboot_owner=$(id -un)
+		# a run directory that is a link in its place: the directory it points at must not be touched
+		mkdir -p "$T/own-target"; chmod 0700 "$T/own-target"
+		ln -s "$T/own-target" "$T/own-link"
+		own_run "$T/own-link" "1:2" > "$T/own-link.out" 2>&1
+		[ "$(stat -f %Lp "$T/own-target")" = 700 ] && ok "own_run: a run directory that is a link is not touched" || no "own_run: the directory the link points at is mode $(stat -f %Lp "$T/own-target")"
+		# a file with more than one link is not given away: it is a file the owner could have planted
+		printf 'planted\n' > "$T/own-sentinel"; chmod 0644 "$T/own-sentinel"
+		mkdir -p "$T/own-dir"; printf 'x\n' > "$T/own-dir/f"; ln "$T/own-sentinel" "$T/own-dir/hard"
+		own_run "$T/own-dir" "$(stat -f '%d:%i' "$T/own-dir")" > "$T/own-dir.out" 2>&1
+		[ "$(stat -f %Lp "$T/own-sentinel")" = 644 ] && ok "own_run: a file with more than one link is left alone" || no "own_run: the planted link was given away: the sentinel is mode $(stat -f %Lp "$T/own-sentinel")"
+		[ "$(stat -f %Lp "$T/own-dir/f")" = 600 ] && ok "own_run: the files of the run are 0600" || no "own_run: the file of the run is mode $(stat -f %Lp "$T/own-dir/f")"
+		[ "$(stat -f %Lp "$T/own-dir")" = 700 ] && ok "own_run: the run directory is 0700" || no "own_run: the run directory is mode $(stat -f %Lp "$T/own-dir")"
+		# a chown that fails: the message names the directory, and the run stays as it is
+		mkdir -m 0700 "$T/own-fail"; printf 'x\n' > "$T/own-fail/f"
+		nvidia_native_tools_testboot_owner=nosuchuserhere
+		own_run "$T/own-fail" "$(stat -f '%d:%i' "$T/own-fail")" > "$T/own-fail.out" 2>&1
+		grep -q "the run directory $T/own-fail could not be given to nosuchuserhere" "$T/own-fail.out" \
+		    && ok "own_run: a failed chown says which directory could not be given" \
+		    || no "own_run: the failed chown is not reported with the directory: $(cat "$T/own-fail.out")"
+		[ "$(stat -f %Lp "$T/own-fail")" = 700 ] && ok "own_run: a failed chown leaves the run directory as it was" || no "own_run: the run directory is mode $(stat -f %Lp "$T/own-fail")"
+		nvidia_native_tools_testboot_owner=$(id -un)
+	else
+		no "own_run: the function of the rc script could not be read"
 	fi
 	# a copy-out path with a symbolic link in it is refused; the run stays in the boot environment
 	mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$T/linked"
@@ -724,6 +1421,17 @@ EOF
 	RUN3=$(rcrun "$T/work3" "$T/copyout3" "$T/return-bad")
 	reap_stub_children
 	grep -q 'bectl activate failed' "$T/copyout3/$(basename "$RUN3")/testboot-return.txt" 2> /dev/null && ok "rc one-shot: a failed return is recorded in the copy-out" || no "rc one-shot: the failed return is not in the copy-out"
+	# the chown of the copy fails: the log says which directory could not be given, and the run stays as it is
+	echo > "$T/loaded"
+	RC_CHOWN_FAIL=1; export RC_CHOWN_FAIL
+	RUN3b=$(rcrun "$T/work3b" "$T/copyout3b" "$T/return")
+	unset RC_CHOWN_FAIL
+	reap_stub_children
+	_c3b=$T/copyout3b/$(basename "$RUN3b")
+	grep -q "the run directory $_c3b could not be given to kitowner" "$RUN3b/rc.log" 2> /dev/null \
+	    && ok "rc one-shot: a failed chown of the copy says which directory could not be given" \
+	    || no "rc one-shot: the failed chown is not reported with the directory: $(grep 'could not be given' "$RUN3b/rc.log" 2> /dev/null)"
+	[ "$(stat -f %Lp "$_c3b" 2> /dev/null)" = 700 ] && ok "rc one-shot: a failed chown leaves the copy as it was" || no "rc one-shot: the copy is mode $(stat -f %Lp "$_c3b" 2> /dev/null)"
 	# a module that does not load: the rows after it are not-run
 	mkdir -p "$T/kfail"; printf '#!/bin/sh\necho "kldload: cannot load $1" >&2\nexit 1\n' > "$T/kfail/kldload"; chmod 0755 "$T/kfail/kldload"
 	echo > "$T/loaded"
@@ -961,8 +1669,11 @@ fi
 for _f in make-be.sh check-be.sh bare-shutdown-check.sh guard.sh nvidia_native_tools_testboot gpu-detect.sh testboot-return; do
 	sh -n "$KIT/$_f" && ok "$_f is valid sh" || no "$_f has a syntax error"
 done
+sh -n "$repo/tests/libnvrm/build-probes.sh" && ok "build-probes.sh is valid sh" || no "build-probes.sh has a syntax error"
 /usr/local/bin/python3 -I -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], \"exec\")" "$KIT/summarize.py" 2> /dev/null && ok "summarize.py compiles" || no "summarize.py does not compile"
 grep -v '^[[:space:]]*#' "$KIT/nvidia_native_tools_testboot" | grep -E 'kldload[^"]*linux|kldunload|bectl activate' > /dev/null && no "the rc script loads a linux module, unloads a module or activates a BE" || ok "the rc script loads no linux module, unloads nothing, activates no BE"
+# the README states the rule of the guard, not the history of the change that made it
+grep -n '2026-11-23' "$repo/README.md" > /dev/null && no "the README tells the history of the guard instead of its rule" || ok "the README states the rule of the guard, not the history of the change"
 
 # G4: run the complete static contract on the real rc, not on either sentinel copy.
 if guard_static "$KIT/nvidia_native_tools_testboot" "$T/g4-static.out"; then

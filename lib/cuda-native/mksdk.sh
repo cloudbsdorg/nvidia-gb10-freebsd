@@ -100,7 +100,9 @@ check_llvm || exit 2
 
 # Time: O(number of required source files).  Space: O(1).
 for src in sdk/include/cuda.h libdevice/libdevice.ll tools/nvptxas.sh \
-    tools/nvfatbin.sh tools/cuda-native-tool-lib.sh libcudart-stub/cudart_stub.c; do
+    tools/cuda-native-tool-lib.sh fatbin/cnfatbin.h fatbin/cnfatbin.c \
+    fatbin/cn_names.h fatbin/cntool.h fatbin/cntool.c fatbin/nvfatbin.c \
+    fatbin/cuda-objdump.c libcudart-stub/cudart_stub.c; do
 	[ -f "$HERE/$src" ] || {
 		echo "mksdk: $HERE/$src is missing; the source tree is incomplete (check out lib/cuda-native again)" >&2
 		exit 1
@@ -144,7 +146,7 @@ mkdir "$NEW/bin" "$NEW/lib64" "$NEW/nvvm" "$NEW/nvvm/libdevice" || exit 1
 mkdir -p "$NEW/share/cuda-native/schema" || exit 1
 cp -R "$HERE/sdk/include" "$NEW/include" || exit 1
 # Time: O(number of tools).  Space: O(1).
-for tool in nvptxas nvfatbin; do
+for tool in nvptxas; do
 	cp "$HERE/tools/$tool.sh" "$NEW/bin/$tool" || exit 1
 	chmod 755 "$NEW/bin/$tool" || exit 1
 done
@@ -160,7 +162,40 @@ substitute() {
 substitute "$HERE/tools/cuda-native-tool-lib.sh" \
     "$NEW/share/cuda-native/cuda-native-tool-lib.sh" || exit 1
 cp "$NEW/bin/nvptxas" "$NEW/bin/ptxas" || exit 1
+
+# The C tools: our fatbin container writer (nvfatbin, also installed as
+# fatbinary) and its reader (cuda-objdump).  They are built with the base
+# compiler and the base linker, so the tree carries no compiler of its own.
+# Time: O(sources + total bytes).  Space: O(total bytes).
+BUILD=$NEW/build
+mkdir -p "$BUILD" || exit 1
+for src in fatbin/cnfatbin.c fatbin/cntool.c fatbin/nvfatbin.c \
+    fatbin/cuda-objdump.c; do
+	base=${src#fatbin/}
+	substitute "$HERE/$src" "$BUILD/$base" || exit 1
+done
+cp "$HERE/fatbin/cnfatbin.h" "$BUILD/cnfatbin.h" || exit 1
+cp "$HERE/fatbin/cn_names.h" "$BUILD/cn_names.h" || exit 1
+cp "$HERE/fatbin/cntool.h" "$BUILD/cntool.h" || exit 1
+# The schema cuda-objdump prints with --schema, as a C string.
+awk '{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); \
+    printf "\t\"%s\\n\"\n", $0 }' \
+    "$HERE/schema/cuda-objdump-1.schema.json" >"$BUILD/schema.inc" || exit 1
+CC=${CC:-cc}
+command -v "$CC" >/dev/null 2>&1 || {
+	echo "mksdk: no C compiler ($CC) in PATH; install the base system compiler" >&2
+	exit 1
+}
+"$CC" -std=gnu11 -O2 -Wall -Wextra -Werror -fuse-ld=lld -I"$BUILD" \
+    -o "$NEW/bin/nvfatbin" "$BUILD/nvfatbin.c" "$BUILD/cnfatbin.c" \
+    "$BUILD/cntool.c" -lmd || exit 1
+"$CC" -std=gnu11 -O2 -Wall -Wextra -Werror -fuse-ld=lld -I"$BUILD" \
+    -o "$NEW/bin/cuda-objdump" "$BUILD/cuda-objdump.c" "$BUILD/cnfatbin.c" \
+    "$BUILD/cntool.c" -lelf -lmd || exit 1
+chmod 755 "$NEW/bin/nvfatbin" "$NEW/bin/cuda-objdump" || exit 1
 cp "$NEW/bin/nvfatbin" "$NEW/bin/fatbinary" || exit 1
+chmod 755 "$NEW/bin/fatbinary" || exit 1
+rm -rf -- "$BUILD"
 # Time: O(number of schemas).  Space: O(1).
 for schema in "$HERE"/schema/*; do
 	[ -f "$schema" ] || {
@@ -176,7 +211,7 @@ printf '{"cuda":{"name":"cuda-native","version":"%d.%d.%d"},"cuda_native":{"vers
     "$LLVM/bin/llvm-as" -o "$NEW/nvvm/libdevice/libdevice.10.bc" || exit 1
 "$LLVM/bin/clang" -std=c11 -O2 -fPIC -Wall -Wextra -Werror -shared \
     -fuse-ld=lld -Wl,-soname,libcudart.so.13 -o "$NEW/lib64/libcudart.so.13" \
-    "$HERE/libcudart-stub/cudart_stub.c" || exit 1
+    "$HERE/libcudart-stub/cudart_stub.c" "$HERE/fatbin/cnfatbin.c" -lmd || exit 1
 ln -s libcudart.so.13 "$NEW/lib64/libcudart.so" || exit 1
 
 # mktemp made NEW mode 0700; give the tree the usual directory mode.

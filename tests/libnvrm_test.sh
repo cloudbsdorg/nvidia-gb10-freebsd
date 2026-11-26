@@ -105,8 +105,8 @@ rc=$?
 expect_rc "drift mutant: the build fails with 'schema drift'" $rc 0
 
 # ---- unit tests with coverage ---------------------------------------------
-CINC="-pthread -I$L -I$L/include -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
-LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
+CINC="-pthread -I$L -I$L/include -I$L/../cuda-native/fatbin -I$T -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include"
+LIBSRC="$L/nvrm.c $L/nvrm_cap.c $L/nvrm_fake.c $L/nvrm_fields.c $L/nvrm_json.c $L/nvrm_names.c $L/nvrm_table.c $L/nvrm_rm.c $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c $L/nvrm_rm_mem.c $L/nvrm_rm_chan.c $L/nvrm_chan.c $L/nvrm_fake_chan.c"
 mkdir -p "$W/cov"
 cc $CINC -fprofile-instr-generate -fcoverage-mapping -o "$W/cov/core_test" "$T/core_test.c" $LIBSRC >"$W/cc1.log" 2>&1
 rc=$?
@@ -256,8 +256,8 @@ sed -i '' 's/text_version(nvrm_schema_version());/printf("0.0");/' "$MD/nvrm-inf
 if cmp -s "$MD/nvrm-info.c" "$L/nvrm-info/nvrm-info.c"; then
 	bad "mutant schema-text-source: the edit did not apply"
 else
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
-	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_rm_chan.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
+	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -I"$L/../cuda-native/fatbin" -std=gnu11 -w -DNVRM_FAULT_INJECT "-DNVRM_INFO_SOURCE=\"$MD/nvrm-info.c\"" -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/info_test.c" $MUTSRC >"$MD/cc.log" 2>&1
 	rc=$?
 	if [ $rc -ne 0 ]; then
 		bad "mutant schema-text-source: does not compile"
@@ -298,9 +298,9 @@ expect_rc "RM backend: 100% line and branch coverage by the scripted kernel" $rc
 (cd "$W/cov" && llvm-cov export ./mem_test -instr-profile=mem.profdata --summary-only $L/nvrm_va.c $L/nvrm_mem.c $L/nvrm_owner.c $L/nvrm_fake_mem.c | python3 -I "$T/coverage_gate.py" nvrm_va.c nvrm_mem.c nvrm_owner.c nvrm_fake_mem.c)
 rc=$?
 expect_rc "memory core, VA allocator and fake memory model: 100% line and branch coverage" $rc 0
-(cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c)
+(cd "$W/cov" && llvm-cov export ./rm_mem_test -instr-profile=rmmem.profdata --summary-only $L/nvrm_rm_mem.c $L/nvrm_rm_chan.c | python3 -I "$T/coverage_gate.py" nvrm_rm_mem.c nvrm_rm_chan.c)
 rc=$?
-expect_rc "RM memory backend: 100% line and branch coverage by the scripted kernel" $rc 0
+expect_rc "RM memory backend and RM channel backend: 100% line and branch coverage by the scripted kernel" $rc 0
 (cd "$W/cov" && llvm-profdata merge -o chan.profdata chan.*.profraw && llvm-cov export ./chan_test -instr-profile=chan.profdata --summary-only $L/nvrm_chan.c $L/nvrm_fake_chan.c | python3 -I "$T/coverage_gate.py" nvrm_chan.c nvrm_fake_chan.c)
 rc=$?
 expect_rc "channel core and fake GPFIFO: 100% line and branch coverage" $rc 0
@@ -334,9 +334,9 @@ mutant() {	# mutant NAME FILE SED-EXPR TEST(core_test|rm_test|version_test)
 	rm -rf "$MD"; mkdir -p "$MD"; cp "$L"/*.c "$L"/*.h "$MD"/; cp -R "$L/include" "$MD/include"
 	sed -i '' "$3" "$MD/$2"
 	if cmp -s "$MD/$2" "$L/$2"; then bad "mutant $1: the edit did not apply"; return; fi
-	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
+	MUTSRC="$MD/nvrm.c $MD/nvrm_cap.c $MD/nvrm_fake.c $MD/nvrm_fields.c $MD/nvrm_json.c $MD/nvrm_names.c $MD/nvrm_table.c $MD/nvrm_rm.c $MD/nvrm_va.c $MD/nvrm_mem.c $MD/nvrm_owner.c $MD/nvrm_fake_mem.c $MD/nvrm_rm_mem.c $MD/nvrm_rm_chan.c $MD/nvrm_chan.c $MD/nvrm_fake_chan.c"
 	if [ "$4" = version_test ]; then MUTSRC=; fi
-	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
+	cc -pthread -I"$MD" -I"$MD/include" -I"$T" -I"$L/../cuda-native/fatbin" -std=gnu11 -w -DNVRM_FAULT_INJECT -I$OGKM/src/common/sdk/nvidia/inc -I$OGKM/src/common/sdk/nvidia/inc/ctrl -I$OGKM/src/nvidia/arch/nvalloc/unix/include -o "$MD/t" "$T/$4.c" $MUTSRC >"$MD/cc.log" 2>&1 || { bad "mutant $1: does not compile"; return; }
 	"$MD/t" >/dev/null 2>&1
 	if [ $? -ne 0 ]; then ok "mutant killed: $1"; else bad "mutant SURVIVED: $1"; fi
 }
@@ -417,7 +417,7 @@ mutant fake-exported nvrm_fake_mem.c 's/ || !o->exported//' mem_test
 mutant fake-spare-limit nvrm_fake_mem.c 's/	    export_spare_limit(\*fd);/	    NVRM_OK;/' mem_test
 mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
 mutant fake-obj-leak nvrm_fake_mem.c '/^fk_mem_free/,/^}/s/		obj_unref(m->o);//' mem_test
-mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : status_fail(err, errlen,$/	return (1 ? NVRM_OK : status_fail(err, errlen,/' rm_mem_test
+mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,$/	return (1 ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,/' rm_mem_test
 mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got;/out->page_size = a->page_size;/' rm_mem_test
 mutant wb-default nvrm_rm_mem.c 's/(void)import_page_size(surface\.attr, &got);/got = a->page_size;/' rm_mem_test
 mutant rm-huge-import nvrm_rm_mem.c 's/		\*ps = 2097152;/		*ps = 536870912;/' rm_mem_test
@@ -487,6 +487,16 @@ mutant chan-sleep-past-deadline nvrm_chan.c 's/return (left < nvrm_chan_slice_ns
 mutant chan-set-object-any nvrm_fake_chan.c 's/if (data != 0 \&\& data != b->granted\[subch\]) {/if (0) {/' chan_test
 mutant chan-ring-writable nvrm_chan.c 's/	    .flags = NVRM_MAP_READ_ONLY };/	    .flags = 0 };/' chan_test
 mutant chan-stats-v11 nvrm_mem.c 's/if (want != sizeof(full) \&\& want != v11)/if (want != sizeof(full))/' mem_test
+# the channel mutants pin: the ring space rule, the ordered submit queue, the
+# release segment reuse, a refused destroy kept until close and forgotten at
+# close, the fork child that makes no backend call, the fake engine running
+# one process's channels only, a backend without forget refused, and the
+# client stats size rule
+mutant chan-segment-reuse nvrm_chan.c 's/if (ch->slot_point\[slot\] > ch->completed)/if (0)/' chan_test
+mutant chan-held-forget nvrm_chan.c 's/cl->ops->chan->forget(ch->b);//' chan_test
+mutant chan-foreign-run nvrm_fake_chan.c 's/if (!nvrm_owner_is_me(\&b->core->cl->owner))/if (0)/' chan_test
+mutant chan-forget-required nvrm_chan.c 's/if (cl->ops->chan->destroy == NULL || cl->ops->chan->forget == NULL)/if (0)/' chan_test
+mutant chan-stats-zero-size nvrm_mem.c 's/size_t want = st->size == 0 ? sizeof(full) : st->size;/size_t want = st->size == 0 ? v11 : st->size;/' mem_test
 
 # ---- JSON modes against the schema --------------------------------------
 export NVRM_BACKEND=fake
@@ -1116,10 +1126,51 @@ expect_rc "mem_probe reports every step on each GPU as PASS${_missing:+ (missing
 NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/mem_probe" >"$W/probe-nogpu.out" 2>&1
 rc=$?
 if [ $rc -eq 101 ] && grep -q '^FAIL enumerate: no GPU' "$W/probe-nogpu.out"; then ok "mem_probe plant: no GPU is a FAIL (rc 101), never a pass"; else bad "mem_probe plant: no GPU gave rc=$rc"; fi
+
+# the channel probe of the boot kit, built against the library under test and
+# run on the fake software GPU (on the test boot it runs on the driver).  The
+# RM backend of main has no channel backend yet, so this is the only place
+# where the channel calls are exercised: the probe itself is the proof on the
+# card.
+cc -I"$L/include" -std=gnu11 -Wall -Wextra -Werror -o "$W/chan_probe" "$T/chan_probe.c" -L"$O/lib" -lnvrm -lthr >"$W/cc-chan.log" 2>&1
+rc=$?
+expect_rc "chan_probe builds against libnvrm (-Werror)" $rc 0
+NVRM_BACKEND=fake NVRM_FAKE_PROFILE=discrete,unified "$W/chan_probe" >"$W/chan.out" 2>&1
+rc=$?
+expect_rc "chan_probe passes every step on two fake GPUs" $rc 0
+_missing=
+for g in 0 1; do for s in create release latency stress isolation cleanup; do
+	grep -q "^PASS gpu $g ([^)]*) $s: " "$W/chan.out" || _missing="$_missing gpu$g:$s"
+done; done
+[ -z "$_missing" ] && ! grep -q '^FAIL' "$W/chan.out"; rc=$?
+expect_rc "chan_probe reports every step on each GPU as PASS${_missing:+ (missing:$_missing)}" $rc 0
+[ $rc -eq 0 ] || sed -n 1,40p "$W/chan.out"
+grep -q '^INFO gpu 0 .* latency_ns: p50 .* ns, p99 .* ns, max .* ns' "$W/chan.out"; rc=$?
+expect_rc "chan_probe reports the latency percentiles" $rc 0
+grep -q '^PASS gpu 0 .* isolation: the second channel died' "$W/chan.out"; rc=$?
+expect_rc "chan_probe kills the channel of the bad push" $rc 0
+NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/chan_probe" >"$W/chan-nogpu.out" 2>&1
+rc=$?
+if [ $rc -eq 101 ] && grep -q '^FAIL enumerate: no GPU' "$W/chan-nogpu.out"; then ok "chan_probe plant: no GPU is a FAIL (rc 101), never a pass"; else bad "chan_probe plant: no GPU gave rc=$rc"; fi
+NVRM_BACKEND=fake NVRM_FAKE_PROFILE=discrete,unified "$W/chan_probe" --json >"$W/chan.json" 2>&1
+rc=$?
+expect_rc "chan_probe --json prints one document" $rc 0
+python3 -I "$T/schema_validate.py" "$T/schema/chan-probe-1.schema.json" "$W/chan.json" >"$W/chan-schema.log" 2>&1
+rc=$?
+expect_rc "chan_probe --json validates against the schema" $rc 0
+[ $rc -eq 0 ] || sed -n 1,20p "$W/chan-schema.log"
+_gpus=$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["gpus"]))' "$W/chan.json" 2>/dev/null)
+[ "$_gpus" = 2 ]; rc=$?
+expect_rc "chan_probe --json holds one entry per GPU" $rc 0
 mkdir -p "$W/bootm"
-BOOT_MEM_PROBE="$W/mem_probe" NVRM_FAKE_PROFILE=discrete BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootm" "$INFO" "$SCHEMA" >/dev/null 2>&1
+BOOT_MEM_PROBE="$W/mem_probe" BOOT_CHAN_PROBE="$W/chan_probe" NVRM_FAKE_PROFILE=discrete BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootm" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q '^PASS mem_probe: every memory step passed on every GPU' "$W/bootm/results.txt" && grep -q '^PASS gpu 0 .* nothing_left' "$W/bootm/results.txt" && [ -s "$W/bootm/mem_probe.txt" ]; rc=$?
 expect_rc "boot script: runs the memory probe and records its rows" $rc 0
+grep -q '^PASS chan_probe: every channel step passed on every GPU' "$W/bootm/results.txt" && grep -q '^PASS gpu 0 .* isolation:' "$W/bootm/results.txt" && [ -s "$W/bootm/chan_probe.txt" ]; rc=$?
+expect_rc "boot script: runs the channel probe and records its rows" $rc 0
+python3 -I "$T/schema_validate.py" "$T/schema/chan-probe-1.schema.json" "$W/bootm/chan_probe.json" >"$W/bootm-chan-schema.log" 2>&1
+rc=$?
+expect_rc "boot script: the JSON document of the channel probe validates against the schema" $rc 0
 mkdir -p "$W/boot"
 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boot" "$INFO" "$SCHEMA" >/dev/null 2>&1
 rc=$?
@@ -1133,16 +1184,25 @@ rc=$?
 expect_rc "boot script: validates --json and --jsonl against the schema" $rc 0
 grep -q '^FAIL memory probe missing' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: a kit without the memory probe FAILs" $rc 0
+grep -q '^FAIL channel probe missing' "$W/boot/results.txt"; rc=$?
+expect_rc "boot script: a kit without the channel probe FAILs" $rc 0
 mkdir -p "$W/boots1"
 BOOT_S1_ONLY=1 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boots1" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q '^INFO memory probe not run: BOOT_S1_ONLY=1' "$W/boots1/results.txt" && ! grep -q '^FAIL memory probe' "$W/boots1/results.txt"; rc=$?
 expect_rc "boot script: BOOT_S1_ONLY=1 records the opt-out instead" $rc 0
+grep -q '^INFO channel probe not run: BOOT_S1_ONLY=1' "$W/boots1/results.txt" && ! grep -q '^FAIL channel probe' "$W/boots1/results.txt"; rc=$?
+expect_rc "boot script: BOOT_S1_ONLY=1 records the opt-out of the channel probe too" $rc 0
 mkdir -p "$W/bootf"
 BOOT_MEM_PROBE=/usr/bin/false BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootf" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q "^FAIL mem_probe exited 1 ($W/bootf/mem_probe.txt)" "$W/bootf/results.txt"; rc=$?
 expect_rc "boot script: a failing probe is a FAIL naming its output file" $rc 0
+mkdir -p "$W/bootcf"
+BOOT_CHAN_PROBE=/usr/bin/false BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootcf" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q "^FAIL chan_probe exited 1 ($W/bootcf/chan_probe.txt)" "$W/bootcf/results.txt"; rc=$?
+expect_rc "boot script: a failing channel probe is a FAIL naming its output file" $rc 0
 grep -q '^PASS GPU 0 sm_count' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: compares GPU values" $rc 0
+
 
 # the version has one source: a header naming another version fails the build
 M=$W/mut-version

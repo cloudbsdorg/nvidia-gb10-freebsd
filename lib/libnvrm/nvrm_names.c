@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "cn_names.h"
 #include "nvrm_internal.h"
 
 static const char *const error_text[] = {
@@ -72,42 +73,48 @@ nvrm_error_id(int error)
 	return (error_ids[error]);
 }
 
-static const struct { const char *id, *text; } reasons[NVRM_R__COUNT] = {
-	[NVRM_R_NONE] = { "available", "the value is available" },
-	[NVRM_R_NOT_QUERIED] = { "not_queried", "the value was not queried" },
-	[NVRM_R_RM_FAILED] = { "rm_control_failed",
-	    "the RM control returned an error" },
-	[NVRM_R_RM_UNSUPPORTED] = { "rm_not_supported",
-	    "the RM reports the control is not supported on this GPU" },
-	[NVRM_R_OS_NOT_REPORTED] = { "os_not_reported",
-	    "the OS layer does not report this value" },
-	[NVRM_R_FAMILY_UNKNOWN] = { "family_unknown",
-	    "the GPU is not in the generation table" },
-	[NVRM_R_INPUT_MISSING] = { "input_unavailable",
-	    "a value this one is computed from is unavailable" },
-	[NVRM_R_NO_NUMA] = { "no_numa_node",
-	    "the GPU is not attached to a NUMA node" },
-	[NVRM_R_BACKEND_NONE] = { "backend_does_not_provide",
-	    "the backend does not provide this value" },
-	[NVRM_R_CLASS_ABSENT] = { "class_absent",
-	    "the GPU does not list the class" },
-	[NVRM_R_OS_CALL_FAILED] = { "os_call_failed",
-	    "the system call to the driver failed" },
-	[NVRM_R_VALUE_UNUSABLE] = { "value_unusable",
+/*
+ * The reason table: the short name of a reason and the text that explains
+ * it.  The shape of an entry is the one of cn_names.h, which the fatbin
+ * reader's table of error codes uses too.
+ */
+static const struct cn_name_entry reasons[NVRM_R__COUNT] = {
+	CN_NAME_ENTRY(NVRM_R_NONE, "available", "the value is available"),
+	CN_NAME_ENTRY(NVRM_R_NOT_QUERIED, "not_queried",
+	    "the value was not queried"),
+	CN_NAME_ENTRY(NVRM_R_RM_FAILED, "rm_control_failed",
+	    "the RM control returned an error"),
+	CN_NAME_ENTRY(NVRM_R_RM_UNSUPPORTED, "rm_not_supported",
+	    "the RM reports the control is not supported on this GPU"),
+	CN_NAME_ENTRY(NVRM_R_OS_NOT_REPORTED, "os_not_reported",
+	    "the OS layer does not report this value"),
+	CN_NAME_ENTRY(NVRM_R_FAMILY_UNKNOWN, "family_unknown",
+	    "the GPU is not in the generation table"),
+	CN_NAME_ENTRY(NVRM_R_INPUT_MISSING, "input_unavailable",
+	    "a value this one is computed from is unavailable"),
+	CN_NAME_ENTRY(NVRM_R_NO_NUMA, "no_numa_node",
+	    "the GPU is not attached to a NUMA node"),
+	CN_NAME_ENTRY(NVRM_R_BACKEND_NONE, "backend_does_not_provide",
+	    "the backend does not provide this value"),
+	CN_NAME_ENTRY(NVRM_R_CLASS_ABSENT, "class_absent",
+	    "the GPU does not list the class"),
+	CN_NAME_ENTRY(NVRM_R_OS_CALL_FAILED, "os_call_failed",
+	    "the system call to the driver failed"),
+	CN_NAME_ENTRY(NVRM_R_VALUE_UNUSABLE, "value_unusable",
 	    "the RM answered, but the answer failed a consistency check (it "
-	    "names another device, or exceeds what the library can count)" },
-	[NVRM_R_FAMILY_NO_CLASS] = { "family_has_no_class",
-	    "the GPU family is known and has no class of this kind" },
-	[NVRM_R_VERSION_UNPARSED] = { "version_unparsed",
-	    "the version string has no readable numeric scheme" },
-	[NVRM_R_VERSION_INCONSISTENT] = { "version_inconsistent",
-	    "the kernel module version sysctls disagree with its version string" },
+	    "names another device, or exceeds what the library can count)"),
+	CN_NAME_ENTRY(NVRM_R_FAMILY_NO_CLASS, "family_has_no_class",
+	    "the GPU family is known and has no class of this kind"),
+	CN_NAME_ENTRY(NVRM_R_VERSION_UNPARSED, "version_unparsed",
+	    "the version string has no readable numeric scheme"),
+	CN_NAME_ENTRY(NVRM_R_VERSION_INCONSISTENT, "version_inconsistent",
+	    "the kernel module version sysctls disagree with its version string"),
 };
 
 const char *
 nvrm_reason_id(int reason)
 {
-	if (reason < 0 || reason >= NVRM_R__COUNT)
+	if (!cn_name_code_valid(reason, NVRM_R__COUNT))
 		return ("unknown");
 	return (reasons[reason].id);
 }
@@ -115,7 +122,7 @@ nvrm_reason_id(int reason)
 const char *
 nvrm_reason_text(int reason)
 {
-	if (reason < 0 || reason >= NVRM_R__COUNT)
+	if (!cn_name_code_valid(reason, NVRM_R__COUNT))
 		return ("unknown reason");
 	return (reasons[reason].text);
 }

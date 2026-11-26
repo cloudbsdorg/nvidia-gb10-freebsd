@@ -143,6 +143,19 @@ was built for; otherwise it refuses to run and says which version it found.
 .It fake
 Synthetic data for tests and for machines without a GPU.
 .El
+.Pp
+What the backends provide:
+.Bl -tag -width "channels" -compact
+.It channels
+.Xr nvrm_chan 3
+work:
+the
+.Li rm
+backend has it, yes (GB20x and later);
+the
+.Li fake
+backend has it, yes (everywhere).
+.El
 .Ss Capsicum
 The default is least privilege.
 After enumeration the descriptors are limited to the ioctl and event rights

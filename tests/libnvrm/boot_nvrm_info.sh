@@ -77,8 +77,25 @@
 # probe is a FAIL; only BOOT_S1_ONLY=1 (a discovery-only kit) turns that into
 # an INFO line, and the run records that it was set.
 #
+# Channels (Track #2437): BOOT_CHAN_PROBE names the kit's chan_probe binary
+# (tests/libnvrm/chan_probe.c, linked to the libnvrm under test; default: a
+# chan_probe next to this script).  It runs after the memory probe, on every
+# GPU the library finds: a compute GPFIFO channel, a semaphore release the GPU
+# writes into a memory object of the probe (the payload is read back), the
+# latency of a thousand releases, a stress loop, a bad push that kills one
+# channel while the other one keeps working, and the cleanup.  Its PASS, FAIL
+# and INFO lines join results.txt, its whole output is OUTDIR/chan_probe.txt
+# and its --json document is OUTDIR/chan_probe.json.  BOOT_CHAN_STRESS is how
+# many releases the stress loop pushes (default: 100000) and
+# BOOT_CHAN_STRESS_SECONDS how long it may run (default: 300); the probe
+# stops early when the time is up.  A missing probe is a FAIL; only
+# BOOT_S1_ONLY=1 (a discovery-only kit) turns that into an INFO line, and the
+# run records that it was set.
+#
 # usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R \
-#            BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
+#            BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] [BOOT_CHAN_PROBE=path] \
+#            [BOOT_CHAN_STRESS=N] [BOOT_CHAN_STRESS_SECONDS=S] \
+#            boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
 # Writes OUTDIR/results.txt (one PASS/FAIL/INFO line per check, last line
 # "== done rc=N"), OUTDIR/nvrm-info.json, nvrm-info.jsonl, sysctl.txt,
 # pciconf.txt, dmesg-nvrm.txt, kldstat.txt, kldstat-after.txt.  Exit status:
@@ -197,6 +214,24 @@ elif [ "${BOOT_S1_ONLY:-}" = 1 ]; then
 	info "memory probe not run: BOOT_S1_ONLY=1 (a discovery-only kit)"
 else
 	fail "memory probe missing: $PROBE is not an executable (set BOOT_MEM_PROBE, or BOOT_S1_ONLY=1 for a discovery-only kit)"
+fi
+
+# the channel calls on the real driver
+BOOT_CHAN_STRESS=${BOOT_CHAN_STRESS:-100000}
+BOOT_CHAN_STRESS_SECONDS=${BOOT_CHAN_STRESS_SECONDS:-300}
+export BOOT_CHAN_STRESS BOOT_CHAN_STRESS_SECONDS
+CPROBE=${BOOT_CHAN_PROBE:-$HERE/chan_probe}
+if [ -x "$CPROBE" ]; then
+	"$CPROBE" >"$OUT/chan_probe.txt" 2>&1
+	rc=$?
+	grep -E '^(PASS|FAIL|INFO) ' "$OUT/chan_probe.txt" >>"$R"
+	"$CPROBE" --json >"$OUT/chan_probe.json" 2>&1
+	if [ $rc -eq 0 ]; then pass "chan_probe: every channel step passed on every GPU"
+	else fail "chan_probe exited $rc ($OUT/chan_probe.txt)"; fi
+elif [ "${BOOT_S1_ONLY:-}" = 1 ]; then
+	info "channel probe not run: BOOT_S1_ONLY=1 (a discovery-only kit)"
+else
+	fail "channel probe missing: $CPROBE is not an executable (set BOOT_CHAN_PROBE, or BOOT_S1_ONLY=1 for a discovery-only kit)"
 fi
 
 # the Linux layer again, after the last nvrm-info run (and the memory probe)

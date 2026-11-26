@@ -1,12 +1,12 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 22, 2026
+.Dd November 23, 2026
 .Dt NVFATBIN 1
 .Os
 .Sh NAME
 .Nm nvfatbin ,
 .Nm fatbinary
-.Nd wrap device payloads in the cuda-native fatbinary stub
+.Nd collect CUDA device images into one cuda-native fatbin container
 .Sh SYNOPSIS
 .Nm
 .Op Fl 64
@@ -22,32 +22,68 @@
 .Nm
 and its installed alias
 .Nm fatbinary
-are the same POSIX shell program.
-They accept the option subset that clang 23 emits when it collects CUDA device
+are the same program.
+The usage line and every diagnostic name the program the way it was invoked:
+the basename of
+.Pa argv[0] ,
+so
+.Nm fatbinary
+says
+.Ql fatbinary .
+The JSON and the trace records keep the canonical name
+.Ql nvfatbin .
+It accepts the option subset that clang 23 emits when it collects CUDA device
 images.
 At least one
 .Fl -image3
 is required.
-Images are retained in argument order; each kind is
+.Pp
+The program writes one container that holds every image in argument order.
+The container is LLVM's
+.Em OffloadBinary
+format, version 2; its fields, its string keys and the checks a reader must
+do are described in
+.Xr nvfatbin 5 .
+No NVIDIA fatbinary or cubin format is read, parsed or imitated.
+.Pp
+The container is at most 16 MiB and holds at most 4096 members.
+A container that would be larger is refused, because the runtime stub
+refuses one that is, and no output is left at the requested path.
+.Pp
+A file that cannot be read says why: it is not there, the permission is
+refused, the input is a directory, the input is empty, the read failed, or
+the host is out of memory.
+.Pp
+Each image is one of
 .Cm elf
 or
 .Cm ptx ,
-and each SM value is a decimal number.
+and each SM value is a decimal number with an optional
+.Cm a
+or
+.Cm f
+suffix, for example
+.Cm 120
+or
+.Cm 121a .
+An
+.Cm elf
+image is a cubin: it must start with the cuda-native cubin magic
+.Li CUDA-NATIVE-STUB-CUBIN 1 ,
+and any other input is refused, so no foreign binary is ever bundled.
+A
+.Cm ptx
+image is kept byte for byte.
 .Pp
-The output starts with the line
-.Li CUDA-NATIVE-STUB-FATBIN 1 .
-One metadata line per input follows:
-.Bd -literal -offset indent
-member kind=KIND sm=N size=BYTES sha256=HEX
-.Ed
-A line containing only
-.Li ---
-separates the metadata from the complete member payloads, which follow in
-argument order with no added bytes.
-Each input is copied once into the private build directory; its size, SHA-256
-and appended payload all come from that copy, so they describe the same bytes.
+Every member records the triple
+.Pa nvptx64-nvidia-cuda ,
+its architecture, its format and the SHA-256 of its image.
+.Pp
 The output is built privately in its destination directory and renamed into
-place only after every image has been read.
+place only after every image has been read, so a failed image read leaves no
+output at the requested path.
+A trace that cannot be written is a different case: the container is already
+in place, and the run ends with a diagnostic and exit status 1.
 .Pp
 .Fl 64
 and
@@ -64,7 +100,10 @@ refused instead of being ignored.
 .Pp
 .Fl -version
 prints
-.Ql nvfatbin (cuda-native) VERSION stub .
+.Ql NAME (cuda-native) VERSION ,
+where
+.Ql NAME
+is the name the program was invoked as.
 With
 .Fl -json
 it prints one JSON object containing
@@ -97,7 +136,13 @@ The record has
 and
 .Dv stub
 fields.
-The image array records each kind, numeric SM value and input path in order.
+The image array records each kind, numeric SM value, architecture and input
+path in order.
+The architecture is the name the container records for the image, with its
+suffix: sm_120 , sm_121a .
+The field
+.Dv arch
+is not required by the schema, so a record without it is still valid.
 The record is validated by
 .Pa share/cuda-native/schema/nvfatbin-trace-1.schema.json
 in the SDK tree.
@@ -108,24 +153,47 @@ every emitted string parseable as UTF-8 JSON.
 .El
 .Sh EXIT STATUS
 .Ex -std
-In detail, exit status 0 means that the stub container was written, 2 reports
+In detail, exit status 0 means that the container was written, 2 reports
 usage or an unsupported argument, and 1 reports an input, output or trace
 error.
 A failed image read leaves no output at the requested path.
+A failed trace write leaves the container at the requested path.
 .Sh EXAMPLES
-Wrap one ELF-labelled payload and its PTX source:
+Collect one cubin and its PTX source:
 .Bd -literal -offset indent
 fatbinary -64 --create kernel.fatbin \e
-    --image3=kind=elf,sm=121,file=kernel.o \e
+    --image3=kind=elf,sm=121,file=kernel.cubin \e
     --image3=kind=ptx,sm=121,file=kernel.ptx
 .Ed
+.Pp
+List what the container holds:
+.Bd -literal -offset indent
+cuda-objdump kernel.fatbin
+.Ed
 .Sh SEE ALSO
+.Xr cuda-objdump 1 ,
 .Xr nvptxas 1 ,
 .Xr libcudart-stub 3 ,
+.Xr nvfatbin 5 ,
 .Xr cuda-native-toolchain 7
 .Sh CAVEATS
-The container is a cuda-native diagnostic format, not an NVIDIA fatbinary.
+The container is a cuda-native format built on LLVM's layout.
+It is not an NVIDIA fatbinary and no NVIDIA fatbinary tool reads it.
 It neither assembles PTX nor makes device code executable.
-The stub runtime validates and counts its metadata for host-side registration,
-but never registers its contents with a GPU.
+The stub runtime validates and counts the members of the container for
+host-side registration, but never registers its contents with a GPU.
 No NVIDIA CUDA toolkit file is used.
+.Pp
+The device image of a
+.Fl -emit-llvm
+compile is an LLVM IR file, not a cubin, and it is not bundled: only our own
+cubins are, so a foreign binary is never carried in a container.
+A
+.Fl -emit-llvm
+compile therefore fails with
+.Ql not a cuda-native cubin .
+Use
+.Fl -c
+or
+.Fl -o
+to build an object or an executable instead.

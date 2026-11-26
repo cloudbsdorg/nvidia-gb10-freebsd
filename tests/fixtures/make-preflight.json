@@ -17,7 +17,7 @@
     {"index": 10, "name": "tool:gmake", "state": "ok", "available": true, "reason": "/usr/local/bin/gmake", "fix": ""},
     {"index": 11, "name": "tool:ld", "state": "ok", "available": true, "reason": "/usr/bin/ld is LLD", "fix": ""},
     {"index": 12, "name": "sources", "state": "ok", "available": true, "reason": "/workspace/nvidia-gb10-freebsd/work/sources", "fix": ""},
-    {"index": 13, "name": "licence", "state": "missing", "available": false, "reason": "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it", "fix": "make install-prereqs ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install-prereqs on a terminal and answer"},
+    {"index": 13, "name": "licence", "state": "missing", "available": false, "reason": "NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it; to accept every licence instead run make install-prereqs ACCEPT_ALL_LICENSES=1, or run make install-prereqs on a terminal and answer the licence question", "fix": "make install-prereqs ACCEPT_NVIDIA_LICENSE=1"},
     {"index": 14, "name": "sysdir", "state": "missing", "available": false, "reason": "no kernel sources at /workspace/nvidia-gb10-freebsd/work/src/sys", "fix": "make install-prereqs"},
     {"index": 15, "name": "bsdsrctop", "state": "missing", "available": false, "reason": "no FreeBSD source top (include/ and sys/) at /workspace/nvidia-gb10-freebsd/work/src", "fix": "make install-prereqs, or BSDSRCTOP="},
     {"index": 16, "name": "drmkmoddir", "state": "missing", "available": false, "reason": "no drm-kmod sources at /workspace/nvidia-gb10-freebsd/work/drm-kmod", "fix": "make install-prereqs, or DRMKMODDIR= the tree of the installed drm.ko"},

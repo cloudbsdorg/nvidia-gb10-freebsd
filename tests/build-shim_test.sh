@@ -81,6 +81,10 @@ set -eu
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
+# Pin the aarch64 path so these cases stay valid on amd64 hosts (Track #2475).
+GB10_TEST_HOOKS=1
+GB10_TEST_ARCH=aarch64
+export GB10_TEST_HOOKS GB10_TEST_ARCH
 
 TESTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT="$TESTSDIR/../scripts/build-shim.sh"

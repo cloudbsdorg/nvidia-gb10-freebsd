@@ -29,8 +29,8 @@ SHLIB_MAJOR=	1
 VERSION_MAP=	${.CURDIR}/Version.map
 SRCS=		nvrm.c nvrm_cap.c nvrm_chan.c nvrm_compat.c nvrm_fake.c \
 		nvrm_fake_chan.c nvrm_fake_mem.c nvrm_fields.c nvrm_json.c \
-		nvrm_mem.c nvrm_names.c nvrm_owner.c nvrm_rm.c nvrm_rm_mem.c \
-		nvrm_table.c nvrm_va.c
+		nvrm_mem.c nvrm_names.c nvrm_owner.c nvrm_rm.c nvrm_rm_chan.c \
+		nvrm_rm_mem.c nvrm_table.c nvrm_va.c
 INCSDIR=	${INCLUDEDIR}/nvrm
 INCS=		include/nvrm/nvrm.h include/nvrm/nvrm_version.h \
 		include/nvrm/nvrm_chan.h
@@ -53,6 +53,11 @@ MLINKS+=	nvrm_chan.3 ${f}.3
 .endfor
 CFLAGS+=	-I${.CURDIR} -I${.CURDIR}/include -std=gnu11 -Wall -Wextra \
 		-Wno-unused-parameter -Werror
+# The table of names is shared with the fatbin reader: cn_names.h lives in
+# lib/cuda-native/fatbin (the fatbin reader is compiled without an include
+# path of its own, so the header has to sit next to it) and libnvrm reaches
+# it the way lib/libcuda reaches ../cuda-native/sdk/include.
+CFLAGS+=	-I${.CURDIR}/../cuda-native/fatbin
 CFLAGS+=	-I${OGKM}/src/common/sdk/nvidia/inc \
 		-I${OGKM}/src/common/sdk/nvidia/inc/ctrl \
 		-I${OGKM}/src/nvidia/arch/nvalloc/unix/include \

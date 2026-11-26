@@ -1,9 +1,15 @@
-# NVIDIA driver for FreeBSD on arm64
+# NVIDIA driver for FreeBSD on arm64 and amd64
 
-NVIDIA ships a FreeBSD driver only for x86-64. This repository builds it for **arm64
-(aarch64)**: NVIDIA's FreeBSD OS layer, patched for arm64, linked to NVIDIA's open GPU kernel
-module core (open-gpu-kernel-modules, MIT) compiled for aarch64 instead of NVIDIA's prebuilt
-x86-64 object. Driver version **580.178.04**.
+NVIDIA ships a FreeBSD driver only for x86-64, with a prebuilt `nv-kernel.o` for that
+architecture. This repository builds the same native driver for **arm64 (aarch64) and
+amd64**: NVIDIA's FreeBSD OS layer, linked to NVIDIA's open GPU kernel module core
+(open-gpu-kernel-modules, MIT, 580.178.04) compiled for the running architecture
+(`TARGET_ARCH=aarch64` or `x86_64`). The shipped RM core objects are
+`nv-kernel-aarch64.o` and `nv-kernel-amd64.o`. On amd64 we still rebuild that open
+core rather than linking NVIDIA's prebuilt `nv-kernel.o`, so both architectures take
+the same path, from the same pinned source, and the kernel modules are linked with
+the base system's `ld.lld` (the build refuses a module that LLD did not link).
+Driver version **580.178.04**.
 
 NVIDIA's sources and binaries are not stored here. The scripts fetch them and check them
 against the pins in [`SOURCES`](SOURCES) (a sha256 for the FreeBSD tarball, a tag and commit
@@ -13,8 +19,8 @@ small source files of our own, and the tests.
 
 ## Install
 
-Use this path on a stock **FreeBSD arm64** installation: 16.0-CURRENT or 15.1-RELEASE or
-later. On a fresh system, run this one-time setup as root:
+Use this path on a stock **FreeBSD arm64 or amd64** installation: 16.0-CURRENT or
+15.1-RELEASE or later. On a fresh system, run this one-time setup as root:
 
 ```sh
 pkg install -y doas git
@@ -61,7 +67,9 @@ NVIDIA's terms require the person installing the driver to accept its licence fi
 `ACCEPT_NVIDIA_LICENSE=1` records acceptance of that licence; `ACCEPT_ALL_LICENSES=1` accepts
 every licence encountered by the install. `YES=1` alone never accepts a licence. Without an
 accept setting, a terminal shows the licence and asks; acceptance is tied to the licence's
-sha256, so a changed licence must be accepted again.
+sha256, so a changed licence must be accepted again. The blocker names the licence it
+requires, by that name and hash, and the one the acceptance on record names: an acceptance
+of another licence text is never carried over to the one now required.
 
 Optional, for Linux binaries only (Steam, the Linux CUDA stack): after `make install` the two
 Linux providers load by module name. They pull in the Linuxulator; native use does not need them.
@@ -77,40 +85,55 @@ sysrc nvidia_linux_mode=AUTO     # rc.d/nvidia_linux loads the providers at boot
 
 ### Installed
 
-A successful install exits 0. Example output (from `scripts/make.sh`), an excerpt of a
-planted install:
+A successful install exits 0. Example output (from `scripts/make.sh`, an excerpt: a
+successful run also prints its prerequisite, build and copying progress):
 
 ```text
-install: done
+install: copying done
 install: installed
 ```
 
 A live install, without a DESTDIR, also lists its next steps, one command per line. Example
 output (from `scripts/make.sh`) for a user who has doas; yours names the root tool you have:
-`sudo`, `su root -c`, no prefix as root, or a note when you have no tool:
+`sudo`, `su root -c`, or no prefix as root. With no root tool at all the commands are
+printed bare, and the line above them says to ask an administrator to run them as root, or
+to open a root shell on the console and run them there.
 
 ```text
-to load the driver at boot instead of the first two next steps, run make configure YES=1 once
 next: doas kenv hw.nvidia.registry.EnableGpuFirmware=1
 next: doas kldload nvidia-drm
 next: kldstat
 next: nvrm-info --json
+To load the driver at boot instead of the firmware setting and the module load, run make configure YES=1 once.
 ```
+
+A staged install, with a DESTDIR, has no next steps: the files are only staged, so nothing
+was loaded and there is nothing to run on this system. Its summary only says where the files
+are. Do not run the load commands below on a staging system: they load a driver that system
+does not have.
 
 The summary lists every installed file and mode. Kernel modules go into `/boot/modules`;
 the devd and rc.d configuration, `nvrm-info`, libnvrm, headers, schema, manual pages and
-licences go under `/usr/local`. Load the driver now: first set the firmware setting as root
-(with doas or sudo, whichever you have), `kenv hw.nvidia.registry.EnableGpuFirmware=1`, then
-run the `kldload` line exactly as `install` printed it. The root tool in that line is the one
-you have, so copy that line. Or configure loading at boot with `make configure`, described
-below, which sets the same firmware value in `/boot/loader.conf`. Then check it without
-assuming a device number:
+licences go under `/usr/local`. For a live install, load the driver now: first set the
+firmware setting as root (with doas or sudo, whichever you have),
+`kenv hw.nvidia.registry.EnableGpuFirmware=1`, then run the `kldload` line exactly as
+`install` printed it. The root tool in that line is the one you have, so copy that line;
+with no root tool at all, ask an administrator to run those two lines as root, or open a
+root shell on the console and run them there. Or configure loading at boot with
+`make configure`, described
+below: it sets the same firmware value in `/boot/loader.conf` and makes the devd rule load
+`nvidia-drm` at boot, so it replaces the firmware setting and the module load above. Then
+check it without assuming a device number:
 
 ```sh
 kldstat
 dmesg | grep -i nvidia
 nvrm-info --json
 ```
+
+With a PREFIX of your own, the last line names the installed tool
+(`'/opt/gb10/sbin/nvrm-info' --json`), because it is not on your PATH. The path is quoted,
+so a prefix with a space in it is still one command.
 
 ### Blocked
 
@@ -121,16 +144,25 @@ acceptance produces this example output (from `scripts/make.sh`; BSD make's own 
 lines follow it):
 
 ```text
-blocked licence: NVIDIA's terms ask you to read and accept the driver licence before install; YES=1 alone does not accept it
-fix: make install ACCEPT_NVIDIA_LICENSE=1 (or ACCEPT_ALL_LICENSES=1), or run make install on a terminal and answer the licence question
+fix: make install ACCEPT_NVIDIA_LICENSE=1
 install: blocked
 ```
 
-Follow the `fix:` line for each blocker. For the licence, the line names the command you
-ran, so under `make install` it says `make install`, as above; `make preflight` shows the
-same check with `make install-prereqs` in its fix. For a missing kernel change, see
-[`kernel-patches/README.md`](kernel-patches/README.md). `make preflight` shows the same checks
-without installing.
+The blocker itself is one long line: it says that NVIDIA's terms ask the person installing
+the driver to read and accept the driver licence before install, that `YES=1` alone does not
+accept it, and the two other ways to accept it: accept every licence this install meets
+with `ACCEPT_ALL_LICENSES=1`, or run the same command on a terminal and answer the licence
+question. The `fix:` line above is that same command with the accept setting added.
+
+Follow the `fix:` line of the licence blocker: it is one command, ready to paste. The other
+blockers name their fix in words, because each of them has more than one way to be fixed.
+For the licence, the line names the command you ran, so under `make install` it says
+`make install`, as above,
+and it keeps the settings that change where the install goes, so a `DESTDIR` or a `PREFIX` you
+gave is in the line too. The other ways to accept the licence are in the blocker's reason:
+add `ACCEPT_ALL_LICENSES=1`, or run the command on a terminal and answer the licence
+question. `make preflight` shows the same checks without installing, with `make install-prereqs`
+in its fix. For a missing kernel change, see [`kernel-patches/README.md`](kernel-patches/README.md).
 
 `make preflight` also says, for each NVIDIA display device, whether the driver will take it
 (it attaches to GA10x (RTX 30) and later only): with `nvidia.ko` loaded the answer is the kernel's (attached,
@@ -167,19 +199,23 @@ The prerequisite phase does all of this without separate manual steps:
   when there is one. A kernel you built from your own tree names no commit: then set
   `SYSDIR=/path/to/that/tree/sys`.
 - fetches drm-kmod at the tag pinned in `SOURCES` for your kernel (drm_v6.12.110_1 for
-  16.0-CURRENT and 15.1). FreeBSD's drm-kmod packages are amd64-only, so on arm64 `make build`
-  builds `drm.ko` and `dmabuf.ko` from that tree and `make install` installs them, unless a
-  `drm.ko` from somewhere else is already in `/boot/modules` (then nvidia-drm is built against
-  `DRMKMODDIR=`, which must be that drm.ko's source).
+  16.0-CURRENT and 15.1). FreeBSD's drm-kmod packages are amd64-only. On amd64, `make
+  build` does not build our own `drm.ko`: preflight asks you to install FreeBSD's
+  `drm-kmod` packages, and `nvidia-drm` is built against that installed `drm.ko`. On
+  arm64 `make build` builds `drm.ko` and `dmabuf.ko` from the pinned tree and `make
+  install` installs them, unless a `drm.ko` from somewhere else is already in
+  `/boot/modules` (then nvidia-drm is built against `DRMKMODDIR=`, which must be that
+  drm.ko's source).
 
 What `make install` writes (listed with mode, owner and sha256 in
 `/var/db/nvidia-gb10-freebsd/installed.manifest`; it never replaces a file it did not write,
 or one that changed since it wrote it):
 
 - `/boot/modules`: `nvidia_gsp_ga10x_fw.ko` (the GSP firmware), `nvidia.ko`,
-  `nvidia-modeset.ko`, `nvidia-drm.ko`, `nvidia_linux.ko`, `nvidia_modeset_linux.ko`, and
-  `drm.ko`, `dmabuf.ko`; then `kldxref /boot/modules`, so the stock loader and `kldload` find
-  them and their dependencies by name.
+  `nvidia-modeset.ko`, `nvidia-drm.ko`, `nvidia_linux.ko`, `nvidia_modeset_linux.ko`;
+  on arm64 also `drm.ko` and `dmabuf.ko` (on amd64 those come from FreeBSD's drm-kmod
+  packages, not from this install); then `kldxref /boot/modules`, so the stock loader
+  and `kldload` find them and their dependencies by name.
 - under `/usr/local`: `etc/rc.d/nvidia_linux`, `etc/devd/nvidia_gb10.conf`, the manual pages
   nvidia(4), nvidia_drm_render(4), nvidia_linux(4), nvrm(3), nvrm(7), nvrm-info(8), `lib/libnvrm`,
   `include/nvrm/nvrm.h`, `sbin/nvrm-info` and its JSON schema, and the licences in
@@ -254,6 +290,10 @@ firmware already registered. The kernel names the module after the file with `_f
 module is not installed or the index is stale: run `make install` again, which runs `kldxref`.
 See `man/nvidia.4`.
 
+Today `nvidia.ko` loads both GSP firmware modules on every machine (amd64; arm64 loads the one it builds).
+[`docs/DEVICE-DECISION.md`](docs/DEVICE-DECISION.md) designs a step that decides, per card and before
+anything loads, which firmware and driver it gets. Design only; nothing changes yet.
+
 ## Diagnostics
 
 The GPU is initialised, and GSP booted, on the first open of its `/dev/nvidiaN`. If that first
@@ -271,6 +311,7 @@ find it by PCI bus, never by assuming 0. See `man/nvidia.4`.
 | Display (DRM/KMS on the NVIDIA card: mode set, scan-out) | works: colour bars on the NVIDIA card's DRM node, found by PCI bus; Xorg modesetting at 2560x1440 on HDMI, software rendering only |
 | CPU writes to a dumb buffer in video memory | works: written data reads back through a fresh `mmap` |
 | Device enumeration, native (`nvrm-info`, libnvrm) | untested on hardware (passes against a simulated device only) |
+| Native GPU memory (libnvrm: allocation, mappings, export/import) | in the tree, against the fake backend; the test-boot kit measures it on the card (row `nvrm-s2-memory`), not yet on hardware |
 | `nvidia-smi` (NVIDIA's Linux arm64 build, through the Linuxulator) | works; Linux-only, last resort |
 | Vulkan (NVIDIA's Linux arm64 ICD, through the Linuxulator) | waits for a test boot: it ran earlier on the tested machine (numbers below); the BAR0 mapping fix (register window as Device memory, not cached) is committed and not yet run on hardware; Linux-only, last resort |
 | CUDA (NVIDIA's Linux `libcuda`, through the Linuxulator) | works, with the prerequisites below; Linux-only, last resort |
@@ -847,7 +888,9 @@ OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()`
 RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
 software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
 API is tested without hardware; the RM backend is tested against a scripted kernel
-(`tests/libnvrm/rm_mem_test.c`).
+(`tests/libnvrm/rm_mem_test.c`). The RM backend's channels are real RM objects: a channel
+group, a GPFIFO channel, the engine objects, a userd page and an error notifier in system
+memory, and a usermode page the doorbell is written in.
 
 ## Native test boot (no Linux layer)
 
@@ -856,20 +899,52 @@ API is tested without hardware; the RM backend is tested against a scripted kern
 
 - `linux_enable="NO"`;
 - no Linuxulator or LinuxKPI module (amdgpu and drm are stripped from `kld_list` and blocked in
-  devmatch);
+  devmatch; every module of the clone that depends on the Linux layer is blocked by name as well,
+  because devmatch loads a driver of its own when it sees the device of it — a Wi-Fi card in the
+  host brought `if_rtw89.ko`, which pulls in `linuxkpi_wlan.ko`);
+- no rc.d service that loads such a module by itself: `make-be.sh` reads every rc script of the
+  clone, expands the `required_modules` of each with the rc.conf variables it uses (the variables of
+  the script itself and the rc.conf of the service), and turns off every service that is enabled and
+  loads a forbidden driver (`drm_ready` loads `amdgpu`), and sets `cloudbsd_hwprobe_command="probe"`
+  so the hwprobe loads no KMS driver. A service whose `rcvar` or whose modules cannot be read is
+  refused, not ignored: a service that is not read is a service that is not known. `check-be.sh`
+  refuses a clone that still has one, and names the service and the module; it also refuses a devd
+  rule that loads a driver by itself, or that starts a service which loads one, and `make-be.sh`
+  refuses a base with such a rule (devd runs it when the device appears, and the kit cannot make it
+  safe);
 - only the GSP firmware module, `nvidia.ko` and `nvidia-modeset.ko` of main, none of which has a
   Linux dependency since #2363;
 - `gpu-detect.sh` and `nvrm-info` traced under `ktrace`, so that every file they execute is checked.
+- `mem_probe` runs beside `nvrm-info`, in the same `boot_nvrm_info.sh` run: the row `nvrm-s2-memory` is the
+  memory measurement of the card (a client with CPU mapping, a VA reservation, video and system memory, GPU
+  and CPU mappings, a pattern written and read back, export and import into a second client, and nothing left
+  after the frees). It is a native row now, not a static one: its status comes from the probe on the card, and
+  its detail holds the FAIL lines of the probe.
+- `chan_probe` runs beside it, in the same `boot_nvrm_info.sh` run: the row `nvrm-s3-channel` is the
+  channel measurement of the card (a compute GPFIFO channel, a semaphore release the GPU writes into a
+  memory object of the probe, so the release is seen, the latency of a thousand releases as p50, p99 and
+  max in nanoseconds, a stress loop of releases, and the isolation: a push at an address that is not
+  mapped kills one channel while the other one keeps releasing). It is a native row too: its status comes
+  from the probe on the card, and its detail holds the latency line and the stress line of the probe.
 
 The environment check fails when a loaded file other than the kernel, or a module record in such a
 file, has a Linux-layer name listed by `guard_layer_name`, or when `compat.linux` answers. Module
 records built into the kernel file are only reported. A failed environment check makes every row
-`not-available` and the verdict `fail`. A traced tool fails its row when it executes a non-FreeBSD binary,
-calls `fexecve`, or calls `execve` with no path. A correct run on current main ends with the verdict
-`incomplete`: some rows are `not-available`, `needs-linux` or `needs-linuxkpi`. Without the optional
+`not-available` and the verdict `fail`. A module can be loaded by more than the loader list: an
+enabled rc.d service loads the modules of its `required_modules` entry, and a devd rule can start
+such a service. The failure message names the loader it can see and points at `check-be.sh`, which
+names the service and the module; when it cannot see a loader it says so instead of naming one. A
+traced tool fails its row when it
+executes a non-FreeBSD binary, calls `fexecve`, or calls `execve` with no path. A correct run on
+current main ends with the verdict `incomplete`: some rows are `not-available`, `needs-linux` or
+`needs-linuxkpi`. Without the optional
 UVM and DRM control modules their rows are `not-available`; the known Linux-dependent controls make
 the uvm rows `needs-linux` and PRIME `needs-linuxkpi`. Results are `summary.json` (schema
-`native-tools-summary/1`) plus per-tool JSON. See
+`native-tools-summary/1`) plus per-tool JSON. The copy-out of a run belongs to the person who ran
+`make-be.sh`: the user is recorded (`DOAS_USER`, else `SUDO_USER`, else the owner of the copy-out
+parent directory), it must be a user of the boot environment, and the one-shot gives the copy to
+them, the directory 0700 and the files 0600.
+See
 [tests/native-tools-testboot/ROWS.md](tests/native-tools-testboot/ROWS.md) for the rows, the
 statuses, the files and the build, check and arm commands. `sh tests/native_tools_kit_test.sh`
 tests the kit without a boot.
@@ -886,7 +961,12 @@ the boot would reject, as `make-be.sh` does:
   of it, below `-V` unless `-V` is 0. The RM reports the usable size (17103323136 on that card),
   which must lie between nominal less the reserve and nominal;
 - `-S` (`BOOT_EXPECT_SM`, default 12.0): the compute capability. It is compared with
-  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card).
+  `compute_capability_major/minor`, not with the RM's own SM numbering (10.4 on that card);
+- `-c` (`BOOT_CHAN_STRESS`, default 100000): how many semaphore releases the channel probe pushes in its
+  stress loop; `make-be.sh` writes it to `rc.conf.d` as `nvidia_native_tools_testboot_chan_stress`;
+- `-C` (`BOOT_CHAN_STRESS_SECONDS`, default 300): how long that stress loop may run, in seconds; the probe
+  stops earlier when it is done, and `make-be.sh` writes it as
+  `nvidia_native_tools_testboot_chan_stress_seconds`.
 
 The GPU uuid is found through the device unit whose `dev.nvidia.<unit>.pci_bus_id` is the device's
 PCI location (000d:01:00.0 on amp001; the units are not nvrm-info's indexes: a BMC display can take
@@ -913,8 +993,13 @@ toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg ins
 `/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
 emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
 The stub `ptxas`/`fatbinary` tools and `libcudart` let clang fully compile and link, but every launch returns `cudaErrorNotSupported` (801); the libdevice math library, real compiler and runtime, device execution and `libcuda` are not there yet.
-Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` (skips
-without LLVM 23).
+`fatbinary` is now a C program that collects the device images into one container of our own: LLVM's OffloadBinary layout, version 2, documented in `nvfatbin(5)`.
+It bundles only our own cubins, so the device image of a `-emit-llvm` compile (an LLVM IR file) is refused with `not a cuda-native cubin`; use `-c` or `-o` to build an object or an executable.
+Each member records its triple, its architecture, its format and the SHA-256 of its image, and a reader refuses any container that fails one of the checks `nvfatbin(5)` lists.
+`cuda-objdump` lists the members as text or as JSON, takes one member out with `--extract`, and reads the container clang puts in an object file.
+NVIDIA's fatbin and cubin formats are never read, parsed or imitated.
+Man page: `cuda-native-toolchain(7)`. Tests: `sh tests/cuda_native_toolchain_test.sh` and
+`sh tests/cuda_native_fatbin_test.sh` (skip without LLVM 23).
 
 ## libcuda (native CUDA Driver API)
 

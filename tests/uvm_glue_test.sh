@@ -10,10 +10,14 @@
 # Runs against a prepared and built tree (default ${GB10_WORK}/build/tree,
 # or the TREE given as the first argument) and the pinned sources. Checks:
 #   (a) exports: every nvUvmInterface* function the header declares is a
-#       defined, exported (nm -D) symbol of TREE/nvidia/nvidia.ko, and the
-#       three hooks RM calls (nv_schedule_uvm_isr, nv_schedule_uvm_drain_p2p,
-#       nv_schedule_uvm_resume_p2p) are defined exactly once each - the
-#       stubs NVIDIA's nvidia_subr.c carried are gone;
+#       defined, exported symbol of TREE/nvidia/nvidia.ko - read from the
+#       dynamic symbol table (nm -D) when the module is ELF DYN (aarch64,
+#       linked shareable) and from the regular symbol table (nm, GLOBAL T
+#       only) when it is ELF REL (amd64, linked with ld -r and carrying no
+#       .dynsym) - and the three hooks RM calls (nv_schedule_uvm_isr,
+#       nv_schedule_uvm_drain_p2p, nv_schedule_uvm_resume_p2p) are defined
+#       exactly once each - the stubs NVIDIA's nvidia_subr.c carried are
+#       gone;
 #   (b) layout: the RM core's own interface structures, compiled with the
 #       tree's headers and flags, have the sizes and offsets the spec's
 #       section 02 states (the UVM module hard-codes them on its side),
@@ -75,19 +79,115 @@ for f in "$KO" "$SUBR" "$HDR" "$TARBALL"; do
 done
 
 # ---- (a) exports ----
+# Which symbol table nvidia.ko exports from is decided by the module's own
+# ELF type, read from the file itself - never from uname:
+#   ELF DYN (aarch64: the module is linked shareable, ld -Bshareable)
+#     carries a dynamic symbol table, so the exports come from nm -D;
+#   ELF REL (amd64: LLD links the module with ld -r) carries no .dynsym at
+#     all, so nm -D prints nothing even though the regular symbol table
+#     holds the same functions as GLOBAL T. The kernel linker resolves
+#     REL kmod globals, so for REL the regular symbol table is the source
+#     and only GLOBAL T counts - a local t is not an export.
+# Any other type is refused: the check fails closed instead of guessing.
+#
+# elf_type_od FILE - print the ELF type straight from the header: e_ident
+# is 16 bytes, e_type is the 2 bytes at offset 16, and EI_DATA (byte 5)
+# says which way round they are. FreeBSD base has no readelf, so this is
+# the reader that is always there. od prints two hex digits per byte, so
+# EI_DATA arrives as 01 (LSB) or 02 (MSB) and e_type as 0100 (REL),
+# 0200 (EXEC) or 0300 (DYN).
+elf_type_od() {
+	_f=$1
+	_b=$(od -An -tx1 -N18 "$_f" 2>/dev/null | tr -s ' \t\n' ' ')
+	# shellcheck disable=SC2086
+	set -- $_b
+	[ "$#" -eq 18 ] || return 1
+	[ "$1$2$3$4" = "7f454c46" ] || return 1
+	case $6 in
+	01) _t="${17}${18}" ;;
+	02) _t="${18}${17}" ;;
+	*) return 1 ;;
+	esac
+	case $_t in
+	0100) printf 'REL\n' ;;
+	0300) printf 'DYN\n' ;;
+	0200) printf 'EXEC\n' ;;
+	*) printf 'OTHER\n' ;;
+	esac
+}
+#
+# elf_type FILE - print the ELF type ("REL", "DYN", "EXEC", ...) of FILE.
+# Two independent readers of the same header must agree, otherwise
+# nothing is printed. Returns 0 only for the types the export check
+# knows how to read (REL and DYN).
+elf_type() {
+	_f=$1
+	[ -f "$_f" ] || return 1
+	_r=""
+	_o=$(elf_type_od "$_f" || :)
+	if command -v readelf > /dev/null 2>&1; then
+		_r=$(readelf -h "$_f" 2>/dev/null | awk -F: '/^[[:space:]]*Type:/ { v = $2; gsub(/^[[:space:]]+/, "", v); sub(/[ \t(].*$/, "", v); print v; exit }' || :)
+	fi
+	if [ -n "$_r" ] && [ -n "$_o" ] && [ "$_r" != "$_o" ]; then
+		return 1
+	fi
+	_t=${_r:-$_o}
+	[ -n "$_t" ] || return 1
+	printf '%s\n' "$_t"
+	case $_t in
+	REL | DYN) return 0 ;;
+	esac
+	return 1
+}
+#
+# uvm_export_symbols TYPE FILE - print the nvUvmInterface* symbols FILE
+# exports, one per line, sorted. TYPE is the ELF type elf_type found:
+# REL reads the regular symbol table (nm), DYN the dynamic one (nm -D).
+# Only GLOBAL text symbols count; a local t is not an export.
+uvm_export_symbols() {
+	_type=$1
+	_ko=$2
+	case $_type in
+	REL | DYN) ;;
+	*) return 1 ;;
+	esac
+	if [ "$_type" = REL ]; then
+		_out=$(nm "$_ko" 2>/dev/null) || return 1
+	else
+		_out=$(nm -D "$_ko" 2>/dev/null) || return 1
+	fi
+	printf '%s\n' "$_out" | awk '$2 == "T" && $3 ~ /^nvUvmInterface/ { print $3 }' | sort -u
+}
+#
 # the interface names the header declares, one per line
 grep -o 'nvUvmInterface[A-Za-z0-9]*(' "$HDR" | sed 's/($//' | sort -u > "$T/declared"
-if ! nm -D "$KO" > "$T/nmd" 2>/dev/null; then
-	echo "uvm_glue_test: nm -D failed on $KO" >&2
-	exit 2
-fi
-awk '$2 == "T" && $3 ~ /^nvUvmInterface/ { print $3 }' "$T/nmd" | sort -u > "$T/exported"
-if [ ! -s "$T/declared" ]; then
-	fail "(a) the header declares no nvUvmInterface function"
-elif comm -23 "$T/declared" "$T/exported" > "$T/missing" && [ ! -s "$T/missing" ]; then
-	pass "(a) every declared nvUvmInterface function ($(awk 'END { print NR }' < "$T/declared")) is exported by nvidia.ko"
-else
-	fail "(a) declared but not exported: $(tr '\n' ' ' < "$T/missing")"
+ko_type=$(elf_type "$KO" || :)
+: > "$T/exported"
+: > "$T/missing"
+export_ok=0
+case $ko_type in
+REL | DYN)
+	if uvm_export_symbols "$ko_type" "$KO" > "$T/exported"; then
+		export_ok=1
+	else
+		fail "(a) could not read nvidia.ko's symbol table"
+	fi
+	;;
+*)
+	fail "(a) nvidia.ko is ELF type '${ko_type:-unknown}' (want REL or DYN): refusing to guess how to read its symbols"
+	;;
+esac
+if [ "$export_ok" -eq 1 ]; then
+	if [ ! -s "$T/declared" ]; then
+		fail "(a) the header declares no nvUvmInterface function"
+	else
+		comm -23 "$T/declared" "$T/exported" > "$T/missing"
+		if [ ! -s "$T/missing" ]; then
+			pass "(a) every declared nvUvmInterface function ($(awk 'END { print NR }' < "$T/declared")) is exported by nvidia.ko [ELF $ko_type]"
+		else
+			fail "(a) declared but not exported: $(tr '\n' ' ' < "$T/missing")"
+		fi
+	fi
 fi
 for h in nv_schedule_uvm_isr nv_schedule_uvm_drain_p2p nv_schedule_uvm_resume_p2p; do
 	n=$(nm "$KO" | awk -v s="$h" '$3 == s && ($2 == "T" || $2 == "t") { c++ } END { print c + 0 }')

@@ -118,8 +118,24 @@ A ring of E entries holds at most E-1 pending entries because equal GP_GET and
 GP_PUT means empty.
 Every batch also needs one core entry that releases the progress semaphore, so
 a batch carries at most E-2 caller elements.
+That core release is the semaphore release the library appends to every batch:
+one extra ring entry that writes the progress point of the batch to the
+semaphore.
 .Fn nvrm_chan_gp_space
 reports free caller-element capacity after reserving that release entry.
+The GPU may move GP_GET past a ring slot before it has read the release
+segment the slot names, so a slot that holds a core release counts as free
+only once the progress semaphore has reached that release: a batch never
+rewrites a segment whose release has not run.
+.Pp
+A caller therefore sees less room than the slots GP_GET has passed: a slot
+whose core release has not run yet is not free.
+A submit with a zero timeout can return
+.Er NVRM_E_TIMEOUT
+after accepting part of its elements; the accepted count and the point of the
+last accepted batch are in the result.
+.Fn nvrm_chan_wait
+on that point frees the slots those batches held.
 .Fn nvrm_chan_submit
 splits a larger request into ordered batches.
 An incomplete run and its terminator are indivisible and never straddle batches.
@@ -198,7 +214,8 @@ of
 .Xr nvrm_mem 3
 and its message kept, and
 .Fn nvrm_client_close
-frees them.
+makes the backend drop its record of the channel, without touching the
+device, before it frees them.
 .Fn nvrm_client_close
 destroys every channel still live on the client first.
 .Pp
@@ -228,6 +245,17 @@ structure is
 Zero or the structure's current
 .Li sizeof
 selects this version; another value is invalid.
+.Sh IMPLEMENTATION NOTES
+The RM backend makes one channel group (a TSG) per channel, with the engine
+of the runlist, the channel itself of the GPFIFO class, and one engine object
+per engine the mask asks for.
+The userd page is one 4 KiB page of system memory that the GPU reads and the
+CPU writes: the GPFIFO control words (the get and the put offsets) are in it.
+The error notifier is one more page of system memory, read-only for the CPU.
+The usermode page of the client is the only device mapping the backend makes:
+the doorbell is one aligned 32-bit store of the work submit token in it.
+The copy class is not bound on a graphics runlist yet: a channel that asks
+for both is refused.
 .Sh RETURN VALUES
 The calls returning
 .Vt int
@@ -239,6 +267,16 @@ returns a one-line explanation for the channel's client.
 .Fn nvrm_chan_destroy
 returns no value and accepts
 .Dv NULL .
+.Sh EXAMPLES
+The live proof of these calls is the channel probe of the test-boot kit:
+.Pa tests/libnvrm/chan_probe.c
+creates a compute channel, pushes a semaphore release through it and reads the
+payload the GPU wrote back, measures the latency of a thousand releases, runs
+a stress loop, and shows that a push at an address that is not mapped kills
+one channel while another one keeps working.
+.Pp
+.Pa tests/libnvrm/mem_probe.c
+measures the memory calls of the same kit.
 .Sh ERRORS
 .Bl -tag -width ".Fn nvrm_chan_status_get"
 .It Fn nvrm_chan_create

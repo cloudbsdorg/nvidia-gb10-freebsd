@@ -15,16 +15,21 @@
 #   -U         do not check root ownership (the host test installs without root; only with -m)
 # Environment: with GB10_TEST_HOOKS=1, not root and NVNT_NO_GIT_CHECK=1, an archive without git metadata is still
 # checked; the commit comparisons fail, as the host test already expects, instead of hiding every later check.
+# NVNT_TEST_PATH names a directory of stub tools that come first on PATH (the hook make-be.sh has): the host test
+# uses it to give the kit a kldxref that reads the name of the file it is given.
 #
 # Checks, each printed "ok" or "FAIL"; exit 0 when all are ok, 1 when one failed, 2 on a usage error:
-#   - staged files: the five files of the list equal their full hashes, are root-owned (0444, nvrm-info 0555), are
+#   - staged files: the seven files of the list equal their full hashes, are root-owned (0444, nvrm-info,
+#     mem_probe and chan_probe 0555), are
 #     not symbolic links; no other file is in /boot/modules.nvnative-test; each .ko has no Linuxulator, LinuxKPI or drm
-#     dependency (kldxref -d -v) and no undefined linux_, lkpi_ or linuxkpi_ symbol; nvrm-info and libnvrm.so.1 are
-#     FreeBSD-branded;
+#     dependency (kldxref -d -v) and no undefined linux_, lkpi_ or linuxkpi_ symbol; nvrm-info, libnvrm.so.1,
+#     mem_probe and chan_probe are FreeBSD-branded;
 #   - no Linux: rc.conf has linux_enable="NO", kld_list holds no amdgpu, radeonkms, i915kms, drm, dmabuf, nvidia or
 #     linux module, devmatch_blocklist (rc.conf and loader.conf) names amdgpu and linuxkpi; no later rc.conf file and
 #     no rc.conf.d file for linux, kld or devmatch overrides them; no loader.conf loads such a module; no nvidia
-#     module in /boot/modules or /boot/kernel;
+#     module in /boot/modules or /boot/kernel; no enabled rc.d service loads such a module by itself (a
+#     required_modules entry: drm_ready loads amdgpu), and cloudbsd_hwprobe, when it is enabled, has the command
+#     "probe" (it loads no KMS driver);
 #   - the kit: the version file holds the commit; the rc script, guard.sh, summarize.py, gpu-detect.sh, the schema,
 #     testboot-return and this script are the commit's; gpu-detect.sh and testboot-return equal their VENDOR pins;
 #     every static row has a known status;
@@ -32,13 +37,17 @@
 #     is a positive number of minutes, no rc.conf sets it to 0, the marker holds the test BE name, the shutdown call
 #     uses only nvidia_native_tools_testboot_shutdown, and shutdown(8) is in the clone; loader.conf has the panic settings;
 #   - order: the firmware module is loaded before nvidia.ko, the GPU is opened as root before nvrm-info runs;
-#   - the one-shot is enabled, every other *_testboot_enable is NO, and the copy-out directory is absolute and not on
-#     a boot environment dataset (zfs list of its nearest existing parent, on this host).
+#   - the one-shot is enabled, every other *_testboot_enable is NO, the owner of the run directory is recorded, and
+#     the copy-out directory is absolute and not on a boot environment dataset (zfs list of its nearest existing
+#     parent, on this host).
 
 set -u
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
+# the stub tools of the host test come first (the same hook make-be.sh has: NVNT_TEST_PATH is a directory of stub
+# tools, and the kit reads the dependencies of a module with kldxref)
+[ -z "${NVNT_TEST_PATH:-}" ] || { PATH=$NVNT_TEST_PATH:$PATH; export PATH; }
 KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$KITDIR/../.." && pwd)
 . "$KITDIR/guard.sh"
@@ -109,8 +118,10 @@ MODS=$MNT/boot/modules.nvnative-test
 KROOT=$MNT/usr/local/share/nvidia-native-tools-test
 RCS=$MNT/usr/local/etc/rc.d/nvidia_native_tools_testboot
 RCC=$MNT/etc/rc.conf
-FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1"
-FORBID_RE='(linux|^amdgpu|^radeonkms|^i915kms|^drm|^dmabuf|^nvidia|^lindebugfs)'
+FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1 mem_probe chan_probe"
+# the modules a kld_list, a loader.conf or an rc.d service must not load.  The list is the one of guard.sh
+# (GUARD_FORBID_RE), so the guard, make-be.sh and this script agree on it.
+FORBID_RE=$GUARD_FORBID_RE
 echo "check-be.sh: ${BE:-$MNT}, commit ${COMMIT:-none}, list $SHAFILE"
 [ "$NO_GIT" = 0 ] || echo "check-be.sh: no git metadata; the commit comparisons below are expected to FAIL"
 
@@ -122,29 +133,28 @@ done
 
 # staged files
 literal() { awk -v n="($1)" '$1 == "SHA256" && $2 == n && $3 == "=" && length($4) == 64 && $4 ~ /^[0-9a-f]+$/ { print $4; c++ } END { exit (c == 1 ? 0 : 1) }' "$SHAFILE"; }
-[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 5 ] && ok "the list holds five entries" || bad "the list $SHAFILE does not hold exactly five SHA256 entries"
+[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 7 ] && ok "the list holds seven entries" || bad "the list $SHAFILE does not hold exactly seven SHA256 entries"
 for _f in $FILES; do
 	_w=$(literal "$_f") || { bad "the list has no single full entry for $_f"; continue; }
 	[ -f "$MODS/$_f" ] || { bad "$_f is not in /boot/modules.nvnative-test"; continue; }
 	_g=$(sha256 -q "$MODS/$_f")
 	[ "$_g" = "$_w" ] && ok "$_f is $_g" || bad "$_f is $_g, the list says $_w"
-	case $_f in nvrm-info) _wm=555 ;; *) _wm=444 ;; esac
+	case $_f in nvrm-info | mem_probe | chan_probe) _wm=555 ;; *) _wm=444 ;; esac
 	_m=$(stat -f %Lp "$MODS/$_f"); _o=$(stat -f %u "$MODS/$_f")
 	if [ "$NOOWNER" = 1 ]; then [ "$_m" = "$_wm" ] && ok "$_f is mode 0$_m (owner not checked: -U)" || bad "$_f is mode $_m, not 0$_wm"
 	else [ "$_m $_o" = "$_wm 0" ] && ok "$_f is root-owned, mode 0$_m" || bad "$_f is mode $_m owner uid $_o: root-owned 0$_wm wanted"; fi
 done
-_extra=$(ls "$MODS" 2> /dev/null | grep -vxE 'nvidia_gsp_ga10x_fw\.ko|nvidia\.ko|nvidia-modeset\.ko|nvrm-info|libnvrm\.so\.1' | tr '\n' ' ')
+_extra=$(ls "$MODS" 2> /dev/null | grep -vxE 'nvidia_gsp_ga10x_fw\.ko|nvidia\.ko|nvidia-modeset\.ko|nvrm-info|libnvrm\.so\.1|mem_probe|chan_probe' | tr '\n' ' ')
 [ -z "$_extra" ] && ok "no other file is staged (no nvidia-drm.ko, no Linux bridge)" || bad "other files are staged: $_extra"
 for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	[ -f "$MODS/$_k" ] || continue
-	rm -rf "$SCR/kd"; mkdir "$SCR/kd"; cp "$MODS/$_k" "$SCR/kd/"
-	_d=$(kldxref -d -v "$SCR/kd" 2> /dev/null | sed -n 's/^[[:space:]]*depends on \([^.[:space:]]*\)\..*/\1/p' | sort -u | tr '\n' ' ')
+	_d=$(guard_kld_deps "$SCR/kd" "$MODS/$_k" | tr '\n' ' ')
 	if [ -z "$_d" ]; then bad "kldxref reports no dependency for $_k: it could not read it"
 	elif printf '%s\n' $_d | grep -Eiq 'linux|drm|dmabuf'; then bad "$_k depends on $_d: not native"
 	else ok "$_k depends only on $_d"; fi
 	_l=$(guard_undef "$MODS/$_k") && ok "${_l#* }" || bad "${_l#* }"
 done
-for _f in nvrm-info libnvrm.so.1; do
+for _f in nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 	[ -f "$MODS/$_f" ] || continue
 	_l=$(guard_elf "$MODS/$_f") && ok "${_l#* }" || bad "${_l#* }"
 done
@@ -159,6 +169,16 @@ for _k in $(_v kld_list); do _b=${_k##*/}; _b=${_b%.ko}; printf '%s\n' "$_b" | g
 _bl=" $(_v devmatch_blocklist) "
 case $_bl in *" amdgpu "*" linuxkpi "*) ok "rc.conf: devmatch_blocklist names amdgpu and linuxkpi" ;; *) bad "rc.conf: devmatch_blocklist does not name amdgpu and linuxkpi: '$_bl'" ;; esac
 grep -Eq '^devmatch_blocklist="(.* )?amdgpu .*linuxkpi.*"' "$MNT/boot/loader.conf" 2> /dev/null && ok "loader.conf: devmatch_blocklist kenv names amdgpu and linuxkpi" || bad "loader.conf: no devmatch_blocklist kenv naming amdgpu and linuxkpi"
+# every module of the clone that depends on the Linux layer must be blocked: devmatch loads a driver of its own when
+# it sees the device of it (Track #2437: a Wi-Fi card in the host brought a LinuxKPI driver with it)
+_lkm=$(guard_linux_modules "$SCR/lkmod" "$MNT/boot/kernel" "$MNT/boot/modules")
+_lfbl=$(sed -n 's/^devmatch_blocklist="\(.*\)"$/\1/p' "$MNT/boot/loader.conf" 2> /dev/null | tail -1)
+_lkmiss=
+for _m in $_lkm; do
+	case "$_bl" in *" $_m "*) ;; *) _lkmiss="$_lkmiss $_m" ;; esac
+	case " $_lfbl " in *" $_m "*) ;; *) bad "loader.conf: the devmatch_blocklist kenv does not name $_m" ;; esac
+done
+[ -z "$_lkmiss" ] && ok "rc.conf: devmatch_blocklist names every module that depends on the Linux layer (${_lkm:-none})" || bad "rc.conf: devmatch_blocklist does not name$_lkmiss: devmatch would load them"
 _ov=0
 for _f in etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local; do
 	[ -f "$MNT/$_f" ] || continue
@@ -178,6 +198,47 @@ done
 [ -z "$_hit" ] && ok "no loader.conf loads a Linux, LinuxKPI, drm or nvidia module" || bad "these loader files load such a module:$_hit"
 _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/null)
 [ -z "$_pk" ] && ok "no nvidia module in /boot/modules or /boot/kernel" || bad "nvidia modules outside the staged directory: $_pk"
+# an enabled rc.d service that loads a forbidden module by itself: rc(8) loads the module of its required_modules
+# entry after kld_list was stripped (drm_ready loads amdgpu).  The rule is generic: every rc script of the clone is
+# read, and the modules its required_modules names are expanded with the rc.conf variables it uses.  A service whose
+# modules cannot be read is a FAIL too: a service that is not read is a service that is not known.  A service whose
+# enable state cannot be read (its script has no rcvar: devd starts it per device) cannot be turned off, so it is a
+# FAIL only when the modules it loads are forbidden.
+# rc_refuse <service> <modules>: the reason the service cannot be known to load nothing, as a FAIL
+rc_refuse()
+{
+	case $2 in
+	unknown-enable\|*)
+		bad "the rc.d service $1 has an enable state that cannot be read and its required_modules loads ${2#unknown-enable|}: rc(8) loads it by itself"
+		;;
+	*)
+		bad "the rc.d service $1 has a required_modules entry that could not be read ($2): it cannot be known to load nothing"
+		;;
+	esac
+}
+guard_rc_offenders "$MNT" "$FORBID_RE" > "$SCR/rc-offenders.txt"
+while IFS='|' read -r _svc _rcvar _mods; do
+	if [ "$_rcvar" = '?' ]; then
+		rc_refuse "$_svc" "$_mods"
+		continue
+	fi
+	bad "the rc.d service $_svc ($_rcvar) is enabled and its required_modules loads $_mods: rc(8) loads it by itself"
+done < "$SCR/rc-offenders.txt"
+# the hwprobe service loads the KMS driver of the card it finds, unless its command is "probe" (Server).  Its loading
+# is not through a required_modules entry, but through the probe it runs.
+if guard_hwprobe_loads "$MNT" > "$SCR/hwprobe.txt" 2> /dev/null; then
+	_hpc=$(cut -d'|' -f2 "$SCR/hwprobe.txt")
+	bad "cloudbsd_hwprobe is enabled with command='$_hpc': it loads the KMS driver of the card it finds; set cloudbsd_hwprobe_command=\"probe\""
+else
+	ok "cloudbsd_hwprobe loads no KMS driver (it is off, or its command is probe)"
+fi
+# a devd rule that loads a driver by itself (kldload, or the hwprobe when it applies the driver)
+while IFS='|' read -r _f _w; do
+	[ -n "$_f" ] || continue
+	bad "the devd rule $_f $_w: it loads a driver by itself"
+done <<EOF
+$(guard_devd_loaders "$MNT" "$FORBID_RE")
+EOF
 
 # the kit
 _ver=$(cat "$MNT/usr/local/etc/nvidia_native_tools_testboot.version" 2> /dev/null || echo none)
@@ -203,7 +264,7 @@ for _p in gpu-detect.sh:"$KROOT/gpu-detect.sh" testboot-return:"$MNT/usr/local/s
 	_n=${_p%%:*}; _w=$(pin "$_n")
 	[ -n "$_w" ] && [ "$(sha256 -q "${_p#*:}" 2> /dev/null)" = "$_w" ] && ok "$_n equals its VENDOR pin" || bad "$_n does not equal its VENDOR pin ${_w:-none}"
 done
-for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi nvrm-s2-memory; do
+for _r in uvm-ioctl-suite uvm-owner-probe uvm-owner-race prime-import render-uapi; do
 	_s=$(head -1 "$KROOT/static-rows/$_r" 2> /dev/null)
 	case $_s in needs-linux | needs-linuxkpi | not-available) ok "static row $_r: $_s" ;; *) bad "static row $_r has status '${_s:-none}'" ;; esac
 done
@@ -246,6 +307,21 @@ grep -q '^kern.panic_reboot_wait_time="5"$' "$MNT/boot/loader.conf" 2> /dev/null
 # the one-shot, the other kits, the copy-out directory
 _rcd=$MNT/etc/rc.conf.d/nvidia_native_tools_testboot
 grep -q '^nvidia_native_tools_testboot_enable="YES"$' "$_rcd" 2> /dev/null && ok "the one-shot is enabled" || bad "the one-shot is not enabled"
+_ow=$(sed -n 's/^nvidia_native_tools_testboot_owner="\(.*\)"$/\1/p' "$_rcd" 2> /dev/null)
+if [ -z "$_ow" ]; then
+	bad "the owner of the run directory is not recorded in $_rcd (nvidia_native_tools_testboot_owner): the one-shot cannot give the results to the person who has to read them"
+else
+	# the owner must be a user of this boot environment, and must not be root in it: the one-shot gives the run
+	# to it with chown(8), which fails for a name the boot environment does not know
+	_owu=$(awk -F: -v n="$_ow" '$1 == n { print $3 }' "$MNT/etc/master.passwd" 2> /dev/null)
+	if [ -z "$_owu" ]; then
+		bad "the owner of the run directory ($_ow) is not a user of this boot environment: the one-shot cannot give the results to it"
+	elif [ "$_owu" = 0 ]; then
+		bad "the owner of the run directory ($_ow) is root in this boot environment: the results would be root-owned and unreadable by the person who has to read them"
+	else
+		ok "the owner of the run directory is recorded ($_ow)"
+	fi
+fi
 _on=$(cat "$RCC" "$MNT"/etc/rc.conf.local "$MNT"/usr/local/etc/rc.conf "$MNT"/usr/local/etc/rc.conf.local 2> /dev/null; find "$MNT/etc/rc.conf.d" "$MNT/usr/local/etc/rc.conf.d" -type f -exec cat {} + 2> /dev/null)
 _others=$(printf '%s\n' "$_on" | grep -E '^[[:space:]]*[A-Za-z0-9_]+_testboot_enable="?[Yy]' | grep -v '^nvidia_native_tools_testboot_enable=' | tr '\n' ' ')
 [ -z "$_others" ] && ok "no other test-boot kit is enabled" || bad "other test-boot kits are enabled: $_others"

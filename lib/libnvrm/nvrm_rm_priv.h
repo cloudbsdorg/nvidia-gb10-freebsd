@@ -62,6 +62,28 @@ struct nvrm_gpu {
 	int			have_card;
 };
 
+struct nvrm_bres;
+
+/* One client on one GPU: the RM session, the device and the VA space of the
+ * client, and what the channel backend adds to them. */
+struct nvrm_bclient {
+	nvrm_backend	*s;		/* the RM session: descriptor and client */
+	NvHandle	device, vaspace;
+	unsigned	minor;
+	int		have_minor;
+	struct nvrm_bres *res;		/* every reservation not yet released */
+	/* the channel backend (nvrm_rm_chan.c) */
+	NvHandle	subdevice;	/* the subdevice of this client */
+	NvHandle	usermode;	/* the usermode object under it */
+	void		*usermode_cpu;	/* its CPU mapping (the doorbell) */
+	int		usermode_fd;	/* the descriptor it was mapped on */
+	NvP64		usermode_cookie;	/* the RM's address for it */
+	uint32_t	classes[64];	/* the class list of the device */
+	unsigned	nclasses;
+	int		have_classes;	/* the list was asked for already */
+	uint64_t	progress;	/* the progress count of the client */
+};
+
 /* RM calls on a session (a descriptor and its RM client). */
 NvU32	nvrm_rm_alloc(nvrm_backend *be, NvHandle parent, NvHandle *hnew,
 	    NvU32 cls, void *params, NvU32 size);
@@ -73,5 +95,60 @@ int	nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen);
 void	nvrm_rm_close(nvrm_backend *be);
 int	nvrm_rm_owner(const nvrm_backend *be);
 const nvrm_rm_sys *nvrm_rm_get_sys(void);
+
+/* ---- what the two halves of the RM backend share ------------------------- */
+
+/* The RM's name for a memory object. */
+NvHandle nvrm_rmm_handle(const nvrm_bmem *m);
+
+/* A CPU mapping of an RM object: the address the CPU sees and the address
+ * the RM gave it. */
+struct nvrm_rm_map {
+	void	*addr;
+	NvP64	cookie;
+};
+
+/* A CPU mapping of an RM object by handle: the RM names the address, the OS
+ * layer maps the descriptor.  The cookie is the RM's address for the
+ * mapping; the unmap gives it back. */
+int	nvrm_rmm_map_handle(nvrm_bclient *c, NvHandle h, uint64_t bytes,
+	    unsigned prot, int fd, struct nvrm_rm_map *map, char *err,
+	    size_t errlen);
+int	nvrm_rmm_unmap_handle(nvrm_bclient *c, NvHandle h, NvP64 cookie,
+	    void *addr, uint64_t bytes, char *err, size_t errlen);
+
+/* Say what an RM call failed with: an RM status, or the system call. */
+int	nvrm_rmm_status_fail(char *err, size_t errlen, const char *what,
+	    NvU32 st);
+
+/* The class slots the channel backend binds: the subchannels first, in the
+ * order of the RM's own subchannel numbers, then the channel itself.  The
+ * classes are the RM backend's own (nvrm_rm.c); the core names no chip. */
+enum {
+	NVRM_RM_CLS_3D = 0,
+	NVRM_RM_CLS_COMPUTE,
+	NVRM_RM_CLS_I2M,
+	NVRM_RM_CLS_2D,
+	NVRM_RM_CLS_COPY,
+	NVRM_RM_CLS_GPFIFO,
+	NVRM_RM_CLS__COUNT
+};
+
+/* The class of a slot: the first of its candidates the device lists, or 0
+ * when the device lists none of them. */
+uint32_t nvrm_rm_chan_class(const nvrm_bclient *c, unsigned slot);
+
+/* The class of the channel group (one per channel). */
+uint32_t nvrm_rm_chan_group_class(void);
+
+/* The client's own objects for the channel backend: a subdevice and the
+ * usermode object under it. */
+int	nvrm_rm_usermode_alloc(nvrm_bclient *c, char *err, size_t errlen);
+
+/* The channel backend: give back what the client holds when it closes. */
+void	nvrm_rm_chan_client_close(nvrm_bclient *c);
+
+/* The RM backend's channel operations. */
+extern const nvrm_chan_ops nvrm_rm_chan_ops;
 
 #endif

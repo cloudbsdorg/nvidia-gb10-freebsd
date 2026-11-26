@@ -46,13 +46,37 @@ SKIPPED=0
 mkdir -p "$REPO/tmp"
 TESTROOT=$(mktemp -d "$REPO/tmp/linux-cuda-test.XXXXXXXX") || exit 1
 # The shim keeps abstract sockets in a file whose path must fit sun_path
-# (103 bytes), so the abstract directory is short, outside the repository:
-# under $HOME, never /tmp.  With no HOME there is nowhere short and private.
-if [ -z "${HOME:-}" ]; then
-	echo "linux_cuda_test: HOME is unset; refusing to fall back to /tmp" >&2
-	exit 2
+# (103 bytes), so the abstract directory is short, outside the repository,
+# and never /tmp. Prefer a caller-supplied TMPDIR when it is an absolute
+# path, is not /tmp or under it, and is a writable directory we can use;
+# otherwise $HOME, if it is writable. On some fleet role accounts $HOME
+# is not writable (owned by root), so TMPDIR is the supported way to
+# point this scratch at a 0700 directory the test user owns.
+sa_root=
+case ${TMPDIR:-} in
+/*)
+	case $TMPDIR in
+	/tmp|/tmp/*) ;;
+	*)
+		if [ -d "$TMPDIR" ] && [ -w "$TMPDIR" ]; then
+			sa_root=$TMPDIR
+		fi
+		;;
+	esac
+	;;
+esac
+if [ -z "$sa_root" ]; then
+	if [ -z "${HOME:-}" ]; then
+		echo "linux_cuda_test: HOME is unset and no usable TMPDIR; refusing to fall back to /tmp" >&2
+		exit 2
+	fi
+	if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
+		echo "linux_cuda_test: HOME is not writable and no usable TMPDIR; refusing to fall back to /tmp" >&2
+		exit 2
+	fi
+	sa_root=$HOME
 fi
-SADIR=$(mktemp -d "$HOME/.cache-sa.XXXXXX") || exit 1
+SADIR=$(mktemp -d "$sa_root/.cache-sa.XXXXXX") || exit 1
 
 # cleanup - remove exactly this run's scratch files on every exit path.
 # Time:  O(files created by this test).

@@ -313,6 +313,7 @@ Merged origin/agent/2088-build-host (a2e0546) with --no-ff; the gate reviewed th
   2. run.sh vmm: vm.create with cloud-init user data, and the result read-back, are not wired.
   3. The guest clones from a read-only mirror amp001 serves on the VM network (Mark: no keys, no GitHub in the VM).
   4. uvm-bsd: install and deinstall targets, the stock source fetch, a harness run.
+
 ## 2026-11-20 llm-cuda (Track #2289, branch agent/2289-llama-cuda; merged onto main 2026-11-22)
 - scripts run-cuda-llama.sh, bench-report.sh + tests/llm/bench_scripts_test.sh + man pages, committed in 9820803 (#2289).
 # Journal native CUDA C1 (Track #2380, epic #2362), branch agent/2380-cuda-c1-toolchain
@@ -598,6 +599,7 @@ STATUS, hand back.
   (guard_layer_name) for files, records and dependencies, now with drm, dmabuf, ttm, amdgpu, radeonkms and i915kms;
   guard_env prints the kernel records on a records line (no globals); kldxref positive control is the module
   record; the record-inside-another-file branch is tested. Kit test 174/0.
+
 ## 2026-11-22T11:45Z libnvrm S3 (Track 2437, branch agent/2437-libnvrm-s3)
 - Main sync: fast-forwarded to origin/main 4a745c7. A --no-ff merge was refused by merge-proof (MERGE_HEAD brings the GitHub merge commit 4a745c7 with no per-commit receipt); b98157c is an ancestor of main, so the fast-forward carries no branch content.
 - Baseline tests/libnvrm_test.sh: 478 ok, 0 failed.
@@ -609,6 +611,7 @@ STATUS, hand back.
 - 2026-11-22T13:35Z amp001 panicked (ZFS on zroot) about 13:24Z and rebooted. Round B (slice 1, worktree wt-libnvrm-s3-b) was cut off before its final report; its files are on disk (chan_test 200850 checks green at its last log). Commit A: gate round 1 receipt 2bd715e0 (5 Opus voices, FINDINGS), fixes from round A4 staged, answers in tmp/libnvrm-s3/answers/answers-A.txt, one stale mutant line being fixed (round A5). Tags: quality.1 REJECTED (each client opens its own RM session); all other round-1 findings DEFECT, ACCEPTED and fixed.
 - Resume: suite on the staged A, gate round 2 with REVIEW_ANSWERS, commit, push; then bring round B onto commit A and finish it.
 - 2026-11-22T21:40Z A6 on main 44617da (PR 15 merged): the three DEFECTs left open on 297e307 (fake leak sweep, dangling fake_map pointer, DEFAULT write-back advice) and three DEBTs (give_back helper, munmap delta, second session asserted). Started by Kimi k3.1-pro (round A6, stopped), finished by Sonnet (Kimi quota out); mem_test main() runs a test table (CPD, the copy-paste detector of PMD). Suite 490 ok. Next: gate 2 rounds, commit, push, PR. Answers: tmp/libnvrm-s3/answers/answers-A6.txt.
+
 ## 2026-11-22 (nvrm-info boot fixes and version sysctls, #2378 libnvrm, #2362 kit): PAUSED for a test boot
 Worktree /home/mlapointe/work/gb10/wt-2378-versions, branch agent/2378-version-numbers, cut from origin/main 8702134.
 No code is written yet, and no opencode round has started. Baseline: tests/libnvrm_test.sh 412 ok, 0 FAILED on 8702134.
@@ -753,16 +756,109 @@ RESUME: orchestrator review and gate; nvidia.ko was built (never loaded); a test
 - Answers to round 1: tmp/2457/REVIEW_ANSWERS-r2.txt (falsification.6 is a QUESTION: live probe needs a test boot).
 RESUME: gate round 2 with REVIEW_ANSWERS=tmp/2457/REVIEW_ANSWERS-r2.txt once the Kimi voices answer (Mark 11-23: no Claude fallback; wait and probe again); then commit, push, full suite, PR. hw-preflight (skills repo) is a follow-up.
 
+## 2026-11-26 #2457 merge of main (4cd016d) and the one cpd refusal
+- The merge of origin/main 4cd016d into the branch head e63ef89 is in the worktree, not committed (MERGE_HEAD is still there). Four files conflicted; each was resolved by hand. JOURNAL.md keeps both sides. docs/MANUAL-BUILD.md keeps main's platform paragraph (arm64 or amd64, the RM core rebuilt for the running architecture, the base ld.lld) and the branch's GA10x paragraph. scripts/make.sh keeps main's HookOS/hookarch and the branch's GB10_TEST_PCICONF, GB10_TEST_SYSCTL and GB10_TEST_MACHINE_ARCH hooks, with the chip-family naming (GA10x, TU10x, ...) and the preflight schema majors (2.0, with schema_major and schema_minor as integers) as they are.
+- schema/samples.json lists every schema of the merged tree: preflight 1 and 2, install 2 with its two fixtures, and the two stock-install schemas. Main's install contract is 2.x and its 1.x file is gone, so the branch's 1.x row is not registered: schema-check refuses a row that names a schema the tree does not hold, and every schema in the tree must be named by a row.
+- The gate's one refusal: cpd reported the fatbin reader's error table (lib/cuda-native/fatbin/cnfatbin.c, from main, PR 50) as a copy of libnvrm's reason table (lib/libnvrm/nvrm_names.c, this branch): 23 lines, 121 tokens. One implementation now: lib/cuda-native/fatbin/cn_names.h carries struct cn_name_entry, the CN_NAME_ENTRY(code, id, text) macro and cn_name_code_valid(code, count). Both libraries include that one file; libnvrm reaches it with -I${.CURDIR}/../cuda-native/fatbin, the way lib/libcuda reaches ../cuda-native/sdk/include, and mksdk.sh copies it next to the reader it compiles (that reader is compiled without an include path of its own, so the header has to sit next to it). The fatbin table keeps its designated initializers (tests/cuda_native_fatbin_test.sh reads that table out of the source text and compares it with the enum in cnfatbin.h); libnvrm's table is written with the macro. The two are the same data in the same struct but not the same token shape, which is what cpd compares. The behaviour is unchanged: the same names, the same texts, the same answers for a code that is not in the table.
+- scan-cpd --root . lib/cuda-native/fatbin/*.c lib/libnvrm/*.c: CLEAN. The gate's own form (SCAN_REPO set, so the whole fatbin and libnvrm trees are the context) is CLEAN too. The largest clone left in that pair is the fatbin table against itself at 89 tokens (the threshold is 100); before the change the same pair was reported at 121.
+- The boot kit of tests/native-tools-testboot carries the shared header too (make-be.sh PATHS), so the copy of lib/libnvrm in the kit still builds.
+
+## 2026-11-22T23:25Z #2455 device decision phase 1 (design)
+Worktree wt-2455, branch agent/2455-device-decision from origin/main cbe6ca3.
+- Survey (MIT open-gpu-kernel-modules 580.178.04 src/ and kernel-open/; zlib supported-gpus.json of the FreeBSD 580.178.04
+  package; BSD fwget tables): the PCI-time check accepts every 0x10de display device; the generation check needs BOOT_42
+  after BAR0 is mapped; 0x1e02+ open-RM capable, 0x1340..0x1df6 closed RM only, older ids in legacy branches.
+- Code writers: MiniMax (token plan) and kimi-k3.1-pro (monthly limit) over quota at 23:25Z; kimi-k3 and kimi-k2.7-code
+  gave no answer in 150 s. docs/DEVICE-DECISION.md written by a Sonnet sub-agent from the brief tmp/2455/brief-doc.md,
+  reviewed by the orchestrating agent (10 fixes, applied by the same Sonnet agent).
+- Mark's additions folded in: one driver and package for every card, branch as data, backends per generation, alias
+  layer, full-coverage path, the #2457 Ampere floor as the first provider-record rule.
+- Next: full suite, gate 2 rounds, commit, push, PR; hand back for Mark's go. Phase 2 waits for that go.
+
 ## 2026-11-22T21:30Z libnvrm S3 slice 1 (Track 2437, branch agent/2437-libnvrm-s3-chan, on main 44617da)
 - nvrm_chan API (nvrm_chan.h), core ring rules (nvrm_chan.c: E-2 per batch, splitting, INCOMPLETE runs, a FIFO of submit waiters with a turn condvar, flush order with two barriers), fake GPFIFO (nvrm_fake_chan.c: NOP, semaphore release and acquire 32/64-bit, ACQ_CIRC_GEQ, copy class), encoders in nvrm_methods.h, barriers in nvrm_barrier.h, nvrm_chan(3).
 - Written by opencode Kimi k3.1-pro (round B), finished by Sonnet (B2, B3: queued submit timeout and handoff, ring-wrap space fix; lint exemption for the fake channel data) after the Kimi quota ran out.
 - tests/libnvrm_test.sh 505 ok, 0 failed. chan_test about 200961 checks; nvrm_chan.c and nvrm_fake_chan.c at 100 percent lines and branches; 11 chan mutants killed.
 - Next: gate rounds 1 and 2, commit, push, PR.
+- Slice 1 round 2 had two complete gate runs on the same diff: run 87573 (receipt a119169e, the one used) and a duplicate run 33965.
+- The mutant script now holds 26 chan mutants (the slice 1 entry of 2026-11-22 21:30Z said 11; that count was stale).
+- 2026-11-23T04:00Z B5 (the four slice 1 DEFECT fixes) on branch agent/2437-libnvrm-s3-defects, on main 0163eda: gate round 1 receipt 4f490fa3 (5 voices, Claude fallbacks because every Kimi voice was over quota); the nine findings fixed by a MiniMax round (B6-review1): size 0 returns the full stats structure again, the fake fetch failure leaves GP_GET alone, one ownership check in run_entries, forget required and never called in a fork child. Suite 608 ok. Answers for round 2: tmp/libnvrm-s3/answers/answers-B5.txt.
+- Resume: gate round 2 with REVIEW_ANSWERS waits until a non-Claude voice answers (Mark: no Claude fallback while the Claude quota is low; wait for the next 5 hour MiniMax window); then commit, push, PR.
+
 ## 2026-11-22T23:25Z #2448 zz-2448 enumerate-gpus patch: fuzz 0 on main after d1752ad
 - patches/patch-zz-2448-enumerate-gpus_nvidia-modeset-freebsd.c regenerated with diff -U2 against the tree after every earlier patch (incl. the nv_version_sysctl.h include from d1752ad). Hunk 2 now anchors on that include; the NVRM include block still sits before nv-retpoline.h. Added (+) lines are byte-identical; hunks apply with no fuzz and no offset.
 - Chain: all 38 patches apply in lexical order at -F0 (offsets only in other patches, none failed). enumerate_gpus_patch_test 5/0; kapi_table_test 30/0.
 - linux_bridge_test on a built tree (tests/linux_bridge_test.sh work/build/tree): 105 passed, 1 failed after; on cbe6ca3 104 passed, 3 failed. The two that went are check (g), the fresh-archive fuzz 0 apply of every patch ("does not apply with fuzz 0" and "a .rej file was left behind"). The one left is check (i), man/nvidia.4 line 272 `.Xr nvidia-smi 1` (mandoc STYLE "referenced manual not found"), which fails the same way on cbe6ca3.
 - Full suite (every tests/*_test.sh), here and on a cbe6ca3 baseline worktree, same build: the same tests fail on both, with identical FAIL lines. fw_depend and open_dev_failure fail on the nvidia.4 lint above; make_contract on two nvrm man3 links missing from expected.manifest; make_install_flow on a personal path in tests/version_sysctl_test.sh line 15; render_uapi_layout exits 2 on a skipped check. With the default tree argument, linux_bridge_test also reports the tree-2363 module files as missing (no tree-2363 is built here).
+
+## C1.3 (#2427) 2026-11-23T00:38Z slice 1 started on main 999b186
+Brief ~/work/gb10/briefs/2427-c1.3-s1-fatbin-container.md on opencode MiniMax (state tmp/round).
+
+## C1.3 (#2427) 2026-11-23T01:00Z checkpoint for the amp001 test boot
+Round stopped about 20 minutes in; snapshot ~/work/gb10/cuda-mgr/snap-20261123T0100Z. Resumed after the boot with ~/work/gb10/briefs/2427-c1.3-s1b-resume.md.
+
+## C1.3 (#2427) 2026-11-23T02:40Z slice 1 round done (MiniMax, resumed run)
+- cnfatbin reader and writer: the LLVM OffloadBinary v2 layout plus our cloudbsd.* keys.
+- nvfatbin and fatbinary, now in C.
+- cuda-objdump: text, --json, --jsonl, --extract and --schema; it also reads .nv_fatbin from ELF files.
+- The runtime stub reads the container.
+- Man pages nvfatbin(5) and cuda-objdump(1).
+Oracles:
+- llvm-objdump --offloading reads our container.
+- Our reader reads clang-offload-packager output, so image kind none is accepted.
+Tests: fatbin 65/65, toolchain 243/243; the mutant goes red.
+Manager review: the bounds checks in cnfatbin_open and read_member are sound.
+DEBT: clang's wrapper gives no length, so the runtime stub takes the container length from its own header (capped at 16 MiB).
+Next: gate round 1.
+
+## C1.3 (#2427) 2026-11-23T03:40Z scanner pass done (MiniMax): functions split, shared cntool.c/h for both tools, test oracle messages literal. lizard and cpd clean. fatbin 67/67, toolchain 243/243. Next: gate round 1.
+
+## C1.3 (#2427) 2026-11-23T03:45Z PAUSED (Claude quota)
+Slice 1 gate round 1 was started then STOPPED at 03:45Z under Mark's low-Claude-quota rule: Kimi is out of quota, so the gate voices would fall through to claude-opus. Staged work is intact; resume = review-and-record when a non-Claude voice chain answers (probe again after about 05:45Z).
+
+## C1.3 (#2427) 2026-11-23T07:12Z PAUSED 07:12Z: MiniMax Token Plan usage limit reached (about 07:05Z). The running passes were stopped with partial edits on disk. Resume after the next 5-hour window (about 10:01Z). Pass A (brief 2427-c1.3-s1e-A.md) got partway; then run B and C.
+
+## C1.3 (#2427) 2026-11-23T07:59Z PARKED 07:59Z for the amp001 drive swap. Nothing of the manager is running. Snapshot of the uncommitted work: ~/work/gb10/cuda-mgr/snap-20261123T0715Z (also on zroot; the cloudbsd pool is not writable for this user). Resume: probe MiniMax; if it answers, rerun the pass named in the previous entry.
+
+## C1.3 (#2427) 2026-11-24T05:40Z pass 3A done (runtime stub bound)
+Gate round 1 finding on the runtime stub trusting the header's own length (quality.10, security.1, falsification.3, the lengthless-peek half of quality.9): the stub now bounds every read by the loaded object that holds the pointer, found with dl_iterate_phdr(3) and the PT_LOAD segment end, capped at 16 MiB. A pointer in no loaded object is refused; a registered mapping is the fallback for it and never widens a bound a loaded object gives.
+Fixtures: the reviewer's 100-byte header claiming 1 MiB just before a PROT_NONE page, the 32-byte header claiming 16 MiB with one entry, eight bytes before a guard page, and a container in an unregistered mapping. A mutant whose stub takes the cap for its bound reads out of bounds and dies on SIGSEGV, so the fixture has teeth.
+Also repaired the earlier run's half-finished error-table refactor: it left the old error_names[] beside the new error_table[] and the tree did not compile under -Werror.
+DEBT closed: the wrapper still gives no length, but the stub no longer needs one.
+Tests: fatbin 67/67, toolchain 249/249. lizard, cpd and mandoc clean. Not committed.
+Next: the remaining gate round 1 findings (UTF-8 JSON, -emit-llvm, kind none, overlong values, overlapping ranges, trace arch, one error table/magic check/file reader, one crafting implementation, the writer's caps).
+
+## C1.3 (#2427) 2026-11-24T07:45Z pass 3B done (reader values and output)
+Gate round 1 findings on values and output: the JSON escaper validates UTF-8 and writes every byte that is not a character as the replacement character, so the document always parses; the text output shows every control byte as a \xNN escape, so one member stays one line and no raw control byte reaches the terminal. The reader measures a value before it copies it: a value of a key we know that does not fit the field is refused with value-too-long, a digest is exactly 64 hexadecimal digits or it is sha256-format, and a key we do not know is ignored however long its value is. Two members that name the same image range ask for more hashing than the container's size allows, and the container is refused with hash-budget before any digest is computed. The writer refuses what the reader or the stub refuses: no members, too many members, and a container larger than 16 MiB. One file reader in cntool.c keeps the cause of a failed read (no such file, permission denied, a directory, an empty file, a failed read, no memory), and cuda-objdump refuses the output modes that cannot be combined and parses the member index strictly.
+The C reader test now writes the containers it breaks, and the shell test drives the tools over them, so the new cases have one crafting place.
+Tests: fatbin 94/94, toolchain 249/249. lizard, cpd and mandoc clean. Not committed.
+Next: the remaining gate round 1 findings (-emit-llvm, kind none, the trace arch, one magic check, the alignment wording, the rest of quality.6).
+
+## C1.3 (#2427) 2026-11-24T08:20Z pass 3C done (docs, tables, tests)
+The rest of gate round 1. The -emit-llvm compile now runs against the real fatbinary and is asserted to fail with "not a cuda-native cubin"; the limitation is in nvfatbin(1) CAVEATS and README.md. The error table is one table of name and message pairs with a build time check, and the shell test proves it. The magic is checked in one helper and one reader reads a whole file; the shell test proves both. The C reader test writes every broken container it builds and the shell test drives cuda-objdump over those files, so the Python crafting block is gone. The trace records the architecture of every image ("arch":"sm_121a") and the trace schema carries it as an additive, optional field. nvfatbin(5) says which offsets are 8-byte aligned and that the keys and values are packed, and it says that an image kind and an offload kind of none are accepted, as the reader does. The offload diagnostic is now "a member has an unsupported offload kind". nvfatbin(1) says that a failed trace write leaves the container in place. The fatbinary alias names itself the way it was invoked, in its usage and in its diagnostics, while the JSON and the trace keep the canonical name nvfatbin. The dead digest field sha256_ok is gone from the reader, the tools, the schema and the tests.
+Tests: fatbin 112/112, toolchain 252/252. lizard empty, scan-cpd CLEAN, mandoc clean. Not committed.
+Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries the merged answers); the work is ready for the commit gate.
+## 2026-11-23T00:55Z #2455 checkpoint for an amp001 test boot
+- Committed and pushed: b413557 (design, gate rounds ff8d06fb and 6ef863ea), 9e9925e (merge of main 999b186, overlap gate 963bb2f3).
+- Suite stopped for the queued test boot: the merged branch and a 999b186 baseline (wt-2455-base) had 25 ok each, and the same four failures each (abi_layout, firmware, kmod_symbols, linux_bridge: modules not built in the prepared tree).
+- RESUME: after the boot, rerun make test in wt-2455 and wt-2455-base (GB10_WORK=<wt>/work, SYSDIR=~/rx7600/kc502/src/sys, OGKM set), compare, open the PR, hand back for Mark's go.
+- 2026-11-23T02:30Z after the boot: full suite on the branch and on the 999b186 baseline, same setup: 53 run, 8 failed on
+  both, the same 8 (abi_layout, firmware, kmod_symbols, linux_bridge, native_tools_kit, prime_import, stubs, uvm_glue: RM
+  cores, shim and modules not built in the prepared tree).
+- Round 3 (approved by the orchestrator): MiniMax (minimax-mlapointe) applied fixes F1-F15 for the round-2 Review-open
+  findings (tmp/2455/task-r3.md); the first attempt died on a transport error, the continuation finished. Orchestrator
+  review fixed one slip by hand (the sample Ampere generation claimed arm64 testing on 0x2d04, which is Blackwell).
+- Next: gate round 3, commit, push; PR #40 stays draft until Mark answers the 11 questions.
+
+## 2026-11-23T04:10Z #2455 round 4: Mark's answers applied; part b cut by MiniMax quota
+- Part a (tmp/2455/task-r4.md, MiniMax): Mark's answers of comment 17247 and the round-3 items B1-B11 applied; rc 0.
+- Part b (tmp/2455/task-r4b.md: pluralistic backends P1-P4, RTX 30+ focus P5) stopped at 04:05Z on "Token Plan usage
+  limit reached"; partial edits are in the working tree (4 table rows over 160 characters remain).
+- Per the orchestrator: no Claude fallback; wait for the next 5-hour MiniMax window, then rerun part b as a
+  continuation, then gate rounds (only if the voices do not fall through to Claude), commit, PR #40 out of draft.
+- 2026-11-23T05:30Z part b finished as a continuation (tmp/2455/task-r4c.md, MiniMax, rc 0): P1-P4 (several of our
+  backends at once, one per card; per-instance names through the alias layer; many devices per class) and P5 (phase 2
+  builds RTX 30 and later only; other generations and vendors designed, not built). Next: gate round 1 (MiniMax-first).
 
 ## 2026-11-22 (UTC) libnvrm review follow-up (#2378, agent/2378-libnvrm-review-followup)
 - The alias/raw fallback plan of the PAUSED entry (nvrm-info boot fixes and version sysctls) was dropped: with

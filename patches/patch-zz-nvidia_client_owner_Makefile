@@ -1,9 +1,14 @@
 --- nvidia/Makefile.orig
 +++ nvidia/Makefile
-@@ -73,10 +73,16 @@
+@@ -78,15 +78,21 @@
  		nvUvmInterfaceInitAccessCntrInfo nvUvmInterfaceDestroyAccessCntrInfo \
  		nvUvmInterfaceEnableAccessCntr nvUvmInterfaceDisableAccessCntr \
  		nvUvmInterfaceReportFatalError
+ .else
+ # FreeBSD 16 bsd.kmod.mk defaults EXPORT_SYMS to NO, which writes an
+ # empty export_syms and objcopy-strips every global. amd64 modules
+ # export every global symbol.
+ EXPORT_SYMS=	YES
  .endif
  
 +# The client hold/release pair nvidia-uvm.ko calls (Track #2373); amd64 modules

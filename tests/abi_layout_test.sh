@@ -78,7 +78,10 @@ command -v awk >/dev/null 2>&1 || die2 "awk not found on PATH ($PATH)"
 ARCH="$(uname -m)"
 case "$ARCH" in
 arm64|aarch64) ;;
-*) die2 "this test proves the aarch64 ABI; host is '$ARCH' - run it on an aarch64 host" ;;
+*)
+	echo "skip  abi_layout_test: this test proves the aarch64 ABI; host is '$ARCH'"
+	exit 77
+	;;
 esac
 
 mkdir -p "$TMPDIR" || die2 "cannot create TMPDIR $TMPDIR"

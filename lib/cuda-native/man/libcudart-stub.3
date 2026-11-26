@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 22, 2026
+.Dd November 23, 2026
 .Dt LIBCUDART-STUB 3
 .Os
 .Sh NAME
@@ -49,17 +49,30 @@ Both configuration functions return zero.
 .Fn __cudaRegisterFatBinary
 checks that the clang wrapper magic is
 .Li 0x466243b1
-and that its data begins with
-.Ql CUDA-NATIVE-STUB-FATBIN 1
-followed by a newline.
-It counts the
-.Li member
-lines before the
-.Li ---
-separator, reports that count in the optional trace and allocates a separate
-record for each valid fatbin.
+and that its data is a cuda-native fatbin container.
+The container carries its own length, but a length is not a bound: the bytes
+the pointer names may be shorter than the container claims.
+The registration bounds every read by the object that holds the pointer.
+It finds that object with
+.Xr dl_iterate_phdr 3 :
+the
+.Va PT_LOAD
+segment that contains the pointer ends where the readable bytes of that
+object end, and the registration reads no byte past that end.
+The bound is never more than 16 MiB.
+A pointer that is in no loaded object is refused, and so is a container that
+claims more bytes than that bound allows.
+A program that holds a container in a mapping of its own, which is in no
+loaded object, can register that mapping with the reader; the bound is then
+the end of the registered mapping.
+A registration never widens the bound of a pointer that a loaded object
+already bounds: the loaded object is the authority, and a registration only
+answers for a pointer that is in no loaded object at all.
+The registration validates the whole of the container it accepted.
+It counts the members, reports that count in the optional trace and allocates
+a separate record for each valid fatbin.
 The record retains copied kernel names so unregister can trace and release each one.
-Bad magic, bad data or a malformed header writes one
+A bad wrapper magic, bad data or a container that fails a check writes one
 .Ql libcudart-stub:
 diagnostic to standard error and returns
 .Dv NULL .
@@ -134,8 +147,10 @@ Compile and link a CUDA source with an SDK in
 .Pp
 A resulting launch returns 801 rather than running the kernel.
 .Sh SEE ALSO
+.Xr cuda-objdump 1 ,
 .Xr nvfatbin 1 ,
 .Xr nvptxas 1 ,
+.Xr nvfatbin 5 ,
 .Xr cuda-native-toolchain 7
 .Sh CAVEATS
 This is an intentionally small runtime stub for clang's generated host calls,
