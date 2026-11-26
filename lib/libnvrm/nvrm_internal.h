@@ -335,6 +335,12 @@ typedef struct nvrm_chan_ops {
 	 * and the sleep is never lost. */
 	uint64_t (*progress_gen)(nvrm_bclient *bc);
 	int	(*wait)(nvrm_bclient *bc, uint64_t slice_ns, uint64_t gen);
+	/* The parameters the RM was given for the last channel allocation the
+	 * client submitted, whether the RM took them or refused them: the
+	 * caller prints them when the RM refused.  A backend without the
+	 * operation says so, and a client that submitted none is told so
+	 * too (NVRM_E_NOENT). */
+	int	(*alloc_get)(nvrm_bclient *bc, nvrm_chan_alloc *out);
 } nvrm_chan_ops;
 
 /* One queued submitter; the queue is a FIFO under the channel lock. */

@@ -75,6 +75,8 @@ enum nvrm_error {
 	NVRM_E_BUSY,		/* still in use: unmap or free what depends on it */
 	NVRM_E_TIMEOUT,		/* the operation reached its deadline */
 	NVRM_E_LOST,		/* the channel is dead */
+	NVRM_E_NOENT,		/* there is nothing to report: the client has
+				   asked for something it never did */
 	NVRM_E__COUNT
 };
 

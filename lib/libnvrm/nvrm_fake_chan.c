@@ -106,8 +106,18 @@ fake_create(nvrm_bclient *bc, const nvrm_bchan_cfg *cfg, nvrm_bchan **bp,
     nvrm_bchan_info *out, char *err, size_t errlen)
 {
 	nvrm_bchan *b;
+	const char *fail;
 
 	*bp = NULL;
+	/* The injected failure: the create is refused with a message of its
+	 * own, so a caller that reads the reason of the refusal sees it
+	 * (and not the message of a later call). */
+	fail = getenv("NVRM_FAKE_FAIL");
+	if (fail != NULL && strcmp(fail, "chancreate") == 0) {
+		snprintf(err, errlen, "fake backend: the channel create "
+		    "failed (injected)");
+		return (NVRM_E_RM);
+	}
 	b = NVRM_CALLOC(1, sizeof(*b));
 	if (b == NULL) {
 		snprintf(err, errlen, "out of memory");
@@ -683,6 +693,19 @@ nvrm_fake_chan_counts(nvrm_chan *ch)
 	return (counts);
 }
 
+/*
+ * The fake backend talks to no RM: it has no parameters of a channel
+ * allocation to report, and says so.  The caller's structure is left
+ * alone: there is nothing to report.
+ */
+static int
+fake_alloc_get(nvrm_bclient *bc, nvrm_chan_alloc *out)
+{
+	(void)bc;
+	(void)out;
+	return (NVRM_E_NOTSUP);
+}
+
 nvrm_chan_ops nvrm_fake_chan_ops = {
 	.copy_on_graphics = 1,
 	.create = fake_create,
@@ -694,4 +717,5 @@ nvrm_chan_ops nvrm_fake_chan_ops = {
 	.error = fake_error,
 	.progress_gen = fake_progress_gen,
 	.wait = fake_wait,
+	.alloc_get = fake_alloc_get,
 };

@@ -16,7 +16,7 @@
 #include "nvrm_internal.h"
 
 #define SCHEMA_ID	"nvrm-info/1"
-#define SCHEMA_MINOR	3
+#define SCHEMA_MINOR	4
 #define SCHEMA_VERSION	"1." NVRM_STRINGIFY(SCHEMA_MINOR)
 
 static nvrm_version schema_version;

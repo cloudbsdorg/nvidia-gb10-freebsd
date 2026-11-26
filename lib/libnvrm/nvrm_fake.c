@@ -12,7 +12,9 @@
  *                      "discrete"): discrete, unified, untabled, unknown, sparse
  *   NVRM_FAKE_FAIL     open, version, list, gpu_open, limit: make that step
  *                      fail, so callers' error paths run without hardware;
- *                      nogpu: list no GPU (a success with zero devices).
+ *                      nogpu: list no GPU (a success with zero devices);
+ *                      chancreate: refuse the channel create with a
+ *                      message of its own.
  *
  * Every query makes one real ioctl round trip on a descriptor the backend
  * owns, so the Capsicum limits (rights and the ioctl allow list) are

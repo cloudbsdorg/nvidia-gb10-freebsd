@@ -15,6 +15,9 @@
 #include <nv_escape.h>
 #include <ctrl/ctrl0080/ctrl0080gpu.h>
 
+#include <nvrm/nvrm.h>
+#include <nvrm/nvrm_chan.h>
+
 #include "nvrm_internal.h"
 #include "nvrm_rm_sys.h"
 
@@ -87,6 +90,11 @@ struct nvrm_bclient {
 	unsigned	nclasses;
 	int		have_classes;	/* the list was asked for already */
 	uint64_t	progress;	/* the progress count of the client */
+	/* The parameters of the last channel allocation this client
+	 * submitted to the RM, whether the RM took them or refused them:
+	 * the caller prints them when the RM refused. */
+	nvrm_chan_alloc	last_alloc;
+	int	have_last_alloc;
 };
 
 /* RM calls on a session (a descriptor and its RM client). */

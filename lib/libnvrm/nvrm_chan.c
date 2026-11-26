@@ -838,6 +838,46 @@ nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info)
 }
 
 /*
+ * The parameters the RM was given for the last channel allocation this
+ * client submitted, whether the RM took them or refused them: the caller
+ * prints them when the RM refused, so the boot log says what the RM was
+ * given.  The parameters do not say which field the RM refused: only the
+ * status of the allocation does, and the caller has it.
+ *
+ * The backend holds them; a backend that keeps none says so, and a client
+ * that submitted none is told so too (NVRM_E_NOENT), so that "nothing was
+ * submitted" and "everything was submitted" are not the same answer.
+ */
+#define ALLOC_NOSUP_MSG "this backend does not record the parameters of a " \
+	"channel allocation: run against the RM backend to see them"
+
+int
+nvrm_chan_alloc_get(nvrm_client *cl, nvrm_chan_alloc *out)
+{
+	int rc;
+
+	clear_err(cl);
+	if (out == NULL)
+		return (fail(cl, NVRM_E_INVAL, "nvrm_chan_alloc_get() wants a "
+		    "structure to fill"));
+	if (!size_ok(out->size, sizeof(*out)))
+		return (fail(cl, NVRM_E_INVAL, "nvrm_chan_alloc.size "
+		    "must be 0 or sizeof(nvrm_chan_alloc)"));
+	if (cl->ops->chan == NULL || cl->ops->chan->alloc_get == NULL)
+		return (fail(cl, NVRM_E_NOTSUP, ALLOC_NOSUP_MSG));
+	rc = cl->ops->chan->alloc_get(cl->bc, out);
+	if (rc == NVRM_E_NOENT)
+		return (fail(cl, rc, "this client submitted no channel "
+		    "allocation to the RM"));
+	if (rc == NVRM_E_NOTSUP)
+		return (fail(cl, rc, ALLOC_NOSUP_MSG));
+	if (rc != NVRM_OK)
+		return (fail(cl, rc, "the backend did not give the parameters "
+		    "of the last channel allocation"));
+	return (NVRM_OK);
+}
+
+/*
  * Destroy a channel.  When the backend refuses to destroy its channel, the
  * ring memory and VA stay held (the backend may still use them) and so does
  * the core record, which the backend may still point to: the failure is

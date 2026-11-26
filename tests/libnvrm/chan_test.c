@@ -1341,6 +1341,28 @@ test_create_failures(void)
 	CHECK(strstr(nvrm_client_errmsg(cl), "channel create") != NULL);
 	check_live_stats(cl, &baseline);
 	cl->ops = saved;
+
+	/* the fake backend's own injected refusal: the create is refused
+	 * with a message of its own, so a caller that reads the reason sees
+	 * it */
+	setenv("NVRM_FAKE_FAIL", "chancreate", 1);
+	ch = (nvrm_chan *)(uintptr_t)1;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_RM);
+	unsetenv("NVRM_FAKE_FAIL");
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "the channel create failed "
+	    "(injected)") != NULL);
+	check_live_stats(cl, &baseline);
+
+	/* another injected failure does not refuse the create: only the
+	 * channel-create mode does */
+	setenv("NVRM_FAKE_FAIL", "nogpu", 1);
+	ch = NULL;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	unsetenv("NVRM_FAKE_FAIL");
+	CHECK(ch != NULL);
+	nvrm_chan_destroy(ch);
+	check_live_stats(cl, &baseline);
 	teardown(cl);
 }
 
@@ -3093,6 +3115,121 @@ run_semantic_tests(const char *only)
 	RUN(test_create_failures);
 }
 
+/*
+ * A backend that keeps the parameters of a channel allocation.
+ */
+static int
+alloc_get_ok(nvrm_bclient *bc, nvrm_chan_alloc *out)
+{
+	(void)bc;
+	memset(out, 0, sizeof(*out));
+	out->size = sizeof(*out);
+	out->gp_fifo_entries = 512;
+	out->h_vaspace = 0;
+	return (NVRM_OK);
+}
+
+/*
+ * A backend that has nothing to report: the client submitted nothing.
+ */
+static int
+alloc_get_none(nvrm_bclient *bc, nvrm_chan_alloc *out)
+{
+	(void)bc;
+	(void)out;
+	return (NVRM_E_NOENT);
+}
+
+/*
+ * A backend that fails for another reason.
+ */
+static int
+alloc_get_failed(nvrm_bclient *bc, nvrm_chan_alloc *out)
+{
+	(void)bc;
+	(void)out;
+	return (NVRM_E_IO);
+}
+
+/*
+ * The parameters of a channel allocation: the core asks the backend for
+ * them, and a backend that keeps none says so.
+ */
+static void
+test_chan_alloc(void)
+{
+	const nvrm_backend_ops *saved;
+	nvrm_backend_ops be;
+	nvrm_chan_ops co;
+	nvrm_chan_alloc al = { 0 };
+	nvrm_client *cl;
+
+	setup();
+	cl = open_client();
+
+	/* the size of the structure is checked */
+	al.size = sizeof(al) + 1;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "nvrm_chan_alloc.size") != NULL);
+
+	/* a null structure is refused, not a crash */
+	CHECK_EQ(nvrm_chan_alloc_get(cl, NULL), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "wants a structure") != NULL);
+
+	/* the fake backend talks to no RM: it has no parameters to give */
+	al.size = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOTSUP);
+	CHECK(strstr(nvrm_client_errmsg(cl), "does not record") != NULL);
+
+	/* a backend without the operation, and one without channels */
+	saved = cl->ops;
+	co = nvrm_fake_chan_ops;
+	co.alloc_get = NULL;
+	be = *saved;
+	be.chan = &co;
+	cl->ops = &be;
+	al.size = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOTSUP);
+	CHECK(strstr(nvrm_client_errmsg(cl), "does not record") != NULL);
+	be.chan = NULL;
+	cl->ops = &be;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOTSUP);
+
+	/* a backend that has nothing to report says so, and the caller's
+	 * structure is left alone */
+	co = nvrm_fake_chan_ops;
+	co.alloc_get = alloc_get_none;
+	be.chan = &co;
+	cl->ops = &be;
+	al.size = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOENT);
+	CHECK(strstr(nvrm_client_errmsg(cl), "submitted no channel allocation")
+	    != NULL);
+	CHECK_EQ(al.size, 0);
+
+	/* a backend that fails for another reason says so too */
+	co.alloc_get = alloc_get_failed;
+	be.chan = &co;
+	cl->ops = &be;
+	al.size = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_IO);
+	CHECK(strstr(nvrm_client_errmsg(cl), "did not give the parameters")
+	    != NULL);
+
+	/* a backend that keeps them */
+	co = nvrm_fake_chan_ops;
+	co.alloc_get = alloc_get_ok;
+	be.chan = &co;
+	cl->ops = &be;
+	al.size = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_OK);
+	CHECK_EQ(al.gp_fifo_entries, 512);
+	CHECK_EQ(al.h_vaspace, 0);
+	CHECK_EQ(al.size, sizeof(al));
+	cl->ops = saved;
+	teardown(cl);
+}
+
 static void
 run_review_tests(const char *only)
 {
@@ -3115,6 +3252,7 @@ run_review_tests(const char *only)
 	RUN(test_copy);
 	RUN(test_lifetime);
 	RUN(test_errmsg_race);
+	RUN(test_chan_alloc);
 }
 
 int

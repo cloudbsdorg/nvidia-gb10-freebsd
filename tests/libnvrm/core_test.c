@@ -171,76 +171,77 @@ test_two_gpus(void)
 	nvrm_close(ctx);
 }
 
+/* the backend the environment names, and the set-id rule. */
 static void
-test_enumerate(void)
+test_enumerate_selection(nvrm_enum_opts *o, char *err, size_t errlen)
 {
 	nvrm_ctx *ctx;
-	nvrm_enum_opts o = { NULL };
-	char err[256];
 	int rc;
-
-	reset_env();
-	nvrm_registry_reset();
-	nvrm_registry_builtin();
-	nvrm_rm_set_sys(&stub_sys);
-	rm_access_result = -1;
 
 	/* no backend: no rm device, no selection */
 	ctx = (nvrm_ctx *)1;
-	rc = nvrm_enumerate(&ctx, NULL, err, sizeof(err));
+	rc = nvrm_enumerate(&ctx, NULL, err, errlen);
 	CHECK_EQ(rc, NVRM_E_NOBACKEND);
 	CHECK(ctx == NULL);
 	CHECK(strstr(err, "kernel module is not loaded") != NULL);
 	CHECK(strstr(err, "NVRM_BACKEND=fake") != NULL && strstr(err, "set-user-ID") != NULL);
 	/* an unknown name is a different message */
-	o.backend = "nope";
-	rc = nvrm_enumerate(&ctx, &o, err, sizeof(err));
+	o->backend = "nope";
+	rc = nvrm_enumerate(&ctx, o, err, errlen);
 	CHECK_EQ(rc, NVRM_E_NOBACKEND);
 	CHECK(strstr(err, "no such backend") != NULL);
-	o.backend = NULL;
+	o->backend = NULL;
 	/* a NULL error buffer, and a zero length, are allowed */
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, NULL, 0), NVRM_E_NOBACKEND);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, 0), NVRM_E_NOBACKEND);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, NULL, 0), NVRM_E_NOBACKEND);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, 0), NVRM_E_NOBACKEND);
 
 	/* the environment selects the backend; an empty value means none */
 	setenv("NVRM_BACKEND", "fake", 1);
-	rc = nvrm_enumerate(&ctx, NULL, err, sizeof(err));
+	rc = nvrm_enumerate(&ctx, NULL, err, errlen);
 	CHECK_EQ(rc, NVRM_OK);
 	CHECK_STR(nvrm_backend_name(ctx), "fake");
 	CHECK_EQ(nvrm_device_count(ctx), 1);
 	nvrm_close(ctx);
 	setenv("NVRM_BACKEND", "", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, sizeof(err)),
+	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, errlen),
 	    NVRM_E_NOBACKEND);
 	/* a set-id program ignores the environment (control: not set-id) */
 	setenv("NVRM_BACKEND", "fake", 1);
 	nvrm_issetugid_hook = probe_yes;
-	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, sizeof(err)),
+	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, errlen),
 	    NVRM_E_NOBACKEND);
 	nvrm_issetugid_hook = probe_no;
-	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_enumerate(&ctx, NULL, err, errlen), NVRM_OK);
 	nvrm_close(ctx);
 	/* an explicit option still works for a set-id program */
 	nvrm_issetugid_hook = probe_yes;
-	o.backend = "fake";
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	o->backend = "fake";
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_OK);
 	nvrm_close(ctx);
 	nvrm_close(NULL);
 	reset_env();
+}
+
+/* an injected failure at every step, and out of memory at every
+ * allocation: each leaves no context behind. */
+static void
+test_enumerate_failures(nvrm_enum_opts *o, char *err, size_t errlen)
+{
+	nvrm_ctx *ctx = NULL;
 
 	/* injected failures at every step, each leaves no context behind */
-	o.backend = "fake";
+	o->backend = "fake";
 	setenv("NVRM_FAKE_FAIL", "open", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_OPEN);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_OPEN);
 	CHECK(ctx == NULL);
 	setenv("NVRM_FAKE_FAIL", "version", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_VERSION);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_VERSION);
 	CHECK(strstr(err, NVRM_RM_VERSION) != NULL);
 	setenv("NVRM_FAKE_FAIL", "list", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_IO);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_IO);
 	/* zero GPUs is a result, not an error: OK, an empty context */
 	setenv("NVRM_FAKE_FAIL", "nogpu", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_OK);
 	CHECK(ctx != NULL);
 	CHECK_EQ(nvrm_device_count(ctx), 0);
 	CHECK(nvrm_device_get(ctx, 0) == NULL);
@@ -248,9 +249,9 @@ test_enumerate(void)
 	nvrm_close(ctx);
 	ctx = NULL;
 	setenv("NVRM_FAKE_FAIL", "gpu_open", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_IO);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_IO);
 	setenv("NVRM_FAKE_FAIL", "limit", 1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_CAPSICUM);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_CAPSICUM);
 	CHECK(strstr(err, "capability mode") != NULL);
 	unsetenv("NVRM_FAKE_FAIL");
 
@@ -258,17 +259,33 @@ test_enumerate(void)
 	 * (the second GPU's failure frees the first) */
 	setenv("NVRM_FAKE_PROFILE", "discrete,unified", 1);
 	fail_calloc_at(1);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_NOMEM);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_NOMEM);
 	fail_calloc_at(2);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_NOMEM);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_NOMEM);
 	fail_calloc_at(3);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_NOMEM);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_NOMEM);
 	fail_calloc_at(4);
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_E_NOMEM);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_E_NOMEM);
 	CHECK(ctx == NULL);
 	fail_calloc_at(5);			/* control: one past the last */
-	CHECK_EQ(nvrm_enumerate(&ctx, &o, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(nvrm_enumerate(&ctx, o, err, errlen), NVRM_OK);
 	nvrm_close(ctx);
+}
+
+static void
+test_enumerate(void)
+{
+	nvrm_enum_opts o = { NULL };
+	char err[256];
+
+	reset_env();
+	nvrm_registry_reset();
+	nvrm_registry_builtin();
+	nvrm_rm_set_sys(&stub_sys);
+	rm_access_result = -1;
+
+	test_enumerate_selection(&o, err, sizeof(err));
+	test_enumerate_failures(&o, err, sizeof(err));
 
 	test_two_gpus();
 	nvrm_rm_set_sys(NULL);
@@ -1349,33 +1366,15 @@ test_cap_helper(void)
 
 /* ---- the fake backend's own ops ------------------------------------------ */
 
+/* the profile list: an unknown name, empty items, too many. */
 static void
-test_fake_direct(void)
+test_fake_direct_profiles(const nvrm_backend_ops *o)
 {
-	const nvrm_backend_ops *o = &nvrm_backend_fake_ops;
 	nvrm_backend *be;
-	nvrm_gpu *g, *g2;
-	uint32_t ids[4], cl[2];
+	uint32_t ids[4];
+	char err[100], big[4096];
 	unsigned n;
-	uint64_t v;
-	char err[100], buf[64], big[4096];
-	nvrm_str rv;
 	int i;
-
-	reset_env();
-	/* an injected class list replaces the profile's, even a failing one */
-	nvrm_registry_reset();
-	nvrm_registry_builtin();
-	{
-		static const uint32_t some[] = { 7, 8, 9 };
-		nvrm_ctx *c2;
-
-		nvrm_fake_inject_classes(some, 3);
-		c2 = must_enum("sparse");
-		CHECK_EQ(info_of(c2, 0)->classes.count, 3);
-		nvrm_close(c2);
-		nvrm_fake_inject_clear();
-	}
 
 	/* profile list: unknown name, empty items, too many */
 	setenv("NVRM_FAKE_PROFILE", "bogus", 1);
@@ -1395,6 +1394,20 @@ test_fake_direct(void)
 	CHECK_EQ(o->list_gpus(be, ids, 4, &n, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(n, 4);			/* bounded by the caller's maximum */
 	o->close(be);
+}
+
+/* the queries of one GPU, and what they say when the descriptor is gone. */
+static void
+test_fake_direct_queries(const nvrm_backend_ops *o)
+{
+	nvrm_backend *be;
+	nvrm_gpu *g, *g2;
+	uint32_t ids[4], cl[2];
+	uint64_t v;
+	char err[100], buf[64];
+	nvrm_str rv;
+	unsigned n;
+
 	setenv("NVRM_FAKE_PROFILE", "", 1);	/* empty = the default */
 	CHECK_EQ(o->open(&be, err, sizeof(err)), NVRM_OK);
 	CHECK_EQ(o->list_gpus(be, ids, 4, &n, err, sizeof(err)), NVRM_OK);
@@ -1449,6 +1462,30 @@ test_fake_direct(void)
 		CHECK(strstr(err, "pipe2") != NULL);
 		setrlimit(RLIMIT_NOFILE, &saved);
 	}
+}
+
+static void
+test_fake_direct(void)
+{
+	const nvrm_backend_ops *o = &nvrm_backend_fake_ops;
+
+	reset_env();
+	/* an injected class list replaces the profile's, even a failing one */
+	nvrm_registry_reset();
+	nvrm_registry_builtin();
+	{
+		static const uint32_t some[] = { 7, 8, 9 };
+		nvrm_ctx *c2;
+
+		nvrm_fake_inject_classes(some, 3);
+		c2 = must_enum("sparse");
+		CHECK_EQ(info_of(c2, 0)->classes.count, 3);
+		nvrm_close(c2);
+		nvrm_fake_inject_clear();
+	}
+
+	test_fake_direct_profiles(o);
+	test_fake_direct_queries(o);
 	reset_env();
 }
 
@@ -1458,7 +1495,7 @@ test_public_versions(void)
 	static const uint32_t built_for[] = { 580, 178, 4 };
 	static const uint32_t library[] = { 1, 3, 0 };
 	static const uint32_t symbols[] = { 1, 3 };
-	static const uint32_t schema[] = { 1, 3 };
+	static const uint32_t schema[] = { 1, 4 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
@@ -1470,7 +1507,7 @@ test_public_versions(void)
 	v = nvrm_symbol_version();
 	t_check_version(v, "NVRM_1.3", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.3", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "1.4", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1510,7 +1547,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":3") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":4") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1527,8 +1564,8 @@ test_json(void)
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
 	    "\"string\":\"NVRM_1.3\",\"major\":1,\"minor\":3,\"patch\":0,"
 	    "\"parts\":[1,3],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.3\","
-	    "\"major\":1,\"minor\":3,\"patch\":0,\"parts\":[1,3],"
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.4\","
+	    "\"major\":1,\"minor\":4,\"patch\":0,\"parts\":[1,4],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1634,7 +1671,7 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 3") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 4") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "

@@ -213,7 +213,7 @@ a dead channel from the other channels of its client.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 3;
+minor 4;
 documents name it in the
 .Li schema
 member.
@@ -240,9 +240,13 @@ Minor 3 added the channel error codes
 .Dq timeout
 and
 .Dq channel_lost .
+Minor 4 added the error code
+.Dq nothing_to_report ,
+which the library returns when a client asks for the parameters of a channel
+allocation it has not submitted.
 Until the first package release the interface is provisional (see
 .Xr nvrm 3 ) ,
-and this schema is minor 3 of it.
+and this schema is minor 4 of it.
 .Sh SEE ALSO
 .Xr cap_enter 2 ,
 .Xr nvrm 3 ,

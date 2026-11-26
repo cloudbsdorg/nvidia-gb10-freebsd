@@ -170,7 +170,7 @@ info "linuxkpi modules loaded (not a Linux layer): $(awk '{print $5}' "$OUT/klds
 	$SYSCTL dev.nvidia
 } >"$OUT/sysctl.txt" 2>&1
 $PCICONF -lvb >"$OUT/pciconf.txt" 2>&1
-dmesg | grep -iE 'nvrm|nvidia' >"$OUT/dmesg-nvrm.txt" 2>&1
+dmesg | grep -iE 'nvrm|nvidia' >"$OUT/dmesg-nvrm-before.txt" 2>&1
 
 # nvrm-info, every mode
 "$INFO" --json >"$OUT/nvrm-info.json" 2>"$OUT/nvrm-info.json.err"
@@ -237,6 +237,11 @@ fi
 # the Linux layer again, after the last nvrm-info run (and the memory probe)
 $KLD >"$OUT/kldstat-after.txt" 2>&1
 linux_check "after nvrm-info ran" "$OUT/kldstat-after.txt"
+
+# the kernel log of the whole run, the probes included: what the driver and
+# the RM said about the channel is in it (the reason a refusal gave is in
+# the lines the driver printed when it refused)
+dmesg | grep -iE 'nvrm|nvidia' >"$OUT/dmesg-nvrm.txt" 2>&1
 
 # compare with the driver, GPU by GPU (boot_compare.py)
 python3 -I "$HERE/boot_compare.py" "$OUT" "$HERE/../.." >>"$R" 2>&1

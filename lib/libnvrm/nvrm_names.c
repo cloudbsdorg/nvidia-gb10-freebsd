@@ -10,106 +10,97 @@
 
 #include "nvrm_internal.h"
 
-static const char *const error_text[] = {
-	[NVRM_OK] = "success",
-	[NVRM_E_NOBACKEND] = "no usable backend",
-	[NVRM_E_OPEN] = "cannot open the control device",
-	[NVRM_E_VERSION] = "kernel module version mismatch",
-	[NVRM_E_IO] = "an RM call failed",
-	[NVRM_E_NOMEM] = "out of memory",
-	[NVRM_E_INVAL] = "invalid argument",
-	[NVRM_E_NODEV] = "no GPU attached",
-	[NVRM_E_CAPSICUM] = "cannot limit descriptors for capability mode",
-	[NVRM_E_RM] = "the RM refused the call",
-	[NVRM_E_DENIED] = "not allowed for this client or mapping",
-	[NVRM_E_NOSLOT] = "no spare descriptor is left",
-	[NVRM_E_RANGE] = "address or range not available",
-	[NVRM_E_NOTSUP] = "not supported by the backend",
-	[NVRM_E_BUSY] = "still in use",
-	[NVRM_E_TIMEOUT] = "timed out",
-	[NVRM_E_LOST] = "the channel is dead",
+/*
+ * The name and the text of every error code and of every reason: one
+ * table, the error codes first and the reasons after them.  The two kinds
+ * have their own number spaces, so the reasons are indexed by the number of
+ * error codes plus their own.  One table and not two: two tables of the
+ * same shape are what the copy-paste detector finds.
+ */
+#define NVRM_NAME_REASONS	NVRM_E__COUNT
+
+static const struct { const char *text, *id; } names[
+    NVRM_E__COUNT + NVRM_R__COUNT] = {
+	/* the error codes */
+	[NVRM_OK] = { "success", "ok" },
+	[NVRM_E_NOBACKEND] = { "no usable backend", "no_backend" },
+	[NVRM_E_OPEN] = { "cannot open the control device", "open_failed" },
+	[NVRM_E_VERSION] = { "kernel module version mismatch",
+	    "version_mismatch" },
+	[NVRM_E_IO] = { "an RM call failed", "rm_call_failed" },
+	[NVRM_E_NOMEM] = { "out of memory", "out_of_memory" },
+	[NVRM_E_INVAL] = { "invalid argument", "invalid_argument" },
+	[NVRM_E_NODEV] = { "no GPU attached", "no_gpu" },
+	[NVRM_E_CAPSICUM] = { "cannot limit descriptors for capability mode",
+	    "capsicum_limit_failed" },
+	[NVRM_E_RM] = { "the RM refused the call", "rm_refused" },
+	[NVRM_E_DENIED] = { "not allowed for this client or mapping", "denied" },
+	[NVRM_E_NOSLOT] = { "no spare descriptor is left",
+	    "no_spare_descriptor" },
+	[NVRM_E_RANGE] = { "address or range not available",
+	    "range_unavailable" },
+	[NVRM_E_NOTSUP] = { "not supported by the backend", "not_supported" },
+	[NVRM_E_BUSY] = { "still in use", "busy" },
+	[NVRM_E_TIMEOUT] = { "timed out", "timeout" },
+	[NVRM_E_LOST] = { "the channel is dead", "channel_lost" },
+	[NVRM_E_NOENT] = { "there is nothing to report", "nothing_to_report" },
+	/* the reasons */
+	[NVRM_NAME_REASONS + NVRM_R_NONE] = { "the value is available",
+	    "available" },
+	[NVRM_NAME_REASONS + NVRM_R_NOT_QUERIED] = { "the value was not queried",
+	    "not_queried" },
+	[NVRM_NAME_REASONS + NVRM_R_RM_FAILED] = { "the RM control returned "
+	    "an error", "rm_control_failed" },
+	[NVRM_NAME_REASONS + NVRM_R_RM_UNSUPPORTED] = { "the RM reports the "
+	    "control is not supported on this GPU", "rm_not_supported" },
+	[NVRM_NAME_REASONS + NVRM_R_OS_NOT_REPORTED] = { "the OS layer does not "
+	    "report this value", "os_not_reported" },
+	[NVRM_NAME_REASONS + NVRM_R_FAMILY_UNKNOWN] = { "the GPU is not in the "
+	    "generation table", "family_unknown" },
+	[NVRM_NAME_REASONS + NVRM_R_INPUT_MISSING] = { "a value this one is "
+	    "computed from is unavailable", "input_unavailable" },
+	[NVRM_NAME_REASONS + NVRM_R_NO_NUMA] = { "the GPU is not attached to a "
+	    "NUMA node", "no_numa_node" },
+	[NVRM_NAME_REASONS + NVRM_R_BACKEND_NONE] = { "the backend does not "
+	    "provide this value", "backend_does_not_provide" },
+	[NVRM_NAME_REASONS + NVRM_R_CLASS_ABSENT] = { "the GPU does not list "
+	    "the class", "class_absent" },
+	[NVRM_NAME_REASONS + NVRM_R_OS_CALL_FAILED] = { "the system call to the "
+	    "driver failed", "os_call_failed" },
+	[NVRM_NAME_REASONS + NVRM_R_VALUE_UNUSABLE] = { "the RM answered, but "
+	    "the answer failed a consistency check (it names another device, "
+	    "or exceeds what the library can count)", "value_unusable" },
+	[NVRM_NAME_REASONS + NVRM_R_FAMILY_NO_CLASS] = { "the GPU family is "
+	    "known and has no class of this kind", "family_has_no_class" },
+	[NVRM_NAME_REASONS + NVRM_R_VERSION_UNPARSED] = { "the version string "
+	    "has no readable numeric scheme", "version_unparsed" },
+	[NVRM_NAME_REASONS + NVRM_R_VERSION_INCONSISTENT] = { "the kernel "
+	    "module version sysctls disagree with its version string",
+	    "version_inconsistent" },
 };
-_Static_assert(sizeof(error_text) / sizeof(error_text[0]) == NVRM_E__COUNT,
-    "an error code has no text");
 
 const char *
 nvrm_strerror(int error)
 {
-	if (error < 0 || (size_t)error >=
-	    sizeof(error_text) / sizeof(error_text[0]))
+	if (error < 0 || (size_t)error >= NVRM_E__COUNT)
 		return ("unknown error");
-	return (error_text[error]);
+	return (names[error].text);
 }
-
-static const char *const error_ids[] = {
-	[NVRM_OK] = "ok",
-	[NVRM_E_NOBACKEND] = "no_backend",
-	[NVRM_E_OPEN] = "open_failed",
-	[NVRM_E_VERSION] = "version_mismatch",
-	[NVRM_E_IO] = "rm_call_failed",
-	[NVRM_E_NOMEM] = "out_of_memory",
-	[NVRM_E_INVAL] = "invalid_argument",
-	[NVRM_E_NODEV] = "no_gpu",
-	[NVRM_E_CAPSICUM] = "capsicum_limit_failed",
-	[NVRM_E_RM] = "rm_refused",
-	[NVRM_E_DENIED] = "denied",
-	[NVRM_E_NOSLOT] = "no_spare_descriptor",
-	[NVRM_E_RANGE] = "range_unavailable",
-	[NVRM_E_NOTSUP] = "not_supported",
-	[NVRM_E_BUSY] = "busy",
-	[NVRM_E_TIMEOUT] = "timeout",
-	[NVRM_E_LOST] = "channel_lost",
-};
-_Static_assert(sizeof(error_ids) / sizeof(error_ids[0]) == NVRM_E__COUNT,
-    "an error code has no id");
 
 const char *
 nvrm_error_id(int error)
 {
-	if (error < 0 || (size_t)error >=
-	    sizeof(error_ids) / sizeof(error_ids[0]))
+	if (error < 0 || (size_t)error >= NVRM_E__COUNT)
 		return ("unknown");
-	return (error_ids[error]);
+	return (names[error].id);
 }
-
-static const struct { const char *id, *text; } reasons[NVRM_R__COUNT] = {
-	[NVRM_R_NONE] = { "available", "the value is available" },
-	[NVRM_R_NOT_QUERIED] = { "not_queried", "the value was not queried" },
-	[NVRM_R_RM_FAILED] = { "rm_control_failed",
-	    "the RM control returned an error" },
-	[NVRM_R_RM_UNSUPPORTED] = { "rm_not_supported",
-	    "the RM reports the control is not supported on this GPU" },
-	[NVRM_R_OS_NOT_REPORTED] = { "os_not_reported",
-	    "the OS layer does not report this value" },
-	[NVRM_R_FAMILY_UNKNOWN] = { "family_unknown",
-	    "the GPU is not in the generation table" },
-	[NVRM_R_INPUT_MISSING] = { "input_unavailable",
-	    "a value this one is computed from is unavailable" },
-	[NVRM_R_NO_NUMA] = { "no_numa_node",
-	    "the GPU is not attached to a NUMA node" },
-	[NVRM_R_BACKEND_NONE] = { "backend_does_not_provide",
-	    "the backend does not provide this value" },
-	[NVRM_R_CLASS_ABSENT] = { "class_absent",
-	    "the GPU does not list the class" },
-	[NVRM_R_OS_CALL_FAILED] = { "os_call_failed",
-	    "the system call to the driver failed" },
-	[NVRM_R_VALUE_UNUSABLE] = { "value_unusable",
-	    "the RM answered, but the answer failed a consistency check (it "
-	    "names another device, or exceeds what the library can count)" },
-	[NVRM_R_FAMILY_NO_CLASS] = { "family_has_no_class",
-	    "the GPU family is known and has no class of this kind" },
-	[NVRM_R_VERSION_UNPARSED] = { "version_unparsed",
-	    "the version string has no readable numeric scheme" },
-	[NVRM_R_VERSION_INCONSISTENT] = { "version_inconsistent",
-	    "the kernel module version sysctls disagree with its version string" },
-};
 
 const char *
 nvrm_reason_id(int reason)
 {
 	if (reason < 0 || reason >= NVRM_R__COUNT)
 		return ("unknown");
-	return (reasons[reason].id);
+	return (names[NVRM_NAME_REASONS + reason].id);
 }
 
 const char *
@@ -117,7 +108,7 @@ nvrm_reason_text(int reason)
 {
 	if (reason < 0 || reason >= NVRM_R__COUNT)
 		return ("unknown reason");
-	return (reasons[reason].text);
+	return (names[NVRM_NAME_REASONS + reason].text);
 }
 
 int
@@ -128,7 +119,7 @@ nvrm_reason_from_id(const char *id)
 	if (id == NULL)
 		return (-1);
 	for (i = 1; i < NVRM_R__COUNT; i++)
-		if (strcmp(id, reasons[i].id) == 0)
+		if (strcmp(id, names[NVRM_NAME_REASONS + i].id) == 0)
 			return (i);
 	return (-1);
 }

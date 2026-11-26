@@ -174,6 +174,7 @@ static struct {
 	int		fail_free_n;	/* the Nth free of the session fails */
 	NvHandle	fail_free_h;	/* the free of this handle fails */
 	uint32_t	tsg_engine;	/* the engine type of the group */
+	int		refuse_chan;	/* the RM refuses a channel allocation */
 	NvHandle	tsg_h, chan_h;
 	uint32_t	chan_cls;	/* the class of the channel */
 	uint32_t	chan_entries;	/* the ring size the channel was given */
@@ -665,8 +666,25 @@ chan_alloc_channel(int fd, NVOS21_PARAMETERS *p)
 		bad("the channel's userd memory is not live");
 	if (!live_system(fd, a->hObjectError))
 		bad("the channel's error notifier is not live");
-	if (a->hVASpace != S[sess_index(fd)].vaspace)
-		bad("the channel is not in the session's VA space");
+	/* The injected refusal: the RM says no to a channel allocation it
+	 * would otherwise take, so that a caller can see what it was given
+	 * when the RM refuses. */
+	if (M.refuse_chan) {
+		p->status = NV_ERR_INVALID_ARGUMENT;
+		return;
+	}
+	/* The rules the RM applies to a channel under a channel group: the
+	 * channel names no VA space (the group carries it) and its engine is
+	 * the engine of the group.  The RM refuses such a channel with
+	 * NV_ERR_INVALID_ARGUMENT. */
+	if (a->hVASpace != 0) {
+		p->status = NV_ERR_INVALID_ARGUMENT;
+		return;
+	}
+	if (a->engineType != M.tsg_engine) {
+		p->status = NV_ERR_INVALID_ARGUMENT;
+		return;
+	}
 	M.chan_cls = p->hClass;
 	M.chan_entries = a->gpFifoEntries;
 	M.chan_userd = a->hUserdMemory[0];
@@ -721,6 +739,8 @@ chan_alloc(int fd, NVOS21_PARAMETERS *p)
 		p->status = NV_ERR_INVALID_CLASS;
 		return;
 	}
+	if (p->status != NV_OK)
+		return;
 	/* The usermode page is not system memory: it is in the GPU's BAR,
 	 * like video memory, so the RM maps it through the device node. */
 	add(fd, p->hObjectNew, p->hClass);
@@ -2346,6 +2366,132 @@ test_chan_create(void)
 	down("chan create");
 }
 
+/*
+ * The RM's answer to a channel allocation with these parameters: the
+ * request is made as the library would make it, with the parameters the
+ * caller wants the RM to judge.
+ */
+static NvU32
+chan_alloc_refused(int fd, const NV_CHANNEL_ALLOC_PARAMS *a)
+{
+	NVOS21_PARAMETERS p;
+
+	memset(&p, 0, sizeof(p));
+	p.hRoot = CLIENT;
+	p.hObjectParent = M.tsg_h;
+	p.hObjectNew = 0xd1a0ffff;
+	p.hClass = M.chan_cls;
+	p.pAllocParms = NV_PTR_TO_NvP64(a);
+	p.paramsSize = sizeof(*a);
+	(void)m_ioctl(fd, NV_ESC_RM_ALLOC, &p);
+	return (p.status);
+}
+
+/*
+ * The parameters the RM is given for a channel: the ones the RM's own rules
+ * ask for, and the refusal of the ones they refuse.  The old parameters (a
+ * channel that names a VA space) are what a live driver refused with
+ * NV_ERR_INVALID_ARGUMENT.
+ */
+static void
+test_chan_params(void)
+{
+	NV_CHANNEL_ALLOC_PARAMS a;
+	nvrm_chan_params pc = { 0, NVRM_ENG_COPY, 0, 0 };
+	nvrm_chan_alloc al = { 0 };
+	nvrm_client *cl;
+	nvrm_chan *ch, *ch2 = NULL;
+	int fd, live_before;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	/* a client that submitted no channel allocation is told so: the
+	 * answer is not the same as "the RM was given zeros" */
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOENT);
+	CHECK(strstr(nvrm_client_errmsg(cl), "submitted no channel allocation")
+	    != NULL);
+	/* the structure is left as the caller had it */
+	CHECK_EQ(al.size, 0);
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	CHECK(ch != NULL);
+	live_before = live_in_session(fd);
+	/* the parameters the library sent */
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_OK);
+	CHECK_EQ(al.h_vaspace, 0);
+	CHECK(al.gp_fifo_offset != 0);	/* the GPU address of the ring */
+	CHECK_EQ(al.gp_fifo_entries, NVRM_CHAN_ENTRIES_DEFAULT);
+	CHECK_EQ(al.h_userd_memory[0], M.chan_userd);
+	CHECK_EQ(al.h_object_error, M.chan_notif);
+	CHECK_EQ(al.engine_type, NV2080_ENGINE_TYPE_GRAPHICS);
+	CHECK_EQ(al.flags, 0);
+	CHECK_EQ(al.h_context_share, 0);
+	CHECK_EQ(al.userd_offset[0], 0);
+	CHECK_EQ(al.size, sizeof(al));
+
+	/* the RM refuses a channel that names a VA space */
+	memset(&a, 0, sizeof(a));
+	a.hObjectError = M.chan_notif;
+	a.gpFifoEntries = NVRM_CHAN_ENTRIES_DEFAULT;
+	a.hVASpace = S[sess_index(fd)].vaspace;
+	a.hUserdMemory[0] = M.chan_userd;
+	a.engineType = NV2080_ENGINE_TYPE_GRAPHICS;
+	CHECK_EQ(chan_alloc_refused(fd, &a), NV_ERR_INVALID_ARGUMENT);
+
+	/* the RM refuses a channel whose engine is not the engine of its
+	 * group */
+	memset(&a, 0, sizeof(a));
+	a.hObjectError = M.chan_notif;
+	a.gpFifoEntries = NVRM_CHAN_ENTRIES_DEFAULT;
+	a.hUserdMemory[0] = M.chan_userd;
+	a.engineType = NV2080_ENGINE_TYPE_COPY0;
+	CHECK_EQ(chan_alloc_refused(fd, &a), NV_ERR_INVALID_ARGUMENT);
+
+	/* The RM refuses an allocation the library made: the parameters the
+	 * RM was given are still reported, so the boot log says what the RM
+	 * saw (a regression that records them only after the RM took them
+	 * would lose exactly this). */
+	M.refuse_chan = 1;
+	CHECK(nvrm_chan_create(cl, &pc, &ch2) != NVRM_OK);
+	CHECK(ch2 == NULL);
+	M.refuse_chan = 0;
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_OK);
+	CHECK_EQ(al.engine_type, NV2080_ENGINE_TYPE_COPY0);
+	CHECK_EQ(al.h_vaspace, 0);
+	CHECK_EQ(al.gp_fifo_entries, NVRM_CHAN_ENTRIES_DEFAULT);
+
+	/* A create that fails before the allocation reaches the RM submits
+	 * nothing: the parameters of the last request the RM did get are
+	 * still the ones reported. */
+	M.fail_cls = CLS_GROUP;
+	ch2 = NULL;
+	CHECK(nvrm_chan_create(cl, &p_compute, &ch2) != NVRM_OK);
+	CHECK(ch2 == NULL);
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_OK);
+	CHECK_EQ(al.engine_type, NV2080_ENGINE_TYPE_COPY0);
+
+	/* the refused allocations left the channel alone */
+	CHECK_EQ(live_in_session(fd), live_before);
+	nvrm_chan_destroy(ch);
+	/* the client keeps its own objects: the device, the VA space, the
+	 * subdevice and the usermode object */
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+
+	/* A client whose first create fails before the allocation submits
+	 * nothing: the getter says so, and it does not answer with a zeroed
+	 * structure that reads like "the RM was given zeros". */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	M.fail_cls = CLS_GROUP;
+	ch = NULL;
+	CHECK(nvrm_chan_create(cl, &p_compute, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK_EQ(nvrm_chan_alloc_get(cl, &al), NVRM_E_NOENT);
+	nvrm_client_close(cl);
+	down("chan params");
+}
+
 static void
 test_chan_copy(void)
 {
@@ -3069,6 +3215,7 @@ test_chan_two_clients(void)
 	X("map-cpu-kind", test_map_cpu_kind) \
 	X("share", test_share) \
 	X("chan", test_chan_create) \
+	X("chan", test_chan_params) \
 	X("chan", test_chan_copy) \
 	X("chan", test_chan_engines) \
 	X("chan", test_chan_submit) \

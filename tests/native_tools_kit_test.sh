@@ -59,6 +59,11 @@ KIT=$repo/tests/native-tools-testboot
 WORK=${GB10_WORK:-$repo/work}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/nvnt-kit.XXXXXX") || exit 2
+# the stubs find the run directories through this: the work root of the kit
+# runs.  It is in the environment, never in a generated source, so a path
+# with a space, a quote or a newline in it cannot become code.
+KIT_TEST_WORK=$T
+export KIT_TEST_WORK
 
 # (guard) no path reaches /sbin/shutdown during host tests.  G1: these sentinels and the override exist before any kit code runs.
 SENT=$T/sentinel
@@ -132,6 +137,22 @@ skip() { echo "skip $1: $2 not set ($3)"; }
 ok "G1 sentinels are first in PATH and the exported shutdown override is a non-setuid executable stub"
 expect() {	# expect <want status> <got status> <what>
 	if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (exit $2, wanted $1)"; fi
+}
+# mk_kenv_stub <path>: the stub of kenv(8) that keeps the value in the file
+# KENV_VALUE_FILE names.  The path is never written into the generated
+# source: the stub reads it from the environment, so a path with a space, a
+# quote or a newline in it cannot become code.
+mk_kenv_stub() {
+	cat > "$1" <<'EOF'
+#!/bin/sh
+_f=${KENV_VALUE_FILE:?the stub needs the file that holds the value}
+case "$1" in
+-d) rm -f "$_f"; exit 0 ;;
+*=*) v=${1#*=}; printf '%s' "$v" > "$_f"; exit 0 ;;
+*) [ -f "$_f" ] && cat "$_f"; exit 0 ;;
+esac
+EOF
+	chmod 0755 "$1"
 }
 . "$KIT/bare-shutdown-check.sh"	# the one detector, shared with check-be.sh: bare_shutdown_lines FILE prints the offending lines
 bare_shutdown() {	# bare_shutdown <rc file>: 0 when the file calls shutdown other than through the guarded variable
@@ -1200,7 +1221,36 @@ case "$*" in
 *) exit 0 ;;
 esac
 EOF
-	printf '#!/bin/sh\necho "dmesg stub"\n' > "$S/dmesg"; printf '#!/bin/sh\nprintf "t\\tNR\\n"\n' > "$S/bectl"
+	cat > "$S/dmesg" <<'EOF'
+#!/bin/sh
+echo "dmesg stub"
+# The marker of the channel probe: the kernel log of the run has to be
+# captured after the probe, so the marker is in it.  The probe's output
+# file is the proof that the probe ran.
+for _f in "$KIT_TEST_WORK"/work/*/nvrm-info/chan_probe.txt; do
+	if [ -f "$_f" ]; then echo "NVRM: kit-chan-probe-marker"; break; fi
+done
+EOF
+	printf '#!/bin/sh\nprintf "t\\tNR\\n"\n' > "$S/bectl"
+	# the RM message rule: the kit sets it in the kernel environment before
+	# the driver is loaded and takes it away after the probes.  The stub
+	# keeps the value in a file, so the run never touches the host's kernel
+	# environment and the rows mean something.
+	mk_kenv_stub "$S/kenv"
+	# The stub of kenv must not turn the path it was given into code: the
+	# file that holds the value is named in the environment, never written
+	# into the generated source.
+	mk_kenv_stub "$T/kenv-hostile"
+	# A path with a space, a quote and a newline in it keeps the value.
+	_hd="$T/kenv value\"quote
+newline"
+	KENV_VALUE_FILE="$_hd" "$T/kenv-hostile" 'hw.nvidia.registry.RmMsg=chan' >/dev/null 2>&1
+	_hv=$(KENV_VALUE_FILE="$_hd" "$T/kenv-hostile" hw.nvidia.registry.RmMsg 2>/dev/null)
+	[ "$_hv" = "chan" ] && ok "the kenv stub kept the value in the file it was given" || no "the kenv stub lost the value: '${_hv:-nothing}'"
+	# A path with a semicolon in it must not run the command it carries.
+	_hd2="$T/kenv; touch $T/kenv-pwned"
+	KENV_VALUE_FILE="$_hd2" "$T/kenv-hostile" 'hw.nvidia.registry.RmMsg=chan' >/dev/null 2>&1
+	[ -e "$T/kenv-pwned" ] && no "the kenv stub ran a command out of the path it was given" || ok "the kenv stub ran no command out of the path it was given"
 	printf '#!/bin/sh\n[ "$*" = "-n linux_enable" ] && echo NO\n' > "$S/sysrc"
 	printf '#!/bin/sh\necho "chown $*" >> "%s/chown.log"\n[ "${RC_CHOWN_FAIL:-0}" = 1 ] && exit 1\nexit 0\n' "$T" > "$S/chown"
 	printf '#!/bin/sh\necho "testboot-return $*" > "%s/returned"\n' "$T" > "$T/return"
@@ -1212,8 +1262,8 @@ EOF
 			env nvidia_native_tools_testboot_shutdown="${RC_SHUTDOWN:-$nvidia_native_tools_testboot_shutdown}" "$@"
 		fi
 	}
-	rcrun() {	# rcrun <work dir> <copy-out dir> <return script> [extra stub dir first in PATH]
-		rc_env PATH="${4:+$4:}$S:$PATH" nvidia_native_tools_testboot_enable=YES nvidia_native_tools_testboot_foreground=YES \
+	rcrun() {	# rcrun <work dir> <copy-out dir> <return script> [extra stub dir first in PATH] [the file the kenv stub keeps the value in]
+		rc_env PATH="${4:+$4:}$S:$PATH" KENV_VALUE_FILE="${5:-$T/kenv.value}" nvidia_native_tools_testboot_enable=YES nvidia_native_tools_testboot_foreground=YES \
 		    nvidia_native_tools_testboot_kit="$T/kitroot" nvidia_native_tools_testboot_mods="$T/mods" \
 		    nvidia_native_tools_testboot_work="$1" nvidia_native_tools_testboot_fallback="$1.fallback" \
 		    nvidia_native_tools_testboot_copyout="$2" nvidia_native_tools_testboot_return="$3" \
@@ -1223,12 +1273,17 @@ EOF
 		ls -d "$1"/* 2> /dev/null | head -1
 	}
 	RC_OWNER=kitowner
+	# The value that was in the kernel environment before the run: the run
+	# must put it back when it ends, and must never lose it.
+	printf 'the administrators own rule' > "$T/kenv.value"
 	RUN=$(rcrun "$T/work" "$T/copyout" "$T/return")
 	reap_stub_children
+	_kv=$(cat "$T/kenv.value" 2> /dev/null)
+	[ "$_kv" = "the administrators own rule" ] && ok "rc one-shot: the value that was in the kernel environment before the run is back" || no "rc one-shot: the value that was in the kernel environment before the run is '${_kv:-gone}', not the one that was there"
 	grep -q '"row":"deadman","status":"pass","detail":".*stubbed shutdown .* is used' "$RUN/results.jsonl" 2> /dev/null && ok "G3 control: the same stub on a hand run (onestart) is used (decided: a stub cannot reboot)" || no "G3 control: the stub on a hand run was not used: $(grep '"row":"deadman"' "$RUN/results.jsonl" 2> /dev/null)"
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass rm-msg:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available env-after:pass env-after-delta:pass rm-msg-off:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
@@ -1247,6 +1302,60 @@ EOF
 		grep -q '^chown -h -- kitowner \.$' "$T/chown.log" 2> /dev/null && ok "rc one-shot: the run directory is given to the owner that make-be.sh recorded" || no "rc one-shot: the run directory was not given to the owner: $(head -2 "$T/chown.log" 2> /dev/null)"
 		grep -q '^chown -h -- kitowner summary\.json$' "$T/chown.log" 2> /dev/null && ok "rc one-shot: the files of the run are given to the owner" || no "rc one-shot: the files of the run were not given to the owner: $(head -2 "$T/chown.log" 2> /dev/null)"
 		grep -q '"verdict": "fail"\|"verdict": "incomplete"' "$RUN/summary.json" && ok "rc one-shot: the verdict is not pass with rows that cannot run natively" || no "rc one-shot: verdict $(grep '"verdict"' "$RUN/summary.json")"
+		# The kernel log of the run has to be taken after the channel probe:
+		# the marker the probe leaves is in it (the probe's output file is
+		# what the stub of dmesg looks for).
+		if [ -f "$RUN/nvrm-info/dmesg-nvrm.txt" ]; then
+			grep -q 'kit-chan-probe-marker' "$RUN/nvrm-info/dmesg-nvrm.txt" && ok "rc one-shot: the kernel log of the run was taken after the channel probe" || no "rc one-shot: the kernel log of the run was taken before the channel probe: $(wc -l < "$RUN/nvrm-info/dmesg-nvrm.txt") lines, no marker of the probe"
+			if [ -f "$RUN/nvrm-info/dmesg-nvrm-before.txt" ]; then
+				grep -q 'kit-chan-probe-marker' "$RUN/nvrm-info/dmesg-nvrm-before.txt" && no "rc one-shot: the kernel log before the probes holds the marker of the probe" || ok "rc one-shot: the kernel log before the probes has no marker of the probe"
+			else
+				no "rc one-shot: there is no kernel log from before the probes"
+			fi
+		else
+			no "rc one-shot: there is no kernel log of the run"
+		fi
+	fi
+	# A run that failed must not leave the RM message rule in the kernel
+	# environment: there was none before it, and there must be none after it.
+	mkdir -p "$T/stubs-fail"
+	cat > "$T/stubs-fail/kldload" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+	chmod 0755 "$T/stubs-fail/kldload"
+	echo > "$T/loaded"
+	rm -f "$T/kenv-fail.value"
+	rcrun "$T/work-fail" "$T/copyout-fail" "$T/return" "$T/stubs-fail" "$T/kenv-fail.value" >/dev/null 2>&1
+	_kf=$(ls -d "$T/work-fail"/* 2> /dev/null | head -1)
+	if ! grep -q '"row":"rm-msg","status":"pass"' "$_kf/results.jsonl" 2> /dev/null; then
+		no "the run that had to fail never put the RM message rule in place: the check proves nothing"
+	elif [ -e "$T/kenv-fail.value" ]; then
+		no "a run that failed left the RM message rule in the kernel environment: $(cat "$T/kenv-fail.value" 2>/dev/null)"
+	else
+		ok "a run that failed left no RM message rule in the kernel environment (the rule was in place before the failure)"
+	fi
+	# A value another administrator puts there while the run is going is left
+	# alone: only the value the run itself put there is taken away.
+	mkdir -p "$T/stubs-other"
+	cat > "$T/stubs-other/kldload" <<'EOF'
+#!/bin/sh
+# another administrator changes the value while the run is going
+printf 'another administrators value' > "$KENV_VALUE_FILE"
+exit 1
+EOF
+	chmod 0755 "$T/stubs-other/kldload"
+	echo > "$T/loaded"
+	rm -f "$T/kenv-other.value"
+	rcrun "$T/work-other" "$T/copyout-other" "$T/return" "$T/stubs-other" "$T/kenv-other.value" >/dev/null 2>&1
+	_ko=$(cat "$T/kenv-other.value" 2>/dev/null)
+	_ko2=$(ls -d "$T/work-other"/* 2> /dev/null | head -1)
+	if ! grep -q '"row":"rm-msg","status":"pass"' "$_ko2/results.jsonl" 2> /dev/null; then
+		no "the run that had to fail never put the RM message rule in place: the check proves nothing"
+	elif [ "$_ko" = "another administrators value" ]; then
+		ok "a value another administrator put there while the run was going is left alone"
+	else
+		no "the value another administrator put there is '${_ko:-gone}'"
 	fi
 	# the hand-over of the copy to the owner, on its own: the function of the rc script, taken out of it
 	sed -n '/^own_run()/,/^}/p' "$KIT/nvidia_native_tools_testboot" > "$T/own_run.sh"

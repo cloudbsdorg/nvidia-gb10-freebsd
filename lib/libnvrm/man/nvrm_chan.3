@@ -11,6 +11,7 @@
 .Nm nvrm_chan_wait ,
 .Nm nvrm_chan_status_get ,
 .Nm nvrm_chan_info_get ,
+.Nm nvrm_chan_alloc_get ,
 .Nm nvrm_chan_destroy
 .Nd ordered GPFIFO submission and channel progress
 .Sh LIBRARY
@@ -38,6 +39,8 @@ libnvrm
 .Fn nvrm_chan_status_get "nvrm_chan *ch" "nvrm_chan_status *st"
 .Ft int
 .Fn nvrm_chan_info_get "const nvrm_chan *ch" "nvrm_chan_info *info"
+.Ft int
+.Fn nvrm_chan_alloc_get "nvrm_client *cl" "nvrm_chan_alloc *out"
 .Ft void
 .Fn nvrm_chan_destroy "nvrm_chan *ch"
 .Sh DESCRIPTION
@@ -90,6 +93,24 @@ pushbuffer that writes them faults its channel; the semaphore has a page of its
 own, mapped read-write, so the GPU can write nothing else.
 Subchannels 0 through 4 are respectively 3D, compute, inline-to-memory, 2D and
 copy.
+.Pp
+.Fn nvrm_chan_alloc_get
+fills
+.Vt nvrm_chan_alloc
+with the parameters the RM was given for the last channel allocation this
+client submitted, whether the RM took them or refused them.
+The field names are the RM's own and the handles are the RM's own numbers, so
+a caller can print every field of what was sent.
+The parameters do not say which field the RM refused: they are the whole
+request, and only the status of the allocation says which request the RM
+refused, so a caller that wants to know which field was wrong must compare
+the two itself.
+A client that submitted no channel allocation to the RM is told so with
+.Dv NVRM_E_NOENT ,
+and its structure is left as it was; a backend that keeps no such parameters
+refuses the call with
+.Dv NVRM_E_NOTSUP .
+.Pp
 .Fn nvrm_chan_status_get
 fills
 .Vt nvrm_chan_status
@@ -263,6 +284,12 @@ for both is refused.
 The class list of the device is read whole: it holds as many entries as the
 RM's own class-list control does (200 in this RM version), and a device that
 lists more classes than that is refused by name, with both numbers, not cut.
+The channel names no VA space: the channel group carries it, and a channel
+under a group that names one is refused by the RM with
+.Dv NV_ERR_INVALID_ARGUMENT .
+The GP FIFO offset is the GPU address of the channel's ring: the field is
+the virtual offset of the GP FIFO, the same kind of value the RM's own
+kernel client passes.
 .Sh RETURN VALUES
 The calls returning
 .Vt int
@@ -343,6 +370,14 @@ and
 return
 .Er NVRM_E_INVAL
 for an unsupported structure size.
+.It Fn nvrm_chan_alloc_get
+returns
+.Er NVRM_E_INVAL
+for a null structure or an unsupported structure size,
+.Er NVRM_E_NOENT
+when the client submitted no channel allocation to the RM, and
+.Er NVRM_E_NOTSUP
+when the backend records no channel allocation parameters.
 .El
 .Sh SEE ALSO
 .Xr fork 2 ,

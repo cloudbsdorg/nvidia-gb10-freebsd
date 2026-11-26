@@ -43,7 +43,12 @@
 # _devdir (/dev), _vram (the board's nominal VRAM in bytes), _vram_reserve
 # (the most the driver may reserve of it, in bytes) and _sm (the compute capability, major.minor), for
 # boot_nvrm_info.sh (values: tests/libnvrm/board-amp001.env), _chan_stress and _chan_stress_seconds (how many
-# semaphore releases the channel probe pushes and how long it may run), _lockfile, _version.  _foreground=YES runs the recorder in the foreground: only
+# semaphore releases the channel probe pushes and how long it may run), _rm_msg (the RM's own rule for its debug
+# messages, set in the kernel environment before the driver is loaded and taken away after the probes: the rule is
+# the RM's own, a comma-separated list of file names or function names of the RM, matched as a substring; it is on
+# for this boot only and off by default everywhere else, and the value that was in the kernel environment before the
+# run is put back on every way out of it, so an administrator's value is never lost), _lockfile, _version.
+# _foreground=YES runs the recorder in the foreground: only
 # tests/native_tools_kit_test.sh sets it, so that it can wait for the run; make-be.sh never writes it.
 
 . /etc/rc.subr
@@ -68,6 +73,10 @@ load_rc_config $name
 : "${nvidia_native_tools_testboot_devdir:=/dev}"
 : "${nvidia_native_tools_testboot_chan_stress:=100000}"
 : "${nvidia_native_tools_testboot_chan_stress_seconds:=300}"
+# The RM's own rule for its debug messages (the RmMsg registry value): the
+# file names and function names of the RM that match are printed.  The
+# channel and the fifo are what this kit asks about.
+: "${nvidia_native_tools_testboot_rm_msg:=chan,Chan,fifo,Fifo}"
 : "${nvidia_native_tools_testboot_vram:=}"
 : "${nvidia_native_tools_testboot_vram_reserve:=}"
 : "${nvidia_native_tools_testboot_sm:=}"
@@ -106,6 +115,41 @@ guard_row()
 {
 	case $3 in 0) _st=pass ;; 1) _st=fail ;; *) _st=error ;; esac
 	row "$1" "$_st" "${2#* }"
+}
+
+# The RM's own rule for its debug messages (the RmMsg registry value).  The value that was in the kernel environment
+# before this run, and whether it was there at all: this run puts its own value there and puts the old one back when
+# it ends, on every path (the trap below), so an administrator's value is never lost and this run's value never stays.
+# A value another administrator puts there while this run is going is left alone: only this run's own value is taken
+# away.
+RM_MSG_VAR=hw.nvidia.registry.RmMsg
+_rm_msg_old=
+_rm_msg_old_set=0
+_rm_msg_ours=0
+
+rm_msg_save()
+{
+	_rm_msg_old=$(kenv "$RM_MSG_VAR" 2> /dev/null)
+	if [ -n "$_rm_msg_old" ]; then _rm_msg_old_set=1; fi
+	# from now on, every way out of this run takes this run's value away again
+	trap 'rm_msg_restore' EXIT
+	trap 'rm_msg_restore; exit 1' INT
+	trap 'rm_msg_restore; exit 1' TERM
+}
+
+rm_msg_restore()
+{
+	[ "$_rm_msg_ours" = 1 ] || return 0
+	_rm_msg_ours=0
+	_now=$(kenv "$RM_MSG_VAR" 2>/dev/null)
+	# only this run's own value is taken away or put back
+	[ "$_now" = "$nvidia_native_tools_testboot_rm_msg" ] || return 0
+	if [ "$_rm_msg_old_set" = 1 ]; then
+		kenv "$RM_MSG_VAR=$_rm_msg_old" >> "$OUT/rm-msg-restore.txt" 2>&1
+	else
+		kenv -d "$RM_MSG_VAR" >> "$OUT/rm-msg-restore.txt" 2>&1
+	fi
+	return 0
 }
 
 # dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE: the real-case decision, no side effects.  Prints the
@@ -353,6 +397,22 @@ run_body()
 	done
 
 	if [ "$ok" = 1 ]; then
+		# The RM's own reason for a refusal: its debug messages for the
+		# channel and the fifo.  The driver reads the registry when it
+		# attaches, so the rule goes into the kernel environment before
+		# the module is loaded; it is taken away again after the probes,
+		# so it is on for this boot only.  The value that was in the
+		# kernel environment before this run is put back on every way
+		# out of the run, so an administrator's value is never lost.
+		rm_msg_save
+		kenv "$RM_MSG_VAR=$nvidia_native_tools_testboot_rm_msg" >"$OUT/rm-msg.txt" 2>&1
+		_rm_msg_ours=1
+		_rmr=$(kenv "$RM_MSG_VAR" 2>/dev/null)
+		if [ "$_rmr" = "$nvidia_native_tools_testboot_rm_msg" ]; then
+			row rm-msg pass "the RM's message rule is in place before the driver is loaded ($nvidia_native_tools_testboot_rm_msg): its channel and fifo messages are printed from now on (what the RM prints depends on what its build has compiled in)"
+		else
+			row rm-msg fail "the RM message rule was not taken: $(cat "$OUT/rm-msg.txt" 2>/dev/null): the reason a refusal gives may be missing from the log"
+		fi
 		running load "kldload the GSP firmware, nvidia.ko, nvidia-modeset.ko: a panic from here leaves this row last"
 		for _k in nvidia_gsp_ga10x_fw nvidia nvidia-modeset; do	# check-be: load-order
 			if kldload "$MODS/$_k.ko" > "$OUT/kldload-$_k.txt" 2>&1; then
@@ -441,8 +501,34 @@ run_body()
 		fi
 		s2_memory_row || :
 		s3_channel_row || :
+		# The kernel log of the whole run, the channel probe included:
+		# what the driver and the RM said about the channel is in it.
+		# The capture boot_nvrm_info.sh makes is after the probes it runs;
+		# this one is after everything, so the reason a refusal gives is
+		# in the file even when the RM printed it after the probe ended.
+		if [ -d "$OUT/nvrm-info" ]; then
+			dmesg | grep -iE 'nvrm|nvidia' > "$OUT/nvrm-info/dmesg-nvrm-final.txt" 2>&1
+			if [ -s "$OUT/nvrm-info/dmesg-nvrm-final.txt" ]; then
+				cat "$OUT/nvrm-info/dmesg-nvrm-final.txt" > "$OUT/nvrm-info/dmesg-nvrm.txt"
+			fi
+		fi
+		# the RM's messages have done their work: this run's rule goes
+		# away again (the value that was in the kernel environment before
+		# this run is put back), so the next load of the driver in this
+		# boot is quiet again
+		rm_msg_restore
+		_kr=$(kenv "$RM_MSG_VAR" 2>/dev/null)
+		_rm_ours=0
+		[ "$_kr" = "$nvidia_native_tools_testboot_rm_msg" ] && _rm_ours=1
+		_rm_old_ours=0
+		[ "$_rm_msg_old_set" = 1 ] && [ "$_rm_msg_old" = "$nvidia_native_tools_testboot_rm_msg" ] && _rm_old_ours=1
+		if [ "$_rm_ours" = 1 ] && [ "$_rm_old_ours" = 0 ]; then
+			row rm-msg-off fail "the RM message rule of this run is still there: $_kr"
+		else
+			row rm-msg-off pass "the RM message rule of this run is gone again (the value that was in the kernel environment before this run is back, or there is none)"
+		fi
 	else
-		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module nvrm-s2-memory nvrm-s3-channel; do
+		for _r in gpu-detect-native nvidiactl-open modeset-open rm-msg nvrm-info nvrm-info-native nvrm-info-no-new-module nvrm-s2-memory nvrm-s3-channel rm-msg-off; do
 			grep -q "^{\"row\":\"$_r\"," "$OUT/results.jsonl" || row "$_r" not-run "not reached: a step before it failed (see the rows above)"
 		done
 	fi

@@ -93,6 +93,34 @@ typedef struct nvrm_chan_info {
 	uint64_t	sem_va;		/* 64-bit progress semaphore, GPU read-write */
 } nvrm_chan_info;
 
+/*
+ * The parameters the RM was given for a channel allocation.  The names are
+ * the RM's own (NV_CHANNEL_ALLOC_PARAMS) and the types are plain, so a
+ * caller can print every field without NVIDIA's headers.  A handle is the
+ * RM's own number; 0 is the RM's null handle.
+ */
+#define NVRM_CHAN_ALLOC_USERDS	8	/* the RM's own count */
+
+typedef struct nvrm_chan_alloc {
+	uint32_t	size;		/* sizeof(nvrm_chan_alloc), or 0 when the
+				   caller does not know it yet; on return it
+				   is sizeof(nvrm_chan_alloc) */
+	uint32_t	h_object_error;	/* the error notifier */
+	uint32_t	h_object_ecc_error;
+	uint32_t	h_object_buffer;
+	uint64_t	gp_fifo_offset;
+	uint32_t	gp_fifo_entries;
+	uint32_t	flags;
+	uint32_t	h_context_share;
+	uint32_t	h_vaspace;
+	uint32_t	h_userd_memory[NVRM_CHAN_ALLOC_USERDS];
+	uint64_t	userd_offset[NVRM_CHAN_ALLOC_USERDS];
+	uint32_t	engine_type;
+	uint32_t	cid;
+	uint32_t	sub_device_id;
+	uint32_t	internal_flags;
+} nvrm_chan_alloc;
+
 int	nvrm_chan_create(nvrm_client *cl, const nvrm_chan_params *p,
 	    nvrm_chan **chp);
 int	nvrm_chan_submit(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
@@ -102,6 +130,7 @@ int	nvrm_chan_gp_space(nvrm_chan *ch, unsigned *n);
 int	nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns);
 int	nvrm_chan_status_get(nvrm_chan *ch, nvrm_chan_status *st);
 int	nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info);
+int	nvrm_chan_alloc_get(nvrm_client *cl, nvrm_chan_alloc *out);
 void	nvrm_chan_destroy(nvrm_chan *ch);
 
 __END_DECLS

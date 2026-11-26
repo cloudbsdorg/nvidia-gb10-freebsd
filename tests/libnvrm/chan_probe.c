@@ -43,7 +43,7 @@
 #define STRESS_SECONDS_DEFAULT	300ULL
 #define RELEASE_PAYLOAD		0x0000600d0000600dULL
 #define MAX_GPUS		16
-#define MAX_STEPS		12
+#define MAX_STEPS		16
 #define DETAIL_LEN		256
 
 /*
@@ -380,6 +380,49 @@ release_once(gpu_ctx *g, uint64_t payload, char *why, size_t whylen)
 	return (0);
 }
 
+/* Every field the RM was given for the channel: the boot log says what the
+ * RM was given.  The parameters do not say which field the RM refused. */
+static void
+print_alloc(nvrm_client *cl)
+{
+	nvrm_chan_alloc a = { 0 };
+	char users[128], offs[256];
+	unsigned i;
+	int rc;
+
+	rc = nvrm_chan_alloc_get(cl, &a);
+	if (rc == NVRM_E_NOENT) {
+		info_line("alloc", "no channel allocation was submitted to the "
+		    "RM: the create failed before it reached the RM");
+		return;
+	}
+	if (rc != NVRM_OK) {
+		info_line("alloc", "the parameters are not available: %s",
+		    nvrm_client_errmsg(cl));
+		return;
+	}
+	info_line("alloc", "hObjectError 0x%x hObjectEccError 0x%x "
+	    "hObjectBuffer 0x%x", a.h_object_error, a.h_object_ecc_error,
+	    a.h_object_buffer);
+	info_line("alloc", "gpFifoOffset 0x%jx gpFifoEntries %u flags 0x%x "
+	    "hContextShare 0x%x hVASpace 0x%x", (uintmax_t)a.gp_fifo_offset,
+	    a.gp_fifo_entries, a.flags, a.h_context_share, a.h_vaspace);
+	users[0] = '\0';
+	offs[0] = '\0';
+	for (i = 0; i < NVRM_CHAN_ALLOC_USERDS; i++) {
+		(void)snprintf(users + strlen(users),
+		    sizeof(users) - strlen(users), "%s0x%x",
+		    i == 0 ? "" : " ", a.h_userd_memory[i]);
+		(void)snprintf(offs + strlen(offs), sizeof(offs) - strlen(offs),
+		    "%s0x%jx", i == 0 ? "" : " ", (uintmax_t)a.userd_offset[i]);
+	}
+	info_line("alloc", "hUserdMemory %s", users);
+	info_line("alloc", "userdOffset %s", offs);
+	info_line("alloc", "engineType 0x%x cid %u subDeviceId 0x%x "
+	    "internalFlags 0x%x", a.engine_type, a.cid, a.sub_device_id,
+	    a.internal_flags);
+}
+
 /* a: create the channel and tell what it is. */
 static int
 step_create(gpu_ctx *g)
@@ -387,12 +430,20 @@ step_create(gpu_ctx *g)
 	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
 	nvrm_chan_info info;
 	nvrm_chan *ch = NULL;
+	char created[256];
 	int rc;
 
 	rc = nvrm_chan_create(g->cl, &p, &ch);
+	/* The error of the create is copied out before the diagnostic call:
+	 * the call clears the client's message, so the reason the RM gave
+	 * would be lost. */
+	(void)snprintf(created, sizeof(created), "%s", rc == NVRM_OK ? "" :
+	    nvrm_client_errmsg(g->cl));
+	/* the parameters the RM was given, whether it took them or not */
+	print_alloc(g->cl);
 	if (!step(rc == NVRM_OK, "create", "%s", rc == NVRM_OK ?
 	    "a compute GPFIFO channel with the default entry count" :
-	    nvrm_client_errmsg(g->cl)))
+	    created))
 		return (0);
 	g->ch[g->nch++] = ch;
 	rc = nvrm_chan_info_get(ch, &info);

@@ -49,6 +49,7 @@ error 13 not_supported 1
 error 14 busy 1
 error 15 timeout 3
 error 16 channel_lost 3
+error 17 nothing_to_report 4
 capability 0 dmabuf_export 0
 capability 1 ats 0
 capability 2 self_hosted 0

@@ -283,8 +283,94 @@ alloc_tsg(nvrm_bchan *b, uint32_t engine, char *err, size_t errlen)
 	return (NVRM_OK);
 }
 
+/*
+ * The parameters the RM may still refuse, and where the RM says so.
+ *
+ * The MIT sources cannot decide the rows below for this board: they
+ * depend on whether the RM that answers is the one on the GPU, and the
+ * tree cannot say what this board's GPU answers (the tree's own
+ * rmconfig.h has RMCFG_FEATURE_PLATFORM_GSP 0 and
+ * RMCFG_FEATURE_GSP_CLIENT_RM 1, so the RM is told at run time, by
+ * IS_GSP_CLIENT(pGpu)).  The channel create therefore tries none of
+ * them: it makes one attempt with the parameters the sources support,
+ * and the next boot says what the RM was given (the parameters do not
+ * say which field the RM refused: only the status of the allocation
+ * does, and the caller keeps it).
+ *
+ *   hObjectError        On a GSP platform the driver does not look the
+ *                       client's notifier up (kernel_channel.c:529) and
+ *                       refuses the channel when it cannot resolve the
+ *                       notifier's descriptor (kernel_channel.c:583).
+ *                       The notifier may also have to be in video memory
+ *                       on such a platform (kernel_channel.c:1914).
+ *   instanceMem,        A GSP client describes the instance memory, the
+ *   ramfcMem,           method buffer and the userd itself
+ *   mthdbufMem,         (kernel_channel.c:2417): these fields are zero
+ *   userdMem            here.
+ *   hUserdMemory[0]     The userd must be a memory object of the client
+ *                       (kernel_channel_gv100.c:190), not protected
+ *                       (kernel_channel_gv100.c:201), and its address
+ *                       and its alignment must fit the hardware's userd
+ *                       (kernel_channel_gv100.c:219, 257).
+ *   engineType          The engine of a channel must be the engine of its
+ *                       group (kernel_channel.c:761).
+ *   gpFifoOffset        The receiving end (the channel HAL of this chip
+ *                       and the RM on the GPU) is not in the MIT tree, so
+ *                       what it wants of the GP FIFO's address (its
+ *                       alignment, its size, the memory it is in) cannot
+ *                       be read.  The value is the GPU address of the
+ *                       ring, the same kind of value the RM's own kernel
+ *                       client passes (nv_gpu_ops.c:5950).
+ */
+
+/* Keep the parameters the RM was given: when the RM refuses them, the
+ * caller prints them, so the boot log says what the RM was given. */
+static void
+remember_alloc(nvrm_bclient *c, const NV_CHANNEL_ALLOC_PARAMS *p)
+{
+	nvrm_chan_alloc *a = &c->last_alloc;
+	unsigned i;
+
+	_Static_assert(NVRM_CHAN_ALLOC_USERDS == NV_MAX_SUBDEVICES,
+	    "the public struct must hold every userd the RM's struct has");
+	memset(a, 0, sizeof(*a));
+	a->size = sizeof(*a);
+	a->h_object_error = p->hObjectError;
+	a->h_object_ecc_error = p->hObjectEccError;
+	a->h_object_buffer = p->hObjectBuffer;
+	a->gp_fifo_offset = p->gpFifoOffset;
+	a->gp_fifo_entries = p->gpFifoEntries;
+	a->flags = p->flags;
+	a->h_context_share = p->hContextShare;
+	a->h_vaspace = p->hVASpace;
+	for (i = 0; i < NVRM_CHAN_ALLOC_USERDS; i++) {
+		a->h_userd_memory[i] = p->hUserdMemory[i];
+		a->userd_offset[i] = p->userdOffset[i];
+	}
+	a->engine_type = p->engineType;
+	a->cid = p->cid;
+	a->sub_device_id = p->subDeviceId;
+	a->internal_flags = p->internalFlags;
+	c->have_last_alloc = 1;
+}
+
 /* The channel itself: the GPFIFO object under the group, with the ring
- * the core mapped for the GPU and the userd page it reads. */
+ * the core mapped for the GPU and the userd page it reads.
+ *
+ * One field of the parameters is not what the name suggests:
+ *
+ *   hVASpace      The channel does not name a VA space: the group names
+ *                 it (the RM reads the VA space of a channel from its
+ *                 channel group), and a channel under a group that names
+ *                 one is refused with NV_ERR_INVALID_ARGUMENT ("TSG
+ *                 channels can't use an explicit vaspace",
+ *                 kernel_channel.c:428).  The boot of 2026-11-26 was
+ *                 refused with exactly that: that boot's own kernel log
+ *                 says "NVRM: kchannelConstruct_IMPL: TSG channels can't
+ *                 use an explicit vaspace" and "Assertion failed: status
+ *                 == NV_OK @ kernel_channel.c:433".  The RM's own kernel
+ *                 client names no VA space either (nv_gpu_ops.c:6021).
+ */
 static int
 alloc_channel(nvrm_bchan *b, const nvrm_bchan_cfg *cfg, uint32_t engine,
     char *err, size_t errlen)
@@ -294,13 +380,17 @@ alloc_channel(nvrm_bchan *b, const nvrm_bchan_cfg *cfg, uint32_t engine,
 
 	memset(&p, 0, sizeof(p));
 	p.hObjectError = nvrm_rmm_handle(b->notif);
-	p.gpFifoOffset = cfg->ring_va;
+	p.gpFifoOffset = cfg->ring_va;	/* the GPU address of the ring */
 	p.gpFifoEntries = cfg->entries;
-	p.hVASpace = b->c->vaspace;
+	p.hVASpace = 0;
 	p.hUserdMemory[0] = nvrm_rmm_handle(b->userd);
 	p.userdOffset[0] = 0;
 	p.engineType = engine;
 	b->chan = nvrm_rm_new_handle(b->c->s);
+	/* The parameters are remembered only when the RM is given them: a
+	 * request that never reached the RM is not the last one, and a
+	 * request the RM refused is (the RM saw it). */
+	remember_alloc(b->c, &p);
 	st = nvrm_rm_alloc(b->c->s, b->tsg, &b->chan,
 	    nvrm_rm_chan_class(b->c, NVRM_RM_CLS_GPFIFO), &p, sizeof(p));
 	if (st != NV_OK) {
@@ -649,6 +739,19 @@ nvrm_rm_chan_client_close(nvrm_bclient *c)
 	client_release(c);
 }
 
+/* The parameters of the last channel allocation this client submitted to
+ * the RM, whether the RM took them or refused them.  A client that
+ * submitted none has no parameters: the call is told so (NVRM_E_NOENT) and
+ * the caller's structure is left alone. */
+static int
+rm_alloc_get(nvrm_bclient *bc, nvrm_chan_alloc *out)
+{
+	if (!bc->have_last_alloc)
+		return (NVRM_E_NOENT);
+	*out = bc->last_alloc;
+	return (NVRM_OK);
+}
+
 const nvrm_chan_ops nvrm_rm_chan_ops = {
 	.copy_on_graphics = 0,
 	.create = rm_create,
@@ -660,4 +763,5 @@ const nvrm_chan_ops nvrm_rm_chan_ops = {
 	.error = rm_error,
 	.progress_gen = rm_progress_gen,
 	.wait = rm_wait,
+	.alloc_get = rm_alloc_get,
 };

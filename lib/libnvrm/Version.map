@@ -88,5 +88,6 @@ NVRM_1.3 {
 		nvrm_chan_wait;
 		nvrm_chan_status_get;
 		nvrm_chan_info_get;
+		nvrm_chan_alloc_get;
 		nvrm_chan_destroy;
 } NVRM_1.2;

@@ -1015,7 +1015,7 @@ rc=$?
 expect_rc "text mode shows the values" $rc 0
 grep -q 'built for RM 580.178.04, running RM 580.178.04' "$W/text.out"; rc=$?
 expect_rc "text mode shows the built-for and the running RM version" $rc 0
-for v in 'RM API version 580.178.04' 'library version 1.3.0' 'library symbol version NVRM_1.3' 'schema version 1.3'; do
+for v in 'RM API version 580.178.04' 'library version 1.3.0' 'library symbol version NVRM_1.3' 'schema version 1.4'; do
 	grep -Fqx "$v" "$W/text.out"; rc=$?
 	expect_rc "text mode shows the version string: $v" $rc 0
 done
@@ -1158,6 +1158,17 @@ expect_rc "chan_probe kills the channel of the bad push" $rc 0
 NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/chan_probe" >"$W/chan-nogpu.out" 2>&1
 rc=$?
 if [ $rc -eq 101 ] && grep -q '^FAIL enumerate: no GPU' "$W/chan-nogpu.out"; then ok "chan_probe plant: no GPU is a FAIL (rc 101), never a pass"; else bad "chan_probe plant: no GPU gave rc=$rc"; fi
+# The reason of a refused create must survive the diagnostic call: the probe
+# prints the parameters the RM was given, and that call clears the client's
+# message.  With the create refused, the probe must still report the reason
+# of the refusal, not the message of the diagnostic call.
+NVRM_BACKEND=fake NVRM_FAKE_FAIL=chancreate "$W/chan_probe" >"$W/chan-refused.out" 2>&1
+rc=$?
+if grep -q '^FAIL gpu 0 .* create: fake backend: the channel create failed (injected)' "$W/chan-refused.out"; then
+	ok "chan_probe: the reason of a refused create survives the diagnostic call"
+else
+	bad "chan_probe: the reason of a refused create was lost: $(grep -m1 '^FAIL gpu 0 .* create' "$W/chan-refused.out")"
+fi
 NVRM_BACKEND=fake NVRM_FAKE_PROFILE=discrete,unified "$W/chan_probe" --json >"$W/chan.json" 2>&1
 rc=$?
 expect_rc "chan_probe --json prints one document" $rc 0
@@ -1627,8 +1638,8 @@ for f in nvrm_version nvrm_version_parse nvrm_version_find nvrm_version_format; 
 done
 grep -q 'versions' "$L/man/nvrm.3" && grep -q 'parts' "$L/man/nvrm.3" && grep -q 'source' "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) documents the JSON version object and its integer parts" $rc 0
-grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 3;' "$L/man/nvrm.7"; rc=$?
-expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 3" $rc 0
+grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 4;' "$L/man/nvrm.7"; rc=$?
+expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 4" $rc 0
 for s in version_string version_major version_minor version_patch version_suffix version_available; do
 	grep -q "hw.nvidia.$s" "$L/nvrm-info/nvrm-info.8"; rc=$?
 	expect_rc "nvrm-info(8) documents hw.nvidia.$s" $rc 0
@@ -1668,6 +1679,19 @@ doc_checks() {
 	# classes than its own control holds is refused, not cut
 	_chk sh -c 'grep -q "The class list of the device is read whole" "$1" || { echo "docs: $1 does not say that the class list is read whole"; false; }' sh "$_l/man/nvrm_chan.3"
 	_chk sh -c 'grep -q "The class list of the device is read whole" "$1" || { echo "docs: the README does not say that the class list is read whole"; false; }' sh "$_readme"
+	# the channel names no VA space: the group carries it, and a channel
+	# that names one is refused by the RM
+	_chk sh -c 'grep -q "The channel names no VA space" "$1" || { echo "docs: $1 does not say that the channel names no VA space"; false; }' sh "$_l/man/nvrm_chan.3"
+	# the parameters of a channel allocation: the whole request the RM was
+	# given, and no claim that they name the field the RM refused
+	_chk sh -c 'grep -q "with the parameters the RM was given for the last channel allocation this" "$1" || { echo "docs: $1 does not say what the parameters of a channel allocation are"; false; }' sh "$_l/man/nvrm_chan.3"
+	_chk sh -c '! grep -q "field the RM did not take" "$1" || { echo "docs: $1 claims that the parameters name the field the RM refused"; false; }' sh "$_l/man/nvrm_chan.3"
+	# a client that submitted no channel allocation is told so
+	_chk sh -c 'grep -q "NVRM_E_NOENT" "$1" || { echo "docs: $1 does not say that there is nothing to report"; false; }' sh "$_l/man/nvrm_chan.3"
+	# the paragraph of nvrm_chan_alloc_get ends before the next call: the
+	# reader must not read the description of nvrm_chan_status_get as the
+	# last sentences of the other one
+	_chk sh -c 'awk "/^.Fn nvrm_chan_status_get/{print prev} {prev=\$0}" "$1" | grep -qx ".Pp" || { echo "docs: $1 runs the paragraph of nvrm_chan_alloc_get into nvrm_chan_status_get"; false; }' sh "$_l/man/nvrm_chan.3"
 	# threads and fork
 	_chk sh -c 'grep -q "^.Sh THREADS AND FORK" "$1" && grep -q "not safe for concurrent use" "$1" && grep -q "must not use a context except to call" "$1" || { echo "docs: nvrm(3) lacks the threads and fork rules"; false; }' sh "$_l/man/nvrm.3"
 	_chk sh -c 'grep -q "not safe for concurrent" "$1" && grep -q "nvrm_close" "$1" || { echo "docs: nvrm.h lacks the threads and fork rules"; false; }' sh "$_l/include/nvrm/nvrm.h"
@@ -1703,6 +1727,11 @@ doc_plant fork-claim include/nvrm/nvrm.h 's/a release (unmap, free, VA release, 
 doc_plant notsup-backwards man/nvrm_mem.3 's/GPU mappings only/CPU mappings/'
 doc_plant class-list-cut man/nvrm_chan.3 's/The class list of the device is read whole/The class list of the device is cut/'
 doc_plant class-list-readme README.md 's/The class list of the device is read whole/The class list of the device is cut/'
+doc_plant chan-vaspace man/nvrm_chan.3 's/The channel names no VA space/The channel names a VA space/'
+doc_plant chan-alloc-what man/nvrm_chan.3 's/with the parameters the RM was given for the last channel allocation this/with the parameters of something else/'
+doc_plant chan-alloc-field man/nvrm_chan.3 's/The parameters do not say which field the RM refused/a refusal names the field the RM did not take./'
+doc_plant chan-alloc-noent man/nvrm_chan.3 's/NVRM_E_NOENT/NVRM_E_IO/'
+doc_plant chan-alloc-pp man/nvrm_chan.3 '/^\.Pp$/{N;/\.Fn nvrm_chan_status_get/s/\.Pp//;}'
 doc_plant zero-notation man/nvrm_mem.3 's/(0 means 4) spare/(0: 4) spare/'
 doc_plant arm64-wc man/nvrm.7 's/^is 0;$/is clear;/'
 doc_plant mem-attr-rule man/nvrm.7 's/^\.Ss Memory attributes/.Ss Memory/'
