@@ -204,6 +204,14 @@ gives
 The version suffix, including its leading delimiter, or an empty string.
 .El
 .Pp
+.Va hw.nvidia.device_count
+is the number of NVIDIA GPUs the driver has attached.
+The variable exists for as long as the module is loaded, so a host with no
+NVIDIA GPU reads 0 instead of finding no variable at all.
+The count is the number of devices attached when the variable is read.
+A GPU that appears after the module was loaded is not counted: the driver
+does not attach a GPU that turns up later.
+.Pp
 Each GPU has the strings
 .Va hw.nvidia.gpus.\& Ns Ar N Ns .vbios
 and

@@ -157,6 +157,39 @@ test_happy(void)
 	CHECK_EQ(K.bad, 0);
 }
 
+/*
+ * A driver with no GPU at all: the enumeration succeeds with zero devices,
+ * and the driver is asked only how many GPUs it has.  No RM client is
+ * allocated: there is nothing to talk to.
+ */
+static void
+test_no_gpu(void)
+{
+	nvrm_ctx *ctx;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	K.ngpus = 0;
+	K.have_card[0] = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	if (rc != NVRM_OK)
+		printf("  enumerate: %s (kernel: %s)\n", err, K.badmsg);
+	CHECK(ctx != NULL);
+	CHECK_EQ(nvrm_device_count(ctx), 0);
+	CHECK(K.saw_card);		/* the driver was asked for its list */
+	CHECK_EQ(K.saw_attach_fd, 0);	/* no GPU to attach */
+	CHECK_EQ(K.saw_client, 0);	/* no RM client was allocated */
+	CHECK_EQ(K.nalloc, 0);		/* and none was freed */
+	CHECK_EQ(K.nlive, 0);
+	CHECK_EQ(K.bad, 0);
+	nvrm_close(ctx);
+	CHECK_EQ(K.nfd, 0);
+	CHECK_EQ(K.nlive, 0);
+	CHECK_EQ(K.bad, 0);
+}
+
 static void
 test_device_versions(void)
 {
@@ -645,15 +678,15 @@ test_list_failures(void)
 	CHECK(strstr(err, "NV_ESC_CARD_INFO") != NULL);
 	CHECK_EQ(K.nlive, 0);
 
-	/* the OS layer has no GPU: a success with zero devices, and the
-	 * client is still freed at close */
+	/* the OS layer has no GPU: a success with zero devices, and no RM
+	 * client at all: there is nothing to talk to */
 	reset_kernel();
 	K.ngpus = 0;
 	ctx = enum_rm(&rc, err, sizeof(err));
 	CHECK_EQ(rc, NVRM_OK);
 	CHECK(ctx != NULL);
 	CHECK_EQ(nvrm_device_count(ctx), 0);
-	CHECK_EQ(K.nlive, 1);			/* the client */
+	CHECK_EQ(K.nlive, 0);			/* no client */
 	nvrm_close(ctx);
 	CHECK_EQ(K.nlive, 0);
 
@@ -676,6 +709,47 @@ test_list_failures(void)
 	CHECK_EQ(rc, NVRM_E_IO);
 	CHECK(strstr(err, "ATTACH_IDS") != NULL);
 	CHECK_EQ(K.nlive, 0);
+}
+
+/*
+ * One RM client per session.  The client belongs to the session, not to
+ * the GPU: a session that lists the GPUs and then attaches one of them
+ * asks for the client twice, and a session that attaches two GPUs asks
+ * once per GPU.  The client the session already has is the client it
+ * keeps: a second one would overwrite the first handle, and only the last
+ * would be freed when the session closes.
+ */
+static void
+test_one_client_per_session(void)
+{
+	nvrm_backend *be;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	rc = nvrm_rm_open(&be, err, sizeof(err));
+	CHECK_EQ(rc, NVRM_OK);
+	if (rc != NVRM_OK) {
+		printf("  open: %s\n", err);
+		return;
+	}
+	CHECK_EQ(K.nlive, 0);		/* no client yet */
+
+	/* the session needs one */
+	CHECK_EQ(nvrm_rm_client_ensure(be, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(K.nlive, 1);
+	CHECK_EQ(K.nalloc, 1);
+
+	/* and asks again: the client it has is the one it keeps */
+	CHECK_EQ(nvrm_rm_client_ensure(be, err, sizeof(err)), NVRM_OK);
+	CHECK_EQ(K.nlive, 1);
+	CHECK_EQ(K.nalloc, 1);
+
+	/* closing the session frees that one client, and only that one */
+	nvrm_rm_close(be);
+	CHECK_EQ(K.nlive, 0);
+	CHECK_EQ(K.nfree, 1);
+	CHECK_EQ(K.bad, 0);
 }
 
 static void
@@ -1050,12 +1124,14 @@ main(void)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	nvrm_rm_set_sys(&scripted);
 	test_happy();
+	test_no_gpu();
 	test_device_versions();
 	test_versions();
 	test_fork_close();
 	test_version_closes_fd();
 	test_open_failures();
 	test_list_failures();
+	test_one_client_per_session();
 	test_gpu_failures();
 	test_property_failures();
 	test_alloc_and_real_calls();

@@ -94,6 +94,11 @@ NvHandle nvrm_rm_new_handle(nvrm_backend *be);
 int	nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen);
 void	nvrm_rm_close(nvrm_backend *be);
 int	nvrm_rm_owner(const nvrm_backend *be);
+/* The RM client of a session: allocated when the session needs one.  A
+ * driver with no GPU needs none, so a session that only counts the GPUs
+ * never allocates one.  One client per session: asking for it again
+ * returns the client the session already has. */
+int	nvrm_rm_client_ensure(nvrm_backend *be, char *err, size_t errlen);
 const nvrm_rm_sys *nvrm_rm_get_sys(void);
 
 /* ---- what the two halves of the RM backend share ------------------------- */

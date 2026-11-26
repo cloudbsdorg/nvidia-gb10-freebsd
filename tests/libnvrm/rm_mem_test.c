@@ -1259,6 +1259,11 @@ test_open_failures(void)
 	M.prelimit_map = 1;
 	CHECK_EQ(open_cl(NVRM_OPEN_ALLOW_MAP, &cl, err, sizeof(err)), NVRM_E_CAPSICUM);
 	CHECK(strstr(err, "cannot limit /dev/nvidia1") != NULL);
+	/* the session's own RM client cannot be allocated */
+	K.fail_alloc_class = NV01_ROOT;
+	CHECK_EQ(open_cl(0, &cl, err, sizeof(err)), NVRM_E_IO);
+	CHECK(strstr(err, "RM client") != NULL);
+	K.fail_alloc_class = -1;
 	/* a GPU the OS layer gave no device node: GPU mappings only */
 	nvrm_device_get(ctx, 0)->gpu->have_card = 0;
 	CHECK_EQ(open_cl(NVRM_OPEN_ALLOW_MAP, &cl, err, sizeof(err)), NVRM_E_NOTSUP);

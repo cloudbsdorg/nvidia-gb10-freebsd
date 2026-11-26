@@ -191,6 +191,21 @@ copy_repo_src() {
 			    "$_module/$(basename "$_f")" >> "$TREE/.prepared.patches"
 		done
 	done
+	# The number of GPUs the driver has (hw.nvidia.device_count): our own
+	# BSD-licensed file, compiled into nvidia.ko only.  The message the
+	# driver prints when it cannot create the control device is ours
+	# too, and so is the state the control device and the GPU count
+	# live in.
+	for _f in src/gb10-device/nv_device_sysctl.c \
+	    src/gb10-device/nv_device_sysctl.h \
+	    src/gb10-device/nv_ctl_error.c \
+	    src/gb10-device/nv_ctl_error.h \
+	    src/gb10-device/nv_ctl_state.c \
+	    src/gb10-device/nv_ctl_state.h; do
+		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
+		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
+		    >> "$TREE/.prepared.patches"
+	done
 	for _f in src/nvidia/interface/nv_uvm_types.h \
 	    src/nvidia/interface/nv_uvm_user_types.h \
 	    src/common/sdk/nvidia/inc/nvgputypes.h; do

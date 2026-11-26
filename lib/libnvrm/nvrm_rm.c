@@ -342,9 +342,7 @@ nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen)
 {
 	nvrm_backend *be;
 	nv_ioctl_rm_api_version_t v;
-	NvHandle client = 0;
 	char found[NVRM_STR_MAX * 2];
-	NvU32 st;
 	int rc;
 
 	*bep = NULL;
@@ -394,17 +392,44 @@ nvrm_rm_open(nvrm_backend **bep, char *err, size_t errlen)
 		return (NVRM_E_VERSION);
 	}
 	read_rm_api_version(be);
-	/* The RM client of this process: one per enumerate. */
+	/*
+	 * The RM client of this process is allocated later, and only when
+	 * there is at least one GPU: a driver with no GPU needs no client,
+	 * and the escape ioctls that answer "how many GPUs are there" must
+	 * work on a host with none.
+	 */
+	*bep = be;
+	return (NVRM_OK);
+}
+
+/*
+ * Make sure the session has an RM client: one per session.  It is
+ * allocated only when the driver reports at least one GPU, so a host with
+ * no GPU never asks the resource manager for a client.
+ *
+ * The client is allocated once and kept: a session that enumerates the
+ * GPUs and then attaches one of them asks for the client twice, and a
+ * session that attaches two GPUs asks once per GPU.  Allocating a second
+ * client would overwrite the first handle, and only the last one would be
+ * freed when the session closes: the earlier clients would stay alive in
+ * the resource manager for as long as the driver lives.
+ */
+int
+nvrm_rm_client_ensure(nvrm_backend *be, char *err, size_t errlen)
+{
+	NvHandle client = 0;
+	NvU32 st;
+
+	if (be->client != 0)
+		return (NVRM_OK);
+
 	st = nvrm_rm_alloc(be, 0, &client, NV01_ROOT, NULL, 0);
 	if (st != NV_OK) {
 		snprintf(err, errlen, "cannot allocate the RM client "
 		    "(status 0x%x)", (unsigned)st);
-		sys->close(be->fd);
-		free(be);
 		return (NVRM_E_IO);
 	}
 	be->client = client;
-	*bep = be;
 	return (NVRM_OK);
 }
 
@@ -426,7 +451,8 @@ nvrm_rm_owner(const nvrm_backend *be)
 void
 nvrm_rm_close(nvrm_backend *be)
 {
-	if (nvrm_rm_owner(be))
+	/* No client was allocated when the driver reported no GPU. */
+	if (nvrm_rm_owner(be) && be->client != 0)
 		nvrm_rm_free(be, 0, be->client);
 	sys->close(be->fd);
 	free(be);
@@ -460,6 +486,7 @@ rm_list_gpus(nvrm_backend *be, uint32_t *ids, unsigned max, unsigned *n,
 	NvU32 attach_ids[NV_MAX_DEVICES];
 	unsigned i, nattach;
 	NvU32 st;
+	int rc;
 
 	*n = 0;
 	/* Card list: PCI location and the ids the OS layer attached. */
@@ -479,6 +506,14 @@ rm_list_gpus(nvrm_backend *be, uint32_t *ids, unsigned max, unsigned *n,
 			attach_ids[nattach++] = be->cards[i].gpu_id;
 	if (nattach == 0)
 		return (NVRM_OK);	/* the core reports "no GPU" */
+	/*
+	 * There is a GPU: the control calls below are made on the RM
+	 * client, so it is allocated now.  A host with no GPU never gets
+	 * this far, and never asks the resource manager for a client.
+	 */
+	rc = nvrm_rm_client_ensure(be, err, errlen);
+	if (rc != NVRM_OK)
+		return (rc);
 	if (sys->ioctl(be->fd, IOC_ATTACH(nattach), attach_ids) != 0) {
 		snprintf(err, errlen, "NV_ESC_ATTACH_GPUS_TO_FD failed: %s",
 		    strerror(errno));

@@ -852,3 +852,81 @@ Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries th
 ## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
 - The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
   b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.
+
+## 2026-11-26 #2464 part 1: the driver loads and unloads with no GPU present
+Worktree wt-2464-no-gpu-load, branch agent/2464-no-gpu-load, from origin/main 4cd016d.
+- Survey of the NVIDIA FreeBSD tarball and the open RM core: the module load and unload path was safe with no
+  GPU already. rm_init_rm() is GPU-independent, rm_init_adapter() is per device (it runs on the open of
+  /dev/nvidiaN), and the modeset core asks for no GPU at module load. What was missing was presence, not safety.
+- The one real defect: /dev/nvidiactl was created by the first GPU that attached and destroyed by the last one
+  that detached, so a host with no NVIDIA GPU had no control device at all, and libnvrm (whose whole probe is
+  access("/dev/nvidiactl")) could not ask the driver how many GPUs it has. The zero-device path in libnvrm
+  existed and was correct; it was unreachable.
+- patches/patch-zzz-2464-no-gpu_ctl.c: the control device belongs to the module (nvidia_ctl_dev_create(),
+  nvidia_ctl_dev_destroy(), nvidia_ctl_module_attach(), nvidia_ctl_module_detach()).
+- patches/patch-zzz-2464-no-gpu_subr.c: the module creates the device after rm_init_rm() and destroys it
+  before rm_shutdown_rm(), and the failure path unwinds what the load did.
+- patches/patch-zzz-2464-no-gpu_nv-freebsd.h: the declarations.
+- patches/patch-nvidia_nvidia_sysctl.c: hw.nvidia.device_count (our own src/gb10-device/nv_device_sysctl.c),
+  and the rm_msg_string leak on every unload fixed.
+- lib/libnvrm: the RM client is allocated only when the driver reports a GPU, so the zero-GPU path asks the
+  resource manager nothing but the escape ioctls.
+- Tests: tests/no_gpu_test.sh (the device count against the driver's own state, the patch checks, 35 mutants) and the
+  libnvrm rm_test cases "no GPU is a success with zero devices and no RM client" and "one client per
+  session".
+- nvidia.ko and nvidia-modeset.ko build with base LLD (Linker: LLD 21.1.8).
+- Still open for the later rounds: hot-plug (a GPU that appears and disappears while the module stays loaded)
+  and the VM simulation; the hw.nvidia.gpus node still appears only with a GPU attached.
+
+## 2026-11-26 #2464 part 2: the gate's review findings (five voices, FINDINGS)
+The gate run 29225 on the staged diff (sha 0a4308d0d8ac) had every scanner clean and every voice on FINDINGS.
+Every finding was read, and every real defect was fixed with a test that fails first.  The two findings whose
+counterexample does not hold are answered in the round's report.
+- lib/libnvrm: the RM client of a session is allocated once.  nvrm_rm_client_alloc() is now
+  nvrm_rm_client_ensure(): a session that already has a client keeps it, so a second allocation cannot
+  overwrite the handle and leave the first one alive in the resource manager.  rm_test's "one client per
+  session" asserts one allocation, one live client while the session is open, and one free at the close.
+- patches/patch-zzz-2464-no-gpu_ctl.c: the module is the only owner of the control device.  The per-GPU
+  creation path is gone, the Linux compat handler is registered and unregistered with the module, and the
+  number of attached GPUs is the driver's own (nvidia_ctl_gpu_count()).
+- patches/patch-zzz-2464-no-gpu_subr.c: the control device is destroyed while the API lock is still held,
+  and an open that was in flight when the unload began is refused (nvidia_ctl_module_alive()), so it cannot
+  reach a resource manager that is gone.
+- src/gb10-device/nv_ctl_error.c (new, with nv_ctl_error.h): the message the driver prints when it cannot
+  create /dev/nvidiactl names the device, the reason and what to do about it.
+- patches/patch-nvidia_nvidia_sysctl.c: the registry message buffer is freed on unload and its pointer is
+  cleared, so a later load cannot free it twice.
+- src/gb10-device/nv_device_sysctl.c: the count is the driver's own and is read when the node is read: no
+  devclass walk, no topology lock, and no softc that can go away while it is read.
+- man/nvidia.4: the count is the devices attached when the variable is read.  A GPU that appears after the
+  module was loaded is not counted: hot-plug is not implemented, so it is not promised.
+- tests/no_gpu_test.sh: a check must fail on the mutant it is run against, a statement that was commented
+  out is not there even though its text is, and the number of mutants in the journal is the script's number.
+
+## 2026-11-26 #2464 part 3: the second gate's findings (four voices, FINDINGS)
+The gate run 4132 on the staged diff (sha fa0e9c61a897) had every scanner clean and four voices on FINDINGS.
+The brief for this round said: fix the blockers, each with a test that fails first; list the rest as
+Review-open.  The blockers were the control device patch (it must apply), the control device error mapping
+(it must be reachable and report the real cause), the creation failures (they must not all read as memory
+failures) and the core control device and count behaviour (it must get a behavioural test).
+- The control device patch applies: scripts/prepare-tree.sh builds the tree with every patch of the
+  repository, and it is the build that applies them.  The hunk headers are right (a check counts the old and
+  the new lines of every hunk and compares them with the header: all the patches of the repository agree).
+- The control device is made with make_dev_s(), which keeps the reason: the code the kernel returns is
+  handed back unchanged, and the message the driver prints is built from that code.  The patch no longer
+  turns a failure into ENOMEM; the ENOMEM and EINVAL cases of the message are the ones the kernel can
+  return, and every other code gets the honest answer, that the node could not be made.
+- The count and the lifetime of the control device live in src/gb10-device/nv_ctl_state.c, our own file, so
+  the test drives the driver's own transitions: a GPU that attaches is counted, a GPU that detaches is
+  forgotten, a detach without an attach leaves the count at zero (the node never publishes a negative
+  number), and the control device is usable from the module load to the module unload.  The test calls the
+  same functions the driver calls.
+- tests/patch_apply_test.sh (new): every patch of the repository applies to the pristine sources it names,
+  and a patch with a broken hunk header is named and refused, so the check can fail.
+- The scanners are clean: lizard -C 20 -L 100 -a 8 finds no warning, cpd (PMD 7.21) finds no clone, and
+  there is no suppression marker anywhere in the change.
+- Review-open (the owner's call, not fixed here): the late attachment contract (the manual says a GPU that
+  appears after the module load is not counted, the implementation counts it), the names of the retained
+  attach API, the unsynchronized RM client allocation in libnvrm, the rm_msg_string ownership, the backend
+  leaked when the RM client cannot be allocated, the owner flag of the RM client, the order of the Linux
+  compat handler unregistration, and the count read without a lock.

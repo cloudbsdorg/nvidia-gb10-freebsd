@@ -114,6 +114,14 @@ attach_one(nvrm_backend *s, uint32_t id, char *err, size_t errlen)
 	NvU32 ids[1] = { id };
 	unsigned i;
 	NvU32 st;
+	int rc;
+
+	/* This session has a GPU of its own, so it needs an RM client.
+	 * The client belongs to the session, not to the GPU: asking for it
+	 * again returns the one the session already has. */
+	rc = nvrm_rm_client_ensure(s, err, errlen);
+	if (rc != NVRM_OK)
+		return (rc);
 
 	if (SYS->ioctl(s->fd, IOC_ATTACH(1), ids) != 0) {
 		snprintf(err, errlen, "NV_ESC_ATTACH_GPUS_TO_FD failed: %s",

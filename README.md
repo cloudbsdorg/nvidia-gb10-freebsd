@@ -554,6 +554,23 @@ sysctl dev.nvidia.0.uuid dev.nvidia.0.pci_bus_id
 list, the meaning of the `*_available` flags and what a read returns before the GPU is
 initialized are in `nvidia(4)`.
 
+### The driver with no GPU
+
+`nvidia.ko` and `nvidia-modeset.ko` load and unload on a host with no NVIDIA GPU. The
+control device `/dev/nvidiactl` belongs to the module, not to the first GPU, so it is
+there from the module load to the module unload; the per-GPU nodes `/dev/nvidiaN` appear
+only when a GPU is attached. The number of GPUs the driver has is a variable of the
+module, so it reads 0 instead of being absent:
+
+```sh
+sysctl hw.nvidia.device_count      # 0 with no NVIDIA GPU
+```
+
+`nvrm-info` asks the driver for its device list, so with the module loaded and no GPU it
+prints "no GPU is attached", and its JSON output is a document with an empty `devices`
+list. The exit status is 0: no GPU is a result, not a failure. A missing
+`/dev/nvidiactl` still means the module is not loaded, and that is a failure.
+
 ## The UVM interface in nvidia.ko
 
 CUDA needs `nvidia-uvm.ko`, a separate kernel module that is a client of the resource
