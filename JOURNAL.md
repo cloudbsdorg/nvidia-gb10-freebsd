@@ -852,3 +852,109 @@ Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries th
 ## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
 - The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
   b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.
+
+## 2026-11-26 #2374 + #2376 GPU access confinement and the wired memory of the GPU
+- Access: the driver decides per credential and per jail whether the caller may use the GPU it asks
+  for.  Outside a jail the group that owns the RM nodes decides (the `video` group by default, the
+  loader tunable `hw.nvidia.gpu_gid` moves it); in a jail the grant decides, and a jail is granted
+  nothing by default (`hw.nvidia.gpu_access_jails`).  The check runs in `NV_ESC_ATTACH_GPUS_TO_FD`
+  before any GPU is opened, and the RM's own gate (`nv_is_gpu_accessible()`, always NV_TRUE before)
+  asks the same rule.  A GPU whose unit cannot be found is refused: no unit, no right to prove.
+- Nodes: `/dev/nvidiactl` and `/dev/nvidiaN` are 0660, owned by root and the group, instead of 0666
+  root:wheel.  The mode and the group come from `nvga_device_mode()` and `nvga_device_gid()`.
+  `/dev/nvidia-modeset` is an RM node too, and it was 0666 as well: `nvidia-modeset.ko` makes it, so
+  it asks the shared header (`src/gb10-gpu-access/nvga_nodes.h`, compiled into both modules) for the
+  same mode and the same group.
+- Accounting: the GPU has no memory of its own on this board, so every allocation the RM takes is
+  wired system RAM.  The charge is inside the RM's allocation path (`nv_alloc_pages()`), where the
+  size is known: counting in the ioctl handler cannot work, the RM's calls pass through unread.  The
+  bytes go to the uid and to the jail, and to the kernel's racct containers (`RACCT_MEMLOCK`, at the
+  credential, so the VM's own racct_set of that resource cannot take the charge away).  An allocation
+  over a limit is refused before the memory is handed out and the RM's allocation fails with
+  `NV_ERR_NO_MEMORY`: the host keeps its memory.
+- Code: `src/gb10-gpu-access/` (the rules in `nvga_policy.h`, no kernel type; the interface in
+  `nvga_glue.h`; the glue in `nvga_glue.c`, compiled into nvidia.ko; the mode and the group of the
+  nodes in `nvga_nodes.h`, compiled into nvidia.ko and nvidia-modeset.ko).  Seven patches, all under
+  the `zzz-` prefix so they apply after the client-ownership patches.
+- Tests: `tests/gpu_access_test.sh` compiles the real glue against fakes of the kernel
+  (`tests/data/nvga_fakes.h`) and runs eight scenarios (access, jail, wired, jail wiring, the rctl cap,
+  the nodes, the driver's own work, a byte count over 2 GiB); 22 mutants are red.  The pins hold on
+  the patched tree: the check before the GPU is opened, the accounting in the allocation path, the
+  nodes at 0660, the modeset node at 0660.
+- nvidia.ko and nvidia-modeset.ko build with base LLD ("Linker: LLD 21.1.8"), and kmod_symbols_test
+  resolves every symbol (the racct, credential and device class calls all resolve).
+- Docs: `nvidia(4)` has a "GPU ACCESS" section (the nodes, the group, the grant, how to give a jail
+  one GPU, the accounting and its limits), the README has the same in prose, and
+  `devd/nvidia_gb10.rules` holds a devfs ruleset for a jail with one GPU.
+- Next: the full suite, then the manager's gate.  Not committed.
+
+## 2026-11-26 continuation round of #2374 + #2376 (the previous run stopped at the full suite)
+- Read the tree as the previous run left it (staged) and finished it: the full suite and its
+  comparison with the main baseline, the round report, the Honcho lessons.
+- Three defects found by reading the previous run's own code, all fixed here, each with a red run
+  first (`/home/mlapointe/work/gb10/tmp/2374-r1/red-run-continuation.txt`):
+  - the byte count of the wired memory was read into an `int` and the sysctl was `CTLTYPE_INT`: the
+    number was cut at 2 GiB, and the wired memory of the GPU on a board with this much RAM is
+    larger than that.  The count and the two counters are 64 bits now (`CTLTYPE_LONG`), and the fake
+    kernel records the type of every sysctl so the harness reads the value with the width it was
+    registered with.
+  - the driver's own work (a thread of the kernel has no credential) was held by a user's limit: a
+    user at their limit could stop the system from working.  The host's own limit still holds it.
+  - `/dev/nvidia-modeset` was still 0666: it is an RM node, made by `nvidia-modeset.ko`, which has
+    no symbol of ours, so it now asks the shared header (`nvga_nodes.h`) for the mode and the group.
+- The devfs rules sample named gid 80, a group that exists nowhere, while the man page said the
+  video group is 44: the sample now uses 44 and says what the gid is for.
+- `tests/linux_bridge_test.sh` caught the modeset patch: it applies every patch to a fresh
+  extraction of NVIDIA's archive with `patch -F0` (no fuzz), and the include hunk of the new patch
+  did not apply there, because the earlier patches had already changed the lines around it (they
+  add their own includes after `nv-retpoline.h`).  The patch was written again against the file as
+  the earlier patches leave it, and every patch now applies with fuzz 0 and leaves no reject.
+- Not committed (the manager gates and commits); everything is staged with `git add -A`.
+
+## 2026-11-26 second continuation round of #2374 + #2376 (the previous run stopped at the full suite)
+- The previous run stopped with the full suite half done (the round died on a transport error to the
+  model gateway).  This round finished it, and found one more defect in the code the previous round
+  had written.
+- **DEFECT (the string sysctls):** `nvga_jails_format()` and `nvga_uids_format()` added to the
+  buffer with `snprintf()` and added the length `snprintf()` *reports* (the length the text would
+  have had) to the offset, without asking whether the text fitted.  When it did not fit, the
+  offset went past the end of the buffer, `len - off` became a huge `size_t`, and the next
+  `snprintf()` wrote past the end of the buffer: a kernel stack buffer overflow, in the code that
+  formats the state the two string sysctls show.  The length the handler reported was the same
+  nonsense, so the read handed the reader bytes from behind the string.
+  The form of the grants (16 jails, each of them every unit) and the list of the users that hold
+  memory (128 of them) are both longer than a page, so this was reachable.
+  - red run first: `/home/mlapointe/work/gb10/tmp/2374-r1/red-run-format.txt` (the glue of the
+    previous round against the new scenario: "the read handed over exactly the list (1034 bytes,
+    1024 in it)" and the read of the grants came back empty).
+  - the fix: the text is added only when it fits whole, by `nvga_fmt_add()` in `nvga_policy.h` (the
+    rule lives with the other rules, so the harness calls it with a buffer that is too small and
+    watches it refuse to write past the end); the length reported is the length that was written;
+    the buffer of the two sysctls is taken from the kernel's memory (8192 bytes, the longest of
+    the two forms) instead of the stack, so a read brings the whole string and a read followed by
+    a write cannot drop a grant; the write path refuses a length that does not fit and a
+    `newidx` that is past `newlen`.
+  - two more mutants are red with it: a formatter that does not check that the text fits, and one
+    that reports more than it wrote.
+- The harness now runs nine scenarios (the new one is "format": the whole form of the grants, the
+  whole list of the users, and the fit check itself) and 25 mutants.
+- nvidia.ko builds again with base LLD ("Linker: LLD 21.1.8"), 0 errors, and kmod_symbols_test
+  resolves every symbol (unresolved: 0).
+- **DEFECT (an allocation that can sleep under the driver's lock):** `nvga_wired_alloc()` took the
+  record of the charge with `malloc(M_NVIDIA, M_WAITOK)` **while it held `nvga_mtx`**.  An
+  allocation that can wait sleeps, and a thread that sleeps while it holds a mutex panics the
+  kernel ("sleeping while holding a mutex"), so the first GPU allocation that had to wait for
+  memory could have taken the host down.  The record is now taken before the lock and freed again
+  with the lock dropped (in `nvga_wired_free()` too).
+  - red run first: `/home/mlapointe/work/gb10/tmp/2374-r1/red-run-lock.txt` ("3 allocation(s) were
+    made while the lock was held").
+  - the fake kernel counts the allocations that were made while a mutex was held, and every
+    scenario checks that the count is zero.
+- **DEFECT (the limit of one user did not hold inside a jail):** inside a jail the accounting
+  replaced the user's own total with the jail's total, so the limit of one user was not enforced
+  there: one user of a jail could hold the whole allowance of the jail.  The limit is now checked
+  for the user and for the jail, and the tighter of the two holds (the man page and the README say
+  so).  A new mutant (the jail's own check turned off) is red with it.
+  - red run first: `/home/mlapointe/work/gb10/tmp/2374-r1/red-run-jail-limit.txt` ("the limit of
+    the user holds inside a jail too").
+- Not committed (the manager gates and commits); everything is staged with `git add -A`.

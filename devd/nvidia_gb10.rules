@@ -1,0 +1,28 @@
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# nvidia-gb10-freebsd: a devfs.rules sample for a jail that may use one
+# NVIDIA GPU.  See nvidia(4), "GPU ACCESS".
+#
+# The sample is a ruleset: copy it into /etc/devfs.rules (or into a file
+# that /etc/devfs.rules includes) and name the jail's devfs_ruleset after
+# the number it carries.  The ruleset hides everything, shows the devices a
+# jail needs, and then shows the two NVIDIA nodes the jail may use: the
+# control node and the node of the one GPU it was granted.
+#
+# The gid in the rules is the group of the jail's users: pick one that
+# exists in the jail, and give the jail's users that group.  44 is the
+# video group, the group the driver owns its own nodes with by default.
+# The driver refuses a GPU the jail was not granted, whatever the jail can
+# see, so the grant below is the second half of the work:
+#
+#	sysctl hw.nvidia.gpu_access_jails="3:0"
+#
+# for jail 3 and GPU 0.  Change the ruleset number, the node names and the
+# grant to what the jail needs.
+
+[devfsrules_nvidia_gpu=10]
+add include $devfsrules_hide_all
+add include $devfsrules_unhide_basic
+add path nvidiactl mode 0660 uid 0 gid 44 unhide
+add path nvidia0 mode 0660 uid 0 gid 44 unhide

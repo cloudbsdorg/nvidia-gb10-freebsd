@@ -56,7 +56,13 @@
 # nvidia.ko and nvidia-drm.ko both find through -I../common/inc.
 # src/gb10-client-owner/nv_client_owner.h and nvco_glue.h (the RM client
 # ownership table and its kernel glue for nvidia-uvm.ko, Track #2373) to
-# TREE/nvidia/. The version sysctl source/header and the shared freestanding
+# TREE/nvidia/. The GPU access check and the wired memory accounting
+# (src/gb10-gpu-access: the rules, the interface and the glue, Track #2374
+# and #2376) go to TREE/nvidia/ as well; the glue is compiled into nvidia.ko
+# through the nvidia/Makefile patch. The mode and the group of the RM nodes
+# (src/gb10-gpu-access/nvga_nodes.h) go to TREE/nvidia/ and to
+# TREE/nvidia-modeset/, because nvidia-modeset.ko makes a node of its own
+# and both modules must carry the same rule. The version sysctl source/header and the shared freestanding
 # nvrm_version.h parser go to both TREE/nvidia/ and TREE/nvidia-modeset/; each
 # of those copies has its own manifest line with a third column, the
 # destination relative to TREE, so a stale copy is named by the freshness check.
@@ -172,11 +178,26 @@ copy_repo_src() {
 	mkdir -p "$TREE/nvidia"
 	for _f in src/gb10-memattr/gb10_memattr.h \
 	    src/gb10-uvm/nv-uvm-interface.h src/gb10-uvm/nv-uvm-interface.c \
-	    src/gb10-client-owner/nv_client_owner.h src/gb10-client-owner/nvco_glue.h; do
+	    src/gb10-client-owner/nv_client_owner.h src/gb10-client-owner/nvco_glue.h \
+	    src/gb10-gpu-access/nvga_policy.h src/gb10-gpu-access/nvga_glue.h \
+	    src/gb10-gpu-access/nvga_glue.c src/gb10-gpu-access/nvga_nodes.h; do
 		cp "$REPO/$_f" "$TREE/nvidia/$(basename "$_f")"
 		printf '%s  %s\n' "$_f" "$(sha256 -q "$REPO/$_f")" \
 		    >> "$TREE/.prepared.patches"
 	done
+	# The mode and the group of the RM nodes
+	# (src/gb10-gpu-access/nvga_nodes.h): nvidia.ko makes /dev/nvidiactl
+	# and /dev/nvidiaN and nvidia-modeset.ko makes /dev/nvidia-modeset,
+	# and all of them must carry the same mode and the same group.  The
+	# header is compiled into both modules, so neither needs a symbol of
+	# the other; the modeset copy carries its own manifest line with the
+	# destination, so a stale copy is named by the freshness check.
+	mkdir -p "$TREE/nvidia-modeset"
+	cp "$REPO/src/gb10-gpu-access/nvga_nodes.h" \
+	    "$TREE/nvidia-modeset/nvga_nodes.h"
+	printf '%s  %s  %s\n' "src/gb10-gpu-access/nvga_nodes.h" \
+	    "$(sha256 -q "$REPO/src/gb10-gpu-access/nvga_nodes.h")" \
+	    "nvidia-modeset/nvga_nodes.h" >> "$TREE/.prepared.patches"
 	# Version and identity sysctls: our own source and the single shared
 	# nvrm_version parser are compiled into both kernel modules. Record one
 	# manifest entry per copy: source path, sha256 and the copy's destination

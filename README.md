@@ -520,6 +520,80 @@ one-shot test-boot kit and `prime_import_probe(8)`; nothing here is loaded on a 
 |---|---|---|
 | `hw.nvidia.altra_device_wc` | loader tunable, read when `nvidia.ko` loads | `-1` decide from ACPI (default), `0` force Normal non-cacheable write-combining, `1` force Device-nGnRE write-combining |
 | `hw.nvidia.altra_device_wc_active` | read-only sysctl | `1` write-combining BAR mappings are Device-nGnRE, `0` they are Normal non-cacheable |
+| `hw.nvidia.gpu_gid` | loader tunable, read when `nvidia.ko` loads | the gid that owns the RM device nodes; the default is the `video` group (44) |
+| `hw.nvidia.gpu_access` | read-only sysctl | `1` when the GPU access check is in force |
+| `hw.nvidia.gpu_access_group` | read-only sysctl | the gid that owns the RM device nodes |
+| `hw.nvidia.gpu_access_denied` | read-only sysctl | the number of GPU attaches that were refused |
+| `hw.nvidia.gpu_access_jails` | read-write sysctl (string) | the GPUs each jail may use, as `jailid:unit,unit` separated by `;`; empty grants nothing |
+| `hw.nvidia.gpu_wired_bytes` | read-only sysctl | the wired memory of the GPU charged to the users, in bytes |
+| `hw.nvidia.gpu_wired_limit` | read-write sysctl | the wired memory of the GPU one user (or one jail) may hold, in bytes; `0` is no limit |
+| `hw.nvidia.gpu_wired_total_limit` | read-write sysctl | the wired memory of the GPU the whole host may hold, in bytes; `0` is no limit |
+| `hw.nvidia.gpu_wired_refused` | read-only sysctl | the number of GPU allocations that were refused |
+| `hw.nvidia.gpu_wired_uids` | read-only sysctl (string) | the wired memory of the GPU per user and per jail, in bytes |
+
+## GPU access, and the memory of the GPU
+
+**The nodes.** `/dev/nvidiactl`, one `/dev/nvidiaN` per GPU and
+`/dev/nvidia-modeset` are owned by `root` and by one group, the `video` group
+by default, and their mode is `0660`. A user outside that group cannot open
+them. The group is read when the driver loads, from the loader tunable
+`hw.nvidia.gpu_gid`.
+
+**Who may use a GPU.** Opening a node is not enough: the driver decides,
+per credential and per jail, whether the caller may use the GPU it asks
+for, and refuses the request with `EPERM` otherwise. Outside a jail a
+credential may use a GPU when it is in the group that owns the nodes; the
+host root may use every GPU. In a jail the grant decides: a jail is granted
+nothing by default, and the administrator names the GPUs it may use with
+`hw.nvidia.gpu_access_jails`. The check runs before the RM sees the attach,
+and the RM's own gate asks the same rule.
+
+**A jail with one GPU.** The jail's own `devfs.rules` decides which nodes
+the jail can see; the grant decides which of those GPUs it may attach. The
+two are independent, so a jail that sees only the node of GPU 0 still cannot
+attach GPU 1 unless it was granted it. `devd/nvidia_gb10.rules` holds a
+ruleset that gives a jail the control node and one GPU:
+
+```
+[devfsrules_nvidia_gpu=10]
+add include $devfsrules_hide_all
+add include $devfsrules_unhide_basic
+add path nvidiactl mode 0660 uid 0 gid 44 unhide
+add path nvidia0 mode 0660 uid 0 gid 44 unhide
+```
+
+with `devfs_ruleset=10` in the jail's parameters, and
+
+```sh
+sysctl hw.nvidia.gpu_access_jails="3:0"
+```
+
+for jail 3 and GPU 0. The gid in the rules is the group the jail's users are
+in: 44 is the `video` group, the group the driver owns its nodes with by
+default. `nvidia(4)` has the whole story.
+
+**The memory.** On this board the GPU has no memory of its own: every GPU
+allocation is wired system RAM, so an allocation without a limit lets one
+user take the memory of the host. The driver charges every allocation to
+the credential that asked for it, per uid and per jail, and charges the
+kernel's own racct containers too, so the uid and the jail see the wired
+memory of the GPU under `memorylocked`. An allocation over a limit is
+refused before the memory is handed out, and the RM's allocation fails with
+`NV_ERR_NO_MEMORY`: the host keeps its memory. The limits are
+`hw.nvidia.gpu_wired_limit` (one user or one jail),
+`hw.nvidia.gpu_wired_total_limit` (the whole host), and a rule of
+`rctl(8)` on the `memorylocked` resource of a user or of a jail. They are
+set in bytes:
+
+```sh
+sysctl hw.nvidia.gpu_wired_limit=1073741824
+sysctl hw.nvidia.gpu_wired_total_limit=8589934592
+```
+
+A limit of 0 is no limit: the accounting is always on, and a limit is the
+administrator's decision. Inside a jail the limit of one user holds for the
+user and for the jail, and the tighter of the two holds.
+
 
 With the default `-1` the driver reads the ACPI MCFG table header. It treats the system as an
 Altra when the OEM ID is exactly `Ampere` and the OEM table ID starts with `Altra` (Altra and

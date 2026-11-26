@@ -176,8 +176,111 @@ removes everything
 and
 .Cm configure
 wrote.
+.Sh GPU ACCESS
+The resource manager nodes,
+.Pa /dev/nvidiactl
+and one
+.Pa /dev/nvidia Ns Ar N
+per GPU,
+and the node of the modeset module,
+.Pa /dev/nvidia-modeset ,
+are owned by
+.Ql root
+and by one group, the
+.Cm video
+group by default, and their mode is
+.Cm 0660 .
+A user outside that group cannot open them.
+The group is read when the driver loads, from the loader tunable
+.Va hw.nvidia.gpu_gid ;
+a number that is not there leaves the
+.Cm video
+group in place.
+.Pp
+Opening a node is not enough to use a GPU.
+The driver decides, per credential and per jail, whether the caller may use
+the GPU it asks for, and refuses the request with
+.Er EPERM
+otherwise.
+Outside a jail a credential may use a GPU when it is in the group that owns
+the nodes; the host root may use every GPU.
+In a jail the grant decides: a jail is granted nothing by default, and the
+administrator names the GPUs it may use with
+.Va hw.nvidia.gpu_access_jails .
+The two are independent.
+The jail's own
+.Xr devfs.rules 5
+decides which nodes the jail can see at all, and the grant decides which of
+those GPUs the jail may attach.
+.Pp
+To grant a jail one GPU, say jail 3 and GPU 0, do two things.
+First give the jail the two nodes it needs, and nothing else, with a devfs
+ruleset of its own:
+.Bd -literal -offset indent
+[devfsrules_nvidia_gpu=10]
+add include $devfsrules_hide_all
+add include $devfsrules_unhide_basic
+add path nvidiactl mode 0660 uid 0 gid 44 unhide
+add path nvidia0 mode 0660 uid 0 gid 44 unhide
+.Ed
+.Pp
+The gid in the rules is the group of the jail's users: pick one that the
+jail has, and give the jail's users that group.
+44 is the
+.Cm video
+group, the group the driver owns its own nodes with by default.
+The jail then uses that ruleset:
+.Bd -literal -offset indent
+jail 3 {
+	devfs_ruleset=10;
+}
+.Ed
+.Pp
+Second name the GPU the jail may use:
+.Bd -literal -offset indent
+sysctl hw.nvidia.gpu_access_jails="3:0"
+.Ed
+.Pp
+The grant is read at every request, so it takes effect at once and needs no
+reload.
+A process in jail 3 that asks for GPU 1 is refused with
+.Er EPERM ,
+whether or not it can see the node of GPU 1:
+a jail that was not granted a GPU cannot attach it.
+.Pp
+The memory the GPU uses is charged to the credential that asked for it.
+On this board the GPU has no memory of its own: every allocation is wired
+system RAM, so an allocation without a limit lets one user take the memory
+of the host.
+The bytes are charged per user and per jail, they are shown in the kernel's
+own accounting under
+.Cm memorylocked ,
+and an allocation over a limit is refused before the memory is handed out.
+The limits are
+.Va hw.nvidia.gpu_wired_limit ,
+for one user or one jail,
+and
+.Va hw.nvidia.gpu_wired_total_limit ,
+for the whole host.
+A rule of
+.Xr rctl 8
+on the
+.Cm memorylocked
+resource of a user or of a jail is honoured as well.
+The limits are set with the
+.Xr sysctl 8
+utility, in bytes:
+.Bd -literal -offset indent
+sysctl hw.nvidia.gpu_wired_limit=1073741824
+sysctl hw.nvidia.gpu_wired_total_limit=8589934592
+.Ed
+.Pp
+A limit of 0 is no limit.
+The driver's own work, which has no credential, is held by the limit of the
+whole host only: a user at their limit cannot stop the system from working.
 .Sh SYSCTL VARIABLES
-All variables in this section are read-only.
+All variables in this section are read-only, except the two limits of the
+wired memory of the GPU, which are read-write.
 .Pp
 .Va hw.nvidia.version
 is the full NVRM banner of the loaded
@@ -281,6 +384,41 @@ is above 0xffff, for example
 The bus BB and slot SS have two digits and the function F one digit.
 .El
 .Pp
+The GPU access check and the wired memory of the GPU have their own
+variables.
+.Bl -tag -width indent
+.It Va hw.nvidia.gpu_access
+1 when the access check is in force.
+.It Va hw.nvidia.gpu_access_group
+The group that owns the RM device nodes.
+.It Va hw.nvidia.gpu_access_denied
+The number of GPU attaches that were refused.
+.It Va hw.nvidia.gpu_access_jails
+The GPUs each jail may use, as
+.Qq jailid:unit,unit
+separated by a semicolon.
+An empty string grants nothing.
+.It Va hw.nvidia.gpu_wired_bytes
+The wired memory of the GPU charged to the users, in bytes.
+.It Va hw.nvidia.gpu_wired_limit
+The wired memory of the GPU one user may hold, in bytes.
+0 is no limit.
+Inside a jail the limit holds for the user and for the jail, and the
+tighter of the two holds.
+This variable is read-write.
+.It Va hw.nvidia.gpu_wired_total_limit
+The wired memory of the GPU the whole host may hold, in bytes.
+0 is no limit.
+This variable is read-write.
+.It Va hw.nvidia.gpu_wired_refused
+The number of GPU allocations that were refused.
+.It Va hw.nvidia.gpu_wired_uids
+The wired memory of the GPU per user and per jail, in bytes, as
+.Qq u Ns Ar uid Ns \&: Ns Ar bytes
+and
+.Qq j Ns Ar jailid Ns \&: Ns Ar bytes .
+.El
+.Pp
 The
 .Nm nvidia-modeset
 module provides
@@ -299,6 +437,17 @@ have the same meanings and availability rules as the corresponding
 variables.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
+.It Va hw.nvidia.gpu_gid
+The group that owns the RM device nodes.
+The value is a gid; the default is the
+.Cm video
+group, which is 44.
+The driver reads it when it loads, so a change takes effect after a reboot,
+or after
+.Xr kldunload 8
+and
+.Xr kldload 8
+of the driver.
 .It Va hw.nvidia.registry.EnableGpuFirmware
 0 turns the GSP firmware off, 1 turns it on, 2 (the default) applies the
 driver's own policy.

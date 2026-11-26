@@ -1,3 +1,44 @@
+# Provenance: GPU access confinement and the wired memory of the GPU (Track #2374, #2376)
+
+Date: 2026-11-26.  Applies to `src/gb10-gpu-access/`, the patches
+`patches/patch-zzz-2374-nvidia_gpu_access_subr.c`,
+`patches/patch-zzz-2376-nvidia_gpu_wired_subr.c`,
+`patches/patch-zzz-2376-nvidia_gpu_modes_nvidia_dev.c`,
+`patches/patch-zzz-2376-nvidia_gpu_modes_nvidia_ctl.c`,
+`patches/patch-zzz-2376-nvidia_gpu_modes_modeset.c`,
+`patches/patch-zzz-2376-nvidia_gpu_access_sysctl.c`,
+`patches/patch-zzz-2376-nvidia_gpu_access_Makefile`, `devd/nvidia_gb10.rules`,
+and `tests/gpu_access_test.sh`.
+
+## Consulted (read)
+
+| Source | Licence checked | Used for |
+|---|---|---|
+| NVIDIA's FreeBSD driver 580.178.04 (`~/work/gb10/sources/NVIDIA-FreeBSD-x86_64-580.178.04/src/nvidia`): `nvidia_subr.c`, `nvidia_dev.c`, `nvidia_ctl.c`, `nvidia_sysctl.c`, `nv-freebsd.h`, `nv.h` | NVIDIA's FreeBSD package (the repo already patches these files; permitted by the brief) | the attach ioctl (`NV_ESC_ATTACH_GPUS_TO_FD`), the RM's own gate (`nv_is_gpu_accessible()`), the RM's allocation path (`nv_alloc_pages()`, `nv_free_pages()`, `nv_alloc_system_pages()`), the device nodes (`make_dev()`), the sysctl node (`oid_nvidia`), the credential and the device class types |
+| NVIDIA's modeset module, same tarball (`.../src/nvidia-modeset/nvidia-modeset-freebsd.c`) | NVIDIA's FreeBSD package (the repo already patches this file; permitted by the brief) | the third RM node, `/dev/nvidia-modeset`, which `nvidia-modeset.ko` makes and which was 0666 as well |
+| open-gpu-kernel-modules 580.178.04 (`~/work/gb10/sources/open-gpu-kernel-modules-580.178.04`): `src/nvidia/arch/nvalloc/unix/src/os.c` (the `osAllocPagesInternal()`, `osAllocPagesNode()` and `osIsGpuAccessible()` calls), `src/nvidia/arch/nvalloc/unix/src/osmemdesc.c` | MIT (the SPDX line of each file was checked before reading) | who calls the OS layer's allocation entry point, and who asks the OS layer whether a GPU is accessible |
+| FreeBSD `sys/` (`/usr/src/sys`): `sys/racct.h`, `kern/kern_racct.c`, `kern/kern_rctl.c`, `kern/kern_sysctl.c`, `vm/vm_unix.c`, `vm/vm_mmap.c`, `sys/ucred.h`, `kern/kern_prot.c`, `sys/jail.h`, `sys/bus.h`, `sys/sysctl.h`, `sys/conf.h`, `fs/devfs/devfs_vnops.c`, `fs/devfs/devfs_rule.c` | BSD-2-Clause | the racct containers and their rules (`racct_add_cred()`, `racct_sub_cred()`, `racct_get_limit()`, `RACCT_MEMLOCK`), the credential reference counting (`crhold()`, `crfree()`), the jail id, the device class (`devclass_get_softc()`, `devclass_get_maxunit()`, `device_get_unit()`), the sysctl handler shape and the write path (`sysctl_new_kernel()`, `sysctl_handle_int()`, `sysctl_handle_long()`), the `video` group (`GID_VIDEO`), and the devfs rules that decide which nodes a jail sees |
+| this repository (`src/`, `patches/`, `tests/`, `docs/`) and the kernel headers of the tree the module is built against | BSD-3-Clause | everything else, and the patterns the work follows (the client ownership table of `src/gb10-client-owner/`, the fake-kernel harness of `tests/client_owner_glue_test.sh`) |
+
+## Not consulted
+
+- No Linux kernel source, local or online: no file of `drivers/gpu/drm`, no
+  `nouveau` file, no other file of a GPL tree.
+- No GPL file of any kind, and no `cleanroom/dirty-notes`.
+- NVIDIA's closed `nv-kernel.o` was not disassembled; the RM core was built
+  from the pinned open-gpu-kernel-modules checkout.
+- The Linux driver's own device and memory accounting was not consulted:
+  the rules here are FreeBSD's (ucred, jail, devfs rules, racct/rctl).
+
+## Licence of the files
+
+Everything under `src/gb10-gpu-access/` is ours and carries the repository
+header (`Copyright (c) 2026 REVYTECH, Inc.`, `SPDX-License-Identifier:
+BSD-3-Clause`); so do `tests/gpu_access_test.sh`,
+`tests/data/gpu_access_harness.c`, `tests/data/nvga_fakes.h` and
+`devd/nvidia_gb10.rules`.  The patches to NVIDIA's files are diffs and keep
+NVIDIA's notices in the files they patch.
+
 # Provenance: nvidia-drm render uAPI (Track #2314, N2)
 
 Date: 2026-11-20. Applies to `src/nvidia-drm-render/`,

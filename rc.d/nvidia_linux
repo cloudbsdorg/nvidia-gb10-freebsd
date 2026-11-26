@@ -21,6 +21,14 @@
 #                   the core and the Linuxulator)
 #   NO              never load them
 # Any other value is refused with a warning and loads nothing.
+#
+# The RM device nodes (/dev/nvidiactl, one /dev/nvidiaN per GPU and
+# /dev/nvidia-modeset) are owned by root and by one group, the video group
+# by default, and their mode is 0660: the group decides who may open them,
+# and the driver decides who may use a GPU, per credential and per jail.
+# This script does not touch the nodes or the rules; nvidia(4), "GPU ACCESS",
+# has them, and devd/nvidia_gb10.rules holds a devfs ruleset for a jail that
+# may use one GPU.
 
 . /etc/rc.subr
 
