@@ -827,7 +827,9 @@ opens spare descriptors of this GPU's own device node (`/dev/nvidiaN`, N reporte
 it keeps working after `cap_enter()`; each CPU mapping or export uses one. A CPU mapping of video
 memory is made on the device node and a CPU mapping of system memory on the control device
 (`/dev/nvidiactl`), because the RM keeps the mapping of system memory on the control device and
-refuses any other descriptor with `NV_ERR_INVALID_ARGUMENT`. The
+refuses any other descriptor with `NV_ERR_INVALID_ARGUMENT`. Device memory that is not video
+memory is mapped on the device node as well: the doorbell page of the client (the usermode object)
+is in the GPU's BAR, and the RM refuses a mapping of it named on the control device. The
 CPU attribute of a mapping follows the rule in `nvrm(7)` (on arm64, video memory is Device unless the
 OS layer says write-combining is safe); `nvrm_mem_read()` and `nvrm_mem_write()` obey it. A release the
 RM refuses is counted (`failed_releases`) and its addresses are never reused. The fake backend is a
@@ -835,7 +837,9 @@ software GPU (video and system memory in one shared object, a VA table, sparse r
 API is tested without hardware; the RM backend is tested against a scripted kernel
 (`tests/libnvrm/rm_mem_test.c`). The RM backend's channels are real RM objects: a channel
 group, a GPFIFO channel, the engine objects, a userd page and an error notifier in system
-memory, and a usermode page the doorbell is written in.
+memory, and a usermode page the doorbell is written in. The page size of an imported object is
+the one the RM's own query for it answers (`NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE`): the surface info
+of an import names the import and not the pages, so it never answers for them.
 
 ## Native test boot (no Linux layer)
 

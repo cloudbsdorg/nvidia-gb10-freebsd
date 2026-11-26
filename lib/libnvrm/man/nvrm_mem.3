@@ -129,6 +129,8 @@ control device
 A CPU mapping of video memory is made on the device node and a CPU mapping of
 system memory on the control device, because the RM keeps the mapping of
 system memory on the control device and refuses any other descriptor.
+Device memory that is not video memory, the doorbell page of the client, is
+mapped on the device node as well.
 Every client opens
 .Va export_slots
 (0 means 4) spare export descriptors.
@@ -290,11 +292,15 @@ or keep it, and close it when done.
 makes an object of the client from such a descriptor, on the same GPU; its
 size, place and, for system memory, its CPU attribute are those the RM
 reports for it.
-Its page size is the smallest one the RM's answer allows: the RM reports a
-huge page without saying 2 MiB or 512 MiB, so such an import has 2 MiB, and a
-mapping that does not fit a 512 MiB page is then refused by the RM
+Its page size is the one the RM's own query for the object answers; the
+surface info of an import names the import and not the pages, so it never
+answers for them.
+A huge page the RM reports as 512 MiB is an import of 512 MiB, and a
+mapping that does not fit such a page is then refused by the RM
 .Pq Dv NVRM_E_RM .
-An import whose page size the RM does not report at all is refused.
+An import is refused when the RM has no such query, when it reports no page
+size at all, and when it reports a page size this library does not
+support; the refusal says which of the three it was.
 Registered user pages cannot be exported.
 .Ss Capability mode
 .Fn nvrm_client_open

@@ -1007,6 +1007,14 @@ nvrm_rm_chan_group_class(void)
 	return (KEPLER_CHANNEL_GROUP_A);
 }
 
+/* The class of the usermode object: the one the library allocates, and the
+ * one the channel backend names when a step of it fails. */
+uint32_t
+nvrm_rm_usermode_class(void)
+{
+	return (BLACKWELL_USERMODE_A);
+}
+
 /* The client's own objects for the channel backend: a subdevice of the
  * device and the usermode object under it, where the doorbell is written.
  * The class and the parameters are the RM backend's own. */
@@ -1032,7 +1040,7 @@ nvrm_rm_usermode_alloc(nvrm_bclient *c, char *err, size_t errlen)
 	up.bPriv = NV_FALSE;
 	c->usermode = nvrm_rm_new_handle(c->s);
 	st = nvrm_rm_alloc(c->s, c->subdevice, &c->usermode,
-	    BLACKWELL_USERMODE_A, &up, sizeof(up));
+	    nvrm_rm_usermode_class(), &up, sizeof(up));
 	if (st != NV_OK) {
 		c->usermode = 0;
 		return (nvrm_rmm_status_fail(err, errlen,

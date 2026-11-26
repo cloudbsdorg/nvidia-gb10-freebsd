@@ -254,6 +254,10 @@ CPU writes: the GPFIFO control words (the get and the put offsets) are in it.
 The error notifier is one more page of system memory, read-only for the CPU.
 The usermode page of the client is the only device mapping the backend makes:
 the doorbell is one aligned 32-bit store of the work submit token in it.
+The page is in the GPU's BAR, so it is device memory and its CPU mapping is
+made on the GPU's own device node, not on the control device: the RM maps
+device memory through the BAR aperture and refuses a mapping of it named on
+the control device.
 The copy class is not bound on a graphics runlist yet: a channel that asks
 for both is refused.
 .Sh RETURN VALUES

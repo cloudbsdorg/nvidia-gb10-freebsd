@@ -141,6 +141,9 @@ uint32_t nvrm_rm_chan_class(const nvrm_bclient *c, unsigned slot);
 /* The class of the channel group (one per channel). */
 uint32_t nvrm_rm_chan_group_class(void);
 
+/* The class of the usermode object: the doorbell page of the client. */
+uint32_t nvrm_rm_usermode_class(void);
+
 /* The client's own objects for the channel backend: a subdevice and the
  * usermode object under it. */
 int	nvrm_rm_usermode_alloc(nvrm_bclient *c, char *err, size_t errlen);

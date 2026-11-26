@@ -419,14 +419,20 @@ mutant fake-host-page nvrm_fake_mem.c 's/		align = host;/		;/' mem_test
 mutant fake-obj-leak nvrm_fake_mem.c '/^fk_mem_free/,/^}/s/		obj_unref(m->o);//' mem_test
 mutant rm-unmap-status nvrm_rm_mem.c 's/	return (p.status == NV_OK ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,$/	return (1 ? NVRM_OK : nvrm_rmm_status_fail(err, errlen,/' rm_mem_test
 mutant rm-page-writeback nvrm_rm_mem.c 's/out->page_size = got;/out->page_size = a->page_size;/' rm_mem_test
-mutant wb-default nvrm_rm_mem.c 's/(void)import_page_size(surface\.attr, &got);/got = a->page_size;/' rm_mem_test
+mutant wb-default nvrm_rm_mem.c 's/got = ps.bytes;/got = a->page_size;/' rm_mem_test
+mutant rm-import-page nvrm_rm_mem.c 's/ps->bytes = p.pageSize;/ps->bytes = 0;/' rm_mem_test
+mutant rm-import-no-query nvrm_rm_mem.c 's/if (st == NV_ERR_NOT_SUPPORTED)/if (0)/' rm_mem_test
+mutant rm-import-page-known nvrm_rm_mem.c 's/if (!page_size_known(ps->bytes))/if (0)/' rm_mem_test
+mutant chan-usermode-ctl nvrm_rm_chan.c 's/desc_open(c, NVRM_DESC_MAP, &c->usermode_fd/desc_open(c, NVRM_DESC_MAP_CTL, \&c->usermode_fd/' rm_mem_test
+mutant chan-no-name nvrm_rm_chan.c 's/snprintf(err, errlen, "%s: %s", what, detail);/snprintf(err, errlen, "%s", detail);/' rm_mem_test
+mutant chan-free-label nvrm_rm_chan.c 's/snprintf(what, sizeof(what), "free %s", name);/snprintf(what, sizeof(what), "unmap %s", name);/' rm_mem_test
 mutant rm-huge-import nvrm_rm_mem.c 's/		\*ps = 2097152;/		*ps = 536870912;/' rm_mem_test
 mutant rm-coherency nvrm_rm_mem.c 's/		return (NVRM_COH_WC);/		return (NVRM_COH_CACHED);/' rm_mem_test
 mutant rm-va-end nvrm_rm_mem.c 's/va->end = vp.vaSize;/va->end = vp.vaBase + vp.vaSize;/' rm_mem_test
 mutant rm-session-map nvrm_rm_mem.c 's/(allow_map ? 0 : SESSION_CPU_MAP)/0/' rm_mem_test
 mutant rm-snoop nvrm_rm_mem.c 's/_CACHE_SNOOP, _ENABLE) : 0);/_CACHE_SNOOP, _ENABLE) : DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE));/' rm_mem_test
 mutant rm-close-sweep nvrm_rm_mem.c '/^rmm_client_close/,/^}/s/		free(r);//' rm_mem_test
-mutant rm-alloc-unknown-page nvrm_rm_mem.c 's/	if (got == 0) {$/	if (0) {/' rm_mem_test
+mutant rm-alloc-unknown-page nvrm_rm_mem.c 's/	if (ps.bytes == 0) {$/	if (0) {/' rm_mem_test
 mutant rm-node nvrm_rm_mem.c 's/DEVICE_PATH_FMT, c->minor);/DEVICE_PATH_FMT, 0);/' rm_mem_test
 mutant fake-orphan-mark nvrm_fake_mem.c 's/			m->o->orphans++;/			(void)0;/' mem_test
 mutant fake-map-user nvrm_fake_mem.c 's/	return (g->wrapper == m->serial);/	return (g->o == m->o \&\& g->user == m->user);/' mem_test

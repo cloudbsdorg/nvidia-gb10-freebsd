@@ -384,6 +384,14 @@ static const struct page_attr {
 	    NVOS32_ATTR2_PAGE_SIZE_HUGE_512MB },
 };
 
+/* What the RM says about the page size of an object.  The three answers
+ * need three different words, so they are kept apart. */
+enum page_answer {
+	PAGE_ANSWER_SIZED,	/* the RM named a size */
+	PAGE_ANSWER_NO_SIZE,	/* the RM named no size */
+	PAGE_ANSWER_NO_QUERY	/* the RM has no page size query */
+};
+
 static int
 page_size_attrs(uint64_t ps, NvU32 *attr, NvU32 *attr2)
 {
@@ -417,12 +425,29 @@ page_size_of(NvU32 attr, NvU32 attr2)
 	return (0);
 }
 
+/* Is this a page size the library can check a mapping against?  A size the
+ * table does not have is refused, never used. */
+static int
+page_size_known(uint64_t ps)
+{
+	unsigned i;
+
+	/* Time: O(the sizes the table has).  Space: O(1). */
+	for (i = 0; i < nitems(page_attrs); i++)
+		if (page_attrs[i].bytes == ps)
+			return (1);
+	return (0);
+}
+
 /*
- * The page size of an imported object.  Surface info reports the ATTR word
- * only, not ATTR2, so a huge page is 2 MiB or 512 MiB: 2 MiB is reported,
- * the granularity every huge-page object has.  A mapping that fits 2 MiB but
- * not a 512 MiB object's pages is refused by the RM (NVRM_E_RM), never made
- * wrong.  DEFAULT names no size at all; the import is refused, not guessed.
+ * The page size the attribute word of a surface info names.  This is the
+ * allocation path only: the surface info of an imported object names the
+ * import and not the pages, so its word must never be read as a page size.
+ * Surface info reports the ATTR word only, not ATTR2, so a huge page is
+ * 2 MiB or 512 MiB: 2 MiB is reported, the granularity every huge-page
+ * object has.  A mapping that fits 2 MiB but not a 512 MiB object's pages
+ * is refused by the RM (NVRM_E_RM), never made wrong.  DEFAULT names no
+ * size at all; the caller asks the RM then.
  */
 static int
 import_page_size(NvU32 attr, uint64_t *ps)
@@ -491,23 +516,120 @@ surface_query(nvrm_bclient *c, NvHandle h, surface_raw *out, char *err,
 	return (NVRM_OK);
 }
 
+/* The page size of an object, as the RM reports it. */
+struct page_size {
+	uint64_t	bytes;
+	enum page_answer answer;
+};
+
+/*
+ * The page size of an object, as the RM's own query answers it.  The query
+ * is the only authority for an imported object: the surface info of an
+ * import names the import and not the pages, so its attribute word must
+ * never be read as a page size.  The answer comes in three shapes and each
+ * is kept apart, because they need different words: the RM named a size,
+ * it named none, or it has no such query at all.
+ */
+static int
+query_page_size(nvrm_bclient *c, NvHandle h, struct page_size *ps, char *err,
+    size_t errlen)
+{
+	NV0041_CTRL_GET_MEM_PAGE_SIZE_PARAMS p;
+	NvU32 st;
+
+	ps->bytes = 0;
+	ps->answer = PAGE_ANSWER_NO_SIZE;
+	memset(&p, 0, sizeof(p));
+	st = nvrm_rm_control(c->s, h, NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE, &p,
+	    sizeof(p));
+	if (st == NV_ERR_NOT_SUPPORTED) {
+		/* An RM without that query names no size either. */
+		ps->answer = PAGE_ANSWER_NO_QUERY;
+		return (NVRM_OK);
+	}
+	if (st != NV_OK)
+		return (nvrm_rmm_status_fail(err, errlen,
+		    "NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE", st));
+	ps->bytes = p.pageSize;
+	ps->answer = ps->bytes != 0 ? PAGE_ANSWER_SIZED :
+	    PAGE_ANSWER_NO_SIZE;
+	return (NVRM_OK);
+}
+
+/*
+ * The page size of an object this client allocated: the attribute word
+ * names it when it names one, else the RM is asked for it.
+ */
+static int
+alloc_page_size(nvrm_bclient *c, NvHandle h, NvU32 attr, struct page_size *ps,
+    char *err, size_t errlen)
+{
+	ps->bytes = 0;
+	ps->answer = PAGE_ANSWER_NO_SIZE;
+	if (import_page_size(attr, &ps->bytes) == NVRM_OK) {
+		ps->answer = PAGE_ANSWER_SIZED;
+		return (NVRM_OK);
+	}
+	return (query_page_size(c, h, ps, err, errlen));
+}
+
+/*
+ * Refuse an object whose page size the library cannot use.  Every answer
+ * gets its own words: an object is not malformed when the page size is
+ * what the library cannot check a mapping against, and the message says
+ * which size was reported, so the reader is not sent to replace a valid
+ * object over a page size.
+ */
+static int
+page_size_refused(const struct page_size *ps, const char *what, char *err,
+    size_t errlen)
+{
+	if (ps->answer == PAGE_ANSWER_NO_QUERY) {
+		snprintf(err, errlen, "the RM does not support "
+		    "NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE, so the page size of "
+		    "%s cannot be known: an RM that supports the query is "
+		    "required", what);
+		return (NVRM_E_NOTSUP);
+	}
+	if (ps->answer == PAGE_ANSWER_NO_SIZE) {
+		snprintf(err, errlen, "the RM did not report a page size for "
+		    "%s, so its mappings cannot be checked", what);
+		return (NVRM_E_NOTSUP);
+	}
+	if (!page_size_known(ps->bytes)) {
+		snprintf(err, errlen, "the RM reported an unsupported page "
+		    "size of %ju bytes for %s: this library does not support "
+		    "that page size", (uintmax_t)ps->bytes, what);
+		return (NVRM_E_NOTSUP);
+	}
+	return (NVRM_OK);
+}
+
 /* Size, page size, place and CPU coherency of an imported object. */
 static int
 surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
     size_t errlen)
 {
 	surface_raw raw;
+	struct page_size ps;
 	int rc;
 
 	rc = surface_query(c, h, &raw, err, errlen);
 	if (rc != NVRM_OK)
 		return (rc);
 	out->bytes = raw.bytes;
-	if (import_page_size(raw.attr, &out->page_size) != NVRM_OK) {
-		snprintf(err, errlen, "the imported object does not say its "
-		    "page size, so its mappings cannot be checked");
-		return (NVRM_E_NOTSUP);
-	}
+	/*
+	 * The page size of an imported object: the RM's own query is the
+	 * only authority for it.  The attribute word of the surface info
+	 * names the import and not the pages, so it never answers.
+	 */
+	rc = query_page_size(c, h, &ps, err, errlen);
+	if (rc != NVRM_OK)
+		return (rc);
+	rc = page_size_refused(&ps, "the imported object", err, errlen);
+	if (rc != NVRM_OK)
+		return (rc);
+	out->page_size = ps.bytes;
 	out->coherency = import_coherency(raw.attr);
 	/* ctrl0041.h, NV0041_CTRL_SURFACE_INFO_INDEX_ADDR_SPACE_TYPE: "Returned
 	 * values are described by NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE". */
@@ -538,6 +660,7 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	NV_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bmem *m;
 	surface_raw surface;
+	struct page_size ps;
 	NvU32 st, cls;
 	uint64_t got;
 	int vid = a->place == NVRM_PLACE_VIDMEM;
@@ -574,8 +697,8 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 		    "allocation" : "system memory allocation", st));
 	}
 	/* attr and attr2 are IN/OUT: the RM writes back what it allocated.
-	 * DEFAULT names no size, so ask the new object's surface info instead of
-	 * assuming that the RM used the requested size. */
+	 * DEFAULT names no size, so ask the RM for the page size of the new
+	 * object instead of assuming that the RM used the requested size. */
 	got = page_size_of(p.attr, p.attr2);
 	if (got == 0 && DRF_VAL(OS32, _ATTR, _PAGE_SIZE, p.attr) ==
 	    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
@@ -583,8 +706,23 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 		if (rc != NVRM_OK) {
 			give_back(c, m);
 			return (rc);
-		} else if (DRF_VAL(OS32, _ATTR, _PAGE_SIZE, surface.attr) ==
-		    NVOS32_ATTR_PAGE_SIZE_DEFAULT) {
+		}
+		rc = alloc_page_size(c, m->h, surface.attr, &ps, err, errlen);
+		if (rc != NVRM_OK) {
+			give_back(c, m);
+			return (rc);
+		}
+		if (ps.answer == PAGE_ANSWER_NO_QUERY) {
+			give_back(c, m);
+			snprintf(err, errlen, "the RM does not support "
+			    "NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE, so the page "
+			    "size of the requested %ju KiB page of the new "
+			    "allocation cannot be known; the object was freed: "
+			    "this RM version cannot be used for that "
+			    "allocation", (uintmax_t)(a->page_size >> 10));
+			return (NVRM_E_NOTSUP);
+		}
+		if (ps.bytes == 0) {
 			give_back(c, m);
 			/* The core always passes a page size (the caller's or
 			 * its default), so 0 never reaches this backend. */
@@ -594,12 +732,12 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 			    "for that allocation",
 			    (uintmax_t)(a->page_size >> 10));
 			return (NVRM_E_NOTSUP);
-		} else
-			(void)import_page_size(surface.attr, &got);
+		}
+		got = ps.bytes;
 	}
 	/* A size the table does not have means the RM used a page this library
 	 * cannot check mappings against, so the object is given back. */
-	if (got == 0) {
+	if (!page_size_known(got)) {
 		give_back(c, m);
 		snprintf(err, errlen, "the RM allocated with a page size this "
 		    "library does not know");

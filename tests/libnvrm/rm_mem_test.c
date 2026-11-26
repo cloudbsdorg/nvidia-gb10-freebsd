@@ -113,6 +113,7 @@ typedef struct mobj {
 	NvU32		attr, attr2, flags;
 	int		live;		/* not freed yet */
 	int		explicit_free;	/* freed by RM_FREE of the object itself */
+	int		imported;	/* an import of another client's object */
 } mobj;
 
 static struct {
@@ -124,10 +125,14 @@ static struct {
 	NvU32		wb_page, wb_huge;	/* page size written back, or NOVERRIDE */
 	NvU32		surf_attr, surf_space;	/* surface info answers, or NOVERRIDE */
 	uint64_t	surf_size;
+	uint64_t	page_size;	/* the page size query answers, or NOVERRIDE */
+	int		no_page_query;	/* the RM has no page size query */
+	int		npagesize;	/* the page size query was asked */
+	int		fail_map_open;	/* opening /dev/nvidiaN fails */
 	int		map_dev_null;	/* /dev/nvidiaN is a node that cannot be mapped */
 	int		ctl_dev_null;	/* /dev/nvidiactl is a node that cannot be mapped */
 	int		ctl_dev_null_n;	/* the Nth /dev/nvidiactl cannot be mapped */
-	int		fail_map_open;	/* opening /dev/nvidiaN fails */
+	int		fail_usermode_map;	/* the usermode page cannot be mapped */
 	int		map_dev_null_n;	/* the Nth /dev/nvidiaN cannot be mapped */
 	int		fail_map_open_n;	/* the Nth /dev/nvidiaN cannot be opened */
 	int		fail_ctl_open;	/* opening /dev/nvidiactl fails */
@@ -165,6 +170,7 @@ static struct {
 	int		fail_alloc_n;	/* the Nth allocation of the session fails */
 	int		fail_ctl_n;	/* the Nth control of the session fails */
 	int		fail_free_n;	/* the Nth free of the session fails */
+	NvHandle	fail_free_h;	/* the free of this handle fails */
 	uint32_t	tsg_engine;	/* the engine type of the group */
 	NvHandle	tsg_h, chan_h;
 	uint32_t	chan_cls;	/* the class of the channel */
@@ -253,6 +259,7 @@ reset_all(void)
 	M.va_size = 1ULL << 40;
 	M.wb_page = M.wb_huge = NOVERRIDE;
 	M.surf_attr = M.surf_space = NOVERRIDE;
+	M.page_size = NOVERRIDE;
 	M.fail_nr = M.status_nr = -1;
 	M.fail_cls = NOVERRIDE;
 	M.fail_ctl = NOVERRIDE;
@@ -678,7 +685,6 @@ chan_alloc_engine(int fd, NVOS21_PARAMETERS *p, int slot)
 static void
 chan_alloc(int fd, NVOS21_PARAMETERS *p)
 {
-	mobj *o;
 	int slot;
 
 	if (p->hClass == NV20_SUBDEVICE_0)
@@ -696,11 +702,9 @@ chan_alloc(int fd, NVOS21_PARAMETERS *p)
 		p->status = NV_ERR_INVALID_CLASS;
 		return;
 	}
-	o = add(fd, p->hObjectNew, p->hClass);
-	/* The usermode page is in system memory, so its CPU mapping belongs
-	 * to the control device. */
-	if (p->hClass == CLS_USERMODE)
-		o->attr = DRF_DEF(OS32, _ATTR, _LOCATION, _PCI);
+	/* The usermode page is not system memory: it is in the GPU's BAR,
+	 * like video memory, so the RM maps it through the device node. */
+	add(fd, p->hObjectNew, p->hClass);
 }
 
 static void
@@ -742,6 +746,36 @@ m_alloc(int fd, NVOS21_PARAMETERS *p)
 }
 
 /* ---- controls --------------------------------------------------------------- */
+
+/* The page size, in bytes, that an attribute word names; 0 when it names
+ * none. */
+static uint64_t
+page_bytes(NvU32 attr)
+{
+	switch (DRF_VAL(OS32, _ATTR, _PAGE_SIZE, attr)) {
+	case NVOS32_ATTR_PAGE_SIZE_4KB:
+		return (4096);
+	case NVOS32_ATTR_PAGE_SIZE_BIG:
+		return (65536);
+	case NVOS32_ATTR_PAGE_SIZE_HUGE:
+		return (2097152);
+	default:
+		return (0);
+	}
+}
+
+/* The page size the RM's own query answers for an object: the override
+ * when there is one, else the size the object was allocated with.  The
+ * answer never depends on the surface info: the query and the surface
+ * info are two different answers, and for an import the query is the one
+ * that counts. */
+static uint64_t
+page_size_answered(const mobj *o)
+{
+	if (M.page_size != NOVERRIDE)
+		return (M.page_size);
+	return (page_bytes(o->attr));
+}
 
 /* #lizard forgives -- the scripted kernel mirrors the RM control switch, one case per control (as scripted_rm.h) */
 static int
@@ -800,6 +834,9 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 		n->size = src->size;
 		n->attr = src->attr;
 		n->attr2 = src->attr2;
+		/* An imported object is a reference to another client's
+		 * object: its surface is the import, not the pages. */
+		n->imported = 1;
 		M.nimport++;
 		return (1);
 	}
@@ -840,6 +877,24 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 			}
 		return (1);
 	}
+	case NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE: {
+		NV0041_CTRL_GET_MEM_PAGE_SIZE_PARAMS *a = NvP64_VALUE(p->params);
+
+		o = find(fd, p->hObject);
+		if (p->paramsSize != sizeof(*a) || o == NULL) {
+			bad("the page size is not asked of a live object");
+			p->status = NV_ERR_INVALID_OBJECT_HANDLE;
+			return (1);
+		}
+		M.npagesize++;
+		if (M.no_page_query) {
+			/* an RM without that query */
+			p->status = NV_ERR_NOT_SUPPORTED;
+			return (1);
+		}
+		a->pageSize = page_size_answered(o);
+		return (1);
+	}
 	case NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2: {
 		NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *a =
 		    NvP64_VALUE(p->params);
@@ -878,10 +933,14 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 }
 
 /* Is the object system memory?  The RM's own word for it: the location in
- * the allocation's attributes. */
+ * the allocation's attributes.  The usermode page is not system memory: it
+ * is in the GPU's BAR, like video memory, and the RM maps it through the
+ * device node. */
 static int
 is_sysmem(const mobj *o)
 {
+	if (o->cls == CLS_USERMODE)
+		return (0);
 	return (DRF_VAL(OS32, _ATTR, _LOCATION, o->attr) ==
 	    NVOS32_ATTR_LOCATION_PCI);
 }
@@ -988,6 +1047,12 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 			M.nmine_free++;
 			return (0);
 		}
+		if (M.fail_free_h != 0 && p->hObjectOld == M.fail_free_h) {
+			p->status = M.status_val != NV_OK ? M.status_val :
+			    NV_ERR_INVALID_STATE;
+			M.nmine_free++;
+			return (0);
+		}
 		p->status = status_now(nr);
 		if (p->status == NV_OK) {
 			o->live = 0;
@@ -1035,6 +1100,12 @@ m_ioctl(int fd, unsigned long cmd, void *arg)
 			bad("CPU map parameters");
 		mem = find(fd, p->params.hMemory);
 		M.nmapmem++;
+		/* The RM refuses the mapping of the usermode page. */
+		if (M.fail_usermode_map && mem->cls == CLS_USERMODE) {
+			M.nunmapmem++;
+			p->params.status = NV_ERR_INVALID_ARGUMENT;
+			return (0);
+		}
 		/*
 		 * The RM's rule: a CPU mapping of system memory belongs to
 		 * the control device and one of video memory to the GPU's
@@ -1492,7 +1563,6 @@ test_alloc_page_writeback(void)
 {
 	nvrm_client *cl;
 	nvrm_mem *m;
-	int frees;
 
 	up();
 	cl = client(0);
@@ -1510,6 +1580,74 @@ test_alloc_page_writeback(void)
 	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m), NVRM_OK);
 	CHECK_EQ(page_of(m), 64 * KiB);
 	nvrm_mem_free(m);
+	/* The surface info names a 4 KiB page: that is the page the object
+	 * has. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_4KB);
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m), NVRM_OK);
+	CHECK_EQ(page_of(m), 4 * KiB);
+	nvrm_mem_free(m);
+	/* The surface info names a huge page without saying 2 MiB or
+	 * 512 MiB: the page every huge-page object has is 2 MiB. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_HUGE);
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 4 * MiB, 2 * MiB, &m), NVRM_OK);
+	CHECK_EQ(page_of(m), 2 * MiB);
+	nvrm_mem_free(m);
+	/* Neither the write-back nor the surface info names a size: the RM's
+	 * own page-size query does. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT);
+	M.page_size = 64 * KiB;
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m), NVRM_OK);
+	CHECK_EQ(page_of(m), 64 * KiB);
+	nvrm_mem_free(m);
+	M.surf_attr = NOVERRIDE;
+	M.page_size = NOVERRIDE;
+	nvrm_client_close(cl);
+	down("alloc page writeback");
+}
+
+/* The allocation path when the RM's own page-size query is the only answer
+ * there is: it is missing, it is refused, it names no size, or it names a
+ * size this library cannot use.  Every one of them undoes the allocation. */
+static void
+test_alloc_page_query(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	int frees;
+
+	up();
+	cl = client(0);
+	/* the RM writes back no page size: the query is the only answer */
+	M.wb_page = NVOS32_ATTR_PAGE_SIZE_DEFAULT;
+	M.wb_huge = NOVERRIDE;
+	/* An RM without that query names no size either: the allocation is
+	 * undone. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT);
+	M.no_page_query = 1;
+	frees = M.nmine_free;
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m),
+	    NVRM_E_NOTSUP);
+	HAS(cl, "requested 4 KiB page");
+	CHECK(m == NULL);
+	CHECK_EQ(M.nmine_free, frees + 1);
+	M.no_page_query = 0;
+	M.page_size = NOVERRIDE;
+	/* The page-size query refused: the allocation is undone and the
+	 * status is the RM's own. */
+	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
+	    NVOS32_ATTR_PAGE_SIZE_DEFAULT);
+	M.fail_ctl = NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE;
+	M.status_val = NV_ERR_INVALID_OBJECT;
+	frees = M.nmine_free;
+	CHECK_EQ(alloc(cl, NVRM_MEM_VRAM, 64 * KiB, 4 * KiB, &m), NVRM_E_RM);
+	HAS(cl, "GET_MEM_PAGE_SIZE failed");
+	CHECK(m == NULL);
+	CHECK_EQ(M.nmine_free, frees + 1);
+	M.fail_ctl = NOVERRIDE;
 	/* If neither answer names a size, the allocation is undone. */
 	M.surf_attr = DRF_NUM(OS32, _ATTR, _PAGE_SIZE,
 	    NVOS32_ATTR_PAGE_SIZE_DEFAULT);
@@ -1546,7 +1684,7 @@ test_alloc_page_writeback(void)
 	CHECK_EQ(not_freed_explicitly(), 0);
 	M.wb_page = M.wb_huge = NOVERRIDE;
 	nvrm_client_close(cl);
-	down("alloc page writeback");
+	down("alloc page query");
 }
 
 static void
@@ -1817,13 +1955,18 @@ test_map_cpu_kind(void)
 
 /* ---- sharing ------------------------------------------------------------------- */
 
+/* An import as the scripted RM answers it: the surface info names the
+ * attribute, the space and the size of the import, and the RM's own query
+ * for the page size answers with the page given here (NOVERRIDE: with the
+ * page size the object was allocated with). */
 static int
 import_with(nvrm_client *b, int fd, NvU32 attr, NvU32 space, uint64_t size,
-    nvrm_mem **im)
+    uint64_t page, nvrm_mem **im)
 {
 	M.surf_attr = attr;
 	M.surf_space = space;
 	M.surf_size = size;
+	M.page_size = page;
 	*im = NULL;
 	return (nvrm_mem_import_fd(b, fd, im));
 }
@@ -1840,60 +1983,117 @@ test_share(void)
 	nvrm_client *a, *b;
 	nvrm_mem *m, *im;
 	nvrm_mem_info mi;
-	int fd;
+	int fd, npagesize;
 
 	up();
 	a = client(0);
 	b = client(NVRM_OPEN_ALLOW_MAP);
+	im = NULL;
 	CHECK_EQ(alloc(a, NVRM_MEM_VRAM, 1 * MiB, 64 * KiB, &m), NVRM_OK);
 	CHECK_EQ(nvrm_mem_export_fd(m, &fd), NVRM_OK);
 	CHECK_EQ(M.nexport, 1);
-	/* as the RM reports it: size, page size, place */
+	/* as the RM reports it: size, page size, place.  The page size of an
+	 * imported object is the one the RM's own query answers; the surface
+	 * info of an import names the import, not the pages. */
 	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_OK);
 	CHECK_EQ(M.nimport, 1);
 	CHECK_EQ(M.nsurf, 1);
-	mi = info_of(im);
+	CHECK_EQ(M.npagesize, 1);
+	mi = im != NULL ? info_of(im) : (nvrm_mem_info){ 0 };
 	CHECK_EQ(mi.kind, NVRM_MEM_IMPORTED);
 	CHECK_EQ(mi.bytes, 1 * MiB);
 	CHECK_EQ(mi.page_size, 64 * KiB);
 	CHECK_EQ(mi.place, NVRM_PLACE_VIDMEM);
+	if (im != NULL)
+		nvrm_mem_free(im);
+	/* an RM without the page-size query: the import is refused, and the
+	 * refusal says the query is the missing part */
+	M.no_page_query = 1;
+	im = NULL;
+	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_E_NOTSUP);
+	HAS(b, "does not support NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE");
+	CHECK(im == NULL);
+	M.no_page_query = 0;
+	/* the page-size query refused: the import keeps its own status */
+	M.fail_ctl = NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE;
+	M.status_val = NV_ERR_INVALID_OBJECT;
+	im = NULL;
+	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_E_RM);
+	HAS(b, "GET_MEM_PAGE_SIZE failed");
+	CHECK(im == NULL);
+	M.fail_ctl = NOVERRIDE;
+	/* a page size the library does not know: the import is refused, and
+	 * the refusal says which size was reported */
+	M.page_size = 256ULL << 20;
+	im = NULL;
+	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_E_NOTSUP);
+	HAS(b, "reported an unsupported page size");
+	HAS(b, "268435456");
+	CHECK(im == NULL);
+	M.page_size = NOVERRIDE;
+	/* the query is the authority: the surface info of the import says
+	 * 4 KiB and the query answers 64 KiB, so the import has 64 KiB and
+	 * the query was asked */
+	M.surf_attr = ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, 1);
+	M.page_size = 64 * KiB;
+	npagesize = M.npagesize;
+	im = NULL;
+	CHECK_EQ(nvrm_mem_import_fd(b, fd, &im), NVRM_OK);
+	CHECK_EQ(M.npagesize, npagesize + 1);
+	CHECK_EQ(info_of(im).page_size, 64 * KiB);
 	nvrm_mem_free(im);
-	/* page sizes: 4 KiB; huge is 2 MiB unless the size allows 512 MiB */
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, 1), VID, 0, &im), NVRM_OK);
+	M.surf_attr = M.surf_space = NOVERRIDE;
+	M.page_size = NOVERRIDE;
+	/* page sizes: the query answers them.  4 KiB, and a huge page of
+	 * 2 MiB. */
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, 1), VID, 0,
+	    4 * KiB, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).page_size, 4 * KiB);
 	nvrm_mem_free(im);
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_HUGE, 1), VID, 6 * MiB, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_HUGE, 1), VID,
+	    6 * MiB, 2 * MiB, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).page_size, 2 * MiB);
 	nvrm_mem_free(im);
-	/* a size 512 MiB pages would fit: still 2 MiB, the page every huge
-	 * object has; the RM refuses a map a real 512 MiB page would not take */
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_HUGE, 1), VID, 1024 * MiB, &im), NVRM_OK);
-	CHECK_EQ(info_of(im).page_size, 2 * MiB);
+	/* a huge page of 512 MiB: the query answers it and the import has
+	 * it, so a mapping that does not fit such a page is the RM's to
+	 * refuse */
+	npagesize = M.npagesize;
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_HUGE, 1), VID,
+	    1024 * MiB, 512 * MiB, &im), NVRM_OK);
+	CHECK_EQ(M.npagesize, npagesize + 1);
+	CHECK_EQ(info_of(im).page_size, 512 * MiB);
 	nvrm_mem_free(im);
 	/* no page size named: refused, and the imported handle freed */
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_DEFAULT, 1), VID, 0, &im), NVRM_E_NOTSUP);
-	HAS(b, "does not say its page size");
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_DEFAULT, 1), VID,
+	    0, 0, &im), NVRM_E_NOTSUP);
+	HAS(b, "did not report a page size");
 	CHECK(im == NULL);
 	/* system memory: the CPU attribute follows the coherency the RM keeps */
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_CACHED), SYSM, 0, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_CACHED), SYSM, 0,
+	    NOVERRIDE, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).place, NVRM_PLACE_SYSMEM);
 	CHECK_EQ(info_of(im).cpu_attr, NVRM_ATTR_CACHED);
 	nvrm_mem_free(im);
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_BACK), SYSM, 0, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_BACK), SYSM, 0,
+	    NOVERRIDE, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).cpu_attr, NVRM_ATTR_CACHED);
 	nvrm_mem_free(im);
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_COMBINE), SYSM, 0, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_COMBINE), SYSM, 0,
+	    NOVERRIDE, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).cpu_attr, NVRM_ATTR_WC);
 	nvrm_mem_free(im);
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_UNCACHED), SYSM, 0, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_UNCACHED), SYSM, 0,
+	    NOVERRIDE, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).cpu_attr, NVRM_ATTR_DEVICE);
 	nvrm_mem_free(im);
-	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_THROUGH), SYSM, 0, &im), NVRM_OK);
+	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, NVOS32_ATTR_COHERENCY_WRITE_THROUGH), SYSM, 0,
+	    NOVERRIDE, &im), NVRM_OK);
 	CHECK_EQ(info_of(im).cpu_attr, NVRM_ATTR_DEVICE);
 	nvrm_mem_free(im);
 	/* neither video nor system memory */
 	CHECK_EQ(import_with(b, fd, ATTR(NVOS32_ATTR_PAGE_SIZE_4KB, 1),
-	    NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_FABRIC, 0, &im), NVRM_E_RM);
+	    NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_FABRIC, 0, NOVERRIDE,
+	    &im), NVRM_E_RM);
 	HAS(b, "neither video nor system memory");
 	M.surf_attr = M.surf_space = NOVERRIDE;
 	M.surf_size = 0;
@@ -2450,8 +2650,18 @@ test_chan_ctl_fail(void)
  * control device the backend opens (0 = the first one).  The channel's
  * pages are in system memory, so their mappings are made on the control
  * device. */
+/* The kinds of descriptor the channel backend opens: the control device
+ * (a system-memory mapping) and the GPU's own device node (the doorbell
+ * page, which is in the GPU's BAR). */
+#define DESC_CTL	0
+#define DESC_GPU	1
+
+/* A create whose descriptor cannot be opened: the create is refused and
+ * nothing is left behind.  n counts the opens of the kind (0 is every one
+ * of them), dev is the kind of descriptor, what is the name of the object
+ * the failure has to name. */
 static void
-chan_open_fails(int n, const char *text)
+chan_open_fails(int n, int dev, const char *what, const char *text)
 {
 	nvrm_client *cl;
 	nvrm_chan *ch;
@@ -2460,23 +2670,33 @@ chan_open_fails(int n, const char *text)
 
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	fd = M.session_fd;
-	if (n == 0)
+	if (dev == DESC_GPU) {
+		if (n == 0)
+			M.fail_map_open = 1;
+		else
+			M.fail_map_open_n = M.map_opens + n;
+	} else if (n == 0)
 		M.fail_ctl_open = 1;
 	else
 		M.fail_ctl_open_n = M.ctl_opens + n;
 	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
 	CHECK(ch == NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
+	/* the failure names the object it was doing */
+	CHECK(strstr(nvrm_client_errmsg(cl), what) != NULL);
 	CHECK_EQ(live_in_session(fd), 2);
 	M.fail_ctl_open = 0;
 	M.fail_ctl_open_n = 0;
+	M.fail_map_open = 0;
+	M.fail_map_open_n = 0;
 	nvrm_client_close(cl);
 }
 
 /* A create whose mapping fails: the create is refused and nothing is left
- * behind.  n is the control device the backend opens. */
+ * behind.  n counts the descriptors of the kind, dev is the kind, what is
+ * the name of the object the failure has to name. */
 static void
-chan_mmap_fails(int n, const char *text)
+chan_mmap_fails(int n, int dev, const char *what, const char *text)
 {
 	nvrm_client *cl;
 	nvrm_chan *ch;
@@ -2485,12 +2705,18 @@ chan_mmap_fails(int n, const char *text)
 
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	fd = M.session_fd;
-	M.ctl_dev_null_n = M.ctl_opens + n;
+	if (dev == DESC_GPU)
+		M.map_dev_null_n = M.map_opens + n;
+	else
+		M.ctl_dev_null_n = M.ctl_opens + n;
 	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
 	CHECK(ch == NULL);
 	CHECK(strstr(nvrm_client_errmsg(cl), text) != NULL);
+	/* the failure names the object it was doing */
+	CHECK(strstr(nvrm_client_errmsg(cl), what) != NULL);
 	CHECK_EQ(live_in_session(fd), 2);
 	M.ctl_dev_null_n = 0;
+	M.map_dev_null_n = 0;
 	nvrm_client_close(cl);
 }
 
@@ -2503,7 +2729,7 @@ test_chan_map_fail(void)
 	int fd;
 
 	up();
-	/* the RM refuses a CPU mapping: the create is refused */
+	/* the RM refuses the CPU mapping: the create is refused */
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 	fd = M.session_fd;
 	M.status_nr = NV_ESC_RM_MAP_MEMORY;
@@ -2515,16 +2741,39 @@ test_chan_map_fail(void)
 	M.status_nr = -1;
 	nvrm_client_close(cl);
 
-	/* the control device cannot be opened: the usermode page cannot be
+	/* the RM refuses the mapping of the usermode page: the create is
+	 * refused, and the failure names the object it was doing */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	M.fail_usermode_map = 1;
+	CHECK(nvrm_chan_create(cl, &p, &ch) != NVRM_OK);
+	CHECK(ch == NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "NV_ESC_RM_MAP_MEMORY") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "map USERMODE") != NULL);
+	CHECK_EQ(live_in_session(fd), 2);
+	M.fail_usermode_map = 0;
+	nvrm_client_close(cl);
+
+	/* the GPU's device node cannot be opened: the usermode page cannot
+	 * be mapped */
+	chan_open_fails(0, DESC_GPU, "map USERMODE",
+	    "cannot open /dev/nvidia1");
+	/* the control device cannot be opened: the userd page cannot be
 	 * mapped */
-	chan_open_fails(0, "cannot open /dev/nvidiactl");
-	/* the mapping of the userd page fails: the second control device the
-	 * backend opens is the one of the userd page */
-	chan_open_fails(2, "cannot open /dev/nvidiactl");
+	chan_open_fails(0, DESC_CTL, "map USERD",
+	    "cannot open /dev/nvidiactl");
+	/* the second control device the backend opens is the one of the
+	 * notifier page */
+	chan_open_fails(2, DESC_CTL, "map NOTIFIER",
+	    "cannot open /dev/nvidiactl");
 	/* the mmap of the usermode page fails */
-	chan_mmap_fails(1, "mmap of the device failed");
+	chan_mmap_fails(1, DESC_GPU, "map USERMODE",
+	    "mmap of the device failed");
 	/* the mmap of the userd page fails */
-	chan_mmap_fails(2, "mmap of the device failed");
+	chan_mmap_fails(1, DESC_CTL, "map USERD", "mmap of the device failed");
+	/* the mmap of the notifier page fails */
+	chan_mmap_fails(2, DESC_CTL, "map NOTIFIER",
+	    "mmap of the device failed");
 	down("chan map fail");
 }
 
@@ -2583,6 +2832,34 @@ test_chan_free_failures(void)
 	nvrm_chan_destroy(ch);
 	CHECK_EQ(failed(cl), 1);
 	M.status_nr = -1;
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	/* the RM refuses the free of the userd page: the unmap before it
+	 * succeeded, so the failure names the free and not the unmap */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	M.fail_free_h = M.chan_userd;
+	M.status_val = NV_ERR_INVALID_STATE;
+	nvrm_chan_destroy(ch);
+	/* the message is read before the count: the count's call clears it */
+	HAS(cl, "free USERD");
+	CHECK(strstr(nvrm_client_errmsg(cl), "unmap USERD") == NULL);
+	CHECK_EQ(failed(cl), 1);
+	M.fail_free_h = 0;
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	/* and the same for the notifier page */
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	M.fail_free_h = M.chan_notif;
+	M.status_val = NV_ERR_INVALID_STATE;
+	nvrm_chan_destroy(ch);
+	HAS(cl, "free NOTIFIER");
+	CHECK(strstr(nvrm_client_errmsg(cl), "unmap NOTIFIER") == NULL);
+	CHECK_EQ(failed(cl), 1);
+	M.fail_free_h = 0;
 	nvrm_client_close(cl);
 	CHECK_EQ(live_in_session(fd), 0);
 	down("chan free failures");
@@ -2715,6 +2992,7 @@ test_chan_two_clients(void)
 	X("reserve", test_reserve) \
 	X("alloc", test_alloc) \
 	X("alloc-page", test_alloc_page_writeback) \
+	X("alloc-page-query", test_alloc_page_query) \
 	X("alloc-sysmem", test_alloc_sysmem) \
 	X("map-gpu", test_map_gpu) \
 	X("map-cpu", test_map_cpu) \

@@ -110,24 +110,42 @@ fetch_classes(nvrm_bclient *c, char *err, size_t errlen)
 	return (NVRM_OK);
 }
 
+/* A step that failed: the object it was doing named in front of the RM's
+ * own words, so the next boot says which call failed. */
+static int
+named_fail(int rc, char *err, size_t errlen, const char *what,
+    const char *detail)
+{
+	snprintf(err, errlen, "%s: %s", what, detail);
+	return (rc);
+}
+
 /* The usermode page: the only device mapping the backend makes.  The
- * doorbell is one aligned store in it.  The page is in system memory, so the
- * mapping is made on a control-device descriptor. */
+ * doorbell is one aligned store in it.  The page is in the GPU's BAR (it is
+ * device memory, like video memory), so the mapping is made on the GPU's
+ * own device node: the RM maps device memory through the BAR aperture and
+ * refuses a mapping of it named on the control device
+ * (NV_ERR_INVALID_ARGUMENT).  Only system memory is mapped on the control
+ * device. */
 static int
 map_usermode(nvrm_bclient *c, char *err, size_t errlen)
 {
 	struct nvrm_rm_map map;
+	char what[32], detail[128];
 	int rc;
 
+	snprintf(what, sizeof(what), "map USERMODE 0x%04x",
+	    nvrm_rm_usermode_class());
 	c->usermode_fd = -1;
-	rc = nvrm_rm_mem_ops.desc_open(c, NVRM_DESC_MAP_CTL, &c->usermode_fd,
-	    err, errlen);
+	rc = nvrm_rm_mem_ops.desc_open(c, NVRM_DESC_MAP, &c->usermode_fd,
+	    detail, sizeof(detail));
 	if (rc != NVRM_OK)
-		return (rc);
+		return (named_fail(rc, err, errlen, what, detail));
 	rc = nvrm_rmm_map_handle(c, c->usermode, NVC361_NV_USERMODE__SIZE,
-	    NVRM_CPU_READ | NVRM_CPU_WRITE, c->usermode_fd, &map, err, errlen);
+	    NVRM_CPU_READ | NVRM_CPU_WRITE, c->usermode_fd, &map, detail,
+	    sizeof(detail));
 	if (rc != NVRM_OK)
-		return (rc);
+		return (named_fail(rc, err, errlen, what, detail));
 	c->usermode_cpu = map.addr;
 	c->usermode_cookie = map.cookie;
 	return (NVRM_OK);
@@ -200,13 +218,15 @@ pick_class(nvrm_bchan *b, const nvrm_bchan_cfg *cfg, nvrm_bchan_info *out,
 /* A page of system memory the GPU reads: the userd page of the channel or
  * the error notifier.  The page is mapped on a descriptor of its own, a
  * control-device one: the RM associates a system-memory mapping with the
- * control device. */
+ * control device.  The name of the page is in front of every failure of
+ * the step, so the next boot says which page it was. */
 static int
 alloc_page(nvrm_bchan *b, nvrm_bmem **mp, int *fdp, void **cp, unsigned prot,
-    char *err, size_t errlen)
+    const char *name, char *err, size_t errlen)
 {
 	nvrm_balloc a;
 	nvrm_bmem_info bi;
+	char what[32], detail[128];
 	int fd, rc;
 
 	memset(&a, 0, sizeof(a));
@@ -214,17 +234,21 @@ alloc_page(nvrm_bchan *b, nvrm_bmem **mp, int *fdp, void **cp, unsigned prot,
 	a.place = NVRM_PLACE_SYSMEM;
 	a.bytes = PAGE_BYTES;
 	a.page_size = PAGE_BYTES;
-	rc = nvrm_rm_mem_ops.mem_alloc(b->c, &a, mp, &bi, err, errlen);
+	rc = nvrm_rm_mem_ops.mem_alloc(b->c, &a, mp, &bi, detail,
+	    sizeof(detail));
+	if (rc != NVRM_OK) {
+		snprintf(what, sizeof(what), "allocate %s", name);
+		return (named_fail(rc, err, errlen, what, detail));
+	}
+	snprintf(what, sizeof(what), "map %s", name);
+	rc = nvrm_rm_mem_ops.desc_open(b->c, NVRM_DESC_MAP_CTL, &fd, detail,
+	    sizeof(detail));
 	if (rc != NVRM_OK)
-		return (rc);
-	rc = nvrm_rm_mem_ops.desc_open(b->c, NVRM_DESC_MAP_CTL, &fd, err,
-	    errlen);
-	if (rc != NVRM_OK)
-		return (rc);
-	rc = nvrm_rm_mem_ops.map_cpu(*mp, fd, prot, cp, err, errlen);
+		return (named_fail(rc, err, errlen, what, detail));
+	rc = nvrm_rm_mem_ops.map_cpu(*mp, fd, prot, cp, detail, sizeof(detail));
 	if (rc != NVRM_OK) {
 		close(fd);
-		return (rc);
+		return (named_fail(rc, err, errlen, what, detail));
 	}
 	*fdp = fd;
 	return (NVRM_OK);
@@ -358,23 +382,30 @@ rm_free(nvrm_bclient *c, NvHandle h, NvHandle parent, const char *what,
 
 /* Give back a page the backend mapped: the mapping first, then the
  * object.  A page that was never mapped (the descriptor could not be
- * opened) has no mapping to give back. */
+ * opened) has no mapping to give back.  Each step names itself: a refused
+ * unmap and a refused free are different calls, and the message must say
+ * which one the RM refused. */
 static int
-free_page(nvrm_bmem **mp, int *fdp, void **cp, char *err, size_t errlen)
+free_page(nvrm_bmem **mp, int *fdp, void **cp, const char *name, char *err,
+    size_t errlen)
 {
 	nvrm_bmem *m = *mp;
+	char what[32], detail[128];
 	int rc;
 
 	if (m == NULL)
 		return (NVRM_OK);
+	snprintf(what, sizeof(what), "unmap %s", name);
 	if (*cp != NULL) {
-		rc = nvrm_rm_mem_ops.unmap_cpu(m, *cp, 1, err, errlen);
+		rc = nvrm_rm_mem_ops.unmap_cpu(m, *cp, 1, detail,
+		    sizeof(detail));
 		if (rc != NVRM_OK)
-			return (rc);
+			return (named_fail(rc, err, errlen, what, detail));
 	}
-	rc = nvrm_rm_mem_ops.mem_free(m, 1, err, errlen);
+	snprintf(what, sizeof(what), "free %s", name);
+	rc = nvrm_rm_mem_ops.mem_free(m, 1, detail, sizeof(detail));
 	if (rc != NVRM_OK)
-		return (rc);
+		return (named_fail(rc, err, errlen, what, detail));
 	if (*fdp >= 0)
 		close(*fdp);
 	*mp = NULL;
@@ -417,10 +448,12 @@ chan_unwind(nvrm_bchan *b, char *err, size_t errlen)
 			return (rc);
 		b->tsg = 0;
 	}
-	rc = free_page(&b->notif, &b->notif_fd, &b->notif_cpu, err, errlen);
+	rc = free_page(&b->notif, &b->notif_fd, &b->notif_cpu, "NOTIFIER",
+	    err, errlen);
 	if (rc != NVRM_OK)
 		return (rc);
-	return (free_page(&b->userd, &b->userd_fd, &b->userd_cpu, err, errlen));
+	return (free_page(&b->userd, &b->userd_fd, &b->userd_cpu, "USERD",
+	    err, errlen));
 }
 
 /* The client's own objects go back to the RM: the usermode object, then
@@ -478,10 +511,10 @@ rm_create(nvrm_bclient *bc, const nvrm_bchan_cfg *cfg, nvrm_bchan **bp,
 		rc = pick_class(b, cfg, out, err, errlen);
 	if (rc == NVRM_OK)
 		rc = alloc_page(b, &b->userd, &b->userd_fd, &b->userd_cpu,
-		    NVRM_CPU_READ | NVRM_CPU_WRITE, err, errlen);
+		    NVRM_CPU_READ | NVRM_CPU_WRITE, "USERD", err, errlen);
 	if (rc == NVRM_OK)
 		rc = alloc_page(b, &b->notif, &b->notif_fd, &b->notif_cpu,
-		    NVRM_CPU_READ, err, errlen);
+		    NVRM_CPU_READ, "NOTIFIER", err, errlen);
 	if (rc == NVRM_OK)
 		rc = alloc_tsg(b, engine, err, errlen);
 	if (rc == NVRM_OK)
