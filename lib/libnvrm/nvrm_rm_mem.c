@@ -10,8 +10,11 @@
  * descriptor and RM client, opened the same way enumeration does it), with
  * only this GPU attached, one NV01_DEVICE_0 and one FERMI_VASPACE_A:
  *
- *   VA reservation   NV50_MEMORY_VIRTUAL at a fixed address inside the VA
- *                    space (sparse with NVOS32_ALLOC_FLAGS_SPARSE)
+ *   VA reservation   NV50_MEMORY_VIRTUAL, the RM places it inside the VA
+ *                    space and answers with the address it chose (sparse
+ *                    with NVOS32_ALLOC_FLAGS_SPARSE); a fixed address is
+ *                    the caller's own, and the RM refuses it when it is
+ *                    outside the space
  *   VRAM             NV01_MEMORY_LOCAL_USER, location video memory, write
  *                    combined
  *   system memory    NV01_MEMORY_SYSTEM, location PCI, cached
@@ -181,6 +184,8 @@ alloc_device_and_vaspace(nvrm_bclient *c, uint32_t id, nvrm_vainfo *va,
 	}
 	va->base = vp.vaBase;
 	va->end = vp.vaSize;
+	c->va_base = vp.vaBase;
+	c->va_end = vp.vaSize;
 	return (NVRM_OK);
 }
 
@@ -300,9 +305,32 @@ fill_alloc(NV_MEMORY_ALLOCATION_PARAMS *p, uint64_t bytes)
 	p->size = bytes;
 }
 
+/*
+ * The VA reservation.
+ *
+ * The RM places the address, the way NVIDIA's own kernel client does
+ * (nv_gpu_ops.c:4998-5060: no fixed address, the RM's own range, and the
+ * address it chose comes back in the params, which the client reads as
+ * memAllocParams.offset).  We pass the range the VA space's own limits make
+ * up, as the RM reported them: the RM clips it to the limits it holds and
+ * places the VA inside (vaspaceFillAllocParams_IMPL, vaspace.c:88-104).
+ *
+ * A fixed address is what the caller asked for, and the RM refuses it when
+ * it is outside the space: the low part of a space is reserved (0 is always
+ * reserved to represent NULL pointers, nvos.h,
+ * NV_VASPACE_ALLOCATION_PARAMETERS, "vaBase"), so a fixed range that leaves
+ * the space is not a valid placement.  That is what the board's RM said
+ * about our own request of boot 6: "virtmemAllocResources: VA Space alloc
+ * failed! Status Code: 0x1f Size: 0x400000 RangeLo: 0x0, RangeHi: 0x3fffff"
+ * (the status the client sees is NV_ERR_INSUFFICIENT_RESOURCES, 0x1a).
+ *
+ * No page size is named: the RM then keeps its own set of page sizes (the
+ * mask it reported, 0x211000: 4 KiB, 64 KiB and 2 MiB), and the pages of
+ * what is mapped there are the ones the mapping asks for.
+ */
 static int
-rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
-    nvrm_bres **rp, char *err, size_t errlen)
+rmm_va_reserve(nvrm_bclient *c, const struct nvrm_va_req *req,
+    nvrm_bres **rp, uint64_t *vap, char *err, size_t errlen)
 {
 	NV_MEMORY_ALLOCATION_PARAMS p;
 	nvrm_bres *r;
@@ -313,11 +341,23 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 		snprintf(err, errlen, "out of memory");
 		return (NVRM_E_NOMEM);
 	}
-	fill_alloc(&p, bytes);
+	fill_alloc(&p, req->bytes);
 	p.flags = NVOS32_ALLOC_FLAGS_VIRTUAL |
-	    NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE |
-	    (sparse ? NVOS32_ALLOC_FLAGS_SPARSE : 0);
-	p.offset = va;
+	    (req->sparse ? NVOS32_ALLOC_FLAGS_SPARSE : 0);
+	if (req->fixed) {
+		p.flags |= NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE;
+		p.offset = req->va;
+	} else {
+		/* The range the VA may take: the space's own limits. */
+		p.flags |= NVOS32_ALLOC_FLAGS_USE_BEGIN_END;
+		p.rangeLo = c->va_base;
+		p.rangeHi = c->va_end - 1;
+	}
+	/* The alignment the caller asked for is a hint: the RM raises it to
+	 * its own policy (the largest page size and the compression page
+	 * size), and only a hint leaves the RM free to do that. */
+	p.alignment = req->align;
+	p.flags |= NVOS32_ALLOC_FLAGS_ALIGNMENT_HINT;
 	p.hVASpace = c->vaspace;
 	r->c = c;
 	r->h = nvrm_rm_new_handle(c->s);
@@ -331,6 +371,8 @@ rmm_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 	r->next = c->res;
 	c->res = r;
 	*rp = r;
+	/* The RM's answer: the address it placed the VA at. */
+	*vap = p.offset;
 	return (NVRM_OK);
 }
 

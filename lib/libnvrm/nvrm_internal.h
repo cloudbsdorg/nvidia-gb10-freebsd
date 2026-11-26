@@ -236,6 +236,18 @@ typedef struct nvrm_bmem_info {
  * child: the backend releases its own records and does process-local work,
  * but does not act on the parent's RM client or fake GPU.
  */
+/*
+ * What the core asks a backend to reserve: the address the core picked, the
+ * size, the alignment, and whether the address is the caller's own.
+ */
+struct nvrm_va_req {
+	uint64_t	va;	/* the address the core picked */
+	uint64_t	bytes;
+	uint64_t	align;	/* a power of two, at least 4 KiB */
+	int		sparse;	/* unmapped addresses read as zero */
+	int		fixed;	/* the address is the caller's own */
+};
+
 typedef struct nvrm_mem_ops {
 	int	(*client_open)(nvrm_backend *be, nvrm_gpu *g,
 		    const nvrm_open_cfg *cfg, nvrm_bclient **bc,
@@ -243,8 +255,15 @@ typedef struct nvrm_mem_ops {
 	void	(*client_close)(nvrm_bclient *bc);
 	int	(*desc_open)(nvrm_bclient *bc, int kind, int *fd, char *err,
 		    size_t errlen);
-	int	(*va_reserve)(nvrm_bclient *bc, uint64_t va, uint64_t bytes,
-		    int sparse, nvrm_bres **r, char *err, size_t errlen);
+	/*
+	 * The VA reservation.  The request carries the address the core
+	 * picked (the caller's own address when req->fixed is set), and the
+	 * address the backend got comes back in *vap: the RM places the VA
+	 * inside the VA space, the way NVIDIA's own kernel client does, so
+	 * the address we asked for is not the address we get.
+	 */
+	int	(*va_reserve)(nvrm_bclient *bc, const struct nvrm_va_req *req,
+	    nvrm_bres **r, uint64_t *vap, char *err, size_t errlen);
 	int	(*va_release)(nvrm_bres *r, int owner, char *err, size_t errlen);
 	int	(*mem_alloc)(nvrm_bclient *bc, const nvrm_balloc *a,
 		    nvrm_bmem **m, nvrm_bmem_info *out, char *err,
@@ -388,6 +407,8 @@ void	nvrm_va_destroy(nvrm_va *va);
 int	nvrm_va_alloc(nvrm_va *va, uint64_t size, uint64_t align,
 	    int have_fixed, uint64_t fixed, uint64_t *out);
 int	nvrm_va_free(nvrm_va *va, uint64_t addr, uint64_t size);
+/* Mark a range a backend placed as used: the address it chose, not ours. */
+int	nvrm_va_take(nvrm_va *va, uint64_t addr, uint64_t size);
 uint64_t nvrm_va_free_bytes(const nvrm_va *va);
 unsigned nvrm_va_extents(const nvrm_va *va);
 

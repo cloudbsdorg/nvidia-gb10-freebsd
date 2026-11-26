@@ -112,6 +112,62 @@ test_va_basic(void)
 	nvrm_va_destroy(NULL);
 }
 
+/*
+ * The allocator takes a range a backend placed for us: the address the RM
+ * chose is not the address the core picked.  Every shape of the range is
+ * covered: the whole of an extent, its head, its tail, a range inside it,
+ * and the ranges that are not free.
+ */
+static void
+test_va_take(void)
+{
+	nvrm_va *va;
+	uint64_t a;
+
+	/* nothing to take, and a range that wraps */
+	va = nvrm_va_new(0x1000, 0x20000);
+	CHECK_EQ(nvrm_va_take(va, 0x1000, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_va_take(va, UINT64_MAX - 1, 4), NVRM_E_INVAL);
+	/* a range outside the space */
+	CHECK_EQ(nvrm_va_take(va, 0x30000, 0x1000), NVRM_E_RANGE);
+	/* a range with a hole in it: the middle is used */
+	CHECK_EQ(nvrm_va_alloc(va, 0x1000, 0x1000, 1, 0x4000, &a), NVRM_OK);
+	CHECK_EQ(nvrm_va_take(va, 0x2000, 0x4000), NVRM_E_RANGE);
+	nvrm_va_destroy(va);
+
+	/* the whole of an extent: the extent goes */
+	va = nvrm_va_new(0x1000, 0x20000);
+	CHECK_EQ(nvrm_va_alloc(va, 0x1000, 0x1000, 1, 0x2000, &a), NVRM_OK);
+	CHECK_EQ(nvrm_va_take(va, 0x1000, 0x1000), NVRM_OK);
+	CHECK_EQ(nvrm_va_extents(va), 1);
+	CHECK_EQ(nvrm_va_free_bytes(va), 0x1f000 - 0x1000 - 0x1000);
+	nvrm_va_destroy(va);
+
+	/* the head of an extent: the part before the range stays free */
+	va = nvrm_va_new(0x1000, 0x20000);
+	CHECK_EQ(nvrm_va_take(va, 0x2800, 0x1d800), NVRM_OK);
+	CHECK_EQ(nvrm_va_extents(va), 1);
+	CHECK_EQ(nvrm_va_free_bytes(va), 0x1800);
+	nvrm_va_destroy(va);
+
+	/* the tail of an extent: the part after the range stays free */
+	va = nvrm_va_new(0x1000, 0x20000);
+	CHECK_EQ(nvrm_va_take(va, 0x1000, 0x1800), NVRM_OK);
+	CHECK_EQ(nvrm_va_extents(va), 1);
+	CHECK_EQ(nvrm_va_free_bytes(va), 0x1f000 - 0x1800);
+	nvrm_va_destroy(va);
+
+	/* a range inside one extent: the extent is split in two */
+	va = nvrm_va_new(0x1000, 0x20000);
+	CHECK_EQ(nvrm_va_take(va, 0x8000, 0x1000), NVRM_OK);
+	CHECK_EQ(nvrm_va_extents(va), 2);
+	CHECK_EQ(nvrm_va_free_bytes(va), 0x1f000 - 0x1000);
+	/* the allocator cannot allocate the memory for the split */
+	fail_calloc_at(1);
+	CHECK_EQ(nvrm_va_take(va, 0x1a000, 0x1000), NVRM_E_NOMEM);
+	fail_calloc_at(0);
+	nvrm_va_destroy(va);
+}
 static void
 test_va_fixed_and_free(void)
 {
@@ -2470,12 +2526,48 @@ test_close_with_channel(void)
 	teardown();
 }
 
+/*
+ * The backend places the reservation at another address (the RM places the
+ * VA inside the VA space, the way NVIDIA's own kernel client has it done):
+ * the address the backend is given is the address the caller gets, and the
+ * core takes it.  A backend that places it outside the VA space cannot be
+ * followed: the reservation goes back and the call fails.
+ */
+static void
+test_va_placed(void)
+{
+	nvrm_va_params p = { 0, 0, 0x1000, 0, 0 };
+	nvrm_client *cl;
+	uint64_t va;
+	unsigned live;
+
+	setup("discrete", NULL);
+	cl = open_client(0, 0, 0);
+	live = bstats().reservations;
+	/* the fake places the reservation at another address */
+	nvrm_fake_mem_va_place(0x30000);
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_OK);
+	CHECK_EQ(va, 0x30000);
+	CHECK_EQ(bstats().reservations, live + 1);
+	CHECK_EQ(nvrm_va_release(cl, va), NVRM_OK);
+	CHECK_EQ(bstats().reservations, live);
+	/* the fake places it outside the VA space: the reservation goes back */
+	nvrm_fake_mem_va_place(0x1000);
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_RANGE);
+	CHECK_EQ(bstats().reservations, live);
+	CHECK(strstr(nvrm_client_errmsg(cl), "not in the VA space") != NULL);
+	nvrm_client_close(cl);
+	teardown();
+}
+
 #define MEM_TESTS(X, N)						\
 	X("va", test_va_basic) \
+	X("va", test_va_take) \
 	X("va", test_va_fixed_and_free) \
 	X("va", test_va_edges) \
 	X("va", test_va_oom) \
 	X("va", test_va_shadow) \
+	X("va", test_va_placed) \
 	X("attr", test_attr_rule) \
 	X("client", test_client_open) \
 	X("client", test_client_independent) \

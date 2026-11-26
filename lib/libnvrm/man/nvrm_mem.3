@@ -167,8 +167,9 @@ The members past the size the call returns are not written, so a caller reads
 .Va size
 after the call to know how much it got.
 .Ss Virtual address space
-The library hands out the GPU virtual addresses; the RM maps at exactly the
-addresses it is given.
+The library hands out the GPU virtual addresses: the RM places each
+reservation inside the VA space and answers with the address it chose, and
+every mapping is made at the address it is given.
 .Fn nvrm_vaspace_info_get
 reports the usable range (from
 .Va base
@@ -184,6 +185,9 @@ reserves
 .Va fixed
 when it is not 0, and returns the start in
 .Pf * Fa va .
+The RM places the reservation inside the space it hands out, so the address
+it returns is the one the RM chose; a fixed address outside that space is
+refused, because the low part of a space is reserved.
 With
 .Dv NVRM_VA_SPARSE
 the addresses of the reservation that nothing is mapped at read as zero and

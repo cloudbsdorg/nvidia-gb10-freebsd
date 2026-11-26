@@ -1153,6 +1153,10 @@ expect_rc "chan_probe reports every step on each GPU as PASS${_missing:+ (missin
 [ $rc -eq 0 ] || sed -n 1,40p "$W/chan.out"
 grep -q '^INFO gpu 0 .* latency_ns: p50 .* ns, p99 .* ns, max .* ns' "$W/chan.out"; rc=$?
 expect_rc "chan_probe reports the latency percentiles" $rc 0
+# The probe asks for the channel's info: the structure it passes must be
+# zeroed first, or the library refuses the size it finds there.
+grep -q '^INFO gpu 0 .* chan_info: cls_gpfifo ' "$W/chan.out"; rc=$?
+expect_rc "chan_probe reads the channel info (the structure is zeroed first)" $rc 0
 grep -q '^PASS gpu 0 .* isolation: the second channel died' "$W/chan.out"; rc=$?
 expect_rc "chan_probe kills the channel of the bad push" $rc 0
 NVRM_BACKEND=fake NVRM_FAKE_FAIL=nogpu "$W/chan_probe" >"$W/chan-nogpu.out" 2>&1

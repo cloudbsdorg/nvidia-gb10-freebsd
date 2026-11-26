@@ -124,6 +124,10 @@ static struct {
 	int		n;
 	/* configuration */
 	NvU64		va_base, va_size;
+	/* The low part of the VA space the RM reserves: 0 is always reserved
+	 * to represent NULL pointers (nvos.h, NV_VASPACE_ALLOCATION_PARAMETERS,
+	 * "vaBase"), and the RM hands out nothing below it. */
+	NvU64		va_low;
 	NvU32		wb_page, wb_huge;	/* page size written back, or NOVERRIDE */
 	NvU32		surf_attr, surf_space;	/* surface info answers, or NOVERRIDE */
 	uint64_t	surf_size;
@@ -470,6 +474,89 @@ m_open(const char *path, int flags)
 
 /* ---- allocations ---------------------------------------------------------- */
 
+/*
+ * The range the RM hands out VA in: the space's own range, less the low
+ * part it reserves.
+ */
+static uint64_t
+va_usable_lo(void)
+{
+	return (M.va_base + M.va_low);
+}
+
+static uint64_t
+va_usable_hi(void)
+{
+	return (M.va_base + M.va_size - 1);
+}
+
+/* The address the RM places a VA at: the first free address of the range,
+ * aligned as the RM aligns a VA (the big page). */
+static int
+va_place(int fd, uint64_t bytes, uint64_t lo, uint64_t hi, uint64_t *out)
+{
+	const uint64_t align = 65536;	/* the big page */
+	uint64_t a;
+	int i;
+
+	if (lo < align)
+		lo = align;
+	a = (lo + align - 1) & ~(align - 1);
+	while (a + bytes - 1 <= hi) {
+		int busy = 0;
+
+		for (i = 0; i < M.n; i++) {
+			mobj *o = &M.o[i];
+
+			if (o->fd != fd || o->cls != NV50_MEMORY_VIRTUAL || !o->live)
+				continue;
+			if (a < o->offset + o->size && o->offset < a + bytes) {
+				busy = 1;
+				break;
+			}
+		}
+		if (!busy) {
+			*out = a;
+			return (1);
+		}
+		a += align;
+	}
+	return (0);
+}
+
+/*
+ * The RM places the VA inside its own range, the way NVIDIA's own kernel
+ * client has it done (the address comes back in the params, and the client
+ * reads it there: nv_gpu_ops.c, "memDesc->address = (NvU64)
+ * memAllocParams.offset").  A fixed address outside the range is refused,
+ * the way the RM refuses it: "VA Space alloc failed!", and the client sees
+ * NV_ERR_INSUFFICIENT_RESOURCES (0x1a) for the RM's own
+ * NV_ERR_INVALID_ARGUMENT (0x1f).
+ */
+static NvU32
+place_va(int fd, NV_MEMORY_ALLOCATION_PARAMS *a)
+{
+	uint64_t lo = va_usable_lo(), hi = va_usable_hi();
+	uint64_t at;
+
+	if (a->flags & NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE) {
+		if (a->offset < lo || a->offset + a->size - 1 > hi)
+			return (NV_ERR_INSUFFICIENT_RESOURCES);
+		return (NV_OK);
+	}
+	if (a->flags & NVOS32_ALLOC_FLAGS_USE_BEGIN_END) {
+		/* The range of the request, clipped to the range the RM holds. */
+		if (a->rangeLo > lo)
+			lo = a->rangeLo;
+		if (a->rangeHi < hi)
+			hi = a->rangeHi;
+	}
+	if (!va_place(fd, a->size, lo, hi, &at))
+		return (NV_ERR_INSUFFICIENT_RESOURCES);
+	a->offset = at;
+	return (NV_OK);
+}
+
 static void
 check_memory_class(int fd, NVOS21_PARAMETERS *p,
     NV_MEMORY_ALLOCATION_PARAMS *a)
@@ -480,9 +567,11 @@ check_memory_class(int fd, NVOS21_PARAMETERS *p,
 		vas = find(fd, a->hVASpace);
 		if (vas == NULL || vas->cls != FERMI_VASPACE_A)
 			bad("virtual memory not in the session's VA space");
-		if ((a->flags & NVOS32_ALLOC_FLAGS_VIRTUAL) == 0 ||
-		    (a->flags & NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE) == 0)
-			bad("virtual memory not at a fixed address");
+		if ((a->flags & NVOS32_ALLOC_FLAGS_VIRTUAL) == 0)
+			bad("virtual memory not virtual");
+		if ((a->flags & NVOS32_ALLOC_FLAGS_ALIGNMENT_HINT) != 0 &&
+		    (a->alignment & (a->alignment - 1)) != 0)
+			bad("the alignment hint is not a power of two");
 		M.nvirtual++;
 	} else if (p->hClass == NV01_MEMORY_LOCAL_USER) {
 		if (DRF_VAL(OS32, _ATTR, _LOCATION, a->attr) !=
@@ -515,6 +604,11 @@ alloc_memory(int fd, NVOS21_PARAMETERS *p)
 	if (a->owner == 0 || a->size == 0)
 		bad("memory allocation without owner or size");
 	check_memory_class(fd, p, a);
+	if (p->hClass == NV50_MEMORY_VIRTUAL) {
+		p->status = place_va(fd, a);
+		if (p->status != NV_OK)
+			return;
+	}
 	if (M.wb_page != NOVERRIDE)
 		a->attr = FLD_SET_DRF_NUM(OS32, _ATTR, _PAGE_SIZE, M.wb_page,
 		    a->attr);
@@ -527,6 +621,9 @@ alloc_memory(int fd, NVOS21_PARAMETERS *p)
 	o->attr = a->attr;
 	o->attr2 = a->attr2;
 	o->flags = a->flags;
+	/* The last allocation is the RM's answer, the address it placed
+	 * included. */
+	M.last_alloc = *a;
 }
 
 static void
@@ -1560,6 +1657,50 @@ test_reserve(void)
 	(void)close_round(0);
 	CHECK_EQ(close_round(1), close_round(0));
 	down("reserve");
+}
+
+/*
+ * The RM places the VA inside its own range, the way NVIDIA's own kernel
+ * client has it done.  The low part of a VA space is reserved (0 is always
+ * reserved to represent NULL pointers, nvos.h,
+ * NV_VASPACE_ALLOCATION_PARAMETERS, "vaBase"), and the RM refuses a fixed
+ * address that is not in the range it hands out: that is what the board's
+ * RM said about our own request of boot 6 ("virtmemAllocResources: VA Space
+ * alloc failed! Status Code: 0x1f Size: 0x400000 RangeLo: 0x0, RangeHi:
+ * 0x3fffff"), and the client saw NV_ERR_INSUFFICIENT_RESOURCES (0x1a).
+ */
+static void
+test_reserve_placed(void)
+{
+	nvrm_va_params p = { 0, 0, 1 * MiB, 0, 0 };
+	nvrm_client *cl;
+	uint64_t va;
+
+	up();
+	/* The RM reported a VA space whose base is 0 and reserves the low part
+	 * of it: the address the core picks (0) is not one the RM hands out. */
+	M.va_base = 0;
+	M.va_low = 0x100000;
+	cl = client(0);
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_OK);
+	CHECK_EQ(va, 0x100000);		/* the address the RM placed */
+	CHECK_EQ(M.last_alloc.offset, va);
+	CHECK((M.last_alloc.flags &
+	    NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE) == 0);
+	CHECK((M.last_alloc.flags & NVOS32_ALLOC_FLAGS_USE_BEGIN_END) != 0);
+	CHECK_EQ(M.last_alloc.rangeLo, M.va_base);
+	CHECK_EQ(M.last_alloc.rangeHi, M.va_base + M.va_size - 1);
+	/* a fixed address inside the range is the caller's own */
+	p.bytes = 0x1000;
+	p.fixed = 0x200000;
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_OK);
+	CHECK_EQ(va, 0x200000);
+	/* a fixed address in the reserved low part is refused */
+	p.fixed = 0x1000;
+	CHECK_EQ(nvrm_va_reserve(cl, &p, &va), NVRM_E_RM);
+	HAS(cl, "NV50_MEMORY_VIRTUAL allocation failed");
+	nvrm_client_close(cl);
+	down("reserve placed");
 }
 
 static void
@@ -3206,6 +3347,7 @@ test_chan_two_clients(void)
 	X("open", test_open) \
 	X("open-fail", test_open_failures) \
 	X("reserve", test_reserve) \
+	X("reserve", test_reserve_placed) \
 	X("alloc", test_alloc) \
 	X("alloc-page", test_alloc_page_writeback) \
 	X("alloc-page-query", test_alloc_page_query) \

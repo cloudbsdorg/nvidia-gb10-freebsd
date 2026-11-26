@@ -51,6 +51,10 @@ void	nvrm_fake_mem_fail(int op, unsigned nth);
 void	nvrm_fake_mem_fail_clear(void);
 /* The host page size the fake aligns objects to (0: sysconf's). */
 void	nvrm_fake_mem_host_page(uint64_t bytes);
+/* The address the fake places the next VA reservation at (0: the address
+ * the core picked): the RM places the VA inside the VA space, so the core
+ * has to take the address it is given. */
+void	nvrm_fake_mem_va_place(uint64_t addr);
 void	nvrm_fake_mem_stats_get(nvrm_fake_mem_stats *st);
 
 /*

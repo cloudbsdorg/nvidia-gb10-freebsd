@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * nvrm_va.c - the GPU virtual address range allocator (libnvrm S2, Track
- * #2419).  Pure bookkeeping, no system calls: the library decides which
- * addresses a client uses and the RM maps at exactly those, so one allocator
- * serves every backend.  Free space is a sorted list of extents [start, end);
- * the end is exclusive and may be 2^64 - 1 at most (a space that ends at the
- * top of the 64-bit range is not representable and is refused).
+ * #2419).  Pure bookkeeping, no system calls: the library keeps track of
+ * which addresses a client uses, and the RM places a reservation inside the
+ * VA space, so one allocator serves every backend.  Free space is a sorted
+ * list of extents [start, end); the end is exclusive and may be 2^64 - 1 at
+ * most (a space that ends at the top of the 64-bit range is not
+ * representable and is refused).
  *
  * Every operation leaves the allocator unchanged when it fails.
  */
@@ -173,6 +174,76 @@ nvrm_va_free(nvrm_va *va, uint64_t addr, uint64_t size)
 	n->end = e;
 	n->next = *pp;
 	*pp = n;
+	return (NVRM_OK);
+}
+
+/*
+ * Mark [addr, addr+size) as used: an address a backend placed for us (the
+ * RM chooses the address inside the VA space, the way NVIDIA's own kernel
+ * client does, so the address we asked for is not the address we get).
+ * The range must be free in full: a part of it that is already used is a
+ * range error, and the allocator is left unchanged then.
+ */
+int
+nvrm_va_take(nvrm_va *va, uint64_t addr, uint64_t size)
+{
+	extent **pp;
+	uint64_t end, cur;
+
+	if (size == 0 || addr > UINT64_MAX - size)
+		return (NVRM_E_INVAL);
+	end = addr + size;
+	/* The range must be covered by the free extents without a hole. */
+	cur = addr;
+	for (pp = &va->free_list; *pp != NULL; pp = &(*pp)->next) {
+		if ((*pp)->end <= addr)
+			continue;
+		if ((*pp)->start >= end)
+			break;
+		if ((*pp)->start > cur)
+			return (NVRM_E_RANGE);	/* a hole in the free space */
+		cur = (*pp)->end;
+	}
+	if (cur < end)
+		return (NVRM_E_RANGE);		/* the range is not free */
+	/* Take the range out of the free list. */
+	pp = &va->free_list;
+	while (*pp != NULL) {
+		extent *x = *pp;
+
+		if (x->end <= addr) {
+			pp = &x->next;
+			continue;
+		}
+		if (x->start >= end)
+			break;
+		if (x->start < addr && x->end > end) {
+			/* The range is inside the extent: the two parts of
+			 * the extent stay free. */
+			extent *tail = NVRM_CALLOC(1, sizeof(*tail));
+
+			if (tail == NULL)
+				return (NVRM_E_NOMEM);
+			tail->start = end;
+			tail->end = x->end;
+			tail->next = x->next;
+			x->end = addr;
+			x->next = tail;
+			return (NVRM_OK);
+		}
+		if (x->start < addr) {		/* the head of the extent */
+			x->end = addr;
+			pp = &x->next;
+			continue;
+		}
+		if (x->end > end) {		/* the tail of the extent */
+			x->start = end;
+			return (NVRM_OK);
+		}
+		/* The extent is inside the range: it goes. */
+		*pp = x->next;
+		free(x);
+	}
 	return (NVRM_OK);
 }
 

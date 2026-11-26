@@ -73,6 +73,9 @@ struct nvrm_bres;
 struct nvrm_bclient {
 	nvrm_backend	*s;		/* the RM session: descriptor and client */
 	NvHandle	device, vaspace;
+	/* The limits of the VA space, as the RM reported them: the low part
+	 * of a space is reserved, so a reservation is placed inside them. */
+	uint64_t	va_base, va_end;
 	unsigned	minor;
 	int		have_minor;
 	struct nvrm_bres *res;		/* every reservation not yet released */

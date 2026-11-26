@@ -428,7 +428,8 @@ int
 nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p, uint64_t *va)
 {
 	nvrm_reserve *r;
-	uint64_t align, addr;
+	uint64_t align, addr, got;
+	struct nvrm_va_req req;
 	int rc;
 
 	cl->errmsg[0] = '\0';
@@ -450,13 +451,41 @@ nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p, uint64_t *va)
 		nvrm_va_free(cl->va, addr, p->bytes);
 		return (fail(cl, NVRM_E_NOMEM, "out of memory"));
 	}
-	rc = cl->mops->va_reserve(cl->bc, addr, p->bytes,
-	    (p->flags & NVRM_VA_SPARSE) != 0, &r->b, cl->errmsg,
-	    sizeof(cl->errmsg));
+	req.va = addr;
+	req.bytes = p->bytes;
+	req.align = align;
+	req.sparse = (p->flags & NVRM_VA_SPARSE) != 0;
+	req.fixed = p->fixed != 0;
+	rc = cl->mops->va_reserve(cl->bc, &req, &r->b, &got,
+	    cl->errmsg, sizeof(cl->errmsg));
 	if (rc != NVRM_OK) {
 		nvrm_va_free(cl->va, addr, p->bytes);
 		free(r);
 		return (rc);
+	}
+	if (got != addr) {
+		/*
+		 * The backend placed the reservation somewhere else (the RM
+		 * chooses the address inside the VA space, the way NVIDIA's
+		 * own kernel client does).  The address it chose is the one
+		 * the reservation has; ours goes back to the free space.
+		 */
+		nvrm_va_free(cl->va, addr, p->bytes);
+		rc = nvrm_va_take(cl->va, got, p->bytes);
+		if (rc != NVRM_OK) {
+			/*
+			 * The address is not in the VA space the core knows:
+			 * the reservation is the backend's, and the core
+			 * cannot track it.  Give it back and say so.
+			 */
+			(void)cl->mops->va_release(r->b, nvrm_owner_is_me(
+			    &cl->owner), cl->errmsg, sizeof(cl->errmsg));
+			free(r);
+			return (fail(cl, rc, "the backend placed the "
+			    "reservation at 0x%jx, which is not in the VA "
+			    "space", (uintmax_t)got));
+		}
+		addr = got;
 	}
 	r->va = addr;
 	r->bytes = p->bytes;

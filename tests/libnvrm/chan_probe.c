@@ -428,7 +428,7 @@ static int
 step_create(gpu_ctx *g)
 {
 	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
-	nvrm_chan_info info;
+	nvrm_chan_info info = { 0 };
 	nvrm_chan *ch = NULL;
 	char created[256];
 	int rc;

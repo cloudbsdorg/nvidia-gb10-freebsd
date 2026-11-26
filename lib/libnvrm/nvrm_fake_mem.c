@@ -115,6 +115,10 @@ struct nvrm_bclient {
 
 static fake_dev *devs;
 static unsigned fail_nth[NVRM_FAKE_OP__COUNT];
+/* The address the fake places the next VA reservation at (0: the address
+ * the core picked).  The RM places the VA inside the VA space, so the
+ * address the core picked is not the address the caller gets. */
+static uint64_t va_place_at;
 static uint64_t n_traps, n_checked;
 static uint64_t next_serial = 1;	/* objects */
 static uint64_t next_wrapper = 1;	/* nvrm_bmem wrappers */
@@ -139,6 +143,14 @@ void
 nvrm_fake_mem_host_page(uint64_t bytes)
 {
 	host_page = bytes;
+}
+
+/* The fake places the next VA reservation at this address (0: the address
+ * the core picked). */
+void
+nvrm_fake_mem_va_place(uint64_t addr)
+{
+	va_place_at = addr;
 }
 
 /* 1 when this call of the operation is to fail. */
@@ -416,9 +428,15 @@ fk_desc_open(nvrm_bclient *c, int kind, int *fd, char *err, size_t errlen)
 
 /* ---- VA ------------------------------------------------------------------ */
 
+/*
+ * The VA reservation.  The fake GPU takes the address the core picked: it
+ * has no RM to place it (the RM backend asks the RM, and the RM places the
+ * VA inside the space, so the address the core picked is not the address the
+ * caller gets).
+ */
 static int
-fk_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
-    nvrm_bres **rp, char *err, size_t errlen)
+fk_va_reserve(nvrm_bclient *c, const struct nvrm_va_req *req,
+    nvrm_bres **rp, uint64_t *vap, char *err, size_t errlen)
 {
 	nvrm_bres *r;
 
@@ -435,13 +453,15 @@ fk_va_reserve(nvrm_bclient *c, uint64_t va, uint64_t bytes, int sparse,
 		return (NVRM_E_NOMEM);
 	}
 	r->c = c;
-	r->r->va = va;
-	r->r->bytes = bytes;
-	r->r->sparse = sparse;
+	r->r->va = va_place_at != 0 ? va_place_at : req->va;
+	r->r->bytes = req->bytes;
+	r->r->sparse = req->sparse;
 	r->r->next = c->res;
 	c->res = r->r;
 	live_res++;
 	*rp = r;
+	*vap = r->r->va;
+	va_place_at = 0;
 	return (NVRM_OK);
 }
 
