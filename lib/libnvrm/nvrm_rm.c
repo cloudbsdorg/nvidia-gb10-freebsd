@@ -923,6 +923,12 @@ rm_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 	return (0);
 }
 
+/* The class list of the device: the RM's answer to the class-list control.
+ * The storage is the caller's (it says how much room it has); the list
+ * itself is the RM's own, and the control holds at most
+ * NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE classes (NVIDIA's number).  An RM that
+ * claims more is refused, never cut: the answer cannot be trusted and the
+ * classes past the cut would be missing ones. */
 static int
 rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 {
@@ -935,6 +941,8 @@ rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 	    &c, sizeof(c));
 	if (st != NV_OK)
 		return (status_reason(st));
+	if (c.numClasses > NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE)
+		return (NVRM_R_VALUE_UNUSABLE);
 	lim = max < NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE ? max :
 	    NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE;
 	*n = 0;

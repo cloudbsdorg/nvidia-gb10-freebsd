@@ -87,7 +87,10 @@ struct nvrm_bchan {
 
 /* ---- the client ---------------------------------------------------------- */
 
-/* The classes the device lists: the RM's answer, asked once per client. */
+/* The classes the device lists: the RM's answer, asked once per client.
+ * The list is taken whole: the storage is as long as the RM's own control
+ * (NVIDIA's number), and an RM that claims more classes than that is
+ * refused by name, with both numbers, never cut. */
 static int
 fetch_classes(nvrm_bclient *c, char *err, size_t errlen)
 {
@@ -101,9 +104,13 @@ fetch_classes(nvrm_bclient *c, char *err, size_t errlen)
 	if (st != NV_OK)
 		return (nvrm_rmm_status_fail(err, errlen,
 		    "NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2", st));
+	if (p.numClasses > nitems(c->classes)) {
+		snprintf(err, errlen, "the device lists %u classes, the most "
+		    "the library holds is %zu", p.numClasses,
+		    nitems(c->classes));
+		return (NVRM_E_NOTSUP);
+	}
 	c->nclasses = p.numClasses;
-	if (c->nclasses > nitems(c->classes))
-		c->nclasses = nitems(c->classes);
 	/* Time: O(the classes the device lists).  Space: O(1). */
 	for (i = 0; i < c->nclasses; i++)
 		c->classes[i] = p.classList[i];

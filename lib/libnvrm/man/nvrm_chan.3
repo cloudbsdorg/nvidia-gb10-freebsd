@@ -260,6 +260,9 @@ device memory through the BAR aperture and refuses a mapping of it named on
 the control device.
 The copy class is not bound on a graphics runlist yet: a channel that asks
 for both is refused.
+The class list of the device is read whole: it holds as many entries as the
+RM's own class-list control does (200 in this RM version), and a device that
+lists more classes than that is refused by name, with both numbers, not cut.
 .Sh RETURN VALUES
 The calls returning
 .Vt int

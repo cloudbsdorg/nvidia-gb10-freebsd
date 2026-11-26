@@ -13,6 +13,7 @@
 #include <nvos.h>
 #include <nv-ioctl.h>
 #include <nv_escape.h>
+#include <ctrl/ctrl0080/ctrl0080gpu.h>
 
 #include "nvrm_internal.h"
 #include "nvrm_rm_sys.h"
@@ -78,7 +79,11 @@ struct nvrm_bclient {
 	void		*usermode_cpu;	/* its CPU mapping (the doorbell) */
 	int		usermode_fd;	/* the descriptor it was mapped on */
 	NvP64		usermode_cookie;	/* the RM's address for it */
-	uint32_t	classes[64];	/* the class list of the device */
+	/* The class list of the device: as many entries as the RM's own
+	 * class-list control holds (NVIDIA's number, not one of ours: the
+	 * device lists more than 64 of them, and the channel's class is
+	 * among the ones past 64). */
+	uint32_t	classes[NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE];
 	unsigned	nclasses;
 	int		have_classes;	/* the list was asked for already */
 	uint64_t	progress;	/* the progress count of the client */

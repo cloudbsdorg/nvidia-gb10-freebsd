@@ -821,11 +821,12 @@ test_property_failures(void)
 	CHECK(!NVRM_HAVE(info0(ctx)->pci_subsystem_vendor));
 	nvrm_close(ctx);
 
-	/* a class list longer than the buffer is cut */
+	/* a class list longer than the control holds is refused, not cut */
 	reset_kernel();
 	K.classes_over = 1;
 	ctx = enum_rm(&rc, err, sizeof(err));
-	CHECK_EQ(info0(ctx)->classes.count, 200);
+	CHECK(!NVRM_HAVE(info0(ctx)->classes));
+	CHECK_EQ(info0(ctx)->classes.reason, NVRM_R_VALUE_UNUSABLE);
 	nvrm_close(ctx);
 
 	/* one rejected GPU info index loses one flag, not the others */
@@ -995,17 +996,19 @@ test_misc(void)
 	o->gpu_close(g);
 	o->close(be);
 	CHECK_EQ(K.nlive, 0);
-	/* the caller's room limits the class list */
+	/* the caller's room limits the class list, and nothing is written
+	 * past that room */
 	reset_kernel();
-	K.classes_over = 1;
 	{
-		uint32_t cl[2];
+		uint32_t cl[3];
 
+		cl[0] = cl[1] = cl[2] = 0xffffffffu;
 		CHECK_EQ(o->open(&be, err, sizeof(err)), NVRM_OK);
 		CHECK_EQ(o->list_gpus(be, &id, 1, &n, err, sizeof(err)), NVRM_OK);
 		CHECK_EQ(o->gpu_open(be, id, &g, err, sizeof(err)), NVRM_OK);
 		CHECK_EQ(o->gpu_classes(g, cl, 2, &n), 0);
 		CHECK_EQ(n, 2);
+		CHECK_EQ(cl[2], 0xffffffffu);
 		o->gpu_close(g);
 		o->close(be);
 	}

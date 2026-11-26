@@ -375,6 +375,11 @@ mutant rm-device nvrm_rm.c 's/rm_alloc(be, g->device, \&g->subdevice/rm_alloc(be
 mutant rm-reply nvrm_rm.c 's/v.reply != NV_RM_API_VERSION_REPLY_RECOGNIZED/0/' rm_test
 mutant rm-pci-check nvrm_rm.c 's/(b.pciDeviceId \& 0xffff) != g->card.pci_info.vendor_id/0/' rm_test
 mutant rm-classes-max nvrm_rm.c 's/lim = max < /lim = 1000 < /' rm_test
+# the class list of the device: a list of 64 cut the channel's class, and
+# an RM that claims more classes than the control holds must be refused
+mutant rm-classes-cap nvrm_rm_priv.h 's/classes\[NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE\]/classes[64]/' rm_mem_test
+mutant rm-classes-over nvrm_rm.c 's/if (c.numClasses > NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE)/if (0)/' rm_test
+mutant rm-classes-chan-over nvrm_rm_chan.c 's/if (p.numClasses > nitems(c->classes))/if (0)/' rm_mem_test
 mutant json-comma nvrm_json.c 's/k++ != 0 ? "," : ""/i != 0 ? "," : ""/' core_test
 mutant decorator-bound nvrm.c 's/if ((unsigned)d->caps\[i\].index >= NVRM_NCAPS)/if (0)/' core_test
 mutant refresh-status nvrm.c 's/NVRM_E_IO : NVRM_OK/NVRM_OK : NVRM_OK/' core_test
@@ -1659,6 +1664,10 @@ doc_checks() {
 	_chk sh -c '! grep -nE "Track #" "$1" || { echo "docs: the installed header names a ticket"; false; }' sh "$_l/include/nvrm/nvrm.h"
 	_chk sh -c 'grep -q "^.Xr rfork 2" "$1" && grep -q "^.Xr vfork 2" "$1" || { echo "docs: nvrm(3) does not name the calls that run no fork handler"; false; }' sh "$_l/man/nvrm.3"
 	_chk sh -c 'grep -q "NVRM_ENUM_ALLOW_ALLOC" "$1" || { echo "docs: the README does not name the flag that allows allocation"; false; }' sh "$_readme"
+	# the class list of the device is read whole: an RM that claims more
+	# classes than its own control holds is refused, not cut
+	_chk sh -c 'grep -q "The class list of the device is read whole" "$1" || { echo "docs: $1 does not say that the class list is read whole"; false; }' sh "$_l/man/nvrm_chan.3"
+	_chk sh -c 'grep -q "The class list of the device is read whole" "$1" || { echo "docs: the README does not say that the class list is read whole"; false; }' sh "$_readme"
 	# threads and fork
 	_chk sh -c 'grep -q "^.Sh THREADS AND FORK" "$1" && grep -q "not safe for concurrent use" "$1" && grep -q "must not use a context except to call" "$1" || { echo "docs: nvrm(3) lacks the threads and fork rules"; false; }' sh "$_l/man/nvrm.3"
 	_chk sh -c 'grep -q "not safe for concurrent" "$1" && grep -q "nvrm_close" "$1" || { echo "docs: nvrm.h lacks the threads and fork rules"; false; }' sh "$_l/include/nvrm/nvrm.h"
@@ -1692,6 +1701,8 @@ doc_plant mapping-hedge man/nvrm.7 's/one for each CPU mapping it can make there
 doc_plant mem-errors man/nvrm_mem.3 's/^\.Sh ERRORS/.Sh DIAGNOSTICS/'
 doc_plant fork-claim include/nvrm/nvrm.h 's/a release (unmap, free, VA release, close) succeeds/every other call is refused/'
 doc_plant notsup-backwards man/nvrm_mem.3 's/GPU mappings only/CPU mappings/'
+doc_plant class-list-cut man/nvrm_chan.3 's/The class list of the device is read whole/The class list of the device is cut/'
+doc_plant class-list-readme README.md 's/The class list of the device is read whole/The class list of the device is cut/'
 doc_plant zero-notation man/nvrm_mem.3 's/(0 means 4) spare/(0: 4) spare/'
 doc_plant arm64-wc man/nvrm.7 's/^is 0;$/is clear;/'
 doc_plant mem-attr-rule man/nvrm.7 's/^\.Ss Memory attributes/.Ss Memory/'

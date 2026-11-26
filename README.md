@@ -840,6 +840,9 @@ group, a GPFIFO channel, the engine objects, a userd page and an error notifier 
 memory, and a usermode page the doorbell is written in. The page size of an imported object is
 the one the RM's own query for it answers (`NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE`): the surface info
 of an import names the import and not the pages, so it never answers for them.
+The class list of the device is read whole, as many entries as the RM's own class-list control
+holds (200 in this RM version); a device that lists more is refused by name, with both numbers,
+never cut.
 
 ## Native test boot (no Linux layer)
 

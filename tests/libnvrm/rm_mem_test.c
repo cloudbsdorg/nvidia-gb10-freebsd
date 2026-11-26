@@ -100,6 +100,8 @@ fail_calloc_at(int n)
 #define CLS_COPY	0xcab5		/* the copy engine */
 #define CLS_USERMODE	0xc761		/* the usermode object */
 #define CLS_MAX		200		/* the class list of a device */
+_Static_assert(CLS_MAX == NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE,
+    "the model's class list must be as long as the RM's own control holds");
 #define MAPS_MAX	32
 #define SESS_MAX	32
 
@@ -232,6 +234,29 @@ sess_nfree(int fd)
 	return (S[sess_index(fd)].nfree);
 }
 
+/* The class list of the device: 126 classes, the shape of a GB20x, with
+ * the channel's class past the first 64 entries (a list of 64 cut it, and
+ * the channel could not be made).  The other values are filler: the backend
+ * binds the classes it knows, wherever the device lists them. */
+static void
+device_class_list(void)
+{
+	int i;
+
+	/* Time: O(the classes of the device).  Space: O(1). */
+	for (i = 0; i < CLS_MAX; i++)
+		M.classes[i] = 0x1000 + (uint32_t)i;
+	M.classes[65] = CLS_3D;
+	M.classes[66] = CLS_COMPUTE_B;
+	M.classes[67] = CLS_COMPUTE_A;
+	M.classes[68] = CLS_GPFIFO_A;
+	M.classes[69] = CLS_GPFIFO_B;
+	M.classes[70] = CLS_COPY;
+	M.classes[71] = CLS_I2M;
+	M.classes[72] = CLS_2D;
+	M.nclasses = 126;
+}
+
 /* A new session on a descriptor: its counters start again (a descriptor
  * that was closed may be given out again). */
 static void
@@ -263,16 +288,10 @@ reset_all(void)
 	M.fail_nr = M.status_nr = -1;
 	M.fail_cls = NOVERRIDE;
 	M.fail_ctl = NOVERRIDE;
-	/* the class list of a GB20x: every class the backend binds */
-	M.classes[0] = CLS_GPFIFO_B;
-	M.classes[1] = CLS_GPFIFO_A;
-	M.classes[2] = CLS_COMPUTE_B;
-	M.classes[3] = CLS_COMPUTE_A;
-	M.classes[4] = CLS_3D;
-	M.classes[5] = CLS_I2M;
-	M.classes[6] = CLS_2D;
-	M.classes[7] = CLS_COPY;
-	M.nclasses = 8;
+	/* the class list of a GB20x: every class the backend binds, and the
+	 * shape of the real device (the channel's class past the first 64
+	 * entries) */
+	device_class_list();
 	M.want_entries = NVRM_CHAN_ENTRIES_DEFAULT;
 	M.token = 0x1234;
 }
@@ -903,8 +922,12 @@ m_control(int fd, NVOS54_PARAMETERS *p)
 		    p->hObject != S[sess_index(fd)].device)
 			bad("the class list is not asked of the device");
 		a->numClasses = M.nclasses;
+		/* The count is the RM's own: it may claim more classes than
+		 * the control holds (an RM that lies), and then the library
+		 * must refuse the list instead of taking the first part of
+		 * it.  Only what the control holds is written. */
 		/* Time: O(the classes the device lists).  Space: O(1). */
-		for (i = 0; i < (int)M.nclasses; i++)
+		for (i = 0; i < (int)M.nclasses && i < (int)CLS_MAX; i++)
 			a->classList[i] = M.classes[i];
 		return (1);
 	}
@@ -2562,6 +2585,53 @@ test_chan_class(void)
 	down("chan class");
 }
 
+/* The device lists more classes than the first 64 entries: the channel's
+ * class is among them, and the backend must find it there. */
+static void
+test_chan_class_long(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	int fd;
+
+	up();
+	CHECK_EQ(M.nclasses, 126);
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_OK);
+	CHECK(ch != NULL);
+	/* the first of the two candidates the device lists */
+	CHECK_EQ(M.chan_cls, CLS_GPFIFO_B);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	down("chan class long");
+}
+
+/* A device that lists more classes than the class-list control holds is
+ * refused, by name and with both numbers: the list is never cut. */
+static void
+test_chan_class_over(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_chan_params p = { 0, NVRM_ENG_COMPUTE, 0, 0 };
+	char want[128];
+
+	up();
+	/* the RM claims more classes than its own control holds */
+	M.nclasses = 500;
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	CHECK_EQ(nvrm_chan_create(cl, &p, &ch), NVRM_E_NOTSUP);
+	CHECK(ch == NULL);
+	snprintf(want, sizeof(want), "the device lists %u classes, the most "
+	    "the library holds is %d", 500, CLS_MAX);
+	CHECK(strstr(nvrm_client_errmsg(cl), want) != NULL);
+	nvrm_client_close(cl);
+	down("chan class over");
+}
+
 static void
 test_chan_alloc_fail(void)
 {
@@ -3005,6 +3075,8 @@ test_chan_two_clients(void)
 	X("chan", test_chan_wait) \
 	X("chan", test_chan_error) \
 	X("chan", test_chan_class) \
+	X("chan", test_chan_class_long) \
+	X("chan", test_chan_class_over) \
 	X("chan", test_chan_alloc_fail) \
 	X("chan", test_chan_ctl_fail) \
 	X("chan", test_chan_map_fail) \
