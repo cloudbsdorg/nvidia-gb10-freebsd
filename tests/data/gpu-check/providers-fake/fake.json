@@ -1,0 +1,132 @@
+{
+ "schema_version": {
+  "string": "1.0",
+  "major": 1,
+  "minor": 0,
+  "patch": 0
+ },
+ "provider": "fake",
+ "vendor": "0x1234",
+ "vendor_name": "fake",
+ "classes": [
+  "0x03"
+ ],
+ "score": 10,
+ "fallback_ok": false,
+ "generation_order": [
+  {
+   "name": "alpha",
+   "arch_values": [
+    99
+   ]
+  }
+ ],
+ "feature_flags": [
+  {
+   "index": 101,
+   "name": "display"
+  },
+  {
+   "index": 102,
+   "name": "alpha_only"
+  }
+ ],
+ "backends": [
+  {
+   "name": "fake-backend",
+   "archs": [
+    "amd64",
+    "arm64"
+   ],
+   "score": 1,
+   "modules": [
+    "fake-module"
+   ],
+   "licence_class": "mit",
+   "features": {
+    "display": true,
+    "alpha_only": true
+   }
+  },
+  {
+   "name": "fake-backend-amd64",
+   "archs": [
+    "amd64"
+   ],
+   "score": 5,
+   "modules": [
+    "fake-module-amd64"
+   ],
+   "licence_class": "mit",
+   "features": {
+    "display": true,
+    "alpha_only": true
+   }
+  }
+ ],
+ "families": [
+  {
+   "id": "alpha",
+   "arch_values": [
+    99
+   ],
+   "devids": [
+    "0x9001"
+   ],
+   "backends": [
+    "fake-backend",
+    "fake-backend-amd64"
+   ],
+   "generations": [
+    {
+     "name": "alpha",
+     "arch_values": [
+      99
+     ],
+     "tested_arch": [
+      "arm64"
+     ]
+    }
+   ],
+   "features": {
+    "display": true,
+    "alpha_only": true
+   },
+   "note": "the fake provider: a family with a board decorator"
+  },
+  {
+   "id": "beta",
+   "arch_values": [
+    99
+   ],
+   "devids": [
+    "0x9002"
+   ],
+   "backends": [],
+   "generations": [
+    {
+     "name": "alpha",
+     "arch_values": [
+      99
+     ]
+    }
+   ],
+   "features": {
+    "display": true,
+    "alpha_only": false
+   },
+   "note": "the fake provider: a family that no backend covers"
+  }
+ ],
+ "decorators": [
+  {
+   "name": "fake-board",
+   "subvendor": "0x1234",
+   "subdevice": "0x5678",
+   "features": {
+    "alpha_only": false
+   },
+   "note": "the fake provider: a board that turns a feature off"
+  }
+ ]
+}

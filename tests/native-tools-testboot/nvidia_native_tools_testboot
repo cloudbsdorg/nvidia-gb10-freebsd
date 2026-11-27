@@ -21,14 +21,18 @@
 #   6. finds the GPU with gpu-detect.sh (vendored from uvm-bsd: PCI class, vendor, the driver parent, never
 #      /dev/nvidia0), opens the chosen node once as root and verifies it is the chosen card;
 #   7. opens /dev/nvidiactl and /dev/nvidia-modeset as root (native device nodes, no Linux bridge);
-#   8. runs tests/libnvrm/boot_nvrm_info.sh (nvrm-info, the native RM-direct library, against the real driver) under
-#      ktrace; the guard checks every file it executed (FreeBSD-branded ELF or #! script) and that no kld was loaded;
+#   8. runs gpu-check (the diagnostic utility of this repository: scripts/gpu-check, the library it runs the checks
+#      from and the adapter of the vendor) under ktrace, against the staged modules and the staged libnvrm.so.1; the
+#      guard checks every file it executed (FreeBSD-branded ELF or #! script) and that no kld was loaded; the rows
+#      nvrm-info, nvrm-s2-memory and nvrm-s3-channel are what the tool measured on the card; the tool loads nothing
+#      itself (--assume-loaded), because the kit loaded the modules and the guard watches the loader; the record of
+#      the run is the database of the runs (gpu-check.db, in the run directory, copied out with the run) when the
+#      library that holds it is in this boot environment, and the stream alone when it is not;
 #   9. records the rows that cannot run natively yet, with their evidence (needs-linux, needs-linuxkpi,
 #      not-available): the uvm-bsd ioctl suite and the #2373 probe and race tests (nvidia-uvm.ko depends on the
 #      Linuxulator), PRIME import (nvidia-drm.ko depends on LinuxKPI), the render uAPI (no kernel part yet); the
-#      S2 memory row and the S3 channel row are not one of them: mem_probe and chan_probe are staged beside
-#      nvrm-info and run with it, so the rows nvrm-s2-memory and nvrm-s3-channel are what the probes measured on
-#      the card;
+#      S2 memory row and the S3 channel row are not one of them: the tool measures the memory and the channel of the
+#      card, so the rows nvrm-s2-memory and nvrm-s3-channel are what it found;
 #  10. env-after: the guard a last time, and a delta against env-loaded;
 #  11. summarize.py writes summary.json and summary.txt; the run is copied to the copy-out directory;
 #  12. ALWAYS ends with testboot-return NORMAL_BE (a panic excepted: it reboots in 5 seconds, the one-shot is used up).
@@ -257,66 +261,101 @@ static_row()
 	esac
 }
 
-# s2_memory_row: the S2 memory row of the kit.  The memory probe (mem_probe, staged beside nvrm-info) runs inside
-# boot_nvrm_info.sh: its PASS and FAIL lines join results.txt and its whole output is mem_probe.txt.  The row is
-# pass when the probe passed every step on every GPU, and the detail is the number of GPUs it measured.
-s2_memory_row()
+# db_probe: the record of the run.  The database of the runs holds it, and the file is in the run directory, so it is
+# copied out with the run and the summary can be read from it.  The library that holds the database is the product's:
+# the boot environment has it when the product is installed in the base (the same way it has python3).  Without it the
+# run is recorded as a stream only, and the row says so: a run must not be lost because the record cannot be written.
+# The library must load: it needs the SQLite library too, and a library that cannot be loaded writes no database.
+# Sets DB_LIB (the library, empty when there is none) and DB_MODE (db or stream).
+DB_LIB=
+DB_MODE=stream
+db_probe()
 {
-	_mr=$OUT/nvrm-info/results.txt
-	_mp=$OUT/nvrm-info/mem_probe.txt
-	if [ ! -f "$_mr" ]; then
-		row nvrm-s2-memory fail "mem_probe.txt missing: boot_nvrm_info.sh wrote no results.txt"
-		return 1
-	fi
-	if grep -q '^PASS mem_probe: every memory step passed on every GPU' "$_mr"; then
-		_mg=$(grep -c '^PASS gpu' "$_mp" 2> /dev/null)
-		row nvrm-s2-memory pass "${_mg:-0} GPU(s): mem_probe passed every memory step on every GPU"
+	DB_LIB=
+	DB_MODE=stream
+	for _l in "$KIT/libgpubcheckdb.so.1" "$KIT/repo/lib/gpu-check-db/libgpubcheckdb.so.1" /usr/local/lib/libgpubcheckdb.so.1; do
+		[ -f "$_l" ] || continue
+		/usr/local/bin/python3 -I -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$_l" > /dev/null 2>&1 || continue
+		DB_LIB=$_l
+		DB_MODE=db
 		return 0
-	fi
-	_mf=
-	if [ -f "$_mp" ]; then
-		_mf=$(grep '^FAIL' "$_mp" 2> /dev/null | head -3 | tr '\n' ';')
-	fi
-	if [ -z "$_mf" ]; then
-		_mf=$(grep '^FAIL' "$_mr" 2> /dev/null | head -3 | tr '\n' ';')
-	fi
-	if [ -z "$_mf" ]; then
-		if [ -f "$_mp" ]; then _mf="mem_probe did not pass"; else _mf="mem_probe.txt missing"; fi
-	fi
-	row nvrm-s2-memory fail "$_mf"
-	return 1
+	done
+	return 0
 }
 
-# s3_channel_row: the S3 channel row of the kit.  The channel probe (chan_probe, staged beside mem_probe) runs
-# inside boot_nvrm_info.sh: its PASS, FAIL and INFO lines join results.txt and its whole output is
-# chan_probe.txt.  The row is pass when the probe passed every channel step on every GPU, and the detail is the
-# latency the probe measured and the stress it ran.
+# s2_memory_row: the S2 memory row of the kit.  The memory row is what the tool measured: gpu-check
+# (the diagnostic utility of this repository) runs the steps of the memory probe against the card and writes its
+# stream as JSON Lines.  The row is pass when the tool measured every step of every card, and the detail says what
+# the tool found.
+s2_memory_row()
+{
+	tool_row nvrm-s2-memory memory "the memory of the card"
+}
+
+# s3_channel_row: the S3 channel row of the kit.  The channel row is what the tool measured: the steps of the channel
+# probe (create, release, latency, stress, isolation, cleanup) are the steps of the tool's channel check.  The row is
+# pass when the tool measured every step of every card, and the detail says what the tool found.
 s3_channel_row()
 {
-	_mr=$OUT/nvrm-info/results.txt
-	_mp=$OUT/nvrm-info/chan_probe.txt
-	if [ ! -f "$_mr" ]; then
-		row nvrm-s3-channel fail "chan_probe.txt missing: boot_nvrm_info.sh wrote no results.txt"
+	tool_row nvrm-s3-channel channel "the channel of the card"
+}
+
+# nvrm_info_row: the identity of the card, as the tool read it from the resource manager.  This is the data
+# nvrm-info prints, read through the library of this repository instead of through a second program.
+nvrm_info_row()
+{
+	tool_row nvrm-info identity "the identity of the card"
+}
+
+# tool_check <check name>: the status and the reason the tool gave for one check, as one line: the status, a bar and
+# the reason.  Nothing when the tool wrote no stream or no row for that check.  The stream is JSON Lines, so the
+# reader is the python of the boot environment (the one summarize.py uses): the kit reads the tool's own words and
+# does not parse them itself.
+tool_check()
+{
+	[ -f "$OUT/gpu-check.jsonl" ] || return 1
+	/usr/local/bin/python3 -I -c '
+import json, sys
+want = sys.argv[2]
+try:
+    handle = open(sys.argv[1], encoding="utf-8")
+except OSError:
+    sys.exit(1)
+for line in handle:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(record, dict) or record.get("kind") != "check":
+        continue
+    if record.get("name") != want:
+        continue
+    # the first card of the machine is the one the kit measures
+    sys.stdout.write("%s|%s\n" % (record.get("status", ""), record.get("reason", "")))
+    break
+' "$OUT/gpu-check.jsonl" "$1" 2> /dev/null
+}
+
+# tool_row <row name> <check name> <what>: the row of the kit that one check of the tool answers.  The status of the
+# tool is the status of the kit, except for a check that did not run: that is not-run, the way the kit names a step
+# that was never reached.
+tool_row()
+{
+	_r=$1; _c=$2; _w=$3
+	_line=$(tool_check "$_c" | head -1)
+	if [ -z "$_line" ]; then
+		row "$_r" fail "the tool wrote no row for the check $_c: $_w was not measured (gpu-check.jsonl)"
 		return 1
 	fi
-	if grep -q '^PASS chan_probe: every channel step passed on every GPU' "$_mr"; then
-		_ml=$(grep '^INFO .* latency_ns: ' "$_mp" 2> /dev/null | head -1)
-		_ms=$(grep '^PASS .* stress: ' "$_mp" 2> /dev/null | head -1)
-		row nvrm-s3-channel pass "${_ml:-no latency line}; ${_ms:-no stress line}"
-		return 0
-	fi
-	_mf=
-	if [ -f "$_mp" ]; then
-		_mf=$(grep '^FAIL' "$_mp" 2> /dev/null | head -3 | tr '\n' ';')
-	fi
-	if [ -z "$_mf" ]; then
-		_mf=$(grep '^FAIL' "$_mr" 2> /dev/null | head -3 | tr '\n' ';')
-	fi
-	if [ -z "$_mf" ]; then
-		if [ -f "$_mp" ]; then _mf="chan_probe did not pass"; else _mf="chan_probe.txt missing"; fi
-	fi
-	row nvrm-s3-channel fail "$_mf"
-	return 1
+	_st=${_line%%|*}; _why=${_line#*|}
+	case $_st in
+	pass) row "$_r" pass "gpu-check: $_w: $_why" ;;
+	fail) row "$_r" fail "gpu-check: $_w: $_why" ;;
+	not_tested) row "$_r" not-run "gpu-check: $_w was not measured: $_why" ;;
+	not_available) row "$_r" not-available "gpu-check: $_w: $_why" ;;
+	*) row "$_r" fail "gpu-check: the check $_c said something else: $_line" ;;
+	esac
+	return 0
 }
 
 run_body()
@@ -414,35 +453,52 @@ run_body()
 	if [ "$ok" = 1 ]; then
 		root_open nvidiactl-open "$nvidia_native_tools_testboot_devdir/nvidiactl" || :
 		root_open modeset-open "$nvidia_native_tools_testboot_devdir/nvidia-modeset" || :
-		# nvrm-info: the native RM-direct library against the real driver, traced
-		_t=$KIT/repo/tests/libnvrm/boot_nvrm_info.sh
-		# check-be: nvrm-info (the next line)
-		running nvrm-info "boot_nvrm_info.sh runs nvrm-info against the driver: a panic from here leaves this row last"
-		kldstat -v > "$OUT/nvrm-info.kldstat-before" 2>&1
-		( cd "$OUT" && env LD_LIBRARY_PATH="$MODS" BOOT_EXPECT_VRAM_BYTES="$nvidia_native_tools_testboot_vram" \
-		    BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES="$nvidia_native_tools_testboot_vram_reserve" BOOT_EXPECT_SM="$nvidia_native_tools_testboot_sm" \
-		    BOOT_MEM_PROBE="$MODS/mem_probe" \
-		    BOOT_CHAN_PROBE="$MODS/chan_probe" \
-		    BOOT_CHAN_STRESS="$nvidia_native_tools_testboot_chan_stress" \
-		    BOOT_CHAN_STRESS_SECONDS="$nvidia_native_tools_testboot_chan_stress_seconds" \
-		    ktrace -i -t cn -f "$OUT/nvrm-info.ktrace" /bin/sh "$_t" "$OUT/nvrm-info" "$MODS/nvrm-info" ) > "$OUT/nvrm-info.out" 2>&1
-		_nrc=$?
-		kldstat -v > "$OUT/nvrm-info.kldstat-after" 2>&1
-		kdump -f "$OUT/nvrm-info.ktrace" > "$OUT/nvrm-info.kdump" 2>&1
-		_tl=$(guard_trace "$OUT/nvrm-info.kdump" "$MODS/nvrm-info" "$OUT/nvrm-info.execs"); _ts=$?
-		guard_row nvrm-info-native "$_tl" "$_ts"
-		_dl=$(guard_env_delta "$OUT/nvrm-info.kldstat-before" "$OUT/nvrm-info.kldstat-after"); _ds=$?
-		guard_row nvrm-info-no-new-module "$_dl" "$_ds"
-		_np=$(grep -c '^PASS' "$OUT/nvrm-info/results.txt" 2> /dev/null); _nf=$(grep -c '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null)
-		if [ "$_nrc" = 0 ] && [ "${_nf:-0}" = 0 ] && [ "${_np:-0}" -gt 0 ]; then
-			row nvrm-info pass "boot_nvrm_info.sh: $_np checks passed, 0 failed (nvrm-info/results.txt, nvrm-info.json, nvrm-info.jsonl)"
+		# gpu-check: the diagnostic utility of this repository, traced.  It reads the card through the library of
+		# this repository (the same one nvrm-info uses) and writes its stream as JSON Lines; the kit reads the
+		# rows it measured.  The modules are already loaded (the kit loaded them), so the tool loads nothing:
+		# --assume-loaded measures the card and never touches the loader.
+		# The record of the run is the database of the runs: it is written beside the stream, so the copy-out of
+		# the run holds the record of what was measured and not only the stream of it.  The library that holds the
+		# database is the product's, and the boot environment has it when the product is installed in the base;
+		# without it the run is recorded as a stream only, and the row says so.
+		# check-be: gpu-check (the next line)
+		running gpu-check "gpu-check runs the checks of the card: a panic from here leaves this row last"
+		kldstat -v > "$OUT/gpu-check.kldstat-before" 2>&1
+		db_probe
+		if [ "$DB_MODE" = db ]; then
+			GPU_CHECK_DB_LIB=$DB_LIB
+			export GPU_CHECK_DB_LIB
+			set -- --db "$OUT/gpu-check.db"
+			_dbnote="the record of the run is in gpu-check.db (the library of the database is $DB_LIB)"
 		else
-			row nvrm-info fail "boot_nvrm_info.sh exit $_nrc: ${_np:-0} passed, ${_nf:-unknown} failed: $(grep '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null | head -3 | tr '\n' ';')"
+			set -- --no-db
+			_dbnote="no database: the library of the database is not in this boot environment, so the run is recorded as a stream only"
 		fi
+		( cd "$OUT" && env GPU_CHECK_NVRM_LIBRARY="$MODS/libnvrm.so.1" \
+		    GPU_CHECK_CHAN_STRESS="$nvidia_native_tools_testboot_chan_stress" \
+		    GPU_CHECK_CHAN_STRESS_SECONDS="$nvidia_native_tools_testboot_chan_stress_seconds" \
+		    LD_LIBRARY_PATH="$MODS" \
+		    ktrace -i -t cn -f "$OUT/gpu-check.ktrace" \
+		    /usr/local/bin/python3 -I "$KIT/repo/scripts/gpu-check" --assume-loaded --jsonl \
+		    "$@" ) \
+		    > "$OUT/gpu-check.jsonl" 2> "$OUT/gpu-check.err"
+		_grc=$?
+		kldstat -v > "$OUT/gpu-check.kldstat-after" 2>&1
+		kdump -f "$OUT/gpu-check.ktrace" > "$OUT/gpu-check.kdump" 2>&1
+		_tl=$(guard_trace "$OUT/gpu-check.kdump" /usr/local/bin/python3 "$OUT/gpu-check.execs"); _ts=$?
+		guard_row gpu-check-native "$_tl" "$_ts"
+		_dl=$(guard_env_delta "$OUT/gpu-check.kldstat-before" "$OUT/gpu-check.kldstat-after"); _ds=$?
+		guard_row gpu-check-no-new-module "$_dl" "$_ds"
+		if [ "$_grc" = 0 ] || [ "$_grc" = 1 ]; then
+			row gpu-check pass "gpu-check ran every check (exit $_grc; 1 means a check failed, not that the tool failed): gpu-check.jsonl; $_dbnote"
+		else
+			row gpu-check fail "gpu-check exit $_grc: $(head -c 200 "$OUT/gpu-check.err" 2> /dev/null | tr '\n' ' ')"
+		fi
+		nvrm_info_row || :
 		s2_memory_row || :
 		s3_channel_row || :
 	else
-		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module nvrm-s2-memory nvrm-s3-channel; do
+		for _r in gpu-detect-native nvidiactl-open modeset-open gpu-check gpu-check-native gpu-check-no-new-module nvrm-info nvrm-s2-memory nvrm-s3-channel; do
 			grep -q "^{\"row\":\"$_r\"," "$OUT/results.jsonl" || row "$_r" not-run "not reached: a step before it failed (see the rows above)"
 		done
 	fi

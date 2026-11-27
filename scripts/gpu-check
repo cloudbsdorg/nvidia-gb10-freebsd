@@ -1,0 +1,2197 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# gpu-check - one command that says whether a GPU works with our driver.
+#
+# The tool reads the PCI display devices of this machine, asks every
+# registered provider whether it covers each of them, and reports the
+# decision with the reason.  With --load it loads the firmware and the
+# driver of the cards the decision served and runs every check.
+#
+# The checks are not in this file: each one registers itself in the
+# library (lib/gpu-check), and this file asks the registry what to run.
+# Adding a check is adding a function in the library, and nothing here.
+#
+# This file is the decision core: it names no vendor and no device.  The
+# vendor knowledge lives in two places, and the vendor-free lint in
+# tests/gpu_check_test.sh checks that it stays there:
+#
+#   data/providers/*.json          the records: what a provider claims
+#   scripts/adapters/<vendor>.py   the probes: how a card of one vendor is
+#                                  opened, read and tested
+#
+# The core asks for an adapter by the vendor id of the card, so it never
+# has to know which vendor that is.
+"""gpu-check - does this GPU work with our driver?
+
+Usage: gpu-check [--load] [--assume-loaded] [--check ID[,ID]] [--list]
+                 [--json|--jsonl] [--report FILE] [--registry DIR]
+                 [--pciconf-file FILE] [--fake FILE] [--capture DIR]
+                 [--device SELECTOR] [--module-dir DIR] [--arch ARCH]
+                 [--db PATH | --no-db]
+       gpu-check history [--last N] [--json|--jsonl]
+       gpu-check show RUN [--json|--jsonl]
+       gpu-check compare RUN RUN [--json|--jsonl]
+       gpu-check export RUN [--json|--jsonl]
+       gpu-check properties RUN [--changed] [--counters] [--json|--jsonl]
+
+Exit status: 0 every claimed card is served, 1 a check failed (--load),
+2 a usage error, 3 no card is claimed by any provider, 4 the machine
+could not be looked at, 6 some cards are served and some are refused,
+7 no claimed card is served.
+"""
+import json
+import os
+import platform
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+# The library of the command: the checks, the probes, the table and the
+# redaction.  It is found in the source tree, or in the installed tree.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PARENT = os.path.dirname(_HERE)
+for _candidate in (os.path.join(_PARENT, "lib", "gpu-check"),
+                    os.path.join(_PARENT, "share", "gpu-check", "lib"),
+                    "/usr/local/share/gpu-check/lib"):
+    if os.path.isdir(os.path.join(_candidate, "gpu_check")):
+        if _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+        break
+
+from gpu_check import FAIL, NOT_AVAILABLE, NOT_TESTED, PASS  # noqa: E402
+from gpu_check import checks as _registered  # noqa: E402,F401  (registers the checks)
+from gpu_check import commands, db, events, metrics  # noqa: E402
+from gpu_check import probes, redact, registry, table  # noqa: E402
+
+TOOL = "gpu-check"
+SCHEMA = "gpu-check.v1"
+SCHEMA_VERSION = {"string": "1.1", "major": 1, "minor": 1, "patch": 0}
+CAPTURE_SCHEMA = "gpu-check-capture/1"
+
+# The version of the tool itself: the schema version is the version of
+# the tool that writes it, and the database keeps it.
+TOOL_VERSION = SCHEMA_VERSION["string"]
+
+EXIT_OK = 0
+EXIT_CHECK_FAILED = 1
+EXIT_USAGE = 2
+EXIT_NOTHING_CLAIMED = 3
+EXIT_CANNOT_LOOK = 4
+EXIT_PARTIAL = 6
+EXIT_NONE_SERVED = 7
+
+# The commands that read the record back.  The first word of the command
+# line names one of them, and then the command reads the database
+# instead of making a run.
+COMMANDS = ("history", "show", "compare", "export", "properties")
+
+USAGE = """usage: gpu-check [--load] [--assume-loaded] [--check ID[,ID]] [--list]
+           [--json|--jsonl] [--report FILE] [--registry DIR]
+           [--pciconf-file FILE] [--fake FILE] [--capture DIR]
+           [--device SELECTOR] [--module-dir DIR] [--arch ARCH]
+           [--db PATH | --no-db]
+       gpu-check history [--last N] [--json|--jsonl]
+       gpu-check show RUN [--json|--jsonl]
+       gpu-check compare RUN RUN [--json|--jsonl]
+       gpu-check export RUN [--json|--jsonl]
+       gpu-check properties RUN [--changed] [--counters] [--json|--jsonl]"""
+
+EXIT_HELP = """gpu-check - does this GPU work with our driver?
+
+usage: gpu-check [--load] [--assume-loaded] [--check ID[,ID]] [--list]
+                 [--json|--jsonl] [--report FILE] [--registry DIR]
+                 [--pciconf-file FILE] [--fake FILE] [--capture DIR]
+                 [--device SELECTOR] [--module-dir DIR] [--arch ARCH]
+                 [--db PATH | --no-db]
+       gpu-check history [--last N] [--json|--jsonl]
+       gpu-check show RUN [--json|--jsonl]
+       gpu-check compare RUN RUN [--json|--jsonl]
+       gpu-check export RUN [--json|--jsonl]
+       gpu-check properties RUN [--changed] [--counters] [--json|--jsonl]
+
+  --load            load the firmware and the driver of every card the
+                    decision served, and run every check.  Needs root,
+                    unless --fake is given: a fake run loads nothing and
+                    needs no root.
+  --assume-loaded   the firmware and the driver are already loaded: run
+                    every check and load nothing.  The tool never loads a
+                    module in this mode, so a machine that loaded the
+                    driver itself (a test boot, an administrator) is
+                    measured and not changed.
+  --check ID[,ID]   run the checks with these ids, and the checks they
+                    depend on.  Without --load a check that needs the
+                    driver says so instead of running.
+  --list            list the checks and what each one needs.
+  --json            print one JSON document (schema gpu-check.v1).
+  --jsonl           print JSON Lines: a header, a record per card, one
+                    record per check as it finishes, an end record.
+                    Every line is flushed as it is written.
+  --report FILE     write the JSON document to FILE, to attach to a
+                    report.  Nothing is sent anywhere, and the document
+                    holds no name, no path and no serial number.
+  --registry DIR    read the provider records from DIR instead of the
+                    default (the data/providers directory of the source
+                    tree, or the installed one).
+  --pciconf-file F  read the pciconf output from F instead of running
+                    pciconf(8).  For tests and for a machine where
+                    pciconf is not installed.
+  --fake FILE       answer the checks from FILE instead of the machine.
+                    A fake run loads nothing, needs no root and says so
+                    in its output.
+  --capture DIR     replay a recorded run from DIR instead of the
+                    machine: the cards, the steps and the facts of that
+                    run.  Loads nothing and needs no root.
+  --device SEL      check only the card with this selector (pci0:0:1:0).
+  --module-dir DIR  load the modules from DIR as well as from the default
+                    one (/boot/modules).  A test boot keeps its modules
+                    somewhere else; every directory must hold a root-owned
+                    file that nobody else may write.
+  --arch ARCH       pretend the machine is ARCH (amd64, arm64).
+  --db PATH         keep the record of the run in the database PATH.  A
+                     directory holds the database inside it.  Without
+                     this the record of a run as root is kept in
+                     /var/db/gpu-check, and the record of a run as a
+                     person in the state directory of that person.
+  --no-db           keep no record of the run: the tool writes no
+                     database and reads none.
+  -h, --help        print this text and exit.
+
+The commands read the record back:
+
+  history [--last N]   the runs that are recorded, the newest first.
+  show RUN             one run: the cards and the rows of their checks.
+  compare RUN RUN      two runs, and what ended differently in them.
+  export RUN           the document a run printed when it was made.
+  properties RUN       the properties of a run.  --changed shows only
+                       the ones that changed, --counters adds the
+                       counters, which are left out otherwise.
+
+Exit status: 0 every claimed card is served, 1 a check failed, 2 a usage
+error, 3 no card is claimed by any provider, 4 the machine could not be
+looked at, 6 some cards are served and some are refused, 7 no claimed
+card is served."""
+
+# The kernel modules live here; only a root-owned file under it is loaded.
+MODULE_DIRS = ("/boot/modules",)
+MODULE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+# What a pciconf line must look like, or the line is not a card.
+SELECTOR = re.compile(r"^pci[0-9]+:[0-9]+:[0-9]+:[0-9]+$")
+HEX4 = re.compile(r"^0x[0-9a-f]{4}$")
+HEX6 = re.compile(r"^0x[0-9a-f]{6}$")
+HEX2 = re.compile(r"^0x[0-9a-f]{2}$")
+
+
+class UsageError(Exception):
+    """The command line does not make sense."""
+
+
+class RegistryError(Exception):
+    """A provider record cannot be used; the tool fails closed."""
+
+
+class LookError(Exception):
+    """The machine could not be looked at."""
+
+
+# --- the provider registry ------------------------------------------------
+
+def _need(doc, key, kind, where):
+    """Return doc[key], or raise: a record that does not have it is refused."""
+    if key not in doc:
+        raise RegistryError("%s: no %s field" % (where, key))
+    value = doc[key]
+    if kind is not None and not isinstance(value, kind):
+        raise RegistryError("%s: the %s field is not %s" % (where, key, kind.__name__))
+    return value
+
+
+def _need_list(doc, key, where):
+    value = _need(doc, key, list, where)
+    for item in value:
+        if not isinstance(item, dict):
+            raise RegistryError("%s: an entry of %s is not an object" % (where, key))
+    return value
+
+
+def _need_int_list(doc, key, where):
+    """Return a list of numbers; a record that has another type is refused."""
+    value = _need(doc, key, list, where)
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool):
+            raise RegistryError("%s: an entry of %s is not a number" % (where, key))
+    return value
+
+
+def _need_str_list(doc, key, where, allow_empty=False):
+    """Return a list of strings; a record that has another type is refused."""
+    value = _need(doc, key, list, where)
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise RegistryError("%s: an entry of %s is not a non-empty string" % (where, key))
+    if not value and not allow_empty:
+        raise RegistryError("%s: the %s field is empty" % (where, key))
+    return value
+
+
+def _need_str(doc, key, where):
+    value = _need(doc, key, str, where)
+    if not value:
+        raise RegistryError("%s: the %s field is empty" % (where, key))
+    return value
+
+
+def _need_hex(doc, key, where, width=4):
+    value = _need_str(doc, key, where).lower()
+    if not value.startswith("0x") or len(value) != width + 2:
+        raise RegistryError("%s: the %s field is not a 0x%s hex id"
+                            % (where, key, "0" * width))
+    try:
+        int(value, 16)
+    except ValueError:
+        raise RegistryError("%s: the %s field is not a hex id" % (where, key))
+    return value
+
+
+def _version(value, where):
+    """Check a version object: the string and every part as a number."""
+    if not isinstance(value, dict):
+        raise RegistryError("%s: a version field is not an object" % where)
+    out = {"string": _need_str(value, "string", where)}
+    for part in ("major", "minor", "patch"):
+        number = _need(value, part, int, where)
+        if number < 0:
+            raise RegistryError("%s: the %s version part is negative" % (where, part))
+        out[part] = number
+    return out
+
+
+class Family(object):
+    """One generation base: the device ids it covers and what it needs."""
+
+    def __init__(self, doc, where):
+        self.id = _need_str(doc, "id", where)
+        self.arch_values = _need_int_list(doc, "arch_values", where)
+        self.devids = set()
+        for devid in _need_str_list(doc, "devids", where):
+            if not devid.startswith("0x"):
+                raise RegistryError("%s: a device id is not a hex id" % where)
+            self.devids.add(devid.lower())
+        if not self.devids:
+            raise RegistryError("%s: the family covers no device id" % where)
+        self.backends = _need_str_list(doc, "backends", where, allow_empty=True)
+        self.generations = _need_list(doc, "generations", where)
+        self.firmware = doc.get("firmware")
+        if self.firmware is not None:
+            if not isinstance(self.firmware, dict):
+                raise RegistryError("%s: the firmware field is not an object" % where)
+            _need_str(self.firmware, "image", where)
+            self.firmware_module = _need_str(self.firmware, "module", where)
+            _need_str_list(self.firmware, "archs", where)
+        else:
+            self.firmware_module = None
+        self.features = doc.get("features") or {}
+        if not isinstance(self.features, dict):
+            raise RegistryError("%s: the features field is not an object" % where)
+        self.feature_values = doc.get("feature_values") or {}
+        if not isinstance(self.feature_values, dict):
+            raise RegistryError("%s: the feature_values field is not an object" % where)
+        self.note = doc.get("note") or ""
+
+    def generation_for(self, devid):
+        """Return the generation entry of this family, or None.
+
+        A family is the base of a card: every device id it covers has the
+        same generation, and the record names that generation once.
+        """
+        devid = devid.lower()
+        if devid not in self.devids:
+            return None
+        for generation in self.generations:
+            if not isinstance(generation, dict):
+                raise RegistryError("family %s: a generation is not an object" % self.id)
+            if not isinstance(generation.get("name"), str):
+                raise RegistryError("family %s: a generation has no name" % self.id)
+            return generation
+        return None
+
+
+class Backend(object):
+    """One backend of a provider: the modules it loads and where."""
+
+    def __init__(self, doc, where):
+        self.name = _need_str(doc, "name", where)
+        self.archs = _need_str_list(doc, "archs", where)
+        self.score = doc.get("score", 0)
+        if not isinstance(self.score, int):
+            raise RegistryError("%s: the score is not a number" % where)
+        self.modules = _need_str_list(doc, "modules", where)
+        for module in self.modules:
+            if not MODULE_NAME.match(module):
+                raise RegistryError("%s: the module %s is not a bare module name"
+                                    % (where, module))
+        self.branch = doc.get("branch")
+        if self.branch is not None:
+            if not isinstance(self.branch, dict):
+                raise RegistryError("%s: the branch field is not an object" % where)
+            _version(self.branch, where)
+        self.features = doc.get("features") or {}
+        if not isinstance(self.features, dict):
+            raise RegistryError("%s: the features field is not an object" % where)
+        self.feature_reasons = doc.get("feature_reasons") or {}
+        if not isinstance(self.feature_reasons, dict):
+            raise RegistryError("%s: the feature_reasons field is not an object" % where)
+
+    def built_for(self, arch):
+        return arch in self.archs
+
+
+class Decorator(object):
+    """A board variant: it adds or overrides, it never decides."""
+
+    def __init__(self, doc, where):
+        self.name = _need_str(doc, "name", where)
+        self.subvendor = _need_hex(doc, "subvendor", where)
+        self.subdevice = _need_hex(doc, "subdevice", where)
+        self.features = doc.get("features") or {}
+        if not isinstance(self.features, dict):
+            raise RegistryError("%s: the features field is not an object" % where)
+        self.feature_values = doc.get("feature_values") or {}
+        if not isinstance(self.feature_values, dict):
+            raise RegistryError("%s: the feature_values field is not an object" % where)
+
+
+class Provider(object):
+    """One provider record: what it claims and what it offers."""
+
+    def __init__(self, doc, where):
+        self.where = where
+        version = _version(_need(doc, "schema_version", dict, where), where)
+        if version["major"] != SCHEMA_VERSION["major"]:
+            raise RegistryError("%s: the schema version %s is not the version %d this "
+                                "tool understands"
+                                % (where, version["string"], SCHEMA_VERSION["major"]))
+        self.name = _need_str(doc, "provider", where)
+        self.score = doc.get("score", 0)
+        if not isinstance(self.score, int):
+            raise RegistryError("%s: the score is not a number" % where)
+        self.fallback_ok = bool(doc.get("fallback_ok", False))
+        self.vendor = _need_hex(doc, "vendor", where)
+        self.vendor_name = doc.get("vendor_name") or "unknown vendor"
+        self.classes = [klass.lower() for klass in _need_str_list(doc, "classes", where)]
+        self.generation_order = _need_list(doc, "generation_order", where)
+        self.generation_arch = {}
+        last = None
+        for entry in self.generation_order:
+            if not isinstance(entry, dict):
+                raise RegistryError("%s: a generation order entry is not an object" % where)
+            name = _need_str(entry, "name", where)
+            if name in self.generation_arch:
+                raise RegistryError("%s: the generation %s is in the order twice" % (where, name))
+            values = _need_int_list(entry, "arch_values", where)
+            if values:
+                low = min(values)
+                if last is not None and low < last:
+                    raise RegistryError("%s: the generation order is not oldest first" % where)
+                last = low
+            self.generation_arch[name] = values
+        self.policy = doc.get("policy") or {}
+        if not isinstance(self.policy, dict):
+            raise RegistryError("%s: the policy field is not an object" % where)
+        self.backends = {}
+        for doc_backend in _need_list(doc, "backends", where):
+            backend = Backend(doc_backend, where)
+            if backend.name in self.backends:
+                raise RegistryError("%s: the backend %s is listed twice" % (where, backend.name))
+            self.backends[backend.name] = backend
+        self.branch = doc.get("driver_branch")
+        if self.branch is not None:
+            if not isinstance(self.branch, dict):
+                raise RegistryError("%s: the driver_branch field is not an object" % where)
+            self.branch = _version(self.branch, where)
+        self.preference = doc.get("preference") or []
+        if not isinstance(self.preference, list):
+            raise RegistryError("%s: the preference field is not a list" % where)
+        self._check_preference()
+        self.families = []
+        seen = {}
+        for doc_family in _need_list(doc, "families", where):
+            family = Family(doc_family, where)
+            for devid in family.devids:
+                if devid in seen:
+                    raise RegistryError("%s: the device id %s is in the families %s and %s"
+                                        % (where, devid, seen[devid], family.id))
+                seen[devid] = family.id
+            self.families.append(family)
+        self.decorators = []
+        for doc_decorator in _need_list(doc, "decorators", where):
+            self.decorators.append(Decorator(doc_decorator, where))
+        self.feature_flags = _need_list(doc, "feature_flags", where)
+        seen_index = {}
+        for flag in self.feature_flags:
+            if not isinstance(flag, dict):
+                raise RegistryError("%s: a feature flag is not an object" % where)
+            index = _need(flag, "index", int, where)
+            name = _need_str(flag, "name", where)
+            if index in seen_index:
+                raise RegistryError("%s: the feature index %s is used twice" % (where, index))
+            seen_index[index] = name
+        self._check_generations()
+
+    def _check_preference(self):
+        """The preference lists must agree with the scores of the backends.
+
+        A preference names the backends in the order they are preferred,
+        and the earlier one must outscore the later one.  A record that
+        says otherwise is refused, because the binding would then have to
+        choose between the score and the preference.
+        """
+        for names in self.preference:
+            if not isinstance(names, list) or not names:
+                raise RegistryError("%s: a preference is not a list of backend names"
+                                    % self.where)
+            earlier = None
+            for name in names:
+                backend = self.backends.get(name)
+                if backend is None:
+                    raise RegistryError("%s: the preference names the backend %s, which "
+                                        "is not in the record" % (self.where, name))
+                if earlier is not None and backend.score <= earlier.score:
+                    raise RegistryError("%s: the preference names %s before %s, and it "
+                                        "does not outscore it"
+                                        % (self.where, name, earlier.name))
+                earlier = backend
+
+    def _check_generations(self):
+        """The generation table and the families must say the same thing.
+
+        A record that names a generation twice with different architecture
+        values is refused: the floor and the card would be read from two
+        different tables, and the card could be served below the floor.
+        """
+        for family in self.families:
+            for generation in family.generations:
+                if not isinstance(generation, dict):
+                    raise RegistryError("family %s: a generation is not an object" % family.id)
+                name = generation.get("name")
+                if not isinstance(name, str):
+                    raise RegistryError("family %s: a generation has no name" % family.id)
+                values = generation.get("arch_values")
+                if not isinstance(values, list):
+                    raise RegistryError("family %s: the generation %s has no architecture "
+                                        "values" % (family.id, name))
+                if name not in self.generation_arch:
+                    raise RegistryError("%s: the family %s names the generation %s, which is "
+                                        "not in the generation order"
+                                        % (self.where, family.id, name))
+                if self.generation_arch[name] != values:
+                    raise RegistryError("%s: the generation %s has the architecture values %s "
+                                        "in the generation order and %s in the family %s"
+                                        % (self.where, name, self.generation_arch[name],
+                                           values, family.id))
+
+    def covers_vendor(self, device):
+        """True when this provider claims the vendor and the class.
+
+        The record names the class code ("0x03"); pciconf prints the
+        class, the subclass and the programming interface together
+        ("0x030000"), so the class of the device starts with the class
+        of the record.
+        """
+        if device["vendor"].lower() != self.vendor:
+            return False
+        for klass in self.classes:
+            if device["class"].lower().startswith(klass):
+                return True
+        return False
+
+    def family_for(self, devid):
+        """The family that covers a device id, or None."""
+        for family in self.families:
+            if devid.lower() in family.devids:
+                return family
+        return None
+
+    def decorator_for(self, device):
+        """The board decorator of a card, or None."""
+        for decorator in self.decorators:
+            if decorator.subvendor == device["subvendor"].lower() and \
+                    decorator.subdevice == device["subdevice"].lower():
+                return decorator
+        return None
+
+
+class Registry(object):
+    """Every provider record of a directory."""
+
+    def __init__(self, providers):
+        self.providers = providers
+
+    @classmethod
+    def load(cls, directory):
+        """Read every provider record of a directory; fail closed."""
+        if not os.path.isdir(directory):
+            raise RegistryError("%s is not a directory" % directory)
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".json"))
+        if not names:
+            raise RegistryError("%s holds no provider record" % directory)
+        providers = []
+        seen = {}
+        for name in names:
+            path = os.path.join(directory, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    doc = json.load(handle)
+            except (OSError, ValueError) as exc:
+                raise RegistryError("%s: cannot be read: %s" % (path, exc))
+            if not isinstance(doc, dict):
+                raise RegistryError("%s: is not a JSON object" % path)
+            provider = Provider(doc, path)
+            if provider.name in seen:
+                raise RegistryError("%s: the provider %s is also in %s"
+                                    % (path, provider.name, seen[provider.name]))
+            seen[provider.name] = path
+            providers.append(provider)
+        providers.sort(key=lambda p: (-p.score, p.name))
+        return cls(providers)
+
+
+def default_registry_dir():
+    """The provider records of the source tree, or the installed ones."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(here), "data", "providers"),
+        os.path.join(os.path.dirname(here), "share", "gpu-check", "providers"),
+        "/usr/local/share/gpu-check/providers",
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return candidates[0]
+
+
+# --- detection -------------------------------------------------------------
+
+def parse_pciconf(text):
+    """Return the display-class devices of pciconf output.
+
+    A line of pciconf -l holds the name of the device, an at sign, the
+    bus address of the card and then the fields: class, rev, hdr,
+    vendor, device, subvendor and subdevice.
+    A line of another class is not a GPU.  A line of the display class
+    that does not parse is an error, never a silent drop.
+    """
+    devices = []
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or "@" not in line:
+            continue
+        name, _, rest = line.partition("@")
+        head = rest.split()[0] if rest.split() else ""
+        selector = head.rstrip(":")
+        if not selector.startswith("pci"):
+            continue
+        fields = {}
+        for word in rest.split():
+            if "=" in word:
+                key, _, value = word.partition("=")
+                fields[key] = value.lower()
+        if "class" not in fields:
+            continue
+        if not fields["class"].startswith("0x03"):
+            continue
+        missing = [k for k in ("class", "vendor", "device") if k not in fields]
+        if missing:
+            raise LookError("line %d of the pciconf output does not parse: no %s"
+                            % (number, " or ".join(missing)))
+        device = {
+            "name": name,
+            "selector": selector,
+            "vendor": fields["vendor"],
+            "device": fields["device"],
+            "subvendor": fields.get("subvendor", "0x0000"),
+            "subdevice": fields.get("subdevice", "0x0000"),
+            "class": fields["class"],
+            "revision": fields.get("rev", "0x00"),
+        }
+        _check_device(device, number)
+        devices.append(device)
+    return devices
+
+
+def _check_device(device, number):
+    """A card must have the fields the schema names, or it is an error."""
+    checks = (
+        ("selector", device["selector"], SELECTOR),
+        ("vendor", device["vendor"], HEX4),
+        ("device", device["device"], HEX4),
+        ("subvendor", device["subvendor"], HEX4),
+        ("subdevice", device["subdevice"], HEX4),
+        ("class", device["class"], HEX6),
+        ("revision", device["revision"], HEX2),
+    )
+    for field, value, pattern in checks:
+        if not pattern.match(value):
+            raise LookError("line %d of the pciconf output does not parse: the %s is %s, "
+                            "which is not a valid %s"
+                            % (number, field, value, field))
+
+
+def read_pciconf(program, path):
+    """The pciconf output: from a file, or from the program."""
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise LookError("cannot read %s: %s" % (safe_path(path), exc.strerror or exc))
+    try:
+        done = subprocess.run([program, "-l"], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, check=False)
+    except OSError as exc:
+        raise LookError("%s cannot be run: %s" % (program, exc))
+    if done.returncode != 0:
+        raise LookError("%s -l failed with status %d" % (program, done.returncode))
+    return done.stdout.decode("utf-8", "replace")
+
+
+def safe_path(path):
+    """A path as it may be shown: the name of the file, not its place.
+
+    The output of the tool holds no home path, so a path that goes into
+    an error is reduced to the name of its last part.
+    """
+    if not path:
+        return ""
+    return os.path.basename(path.rstrip("/")) or path
+
+
+def scrub(text):
+    """A message without the home path of the user."""
+    home = os.path.expanduser("~")
+    if home and home != "/" and home in text:
+        return text.replace(home, "~")
+    return text
+
+
+# --- the decision ----------------------------------------------------------
+
+def _floor_arch(provider):
+    """The lowest architecture value the policy floor accepts."""
+    floor = provider.policy.get("min_generation")
+    if not floor:
+        return None
+    if floor not in provider.generation_arch:
+        raise RegistryError("%s: the policy floor names the generation %s, "
+                            "which is not in the generation order"
+                            % (provider.where, floor))
+    values = provider.generation_arch[floor]
+    if not values:
+        raise RegistryError("%s: the policy floor names the generation %s, which has no "
+                            "architecture value, so the floor cannot be applied"
+                            % (provider.where, floor))
+    return min(values)
+
+
+def _generation_arch(family, generation):
+    """The lowest architecture value of a generation of a family."""
+    values = generation.get("arch_values")
+    if not isinstance(values, list):
+        raise RegistryError("family %s: a generation has no architecture values" % family.id)
+    for value in values:
+        if not isinstance(value, int):
+            raise RegistryError("family %s: an architecture value is not a number" % family.id)
+    return min(values) if values else None
+
+
+def _refusal(code, reason, next_step, provider, family, warnings):
+    """One refusal, in the shape every refusal has."""
+    return {
+        "code": "refused",
+        "provider": provider,
+        "family": family,
+        "backend": None,
+        "instance": None,
+        "reason": reason,
+        "reason_code": code,
+        "next": next_step,
+        "warnings": warnings,
+    }
+
+
+def decide(device, providers, arch):
+    """Decide what happens to one card.  Returns (decision, provider).
+
+    The core names no vendor: it asks every provider whether it claims
+    the card, takes the one with the highest score, and applies the policy
+    floor, the per-architecture build check and the binding in that order.
+    A claimed card that a provider refuses is not offered to a lower-scoring
+    provider, unless the record of the one that refused says so.
+    """
+    claims = [p for p in providers if p.covers_vendor(device)]
+    if not claims:
+        return ({
+            "code": "no_provider",
+            "provider": None,
+            "family": None,
+            "backend": None,
+            "instance": None,
+            "reason": "no provider names this device",
+            "reason_code": "no_provider",
+            "next": "none, this device is never loaded",
+            "warnings": [],
+        }, None)
+    ties = [p.name for p in claims[1:] if p.score == claims[0].score]
+    warnings = ["tie_score"] if ties else []
+    decision = None
+    provider = None
+    refusal = None
+    for claim in claims:
+        decision = _decide_one(claim, device, arch, warnings)
+        provider = claim
+        if decision["code"] == "supported":
+            break
+        if refusal is None:
+            refusal = decision
+        if not claim.fallback_ok:
+            break
+    if decision["code"] != "supported" and refusal is not None:
+        # Nobody served the card: the refusal of the provider that claims
+        # it the strongest is the one that stands.
+        decision = refusal
+        provider = claims[0]
+    return (decision, provider)
+
+
+def _decide_one(provider, device, arch, warnings):
+    """Decide what happens to one card, with one provider."""
+    family = provider.family_for(device["device"])
+    if family is None:
+        return _refusal("uncovered",
+                        "the provider %s covers the vendor but no family of it "
+                        "covers the device id %s" % (provider.name, device["device"]),
+                        "add the device id to the provider record",
+                        provider.name, None, warnings)
+    generation = family.generation_for(device["device"])
+    if generation is None:
+        return _refusal("uncovered",
+                        "the family %s names no generation for the device id %s"
+                        % (family.id, device["device"]),
+                        "add the generation to the provider record",
+                        provider.name, family.id, warnings)
+    refusal = _policy_floor(provider, family, generation, warnings)
+    if refusal is not None:
+        return refusal
+    refusal = _backend_for(provider, family, generation, device, arch, warnings)
+    if refusal is not None:
+        return refusal
+    return _binding(provider, family, generation, arch, warnings)
+
+
+def _policy_floor(winner, family, generation, warnings):
+    """The policy floor, before every architecture check."""
+    floor = _floor_arch(winner)
+    if floor is None:
+        return None
+    arch_value = _generation_arch(family, generation)
+    floor_name = winner.policy.get("min_generation")
+    if arch_value is None:
+        return _refusal("below_policy",
+                        "the generation %s has no architecture value, so it is "
+                        "older than the floor %s" % (generation.get("name"), floor_name),
+                        winner.policy.get("reason") or "none",
+                        winner.name, family.id, warnings)
+    if arch_value < floor:
+        return _refusal("below_policy",
+                        "the generation %s is below the floor %s"
+                        % (generation.get("name"), floor_name),
+                        winner.policy.get("reason") or "none",
+                        winner.name, family.id, warnings)
+    return None
+
+
+def _backend_for(winner, family, generation, device, arch, warnings):
+    """The per-architecture build check: the firmware and the backend."""
+    candidates = []
+    for name in family.backends:
+        backend = winner.backends.get(name)
+        if backend is None:
+            raise RegistryError("%s: the family %s names the backend %s, which is "
+                                "not in the record" % (winner.where, family.id, name))
+        candidates.append(backend)
+    if family.firmware is not None and arch not in family.firmware["archs"]:
+        return _refusal("not_built_%s" % arch,
+                        "the firmware %s is not built for %s"
+                        % (family.firmware["image"], arch),
+                        "build the firmware %s for %s" % (family.firmware["image"], arch),
+                        winner.name, family.id, warnings)
+    if not candidates:
+        return _refusal("uncovered",
+                        "the record names the device but no backend of ours covers it",
+                        "none, no backend of ours covers this card yet",
+                        winner.name, family.id, warnings)
+    if not [b for b in candidates if b.built_for(arch)]:
+        return _refusal("not_built_%s" % arch,
+                        "the backend %s is not built for %s"
+                        % (candidates[0].name, arch),
+                        "build the backend %s for %s" % (candidates[0].name, arch),
+                        winner.name, family.id, warnings)
+    return None
+
+
+def _binding(winner, family, generation, arch, warnings):
+    """The binding: the highest-scoring candidate that is built here wins."""
+    candidates = [winner.backends[name] for name in family.backends]
+    built = [b for b in candidates if b.built_for(arch)]
+    built.sort(key=lambda b: (-b.score, b.name))
+    backend = built[0]
+    instance = backend.name
+    # A backend that carries no branch of its own uses the branch of the record.
+    branch = backend.branch or winner.branch
+    if branch:
+        instance = "%s-%s" % (backend.name, branch["string"])
+    tested = generation.get("tested_arch")
+    if isinstance(tested, list) and arch not in tested:
+        warnings.append("not_tested_on_%s" % arch)
+    return {
+        "code": "supported",
+        "provider": winner.name,
+        "family": family.id,
+        "backend": backend.name,
+        "instance": instance,
+        "reason": "the backend %s covers the family %s" % (backend.name, family.id),
+        "reason_code": None,
+        "next": None,
+        "warnings": warnings,
+    }
+
+
+def features_of(provider, family, backend, decorator):
+    """The feature flags of a card: the family, then the backend, then the board."""
+    out = []
+    if provider is None:
+        return out
+    for flag in provider.feature_flags:
+        index = flag["index"]
+        name = flag["name"]
+        available = None
+        reason = None
+        value = None
+        if backend is not None and name in backend.features:
+            available = bool(backend.features[name])
+            reason = backend.feature_reasons.get(name)
+        elif family is not None and name in family.features:
+            available = bool(family.features[name])
+        if decorator is not None and name in decorator.features:
+            available = bool(decorator.features[name])
+            reason = None
+        if available is None:
+            available = False
+            reason = "the provider record does not say"
+        if family is not None and name in family.feature_values:
+            value = family.feature_values[name]
+        if decorator is not None and name in decorator.feature_values:
+            value = decorator.feature_values[name]
+        row = {"index": index, "name": name, "available": available}
+        if reason:
+            row["reason"] = reason
+        if value is not None:
+            row["value"] = value
+        out.append(row)
+    return out
+
+
+# --- the fake file ---------------------------------------------------------
+
+def fake_answer(fake, name, device):
+    """The answer of a fake file for one card, or None.
+
+    An answer is either the one answer of the file, or a map of selectors
+    to answers, so a file can answer two cards of one machine apart.
+    """
+    answer = fake.get(name)
+    if not isinstance(answer, dict):
+        return None
+    if "status" in answer:
+        return answer
+    for key in (device["selector"], device["name"]):
+        one = answer.get(key)
+        if isinstance(one, dict):
+            return one
+    return None
+
+
+def check_fake_status(answer, where):
+    """The status of an answer, or raise: the vocabulary is one.
+
+    A fake file may say "ok" where the vocabulary says "pass": it is the
+    same word, and the row always carries the vocabulary.
+    """
+    try:
+        return probes.answer_status(answer, where)
+    except probes.FakeAnswerError as exc:
+        raise UsageError(str(exc))
+
+
+def check_fake(fake):
+    """Every answer of a fake file uses the documented vocabulary."""
+    try:
+        probes.check_answers(fake)
+    except probes.FakeAnswerError as exc:
+        raise UsageError(str(exc))
+
+
+# --- the machine -----------------------------------------------------------
+
+def trusted_module_path(name, dirs=MODULE_DIRS):
+    """The file of a kernel module: a bare name under the module directory.
+
+    Returns (path, None, None) when the module may be loaded.  When it may
+    not, it returns (None, the reason, the status of the refusal): a
+    module that is not installed is not available (the load continues
+    without it), and a module whose file cannot be trusted is a failure
+    (nothing is loaded after it).
+    """
+    if not MODULE_NAME.match(name):
+        return None, "the module name %s is not a bare module name" % name, FAIL
+    for directory in dirs:
+        path = os.path.join(directory, name + ".ko")
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            return None, "the module file %s is not a regular file" % path, FAIL
+        if info.st_uid != 0:
+            return None, "the module file %s is not owned by root" % path, FAIL
+        if info.st_mode & 0o022:
+            return None, "the module file %s may be written by others" % path, FAIL
+        return path, None, None
+    return None, ("the module %s is not installed under %s"
+                  % (name, " or ".join(dirs))), NOT_AVAILABLE
+
+
+class Machine(object):
+    """What the tool may ask of the machine (or of a fake).
+
+    The machine loads the modules, reads the listing of the loaded ones
+    and answers nothing else.  A fake run loads nothing: the answers of
+    the fake file are used instead.
+    """
+
+    def __init__(self, fake=None, do_load=False, capture=None, module_dirs=MODULE_DIRS,
+                 assume_loaded=False):
+        # None means there is no fake file; an empty fake file is a fake
+        # run that answers nothing.
+        self.fake = fake
+        self.do_load = do_load
+        # The driver and the firmware are already loaded: the run measures
+        # the card and loads nothing.
+        self.assume_loaded = assume_loaded
+        self.capture = capture
+        # The directories the modules are loaded from.
+        self.module_dirs = list(module_dirs)
+        self.attempted = []
+        self.loaded = []
+        # The modules that were loaded before this run began.
+        self.already = []
+        # The listing of the loaded modules is read once and kept; it is
+        # read again when a module was loaded, because the listing then
+        # says something else.
+        self._listing = None
+        self._initial = None
+
+    @property
+    def is_fake(self):
+        return self.fake is not None
+
+    @property
+    def is_capture(self):
+        """True when the run replays a recorded run."""
+        return self.capture is not None
+
+    @property
+    def may_load(self):
+        """True when this run may load a module.
+
+        A run that loads nothing never needs root to load: the checks
+        that would have loaded say what is loaded instead.
+        """
+        return self.do_load
+
+    @property
+    def has_driver(self):
+        """True when the checks that need the driver may run.
+
+        The driver is there when this run loaded it, or when the run was
+        told it is already loaded.
+        """
+        return self.do_load or self.assume_loaded
+
+    @property
+    def missing_verb(self):
+        """What a module that is not there is called: installed or loaded."""
+        return "loaded" if self.assume_loaded else "installed"
+
+    def already_loaded(self, name):
+        """True when the module was loaded before this run began.
+
+        A module that is loaded is loaded: the run says so and goes on.
+        A fake file names the modules of the machine in "modules"; a live
+        run reads the listing of the kernel.
+        """
+        if self.is_fake:
+            names = self.fake.get("modules")
+            loaded = isinstance(names, list) and name in names
+        elif self.is_capture:
+            loaded = name in self.module_listing()
+        else:
+            loaded = name in self.initial_listing()
+        if loaded and name not in self.already:
+            self.already.append(name)
+        return loaded
+
+    def initial_listing(self):
+        """The names of the modules that were loaded before this run."""
+        if self._initial is None:
+            self._initial = list(self.module_listing())
+        return self._initial
+
+    def kldload(self, module_name):
+        """Load a module.  Returns (status, message).
+
+        A run that was told the driver is already loaded loads nothing:
+        it says what is loaded, and what is not.  A fake run and a
+        replayed run answer from their own record, so they say what
+        they loaded that day.
+        """
+        self.attempted.append(module_name)
+        if self.is_fake:
+            if self.already_loaded(module_name):
+                self.loaded.append(module_name)
+                return PASS, "the module %s was already loaded" % module_name
+            answer = (self.fake.get("kldload") or {}).get(module_name)
+            if not isinstance(answer, dict):
+                return NOT_TESTED, "the fake does not answer for the module %s" % module_name
+            status = check_fake_status(answer, "the fake answer for the module %s" % module_name)
+            if status == PASS:
+                self.loaded.append(module_name)
+                return PASS, (answer.get("message")
+                              or ("the module %s was loaded" % module_name))
+            if status == FAIL:
+                return FAIL, (answer.get("message")
+                              or ("the module %s was not loaded" % module_name))
+            return status, (answer.get("message")
+                            or ("the module %s was not loaded" % module_name))
+        if self.is_capture:
+            # A recorded run loaded its modules that day: the replay says
+            # what it saw, and it loads nothing now.
+            if module_name in self.module_listing():
+                self.loaded.append(module_name)
+                return PASS, ("the recorded run had the module %s loaded"
+                              % module_name)
+            return NOT_TESTED, ("the recorded run did not have the module %s loaded"
+                                % module_name)
+        if self.assume_loaded:
+            # This run loads nothing: it says what is loaded, and what
+            # is not.
+            if self.already_loaded(module_name):
+                self.loaded.append(module_name)
+                return PASS, "the module %s was already loaded" % module_name
+            return NOT_AVAILABLE, ("the module %s is not loaded, and this run loads "
+                                   "nothing" % module_name)
+        if self.already_loaded(module_name):
+            self.loaded.append(module_name)
+            return PASS, "the module %s was already loaded" % module_name
+        path, reason, status = trusted_module_path(module_name, self.module_dirs)
+        if path is None:
+            return status, reason
+        try:
+            done = subprocess.run(["/sbin/kldload", path],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  check=False)
+        except OSError as exc:
+            return FAIL, "kldload cannot be run: %s" % exc
+        message = done.stdout.decode("utf-8", "replace").strip()
+        if done.returncode == 0:
+            self.loaded.append(module_name)
+            self._listing = None
+            return PASS, message or ("the module %s was loaded" % module_name)
+        return FAIL, message or ("the module %s was not loaded" % module_name)
+
+    def capture_entry(self, selector):
+        """The record of one card in the capture, or None.
+
+        A replayed run answers the load from the record of the run: the
+        recorded run says what it loaded that day, and the provider
+        record says what a live run would load now.
+        """
+        if self.capture is None:
+            return None
+        for entry in self.capture.get("devices") or []:
+            if not isinstance(entry, dict):
+                continue
+            card = entry.get("card")
+            if isinstance(card, dict) and card.get("selector") == selector:
+                return entry
+        return None
+
+    def module_listing(self):
+        """The names of the loaded modules.
+
+        A fake run answers from the fake file, a replayed run from the
+        capture, and a live run from kldstat(8).  A fake file that says
+        a module was loaded has that module loaded: the file is the
+        machine, and it says what the machine holds.
+
+        The listing is read once and kept: it is read again when a
+        module was loaded, because the listing then says something else.
+        """
+        if self._listing is None:
+            self._listing = self._read_listing()
+        return self._listing
+
+    def _read_listing(self):
+        """The names of the loaded modules, read now."""
+        if self.is_fake:
+            names = self.fake.get("modules")
+            if isinstance(names, list):
+                return [name for name in names if isinstance(name, str)]
+            loads = self.fake.get("kldload")
+            if isinstance(loads, dict):
+                return [module for module, answer in sorted(loads.items())
+                        if isinstance(answer, dict)
+                        and answer.get("status") in (PASS, "ok")]
+            return []
+        if self.capture is not None:
+            facts = self.capture.get("environment")
+            if isinstance(facts, dict) and isinstance(facts.get("facts"), dict):
+                names = facts["facts"].get("modules")
+                if isinstance(names, list):
+                    return [name for name in names if isinstance(name, str)]
+            return []
+        try:
+            done = subprocess.run(["/sbin/kldstat", "-v"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, check=False)
+        except OSError:
+            return []
+        if done.returncode != 0:
+            return []
+        listing = done.stdout.decode("utf-8", "replace")
+        return _module_names(listing)
+
+
+def _module_names(listing):
+    """The names of the modules of a kldstat listing."""
+    from gpu_check import environment
+
+    return environment.loaded_modules(listing)
+
+
+# --- the probes ------------------------------------------------------------
+
+def adapter_dirs():
+    """The places the probe adapters live in."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(here, "adapters"),
+        os.path.join(os.path.dirname(here), "share", "gpu-check", "adapters"),
+        "/usr/local/share/gpu-check/adapters",
+    ]
+
+
+def install_prefixes():
+    """The prefixes the probes look in: the one of the tool, then /usr/local."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    prefixes = []
+    parent = os.path.dirname(here)
+    if os.path.basename(here) in ("sbin", "bin"):
+        prefixes.append(parent)
+    prefixes.append("/usr/local")
+    return prefixes
+
+
+def load_adapter(vendor):
+    """The probe adapter of a vendor, or None.
+
+    The adapter is the file named after the vendor id of the card, so the
+    core never has to know which vendor it is looking at.
+    """
+    name = "%s.py" % vendor.lower()
+    for directory in adapter_dirs():
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("gpu_check_adapter", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception:
+            return None
+        return module
+    return None
+
+
+# --- the checks ------------------------------------------------------------
+
+def check_row(index, name, title, status, reason, **extra):
+    """One row of a check: its place, its name, its result and why."""
+    row = {"index": index, "name": name, "title": title, "status": status,
+           "reason": reason}
+    row.update(extra)
+    return row
+
+
+def _needs(context, check):
+    """Why a check did not run, or None when it may run.
+
+    A check that opens the card was not run as a user: both say so, and
+    the row says why.  A check that loads a module needs root only when
+    this run may load: a run that was told the driver is already loaded
+    loads nothing, and reading the listing of the loaded modules needs
+    no root.  A fake run loads nothing, so it needs no root either: the
+    file answers the loads instead of the kernel.  A replayed run is the
+    same: it loads nothing and touches nothing.
+    """
+    machine = context.machine
+    if check.needs_root and not machine.is_fake \
+            and not machine.is_capture and os.geteuid() != 0:
+        if not (check.loads and not machine.may_load):
+            return "this check needs root: it was not run"
+    if check.needs_load and not machine.has_driver \
+            and not machine.is_capture:
+        return ("no --load: the driver was not loaded, so this check was not run")
+    return None
+
+
+def run_check(context, check, index):
+    """Run one check and return its row."""
+    blocked = _needs(context, check)
+    if blocked is not None:
+        return check_row(index, check.id, check.title, NOT_TESTED, blocked)
+    try:
+        outcome = check.run(context)
+    except Exception as exc:  # never a traceback: the row says what failed
+        return check_row(index, check.id, check.title, FAIL,
+                         "the check failed: %s: %s" % (type(exc).__name__, exc))
+    if not isinstance(outcome, dict) or "status" not in outcome:
+        return check_row(index, check.id, check.title, FAIL,
+                         "the check answered nothing")
+    status = outcome.get("status")
+    reason = outcome.get("reason") or "the check said nothing"
+    extra = {}
+    if outcome.get("steps"):
+        extra["steps"] = outcome["steps"]
+    for key in ("rm_index", "uuid_sha256"):
+        if key in outcome:
+            extra[key] = outcome[key]
+    return check_row(index, check.id, check.title, status, reason, **extra)
+
+
+# --- the output ------------------------------------------------------------
+
+def english_device_line(label, device, decision, generation, provider):
+    """The one line of a card, the same bytes in the text and in the JSON."""
+    vendor = device["vendor"].lower().replace("0x", "")
+    devid = device["device"].lower().replace("0x", "")
+    name = generation.upper() if generation else "unknown generation"
+    if provider is not None:
+        card = "%s %s:%s" % (provider.vendor_name, vendor, devid)
+    else:
+        card = "vendor %s:%s" % (vendor, devid)
+    if decision["code"] == "supported":
+        return ("%s (%s): %s (%s) supported: %s"
+                % (label, device["selector"], card, name, decision["reason"]))
+    return ("%s (%s): %s (%s) %s: %s: next: %s"
+            % (label, device["selector"], card, name,
+               decision["code"], decision["reason"], decision["next"] or "none"))
+
+
+def host_block(arch):
+    """The host facts: no hostname, no user name, no path."""
+    release = platform.release()
+    parts = release.split(".")
+    numbers = []
+    for part in parts[:3]:
+        try:
+            numbers.append(int(part))
+        except ValueError:
+            numbers.append(0)
+    while len(numbers) < 3:
+        numbers.append(0)
+    suffix = ""
+    for part in parts[3:]:
+        suffix += ("." if suffix else "") + part
+    os_release = {"string": release, "major": numbers[0], "minor": numbers[1],
+                  "patch": numbers[2]}
+    if suffix:
+        os_release["suffix"] = suffix
+    return {"arch": arch, "os": "FreeBSD", "os_release": os_release}
+
+
+def empty_summary():
+    """The summary of a run with no card in it."""
+    return {"devices": 0, "supported": 0, "refused": 0, "no_provider": 0,
+            "checks": {PASS: 0, FAIL: 0, NOT_TESTED: 0, NOT_AVAILABLE: 0}}
+
+
+def print_text(document, colour=None):
+    """The table of the checks, and the one line that counts them."""
+    if colour is None:
+        colour = table.use_colour()
+    for entry in document["devices"]:
+        print(entry["english"])
+        print(table.render(entry["checks"], colour=colour))
+        print(table.summary(entry["checks"]))
+    if document["fake"]:
+        print("note: this run answered from a fake file: it loaded nothing and "
+              "proved nothing about this machine")
+    if document["capture"]:
+        print("note: this run replayed a recorded run: it loaded nothing and "
+              "proved nothing about this machine")
+
+
+def print_list():
+    """The checks, and what each one needs."""
+    width = max(len(check.id) for check in registry.checks())
+    for check in registry.checks():
+        needs = []
+        if check.needs_root:
+            needs.append("root")
+        if check.needs_load:
+            needs.append("load")
+        suffix = " (%s)" % ", ".join(needs) if needs else ""
+        print("%-*s  %s%s" % (width, check.id, check.title, suffix))
+
+
+class JsonLinesWriter(object):
+    """The JSON Lines stream of a run.
+
+    The stream is a subscriber of the events, like the table and the
+    database are.  It builds its records from named fields only: a key
+    that is there for the database cannot change the bytes of the
+    stream.
+    """
+
+    # The fields of a card that the stream carries.
+    DEVICE_FIELDS = ("label", "selector", "name", "identity", "generation",
+                     "board", "decision", "features", "english")
+
+    def __init__(self, stream=None):
+        self.stream = stream if stream is not None else sys.stdout
+        self.label = None
+
+    def __call__(self, event):
+        handler = getattr(self, "_on_" + event.kind, None)
+        if handler is not None:
+            handler(event)
+
+    def _write(self, record):
+        """One record of the stream, flushed as it is written."""
+        self.stream.write(json.dumps(record) + "\n")
+        self.stream.flush()
+
+    def _on_run_start(self, event):
+        payload = event.payload
+        self._write({"kind": "header", "schema": SCHEMA,
+                     "schema_version": SCHEMA_VERSION, "tool": TOOL,
+                     "mode": payload.get("mode"), "fake": payload.get("fake"),
+                     "capture": payload.get("capture"),
+                     "host": payload.get("host"),
+                     "registry": {"providers": list(payload.get("providers") or [])}})
+
+    def _on_device(self, event):
+        record = {"kind": "device"}
+        for key in self.DEVICE_FIELDS:
+            if key in event.payload:
+                record[key] = event.payload[key]
+        self.label = event.payload.get("label")
+        self._write(record)
+
+    def _on_check(self, event):
+        payload = event.payload
+        record = {"kind": "check", "label": self.label,
+                  "index": payload.get("index"), "name": payload.get("name"),
+                  "title": payload.get("title"), "status": payload.get("status"),
+                  "reason": payload.get("reason")}
+        if payload.get("steps"):
+            record["steps"] = payload["steps"]
+        self._write(record)
+
+    def _on_error(self, event):
+        self._write({"kind": "error", "error": event.payload.get("error")})
+
+    def _on_run_end(self, event):
+        payload = event.payload
+        self._write({"kind": "end", "summary": payload.get("summary"),
+                     "exit": payload.get("exit")})
+
+
+def emit_error(options, message, status, stream=None):
+    """One error, in the shape the mode asked for.
+
+    The error goes through the stream, so the JSON Lines stream and the
+    database hear of it the same way they hear of anything else.
+    """
+    message = scrub(message)
+    if stream is None:
+        stream = events.Stream()
+        if options.get("jsonl"):
+            stream.subscribe(JsonLinesWriter())
+    stream.emit("run_start", "run_start",
+                {"host": host_block(options.get("arch") or host_arch()),
+                 "mode": options.get("mode", "detect"),
+                 "fake": options.get("fake") is not None,
+                 "capture": options.get("capture") is not None,
+                 "providers": list(options.get("providers", []))})
+    stream.emit("error", "error", {"error": message})
+    stream.emit("run_end", "run_end",
+                {"summary": empty_summary(), "exit": status})
+    if options.get("json"):
+        print(json.dumps({"schema_version": SCHEMA_VERSION, "tool": TOOL,
+                          "schema": SCHEMA, "status": "error", "error": message,
+                          "exit": status}, indent=1))
+    elif not options.get("jsonl"):
+        print("%s: %s" % (TOOL, message), file=sys.stderr)
+
+
+# --- the run ---------------------------------------------------------------
+
+def exit_status(entries, claimed, served):
+    """The exit status: what the decisions and the rows say.
+
+    A refused card is a refusal, not a failed check: the decision row of
+    a refused card does not count as a failed check.
+    """
+    decision = registry.decision_check()
+    decision_id = decision.id if decision is not None else None
+    failed = 0
+    for entry in entries:
+        for row in entry["checks"]:
+            if row["status"] == FAIL and row["name"] != decision_id:
+                failed += 1
+    if failed:
+        return EXIT_CHECK_FAILED
+    if claimed == 0:
+        return EXIT_NOTHING_CLAIMED
+    if served == 0:
+        return EXIT_NONE_SERVED
+    if served < claimed:
+        return EXIT_PARTIAL
+    return EXIT_OK
+
+
+def host_arch():
+    """The architecture of this machine, as the records name it."""
+    machine = platform.machine()
+    if machine in ("aarch64", "arm64"):
+        return "arm64"
+    if machine in ("x86_64", "amd64"):
+        return "amd64"
+    return machine
+
+
+def normalize_arch(value):
+    """The architecture as the records name it, or None when it is not one."""
+    text = value.strip().lower().replace("-", "_")
+    known = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+    if text in known:
+        return known[text]
+    if re.match(r"^[a-z0-9_]+$", text):
+        return text
+    return None
+
+
+def select_checks(options):
+    """The checks this run runs, in the order they run in.
+
+    Without options the run says what the card is and whether the driver
+    serves it, and nothing else.  With --load it runs every check.  With
+    --assume-loaded it runs every check too, and loads nothing.  With
+    --check it runs the checks that were named and the ones they depend
+    on.
+    """
+    if options["check_ids"]:
+        wanted, unknown = registry.resolve(options["check_ids"])
+        if unknown:
+            raise UsageError("there is no check named %s; the checks are: %s"
+                             % (", ".join(unknown),
+                                ", ".join(check.id for check in registry.checks())))
+        return wanted
+    if options["capture"]:
+        # A replayed run is the whole recorded run: every check answers
+        # from the record, and none of them touches the machine.
+        return registry.everything()
+    if options["load"] or options["assume_loaded"]:
+        return registry.everything()
+    return registry.defaults()
+
+
+def read_capture(directory):
+    """The document of a recorded run, or the reason it cannot be used."""
+    path = os.path.join(directory, "capture.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as exc:
+        raise LookError("cannot read the capture: %s" % (exc.strerror or exc))
+    except ValueError as exc:
+        raise LookError("the capture is not JSON: %s" % exc)
+    if not isinstance(document, dict):
+        raise LookError("the capture is not a JSON object")
+    schema = document.get("schema")
+    if schema != CAPTURE_SCHEMA:
+        raise LookError("the capture has the schema %r, not %s" % (schema, CAPTURE_SCHEMA))
+    if not isinstance(document.get("devices"), list):
+        raise LookError("the capture holds no device")
+    return document
+
+
+def capture_devices(document):
+    """The cards of a recorded run."""
+    devices = []
+    for entry in document["devices"]:
+        if not isinstance(entry, dict):
+            raise LookError("a card of the capture is not an object")
+        card = entry.get("card")
+        if not isinstance(card, dict):
+            raise LookError("a card of the capture holds no card")
+        device = {
+            "name": card.get("name") or "gpu",
+            "selector": card.get("selector") or "",
+            "vendor": card.get("vendor") or "0x0000",
+            "device": card.get("device") or "0x0000",
+            "subvendor": card.get("subvendor") or "0x0000",
+            "subdevice": card.get("subdevice") or "0x0000",
+            "class": card.get("class") or "0x030000",
+            "revision": card.get("revision") or "0x00",
+        }
+        _check_device(device, 0)
+        devices.append(device)
+    return devices
+
+
+def open_database(options):
+    """The database of the runs, or the reason it cannot be used.
+
+    A run that answers from a file or from a recording knows no
+    machine, so the provider of the platform is the fake one: the
+    properties of such a run are the ones of a machine that is not
+    there.  A run that looks at this machine uses the provider of the
+    platform the library was built with.
+    """
+    platform = None
+    if options["fake"] is not None or options["capture"] is not None:
+        platform = "fake"
+    return db.Database(options["db"], platform=platform)
+
+
+def run(options):
+    """The whole run.  Returns the exit status."""
+    mode = "capture" if options["capture"] else options["mode"]
+    arch = options["arch"] or host_arch()
+    try:
+        registry_records = Registry.load(options["registry"])
+    except RegistryError as exc:
+        emit_error(options, "the provider registry cannot be used: %s" % exc,
+                   EXIT_USAGE)
+        return EXIT_USAGE
+    options["providers"] = [p.name for p in registry_records.providers]
+    # The stream of the run.  Everything that comes out of it -- the
+    # table, the JSON document, the JSON Lines stream and the database
+    # -- is a subscriber of it, so they cannot disagree about what
+    # happened.
+    stream = events.Stream()
+    builder = events.DocumentBuilder(TOOL, SCHEMA, SCHEMA_VERSION)
+    stream.subscribe(builder.feed)
+    if options["jsonl"]:
+        stream.subscribe(JsonLinesWriter())
+    database = None
+    if not options["no_db"]:
+        try:
+            database = open_database(options)
+        except db.DatabaseError as exc:
+            emit_error(options, "the record of the run cannot be kept: %s" % exc,
+                       EXIT_USAGE)
+            return EXIT_USAGE
+        stream.subscribe(db.Recorder(database))
+    capture = None
+    try:
+        if options["capture"]:
+            capture = read_capture(options["capture"])
+            devices = capture_devices(capture)
+        else:
+            text = read_pciconf(options["pciconf"], options["pciconf_file"])
+            devices = parse_pciconf(text)
+    except LookError as exc:
+        emit_error(options, str(exc), EXIT_CANNOT_LOOK, stream)
+        return EXIT_CANNOT_LOOK
+    if options["device"]:
+        chosen = [d for d in devices if d["selector"] == options["device"]]
+        if not chosen:
+            emit_error(options, "no card matches the selector %s; the cards of this "
+                        "machine are: %s"
+                        % (options["device"],
+                           ", ".join(d["selector"] for d in devices) or "none"),
+                        EXIT_USAGE, stream)
+            return EXIT_USAGE
+        devices = chosen
+    try:
+        wanted = select_checks(options)
+    except UsageError as exc:
+        emit_error(options, str(exc), EXIT_USAGE, stream)
+        return EXIT_USAGE
+    machine = Machine(fake=options["fake"], do_load=options["load"], capture=capture,
+                      module_dirs=options["module_dirs"],
+                      assume_loaded=options["assume_loaded"])
+    probe = _probe_for(options, capture)
+    # The run starts: the facts of the machine, and the catalogue of
+    # what the run is about to do.
+    stream.emit("run_start", "run_start",
+                {"host": host_block(arch),
+                 "mode": mode,
+                 "fake": options["fake"] is not None,
+                 "capture": capture is not None,
+                 "providers": list(options["providers"]),
+                 "tool": TOOL,
+                 "tool_version": TOOL_VERSION,
+                 "schema": SCHEMA,
+                 "platform": platform_name(database)})
+    for check in registry.checks():
+        stream.emit("check_def", check.id, _check_def_of(check))
+    for definition in metrics.definitions():
+        stream.emit("metric_def", definition["key"], definition)
+    stream.emit("snapshot", "run_start", {"phase": "run_start"})
+    results = []
+    claimed = 0
+    served = 0
+    for number, device in enumerate(devices):
+        entry = process_card(machine, probe, device, number, registry_records, arch,
+                             wanted, options, stream)
+        results.append(entry)
+        if entry["decision"]["provider"] is not None:
+            claimed += 1
+        if entry["decision"]["code"] == "supported":
+            served += 1
+    stream.emit("snapshot", "run_end", {"phase": "run_end"})
+    summary = events.summarize(results)
+    status = exit_status(results, claimed, served)
+    stream.emit("run_end", "run_end", {"summary": summary, "exit": status})
+    # A subscriber that failed means the record of the run is not whole.
+    # The run says so and stops: a half record is worse than none.
+    if stream.failed():
+        for kind, name, exc in stream.failed():
+            print("%s: the record of the run cannot be kept: %s: %s"
+                  % (TOOL, kind, exc), file=sys.stderr)
+        if database is not None:
+            database.close()
+        return EXIT_USAGE
+    document = builder.document()
+    if options["report"]:
+        try:
+            write_report(options["report"], document)
+        except OSError as exc:
+            emit_error(options, "cannot write the report %s: %s"
+                       % (safe_path(options["report"]), exc.strerror or exc),
+                       EXIT_USAGE, stream)
+            return EXIT_USAGE
+    if options["jsonl"]:
+        pass
+    elif options["json"]:
+        print(json.dumps(document, indent=1))
+    else:
+        print_text(document)
+    if database is not None:
+        database.close()
+    return status
+
+
+def platform_name(database):
+    """The name of the platform the record is kept for."""
+    if database is None:
+        return "unknown"
+    try:
+        return database.platform_name() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _check_def_of(check):
+    """The definition of a check: what it is and what it needs."""
+    decision = registry.decision_check()
+    return {
+        "check_id": check.id,
+        "title": check.title,
+        "ordinal": registry.index_of(check),
+        "needs_root": 1 if check.needs_root else 0,
+        "needs_load": 1 if check.needs_load else 0,
+        "loads": 1 if check.loads else 0,
+        "is_decision": 1 if decision is not None and check.id == decision.id else 0,
+        "depends_on": list(check.dependencies),
+    }
+
+
+def _probe_for(options, capture):
+    """The backend that answers the probes of this run."""
+    if options["fake"] is not None:
+        return probes.FakeBackend(options["fake"])
+    if capture is not None:
+        return probes.CaptureBackend(capture)
+    return None
+
+
+def process_card(machine, probe, device, number, registry_records, arch, wanted,
+                 options, stream):
+    """The result of one card: the decision, the rows and the english line."""
+    label = "gpu%d" % number
+    provider = None
+    family = None
+    backend = None
+    decorator = None
+    decision, provider = decide(device, registry_records.providers, arch)
+    if provider is not None:
+        family = provider.family_for(device["device"])
+        decorator = provider.decorator_for(device)
+        if decision["backend"] is not None:
+            backend = provider.backends.get(decision["backend"])
+    generation = None
+    if family is not None:
+        entry = family.generation_for(device["device"])
+        if entry is not None:
+            generation = entry.get("name")
+    card_probe = probe
+    if card_probe is None:
+        card_probe = _live_probe(device)
+    context = _context(machine, card_probe, device, decision, provider, family,
+                       backend, decorator, arch)
+    asked = set(check.id for check in wanted)
+    made = {}
+    # The modules of one card are the ones this card loaded: the machine
+    # keeps them all, so the count before the card says where its own
+    # begin.
+    loaded_before = len(machine.loaded)
+    head = _entry_head(label, device, decision, provider, family, backend,
+                       decorator, generation)
+    payload = dict(head)
+    payload["ordinal"] = number
+    stream.emit("device", label, payload)
+    for key, value in metrics.values_of(head):
+        stream.emit("metric", key, {"key": key, "value": value,
+                                     "device_ordinal": number})
+    for check in wanted:
+        # The machine is read once before the checks and once after them:
+        # what the checks changed is the difference between the two.
+        started = events.timestamp()
+        row = run_check(context, check, registry.index_of(check))
+        ended = events.timestamp()
+        made[check.id] = row
+        stream.emit("check", check.id, _check_event(row, number, started, ended))
+    for check in registry.checks():
+        if check.id in asked:
+            continue
+        row = check_row(registry.index_of(check), check.id, check.title, NOT_TESTED,
+                         _not_asked(options))
+        made[check.id] = row
+        stream.emit("check", check.id, _check_event(row, number, "", ""))
+    ordered_rows = [made[check.id] for check in registry.checks()]
+    entry = dict(head)
+    entry["loaded"] = list(machine.loaded[loaded_before:])
+    entry["checks"] = ordered_rows
+    uuid = context.state.get("uuid_sha256")
+    if uuid:
+        entry["uuid_sha256"] = uuid
+        rm_index = context.state.get("rm_index")
+        if isinstance(rm_index, int):
+            stream.emit("metric", "pci.rm_index",
+                        {"key": "pci.rm_index", "value": rm_index,
+                         "device_ordinal": number})
+    end = {"ordinal": number, "loaded": list(machine.loaded[loaded_before:])}
+    if uuid:
+        end["uuid_sha256"] = uuid
+    stream.emit("device_end", label, end)
+    return entry
+
+
+def _check_event(row, number, started, ended):
+    """The event of a check: the row, and what the record needs.
+
+    The row is the row of the document.  The keys that are here for the
+    database alone are added to it, and the JSON Lines stream picks the
+    fields it wants, so they cannot change the bytes of the stream.
+    """
+    payload = dict(row)
+    payload["device_ordinal"] = number
+    payload["started_at"] = started
+    payload["ended_at"] = ended
+    return payload
+
+
+def _not_asked(options):
+    """Why a check did not run: the run did not ask for it."""
+    if options["check_ids"]:
+        return ("not asked for: this run asked for %s"
+                % ", ".join(options["check_ids"]))
+    return "not asked for: a run without --load does not touch the machine"
+
+
+def _entry_head(label, device, decision, provider, family, backend, decorator,
+                generation):
+    """The part of a card that does not depend on the checks."""
+    return {
+        "label": label,
+        "selector": device["selector"],
+        "name": device["name"],
+        "identity": {"vendor": device["vendor"], "device": device["device"],
+                     "subvendor": device["subvendor"], "subdevice": device["subdevice"],
+                     "class": device["class"], "revision": device["revision"]},
+        "generation": {"name": generation,
+                       "arch_values": family.arch_values if family else [],
+                       "source": "the provider record"},
+        "board": {"name": decorator.name if decorator else None,
+                  "reason": None if decorator else
+                  "no board record for the subsystem %s:%s"
+                  % (device["subvendor"].lower().replace("0x", ""),
+                     device["subdevice"].lower().replace("0x", ""))},
+        "decision": {"code": decision["code"],
+                     "reason_code": decision["reason_code"],
+                     "provider": decision["provider"],
+                     "family": decision["family"],
+                     "backend": decision["backend"],
+                     "instance": decision["instance"],
+                     "reason": decision["reason"],
+                     "next": decision["next"],
+                     "warnings": decision["warnings"]},
+        "features": features_of(provider, family, backend, decorator),
+        "english": english_device_line(label, device, decision, generation, provider),
+    }
+
+
+def _live_probe(device):
+    """The backend of a live run: the adapter of the vendor of the card."""
+    adapter = load_adapter(device["vendor"])
+    if adapter is None:
+        return probes.AdapterBackend(_NoAdapter(), install_prefixes())
+    return probes.AdapterBackend(adapter, install_prefixes())
+
+
+class _NoAdapter(object):
+    """The adapter of a card no adapter covers: it answers nothing."""
+
+    def identity(self, device, prefixes):
+        return {"status": NOT_TESTED,
+                "reason": "there is no probe for the vendor %s" % device["vendor"],
+                "extra": {}}
+
+    def device_open(self, device, prefixes):
+        return {"status": NOT_TESTED,
+                "reason": "there is no probe for the vendor %s" % device["vendor"]}
+
+    def uvm(self, device, prefixes):
+        return {"status": NOT_TESTED,
+                "reason": "there is no probe for the vendor %s" % device["vendor"]}
+
+    def prime(self, device, prefixes):
+        return {"status": NOT_TESTED,
+                "reason": "there is no probe for the vendor %s" % device["vendor"]}
+
+    def display(self, device, prefixes):
+        return {"status": NOT_TESTED,
+                "reason": "there is no probe for the vendor %s" % device["vendor"]}
+
+
+def _context(machine, probe, device, decision, provider, family, backend,
+             decorator, arch):
+    """The context of one card: what the checks are given."""
+    from gpu_check import context as context_module
+
+    return context_module.Context(device=device, decision=decision, machine=machine,
+                                   probe=probe, provider=provider, family=family,
+                                   backend=backend, decorator=decorator,
+                                   arch=arch)
+
+
+def write_report(path, document):
+    """Write the document to the file, without following a symlink.
+
+    The document is written to a new file in the same directory and then
+    moved into place, so a symlink at the path is replaced instead of
+    followed, and a file that is not ours is never truncated.  What is
+    written holds no name, no home path and no serial number: the UUID
+    of a card is hashed.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         prefix=".gpu-check-report.", delete=False)
+    try:
+        with handle:
+            json.dump(redact.redact(document), handle, indent=1)
+            handle.write("\n")
+        os.chmod(handle.name, 0o644)
+        os.replace(handle.name, path)
+    except OSError:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+# --- the command line ------------------------------------------------------
+
+def take_value(args, option, what):
+    """The value of an option: a value, never another option."""
+    if not args:
+        raise UsageError("%s needs %s" % (option, what))
+    value = args.pop(0)
+    if value.startswith("-"):
+        raise UsageError("%s needs %s, not the option %s" % (option, what, value))
+    return value
+
+
+def parse_args(argv):
+    """The command line.  Raises UsageError."""
+    options = {"load": False, "assume_loaded": False, "json": False, "jsonl": False,
+               "report": None,
+               "registry": default_registry_dir(), "pciconf": "/usr/sbin/pciconf",
+               "pciconf_file": None, "fake": None, "capture": None, "device": None,
+               "arch": None, "mode": "detect", "providers": [], "check_ids": [],
+               "list": False, "module_dirs": list(MODULE_DIRS),
+               "command": None, "runs": [], "last": None,
+               "changed": False, "counters": False, "db": None, "no_db": False}
+    args = list(argv)
+    if args and args[0] in COMMANDS:
+        options["command"] = args.pop(0)
+    while args:
+        argument = args.pop(0)
+        if argument in ("-h", "--help"):
+            print(EXIT_HELP)
+            raise SystemExit(0)
+        if argument == "--load":
+            options["load"] = True
+            options["mode"] = "load"
+        elif argument == "--assume-loaded":
+            options["assume_loaded"] = True
+            options["mode"] = "assume-loaded"
+        elif argument == "--list":
+            options["list"] = True
+        elif argument == "--check":
+            value = take_value(args, "--check", "a comma separated list of check ids")
+            options["check_ids"] = [name.strip() for name in value.split(",") if name.strip()]
+            if not options["check_ids"]:
+                raise UsageError("--check needs the id of at least one check")
+            options["mode"] = "check"
+        elif argument == "--json":
+            options["json"] = True
+        elif argument == "--jsonl":
+            options["jsonl"] = True
+        elif argument == "--report":
+            options["report"] = take_value(args, "--report", "a FILE name")
+        elif argument == "--registry":
+            options["registry"] = take_value(args, "--registry", "a DIR")
+        elif argument == "--pciconf-file":
+            options["pciconf_file"] = take_value(args, "--pciconf-file", "a FILE name")
+        elif argument == "--fake":
+            options["fake"] = take_value(args, "--fake", "a FILE name")
+        elif argument == "--capture":
+            options["capture"] = take_value(args, "--capture", "a DIR")
+        elif argument == "--device":
+            options["device"] = take_value(args, "--device", "a SELECTOR")
+        elif argument == "--module-dir":
+            value = take_value(args, "--module-dir", "a DIR")
+            if not value.startswith("/"):
+                raise UsageError("--module-dir needs an absolute path, not %s" % value)
+            options["module_dirs"].append(value)
+        elif argument == "--arch":
+            options["arch"] = take_value(args, "--arch", "an ARCH")
+        elif argument == "--db":
+            options["db"] = take_value(args, "--db", "a PATH")
+        elif argument == "--no-db":
+            options["no_db"] = True
+        elif argument == "--last":
+            value = take_value(args, "--last", "a number of runs")
+            options["last"] = _number(value, "--last")
+            if options["last"] < 1:
+                raise UsageError("--last needs a number of runs that is at least one")
+        elif argument == "--changed":
+            options["changed"] = True
+        elif argument == "--counters":
+            options["counters"] = True
+        else:
+            options["runs"].append(argument)
+    options["runs"] = [_number(run, "a run id") for run in options["runs"]]
+    _check_read_back(options)
+    if options["db"] is not None and options["no_db"]:
+        raise UsageError("--db and --no-db cannot be given together: one names "
+                         "the file of the record, the other keeps no record")
+    if options["json"] and options["jsonl"]:
+        raise UsageError("--json and --jsonl cannot be given together")
+    if options["load"] and options["assume_loaded"]:
+        raise UsageError("--load and --assume-loaded cannot be given together: "
+                         "one loads the driver and the other does not")
+    if options["list"] and (options["load"] or options["assume_loaded"]
+                             or options["check_ids"] or options["json"]
+                             or options["jsonl"] or options["report"]):
+        raise UsageError("--list says what the checks are: it takes nothing else")
+    if options["arch"] is not None:
+        arch = normalize_arch(options["arch"])
+        if arch is None:
+            raise UsageError("--arch %s is not an architecture this tool understands"
+                             % options["arch"])
+        options["arch"] = arch
+    return options
+
+
+def _number(text, what):
+    """A number, or the reason it is not one."""
+    try:
+        return int(text)
+    except ValueError:
+        raise UsageError("%s must be a number, not %s" % (what, text))
+
+
+def _check_read_back(options):
+    """The options of a command that reads the record back.
+
+    The commands that read the record back take a database and nothing
+    else: they do not look at the machine, they do not load anything and
+    they do not make a run.
+    """
+    command = options["command"]
+    if command is None:
+        if options["runs"]:
+            raise UsageError("unknown argument: %s" % options["runs"][0])
+        if options["last"] is not None:
+            raise UsageError("--last belongs to a command that reads the record "
+                             "back, not to a run")
+        for name in ("changed", "counters"):
+            if options[name]:
+                raise UsageError("--%s belongs to a command that reads the record "
+                                 "back, not to a run" % name)
+        return
+    run_only = ("load", "assume_loaded", "check_ids", "report", "list", "fake",
+                "capture", "device", "pciconf_file", "arch")
+    for name in run_only:
+        if options[name]:
+            raise UsageError("gpu-check %s reads the record back: it takes no run "
+                             "options" % command)
+    if options["no_db"]:
+        raise UsageError("--no-db belongs to a run: gpu-check %s reads the record "
+                         "back" % command)
+    wanted = {"history": 0, "show": 1, "compare": 2, "export": 1, "properties": 1}
+    if len(options["runs"]) != wanted[command]:
+        raise UsageError("gpu-check %s takes %d run %s, not %d"
+                         % (command, wanted[command],
+                            "id" if wanted[command] == 1 else "ids",
+                            len(options["runs"])))
+    if command != "properties" and options["changed"]:
+        raise UsageError("--changed belongs to the properties command")
+    if command != "properties" and options["counters"]:
+        raise UsageError("--counters belongs to the properties command")
+    if command != "history" and options["last"] is not None:
+        raise UsageError("--last belongs to the history command")
+
+
+def read_back(options):
+    """Read the record back.  Returns the exit status."""
+    mode = commands.JSON if options["json"] else \
+        commands.JSONL if options["jsonl"] else commands.TABLE
+    try:
+        database = db.Database(options["db"])
+    except db.DatabaseError as exc:
+        print("%s: the record of the runs cannot be read: %s" % (TOOL, exc),
+              file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        command = options["command"]
+        if command == "history":
+            last = options["last"] if options["last"] is not None \
+                else commands.DEFAULT_HISTORY
+            commands.history(database, last, mode)
+        elif command == "show":
+            commands.show(database, options["runs"][0], mode)
+        elif command == "compare":
+            commands.compare(database, options["runs"][0], options["runs"][1], mode)
+        elif command == "export":
+            commands.export(database, options["runs"][0], mode)
+        elif command == "properties":
+            commands.properties(database, options["runs"][0], options["changed"],
+                                options["counters"], mode)
+    except db.DatabaseError as exc:
+        print("%s: the record of the runs cannot be read: %s" % (TOOL, exc),
+              file=sys.stderr)
+        return EXIT_USAGE
+    finally:
+        database.close()
+    return EXIT_OK
+
+
+def main(argv):
+    try:
+        options = parse_args(argv)
+    except UsageError as exc:
+        print("%s: %s" % (TOOL, exc), file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return EXIT_USAGE
+    if options["list"]:
+        print_list()
+        return EXIT_OK
+    if options["command"] is not None:
+        return read_back(options)
+    if options["fake"] is not None:
+        try:
+            with open(options["fake"], encoding="utf-8") as handle:
+                fake = json.load(handle)
+        except OSError as exc:
+            print("%s: the fake file %s cannot be read: %s"
+                  % (TOOL, safe_path(options["fake"]), exc.strerror or exc), file=sys.stderr)
+            return EXIT_USAGE
+        except ValueError as exc:
+            print("%s: the fake file %s is not JSON: %s"
+                  % (TOOL, safe_path(options["fake"]), exc), file=sys.stderr)
+            return EXIT_USAGE
+        if not isinstance(fake, dict):
+            print("%s: the fake file %s is not a JSON object"
+                  % (TOOL, safe_path(options["fake"])), file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            check_fake(fake)
+        except UsageError as exc:
+            print("%s: the fake file %s cannot be used: %s"
+                  % (TOOL, safe_path(options["fake"]), exc), file=sys.stderr)
+            return EXIT_USAGE
+        options["fake"] = fake
+    if options["load"] and options["fake"] is None and options["capture"] is None \
+            and os.geteuid() != 0:
+        print("%s: --load needs root: it loads kernel modules.  Run it as root, "
+              "or use --fake FILE for a run that loads nothing." % TOOL, file=sys.stderr)
+        return EXIT_USAGE
+    if options["load"] and options["registry"] != default_registry_dir():
+        print("%s: --load uses the default provider registry only: it loads kernel "
+              "modules, and a registry of your own does not name them" % TOOL,
+              file=sys.stderr)
+        return EXIT_USAGE
+    return run(options)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        # the reader went away: say nothing on stdout, and do not let the
+        # interpreter complain about the broken pipe while it flushes.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(EXIT_CANNOT_LOOK)
+    except KeyboardInterrupt:
+        sys.exit(EXIT_CANNOT_LOOK)
+    except SystemExit:
+        raise
+    except Exception as exc:  # never a traceback: the status says what failed
+        print("%s: internal error: %s: %s" % (TOOL, type(exc).__name__, exc),
+              file=sys.stderr)
+        sys.exit(EXIT_USAGE)

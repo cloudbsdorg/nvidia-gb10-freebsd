@@ -1,0 +1,16 @@
+{
+ "kldload": {
+  "nvidia_gsp_ga10x_fw": {"status": "ok", "message": "the firmware module was loaded"},
+  "nvidia": {"status": "ok", "message": "the driver module was loaded"},
+  "nvidia-modeset": {"status": "ok", "message": "the modeset module was loaded"},
+  "nvidia-drm": {"status": "ok", "message": "the drm module was loaded"}
+ },
+ "identity": {"status": "pass", "pci_vendor": "0x10de", "pci_device": "0x2d04",
+              "uuid": "GPU-11111111-2222-3333-4444-555555555555",
+              "message": "the device opened and its identity matches the card"},
+ "memory": {"status": "pass", "message": "1 MiB was allocated, mapped, written and read back"},
+ "display": {"status": "pass", "message": "the display device has a connected output"},
+ "vulkan": {"status": "not_available", "message": "no native Vulkan ICD is installed"},
+ "compute": {"status": "not_available", "message": "no native CUDA library is installed"},
+ "uvm": {"status": "not_available", "message": "no UVM module is installed"}
+}

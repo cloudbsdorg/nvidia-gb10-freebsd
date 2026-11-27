@@ -3,5 +3,10 @@
   {"schema": "schema/make-install-2.schema.json", "fixture": "tests/fixtures/make-install.json", "format": "json", "command": "make install ACCEPT_NVIDIA_LICENSE=1 JSON=1"},
   {"schema": "schema/make-install-2.schema.json", "fixture": "tests/fixtures/make-install-progress.jsonl", "format": "jsonl", "command": "make install JSONL=1"},
   {"schema": "schema/stock-install-step-1.schema.json", "fixture": "tests/fixtures/stock-install-steps.jsonl", "format": "jsonl", "command": "sh tests/install-e2e/guest.sh ... (RESULTS/steps.jsonl)"},
-  {"schema": "schema/stock-install-summary-1.schema.json", "fixture": "tests/fixtures/stock-install-summary.json", "format": "json", "command": "sh tests/install-e2e/run.sh ... (RESULTS/summary.json)"}
+  {"schema": "schema/stock-install-summary-1.schema.json", "fixture": "tests/fixtures/stock-install-summary.json", "format": "json", "command": "sh tests/install-e2e/run.sh ... (RESULTS/summary.json)"},
+  {"schema": "schema/gpu-check-1.schema.json", "fixture": "tests/fixtures/gpu-check.json", "format": "json", "command": "scripts/gpu-check --json --pciconf-file tests/data/gpu-check/pciconf-mixed.txt --arch arm64"},
+  {"schema": "schema/gpu-check-stream-1.schema.json", "fixture": "tests/fixtures/gpu-check.jsonl", "format": "jsonl", "command": "scripts/gpu-check --jsonl --pciconf-file tests/data/gpu-check/pciconf-mixed.txt --arch arm64"},
+  {"schema": "schema/gpu-check-history-1.schema.json", "fixture": "tests/fixtures/gpu-check-history.json", "format": "json", "command": "scripts/gpu-check history --db DB --json"},
+  {"schema": "schema/gpu-check-compare-1.schema.json", "fixture": "tests/fixtures/gpu-check-compare.json", "format": "json", "command": "scripts/gpu-check compare RUN RUN --db DB --json"},
+  {"schema": "schema/gpu-check-properties-1.schema.json", "fixture": "tests/fixtures/gpu-check-properties.json", "format": "json", "command": "scripts/gpu-check properties RUN --changed --counters --db DB --json"}
 ]}

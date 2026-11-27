@@ -1,0 +1,138 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 26, 2026
+.Dt GPU-CHECK.DB 5
+.Os
+.Sh NAME
+.Nm gpu-check.db
+.Nd the database of the runs of gpu-check
+.Sh DESCRIPTION
+The
+.Nm
+file is the record of the runs of
+.Xr gpu-check 8 .
+It is a SQLite database, and it holds one table for the runs, one for the
+cards, one for the checks, one for the properties of the machine and one
+for the events that are the source of truth of all of them.
+.Pp
+Every run of the tool writes to it.
+The tool never reads it while a run lasts: the events are written as the
+run goes, and the tables that hold the current state are written in the
+same transaction as the event that caused them.
+When a machine is pulled out in the middle of a run, the events that were
+written are still there and the run is marked as not finished.
+.Pp
+The file is written in the write-ahead log mode, so a reader may read it
+while a run is writing to it.
+Each event is its own transaction, and a snapshot of the properties is one
+transaction, so a snapshot is either whole or not there at all.
+.Pp
+The schema of the file is versioned.
+The version is in the
+.Pa schema_version
+table, as a string and as its three parts, so a reader never has to parse
+a version to compare it.
+A file whose version is newer than the one the tool knows is refused, and
+the refusal names both versions: the one of the file and the one of the
+tool.
+The migrations are in
+.Pa /usr/local/share/gpu-check/schema ,
+one file per version, and they are applied when the file is new and when
+the file is older than they are.
+.Sh TABLES
+.Bl -tag -width "property_values" -compact
+.It Pa schema_version
+The version of the file: one row, always.
+.It Pa migrations
+The migrations that have been applied, in the order they were applied.
+.It Pa platforms
+The operating systems a run happened on.
+The core of the tool names no platform of its own; it asks this table.
+.It Pa sources
+Where a fact came from: the sysctl tree, the kernel environment, the
+loader, the module list, the device tree, the operating system.
+.It Pa property_keys
+The names of the properties, one per source.
+.It Pa properties
+What a property is: its kind, fixed the first time it is seen.
+.It Pa property_classes
+How a property behaves in one run: constant, changing or a counter.
+The class is of the run and not of the key, so a key that is busy in one
+run may be quiet in the next.
+.It Pa property_values
+The value history of a property: one row per value, closed when the value
+changes.
+A value that does not change does not make a row.
+.It Pa observations
+What a snapshot saw: the link between a snapshot and the value of a
+property at that moment.
+.It Pa snapshots
+The state of the machine at a point of the run: one at the start of the
+run, before the checks have run, and one at the end, after they have run.
+The difference between the two is what the run changed.
+.It Pa runs
+The runs: when they started and ended, the tool and its version, the mode,
+the architecture, the exit status, the host as a salted hash, the commit
+of the test kit and the boot environment.
+.It Pa devices
+The cards of a run: their identity, the decision that was taken about them
+and the reason for it.
+.It Pa device_features , Pa device_arch_values , Pa device_warnings , Pa device_loaded
+The lists of a card.
+A list is a table of its own and never a column.
+.It Pa check_defs , Pa check_deps
+What each check is and what it needs.
+A check keeps its id when its title changes.
+.It Pa run_checks , Pa check_steps
+What a check did in a run, and the steps it took.
+.It Pa metric_defs
+The metrics the tool knows.
+A metric that is not defined here has no value: the tool refuses to invent
+one.
+.It Pa measurements
+The value of a metric, at a moment, for a card.
+.It Pa blobs
+The pieces of a run that are too big, or too odd, to be a column.
+A blob is never parsed for a result; it is insurance.
+.It Pa events
+The events.
+Everything else is derived from these rows, and these rows are only ever
+added to.
+.It Pa event_data
+What an event carried: one row per name and value, so the payload of an
+event is a table and not a document.
+.El
+.Pp
+The keys are integers and the natural key of a row is unique.
+The foreign keys are declared and enforced, and the check constraints
+hold what a column may hold.
+There is no list in a column and there is no document in a column.
+.Sh READING A RUN BACK
+The
+.Nm gpu-check
+command reads the file back, and the answers it gives are the same facts
+the tables hold:
+.Bl -tag -width "compare" -compact
+.It Cm gpu-check history
+The runs that are in the file.
+.It Cm gpu-check show Ar run
+One run, as the document of the run.
+.It Cm gpu-check compare Ar run Ar run
+Two runs, side by side.
+.It Cm gpu-check export Ar run
+One run, as JSON.
+.It Cm gpu-check properties Ar run
+The properties of a run, and the ones that changed.
+.El
+.Pp
+The events are the source of truth and everything else is derived from
+them, so a reader may rebuild the tables from the events alone.
+.Sh SEE ALSO
+.Xr sqlite3 1 ,
+.Xr gpu-check 8
+.Sh CAVEATS
+The file holds no personal data: the host is written as a salted hash and
+the UUID of a card is hashed, never printed.
+The file is not a secret, but it holds the state of the machine it was
+written on.

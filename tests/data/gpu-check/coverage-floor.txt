@@ -1,0 +1,26 @@
+# The floor of the coverage of every file of the library of the gpu-check
+# command.  One line per file: the name of the file, a space, and the floor
+# (the lowest percentage of the lines and of the branches the file may have).
+#
+# The gate (tests/gpu_check_coverage_gate.py) fails when a file is below its
+# floor, and says RAISE when a file is above it: the floors are a ratchet
+# and they may only go up.  A file without a floor has no gate: the gate
+# fails closed.
+#
+# The floors are the numbers the code has with the tests that always run:
+# the suite of the tool, the unit tests of the library and the cases of the
+# database.  A machine that also has the pinned NVIDIA sources runs the
+# checks against the fake backend of the library as well, and reaches a
+# little more.
+__init__.py 100
+checks.py 94
+commands.py 67
+context.py 100
+db.py 64
+environment.py 92
+events.py 87
+metrics.py 62
+probes.py 74
+redact.py 82
+registry.py 95
+table.py 92

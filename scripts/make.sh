@@ -233,6 +233,7 @@ setup() {
 	TREE=$WORK/build/tree
 	STAGE=$WORK/stage
 	LIBOBJ=$WORK/build/libnvrm-obj
+	DBOBJ=$WORK/build/gpubcheckdb-obj
 	DRMOBJ=$WORK/build/drm-obj
 	GB10_WORK=$WORK
 	TMPDIR=$WORK/tmp
@@ -1254,6 +1255,7 @@ $_mt
 EOF
 	build_drm
 	build_libnvrm
+	build_gpu_check_db
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || die "missing after the build: $TREE/$_ko"
 		lld_check "$TREE/$_ko"
@@ -1294,6 +1296,21 @@ build_libnvrm() {
 	step nvrm-info env MAKEOBJDIR="$LIBOBJ/info" LIBNVRM_OBJ="$LIBOBJ/lib" /usr/bin/make -C "$repo/lib/libnvrm/nvrm-info"
 }
 
+# The database of the runs: the library that holds it (lib/gpu-check-db), the
+# migrations it applies and the library with only the fake provider, which is
+# the proof that the core of the library needs no operating system.  The
+# objects go under WORK (MAKEOBJDIR), so the checkout stays clean.
+build_gpu_check_db() {
+	rm -rf -- "$DBOBJ"
+	mkdir -p -- "$DBOBJ"
+	step gpubcheckdb env MAKEOBJDIR="$DBOBJ" /usr/bin/make -C "$repo/lib/gpu-check-db"
+	step gpubcheckdb-fake env /usr/bin/make -C "$repo/lib/gpu-check-db/fake" \
+	    "LIB=$DBOBJ/libgpubcheckdb_fake.so"
+	[ -f "$DBOBJ/libgpubcheckdb.so.1" ] || die "build: libgpubcheckdb.so.1 was not built"
+	[ -f "$DBOBJ/libgpubcheckdb.a" ] || die "build: libgpubcheckdb.a was not built"
+	[ -f "$DBOBJ/libgpubcheckdb_fake.so" ] || die "build: libgpubcheckdb_fake.so was not built"
+}
+
 # Build stamp: what the modules were built from.  install rebuilds when it
 # differs: another kernel tree or source top, other drm-kmod sources, new
 # patches or scripts.
@@ -1304,7 +1321,7 @@ build_stamp() {
 	[ -f "$DRMKMODDIR/linuxkpi_version.mk" ] && _drm=$(sha256 -q "$DRMKMODDIR/linuxkpi_version.mk")
 	[ -d "$DRMKMODDIR/.git" ] && _drm="$_drm $(git -C "$DRMKMODDIR" rev-parse HEAD 2>/dev/null || true)"
 	printf 'drmkmoddir %s %s\n' "$DRMKMODDIR" "$_drm"
-	printf 'tree %s\n' "$(cd "$repo" && find SOURCES patches scripts src lib rc.d man devd -type f | sort | xargs sha256 -q | sha256 -q)"
+	printf 'tree %s\n' "$(cd "$repo" && find SOURCES patches scripts src lib rc.d man devd schema -type f | sort | xargs sha256 -q | sha256 -q)"
 }
 
 # --- test -----------------------------------------------------------------
@@ -1392,6 +1409,43 @@ stage() {
 	install -m 555 -- "$LIBOBJ/info/nvrm-info" "$_p/sbin/nvrm-info"
 	install -m 444 -- "$_l/nvrm-info/nvrm-info.8" "$_p/share/man/man8/nvrm-info.8"
 	install -m 444 -- "$_l/schema/nvrm-info-1.schema.json" "$_p/share/nvrm/schema/"
+	# the card check: the tool, its library, its man page, its schemas, the
+	# provider records it reads and the probe adapters.  The records are
+	# data and the adapters hold the vendor knowledge: the core of the tool
+	# names no vendor.
+	mkdir -p "$_p/share/man/man8" "$_p/share/gpu-check/schema" "$_p/share/gpu-check/providers" \
+	    "$_p/share/gpu-check/adapters" "$_p/share/gpu-check/lib/gpu_check"
+	install -m 555 -- "$repo/scripts/gpu-check" "$_p/sbin/gpu-check"
+	install -m 444 -- "$repo/man/gpu-check.8" "$_p/share/man/man8/gpu-check.8"
+	for _lib in "$repo"/lib/gpu-check/gpu_check/*.py; do
+		install -m 444 -- "$_lib" "$_p/share/gpu-check/lib/gpu_check/"
+	done
+	install -m 444 -- "$repo/schema/gpu-check-1.schema.json" "$_p/share/gpu-check/schema/"
+	install -m 444 -- "$repo/schema/gpu-check-stream-1.schema.json" "$_p/share/gpu-check/schema/"
+	for _rec in "$repo"/data/providers/*.json; do
+		install -m 444 -- "$_rec" "$_p/share/gpu-check/providers/"
+	done
+	for _ad in "$repo"/scripts/adapters/*.py; do
+		install -m 444 -- "$_ad" "$_p/share/gpu-check/adapters/"
+	done
+	# the database of the runs: the C library that holds it, the migrations it
+	# applies to a new file, the schemas of the answers it gives and the man
+	# page of the file.  The library is what the tool loads; the migrations are
+	# what it applies when the file is new, so both are installed.
+	mkdir -p "$_p/share/man/man5" "$_p/include/gpubcheckdb"
+	install -m 444 -- "$DBOBJ/libgpubcheckdb.so.1" "$_p/lib/libgpubcheckdb.so.1"
+	ln -s libgpubcheckdb.so.1 "$_p/lib/libgpubcheckdb.so"
+	install -m 444 -- "$DBOBJ/libgpubcheckdb.a" "$_p/lib/libgpubcheckdb.a"
+	install -m 444 -- "$DBOBJ/libgpubcheckdb_fake.so" "$_p/lib/libgpubcheckdb_fake.so"
+	install -m 444 -- "$repo/lib/gpu-check-db/gdb.h" "$_p/include/gpubcheckdb/gdb.h"
+	install -m 444 -- "$repo/lib/gpu-check-db/gdb_platform.h" "$_p/include/gpubcheckdb/gdb_platform.h"
+	install -m 444 -- "$repo/man/gpu-check.db.5" "$_p/share/man/man5/gpu-check.db.5"
+	for _sql in "$repo"/schema/gpu-check-db-*.sql; do
+		install -m 444 -- "$_sql" "$_p/share/gpu-check/schema/"
+	done
+	for _js in gpu-check-history-1 gpu-check-compare-1 gpu-check-properties-1; do
+		install -m 444 -- "$repo/schema/$_js.schema.json" "$_p/share/gpu-check/schema/"
+	done
 }
 
 # allowed_path PATH PREFIX: the fixed set of paths make install may write.
@@ -1410,8 +1464,38 @@ allowed_path() {
 	case ${_ap#"$_pp"} in
 	"$_ap") return 1 ;;
 	/etc/rc.d/nvidia_linux|/etc/devd/nvidia_gb10.conf|/lib/libnvrm.so.1|/lib/libnvrm.so|/lib/libnvrm.a|\
-	/include/nvrm/nvrm.h|/sbin/nvrm-info|/share/man/man7/nvrm.7|/share/man/man8/nvrm-info.8|\
+	/include/nvrm/nvrm.h|/sbin/nvrm-info|/sbin/gpu-check|/share/man/man8/gpu-check.8|\
+	/share/man/man7/nvrm.7|/share/man/man8/nvrm-info.8|\
 	/share/nvrm/schema/nvrm-info-1.schema.json|/share/licenses/$name/NVIDIA-LICENSE|/share/licenses/$name/LICENSE)
+		return 0 ;;
+	/share/gpu-check/schema/gpu-check-1.schema.json|/share/gpu-check/schema/gpu-check-stream-1.schema.json)
+		return 0 ;;
+	/share/gpu-check/schema/gpu-check-db-*.sql)
+		case ${_ap##*/} in
+		*[!A-Za-z0-9_.-]*) return 1 ;;
+		esac
+		return 0 ;;
+	/share/gpu-check/schema/gpu-check-history-1.schema.json|\
+	/share/gpu-check/schema/gpu-check-compare-1.schema.json|\
+	/share/gpu-check/schema/gpu-check-properties-1.schema.json|\
+	/lib/libgpubcheckdb.so.1|/lib/libgpubcheckdb.so|/lib/libgpubcheckdb.a|\
+	/lib/libgpubcheckdb_fake.so|/include/gpubcheckdb/gdb.h|/include/gpubcheckdb/gdb_platform.h|\
+	/share/man/man5/gpu-check.db.5)
+		return 0 ;;
+	/share/gpu-check/lib/gpu_check/*.py)
+		case ${_ap##*/} in
+		*[!A-Za-z0-9_.-]*) return 1 ;;
+		esac
+		return 0 ;;
+	/share/gpu-check/providers/*.json)
+		case ${_ap##*/} in
+		*[!A-Za-z0-9_.-]*) return 1 ;;
+		esac
+		return 0 ;;
+	/share/gpu-check/adapters/*.py)
+		case ${_ap##*/} in
+		*[!A-Za-z0-9_.-]*) return 1 ;;
+		esac
 		return 0 ;;
 	/share/man/man4/nvidia*.4|/share/man/man3/nvrm*.3)
 		case ${_ap##*/} in
@@ -2112,6 +2196,8 @@ do_install() {
 		[ -f "$TREE/$_ko" ] || _ok=0
 	done
 	[ -f "$LIBOBJ/info/nvrm-info" ] || _ok=0
+	[ -f "$DBOBJ/libgpubcheckdb.so.1" ] || _ok=0
+	[ -f "$DBOBJ/libgpubcheckdb_fake.so" ] || _ok=0
 	if [ "$_ok" = 1 ] && [ -f "$WORK/build/stamp" ] && [ "$(build_stamp)" = "$(cat "$WORK/build/stamp")" ]; then
 		install_progress build "is current"
 	else
@@ -2894,7 +2980,52 @@ do_test_install() {
 }
 
 target=${1:-}
+# do_check_card: the card check of this machine.  The tool only looks:
+# the load is a separate command the user runs as root.  The switches
+# (CHECK_JSON, CHECK_LOAD, CHECK_REPORT) reach this script through the
+# environment, never as the text of a recipe, and each one is checked
+# here before it is used: the tool gets fixed flags and one quoted file
+# name, so no text of a switch is ever run by a shell.
+do_check_card() {
+	_gc=$repo/scripts/gpu-check
+	[ -f "$_gc" ] || die "check-card: scripts/gpu-check is missing"
+	command -v python3 > /dev/null 2>&1 || \
+	    die "check-card: python3 is not installed, and the card check needs it"
+	if [ -n "${ARGS:-}" ]; then
+		die "check-card: ARGS is gone: it was free text in a recipe, and the shell ran it.  Use CHECK_JSON=1, CHECK_LOAD=1 or CHECK_REPORT=FILE"
+	fi
+	case ${CHECK_JSON:-0} in
+	0|1) ;;
+	*) die "check-card: CHECK_JSON must be 0 or 1" ;;
+	esac
+	case ${CHECK_LOAD:-0} in
+	0|1) ;;
+	*) die "check-card: CHECK_LOAD must be 0 or 1" ;;
+	esac
+	_nl='
+'
+	case ${CHECK_REPORT:-} in
+	'') ;;
+	-*) die "check-card: CHECK_REPORT needs a FILE name, not an option" ;;
+	*"$_nl"*) die "check-card: CHECK_REPORT must be one line" ;;
+	esac
+	if [ "${CHECK_JSON:-0}" = 1 ]; then
+		set -- "$@" --json
+	fi
+	if [ "${CHECK_LOAD:-0}" = 1 ]; then
+		set -- "$@" --load
+	fi
+	if [ -n "${CHECK_REPORT:-}" ]; then
+		set -- "$@" --report "$CHECK_REPORT"
+	fi
+	exec python3 "$_gc" "$@"
+}
+
 case $target in
+check-card)
+	shift
+	do_check_card "$@"
+	;;
 preflight)
 	shift
 	while [ $# -gt 0 ]; do
@@ -2966,7 +3097,7 @@ _build-stamp)
 	build_stamp
 	;;
 *)
-	printf 'usage: sh scripts/make.sh preflight|install-prereqs|configure|build|test|install|deinstall|test-install|clean\n' >&2
+	printf 'usage: sh scripts/make.sh check-card|preflight|install-prereqs|configure|build|test|install|deinstall|test-install|clean\n' >&2
 	exit 2
 	;;
 esac

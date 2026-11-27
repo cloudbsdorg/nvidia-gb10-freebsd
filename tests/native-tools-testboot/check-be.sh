@@ -31,12 +31,15 @@
 #     required_modules entry: drm_ready loads amdgpu), and cloudbsd_hwprobe, when it is enabled, has the command
 #     "probe" (it loads no KMS driver);
 #   - the kit: the version file holds the commit; the rc script, guard.sh, summarize.py, gpu-detect.sh, the schema,
-#     testboot-return and this script are the commit's; gpu-detect.sh and testboot-return equal their VENDOR pins;
-#     every static row has a known status;
+#     testboot-return and this script are the commit's; the tool the kit measures the card with (scripts/gpu-check),
+#     its library, the adapter of the vendor and the provider records are the commit's too; gpu-detect.sh and
+#     testboot-return equal their VENDOR pins; every static row has a known status; the library that holds the
+#     database of the runs, when the clone has one, equals the hash beside it and the migrations are in the kit (a
+#     clone without it is a note: the run is recorded as a stream);
 #   - dead-man (static): the rc script arms the timer before its first kldload and gates the loads on it, the default
 #     is a positive number of minutes, no rc.conf sets it to 0, the marker holds the test BE name, the shutdown call
 #     uses only nvidia_native_tools_testboot_shutdown, and shutdown(8) is in the clone; loader.conf has the panic settings;
-#   - order: the firmware module is loaded before nvidia.ko, the GPU is opened as root before nvrm-info runs;
+#   - order: the firmware module is loaded before nvidia.ko, the GPU is opened as root before gpu-check runs;
 #   - the one-shot is enabled, every other *_testboot_enable is NO, the owner of the run directory is recorded, and
 #     the copy-out directory is absolute and not on a boot environment dataset (zfs list of its nearest existing
 #     parent, on this host).
@@ -114,6 +117,7 @@ SCR=$(mktemp -d "${TMPDIR:-/var/run}/nvnt-check-scr.XXXXXXXX") || exit 2
 rc=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; rc=1; }
+note() { echo "note $*"; }
 MODS=$MNT/boot/modules.nvnative-test
 KROOT=$MNT/usr/local/share/nvidia-native-tools-test
 RCS=$MNT/usr/local/etc/rc.d/nvidia_native_tools_testboot
@@ -159,6 +163,19 @@ for _f in nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 	_l=$(guard_elf "$MODS/$_f") && ok "${_l#* }" || bad "${_l#* }"
 done
 if [ -f "$KROOT/SHA256.txt" ] && cmp -s "$SHAFILE" "$KROOT/SHA256.txt"; then ok "the installed hash list is the given one"; else bad "the installed hash list is missing or differs from $SHAFILE"; fi
+# the library of the database of the runs: with it the run is recorded in a database (the file is copied out with the
+# run), without it the run is recorded as a stream only.  Its absence is a note, not a refusal: the kit still measures
+# the card.
+if [ -f "$KROOT/libgpubcheckdb.so.1" ]; then
+	_dbl=$(sha256 -q "$KROOT/libgpubcheckdb.so.1")
+	_dbw=$(cat "$KROOT/gpu-check-db.sha256" 2> /dev/null)
+	if [ "$_dbl" = "$_dbw" ]; then ok "the library of the database of the runs is installed and equals its hash ($_dbl)"
+	else bad "the library of the database of the runs is $_dbl, the hash beside it says ${_dbw:-nothing}"; fi
+	_dbs=$(ls "$KROOT/repo/schema"/gpu-check-db-*.sql 2> /dev/null | wc -l | tr -d ' ')
+	[ "$_dbs" -ge 2 ] && ok "the migrations of the database are in the kit ($_dbs files)" || bad "the kit holds $_dbs migrations of the database, not the two it needs"
+else
+	note "the clone has no library of the database of the runs: the run will be recorded as a stream, not in a database (build it with: make -C lib/gpu-check-db, or install the product in the base boot environment)"
+fi
 
 # no Linux layer, no LinuxKPI driver
 _v() { sysrc -f "$RCC" -n "$1" 2> /dev/null; }
@@ -259,6 +276,13 @@ for _p in nvidia_native_tools_testboot:"$RCS" guard.sh:"$KROOT/guard.sh" summari
 	[ -f "$_dst" ] || { bad "$_n is not installed ($_dst)"; continue; }
 	git_ show "$COMMIT:tests/native-tools-testboot/$_n" 2> /dev/null | cmp -s - "$_dst" && ok "$_n is the one of commit $COMMIT" || bad "$_n differs from the one of commit $COMMIT"
 done
+# the tool the kit measures the card with: the tool, the library it runs the checks from, the adapter of the vendor
+# and the provider records.  The tool finds the three beside itself, so they must be in the same tree.
+for _p in scripts/gpu-check:"$KROOT/repo/scripts/gpu-check" scripts/adapters/0x10de.py:"$KROOT/repo/scripts/adapters/0x10de.py" lib/gpu-check/gpu_check/registry.py:"$KROOT/repo/lib/gpu-check/gpu_check/registry.py" data/providers/nvidia-open.json:"$KROOT/repo/data/providers/nvidia-open.json"; do
+	_n=${_p%%:*}; _dst=${_p#*:}
+	[ -f "$_dst" ] || { bad "$_n is not installed ($_dst): the kit cannot measure the card without it" >&2; continue; }
+	git_ show "$COMMIT:$_n" 2> /dev/null | cmp -s - "$_dst" && ok "$_n is the one of commit $COMMIT" || bad "$_n differs from the one of commit $COMMIT"
+done
 pin() { git_ show "$COMMIT:tests/native-tools-testboot/VENDOR" 2> /dev/null | awk -v f="$1" '$1 == "file" && $3 == f { on = 1; next } $1 == "file" { on = 0 } on && $1 == "sha256" { print $3; exit }'; }
 for _p in gpu-detect.sh:"$KROOT/gpu-detect.sh" testboot-return:"$MNT/usr/local/sbin/testboot-return"; do
 	_n=${_p%%:*}; _w=$(pin "$_n")
@@ -296,8 +320,8 @@ if [ -f "$RCS" ]; then
 	_lo=$(markof load-order)
 	grep -q 'for _k in nvidia_gsp_ga10x_fw nvidia nvidia-modeset; do' "$RCS" || _lo=
 	[ -n "$_lo" ] && ok "order: the firmware module is loaded first, then nvidia.ko and nvidia-modeset.ko (line $_lo)" || bad "order: no load loop with the firmware first"
-	_ro=$(markof root-open); _ni=$(markof nvrm-info)
-	[ -n "$_ro" ] && [ -n "$_ni" ] && [ "$_ro" -lt "$_ni" ] && ok "order: root opens the GPU (line $_ro) before nvrm-info runs (line $_ni)" || bad "order: the root open is not before nvrm-info"
+	_ro=$(markof root-open); _gc=$(markof gpu-check)
+	[ -n "$_ro" ] && [ -n "$_gc" ] && [ "$_ro" -lt "$_gc" ] && ok "order: root opens the GPU (line $_ro) before gpu-check runs (line $_gc)" || bad "order: the root open is not before gpu-check"
 	grep -v '^[[:space:]]*#' "$RCS" | grep -Eq 'kldload[^"]*linux|kldunload|bectl activate' && bad "the rc script loads a linux module, unloads a module or activates a BE" || ok "the rc script loads no linux module, unloads nothing, activates no BE"
 else
 	bad "the rc script is not installed"

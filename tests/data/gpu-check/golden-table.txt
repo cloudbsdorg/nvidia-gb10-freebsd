@@ -1,0 +1,21 @@
+gpu0 (pci0:0:2:0): nvidia 10de:2d04 (GB20X) supported: the backend rm-open covers the family gb20x
+CHECK           RESULT         DETAIL
+detect          pass           vendor 10de device 2d04 subsystem 1462:5351 class 030000, generation
+                               GB20X, board none
+decide          pass           the provider nvidia-open chose the backend rm-open: the backend
+                               rm-open covers the family gb20x
+firmware        pass           the firmware gsp_ga10x was loaded (the firmware module was loaded)
+driver-loaded   pass           the driver modules nvidia+nvidia-modeset+nvidia-drm were loaded
+device-open     pass           the device opened and its identity matches the card
+identity        pass           the device opened and its identity matches the card
+memory          pass           1 MiB was allocated, mapped, written and read back
+channel         not_tested     the fake does not answer the channel probe
+uvm             not_available  no UVM module is installed
+prime           not_tested     the fake does not answer the prime check
+display         pass           the display device has a connected output
+no-linux-layer  pass           the loaded modules are native: nvidia, nvidia-drm, nvidia-modeset,
+                               nvidia_gsp_ga10x_fw
+native-modules  pass           the loaded modules nvidia_gsp_ga10x_fw, nvidia, nvidia-modeset,
+                               nvidia-drm are native
+10 passed, 2 not tested, 1 not available
+note: this run answered from a fake file: it loaded nothing and proved nothing about this machine

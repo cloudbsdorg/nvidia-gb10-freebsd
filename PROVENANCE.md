@@ -109,3 +109,36 @@ no comments; `mksdk.sh` generates it from `cuda.h`.
 The test checks this. It fails if any file under `lib/cuda-native` or `tests/cuda-native` lacks
 the header, names NVIDIA Corporation, or carries another copyright line in any spelling. Two
 planted mutants prove that the check works.
+
+# Provenance: the card check (#2456)
+
+What was consulted to write the card check, the tool `scripts/gpu-check`, the provider record
+`data/providers/nvidia-open.json` and their tests. **No Linux kernel source was opened**, no
+file of the nouveau tree, no GPL file of any kind, and no file of NVIDIA's closed driver
+sources.
+
+## Permitted sources that were read
+
+| Source | Licence | Used for |
+|---|---|---|
+| NVIDIA's FreeBSD driver package 580.178.04, `doc/supported-gpus/supported-gpus.json` (the local copy under `~/work/gb10/sources/NVIDIA-FreeBSD-x86_64-580.178.04/doc/supported-gpus/`) and the `LICENSE` file beside it | zlib (the notice is in that directory) | the device id list of every generation of the provider record and the feature flags of those generations: `runtimepm`, `hdmi4k60rgb444`, `dpycbcr420`, `dpgsynccompatible`, `hdmigsynccompatible`, `vdpaufeatureset` and `kernelopen`. The file is never copied by hand: the record names the file, its sha256 and the fact that its lists are derived from it. |
+| `docs/DEVICE-DECISION.md` (our own design, Track #2455) | ours (BSD-3-Clause) | the decision model the card check implements: the layers (abstract device, class, family, board decorator), the indexed feature flags, the provider record, the decision codes (`supported`, `refused`, `no_provider`, with `below_policy`, `uncovered` and `not_built_<arch>`), the per-architecture build check, the binding and the exit codes |
+| this repository's `lib/libnvrm/include/nvrm/nvrm.h` and `lib/libnvrm/nvrm_fields.c` | ours (BSD-3-Clause) | the memory and channel checks of the tool (`nvrm_enumerate`, `nvrm_client_open`, `nvrm_va_reserve`, `nvrm_mem_alloc`, `nvrm_mem_map_cpu`, `nvrm_mem_write`, `nvrm_mem_read`, the export and the import of a memory object) and the identity fields the tool reads back from `nvrm-info --json` |
+
+## Not consulted
+
+- No Linux kernel source, local or online: nothing under `drivers/gpu`, `drivers/media`,
+  `drivers/pci` or any other GPL tree.
+- No file of the nouveau driver, and no file of NVIDIA's closed Linux driver sources.
+- No file of NVIDIA's driver sources at all: the generation names, the architecture values and
+  the firmware family names come from our own design document, which recorded them earlier.
+- No `cleanroom/dirty-notes`.
+
+## Licence of the result
+
+`scripts/gpu-check`, the library it runs the checks from (`lib/gpu-check/`), the vendor adapter
+(`scripts/adapters/0x10de.py`), `man/gpu-check.8`, the schemas, the tests and the documentation
+are BSD-3-Clause, like the repository. The provider record is ours, but the device id lists and
+the feature flags in it are derived from NVIDIA's `supported-gpus.json`, which is under the zlib
+licence; the record says so, in its `input` field, with the checksum of the file the lists come
+from.

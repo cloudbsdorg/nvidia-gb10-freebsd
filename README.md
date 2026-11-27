@@ -278,7 +278,162 @@ See `man/nvidia.4`.
 
 Today `nvidia.ko` loads both GSP firmware modules on every machine (amd64; arm64 loads the one it builds).
 [`docs/DEVICE-DECISION.md`](docs/DEVICE-DECISION.md) designs a step that decides, per card and before
-anything loads, which firmware and driver it gets. Design only; nothing changes yet.
+anything loads, which firmware and driver it gets. The [card check](#card-check) runs the first
+part of that design, the decision itself, and reports it.
+
+## Card check
+
+One command says whether a GPU of this machine works with our driver:
+
+```sh
+make check-card          # or: gpu-check
+```
+
+The make target takes switches, not free text: `CHECK_JSON=1` prints one JSON document,
+`CHECK_LOAD=1` loads the driver (as root) and `CHECK_REPORT=FILE` writes the document to a
+file. They reach the tool as fixed flags, so no text of a switch is ever run by a shell.
+
+Without a switch the tool only looks: it reads the display devices of the machine with
+`pciconf(8)`, asks every registered provider whether it covers each of them, and reports the
+decision with the reason. It loads no module and writes no file, it works as a normal user,
+and it works on a machine where nothing of ours is installed. The tool is Python 3 with the
+standard library only, so it needs `python3` (a package on FreeBSD).
+
+Every check is registered in one library, and each check says what it needs: the root of the
+machine, the driver loaded, or the checks that must run before it. The command holds no list of
+its own, so a check is one function in the library and nothing else changes.
+
+```text
+gpu0 (pci13:1:0:0): nvidia 10de:2d04 (GB20X) supported: the backend rm-open covers the family gb20x
+CHECK           RESULT      DETAIL
+detect          pass        vendor 10de device 2d04 subsystem 1462:5351 class 030000, generation
+                            GB20X, board none
+decide          pass        the provider nvidia-open chose the backend rm-open: the backend rm-open
+                            covers the family gb20x
+firmware        pass        the recorded run loaded the firmware module nvidia_gsp_ga10x_fw
+driver-loaded   pass        the recorded run loaded the driver modules nvidia+nvidia-modeset
+device-open     pass        a client opened on the card pci13:1:0:0
+identity        pass        the device opened and its identity matches the card
+memory          pass        19 steps passed
+channel         fail        create: the channel allocation failed (RM status 0x1f)
+uvm             not_tested  the recorded run did not test the unified memory interface
+prime           not_tested  the recorded run did not test the import path
+display         not_tested  the recorded run did not test the display path
+no-linux-layer  pass        the loaded modules are native: zfs, if_aq, filemon, vmm, hcons, hidmap,
+                            hms, hmt, hconf, hsctrl, ig4, imgact_binmisc, snd_uaudio, if_wg, cuse,
+                            mac_ntpd, nvidia_gsp_ga10x_fw, nvidia, nvidia-modeset
+native-modules  pass        the loaded modules nvidia_gsp_ga10x_fw, nvidia, nvidia-modeset are
+                            native
+9 passed, 1 failed, 3 not tested
+note: this run replayed a recorded run: it loaded nothing and proved nothing about this machine
+```
+
+That is the recorded run of 2026-11-26, replayed with `--capture`: the memory of the card
+passed all its steps, the channel of the card could not be created (the resource manager said
+`0x1f`), and the checks that did not run that day say so. The table has three columns: the
+check, its result, and the detail that says why. A detail that does not fit the width of the
+terminal wraps under its own row, so a reason is never cut in the middle. The result is coloured
+when the output is a terminal and plain text everywhere else (a file, a pipe, a test); `NO_COLOR`
+says no. The last line counts the rows.
+
+Every check that was not run says so and says why: a check is `pass`, `fail`, `not tested` or
+`not available`, and the reason names the cause. A card the decision refused is never touched:
+its rows say that the decision refused it, and nothing is loaded for it.
+
+The decisions are `supported`, `refused` and `no_provider`. A refusal carries a code:
+`below_policy` (the card is older than the floor the driver sets), `uncovered` (no backend of
+ours covers the card) or `not_built_<arch>` (the card needs a firmware or a backend that is not
+built for this architecture), and a `next` step that says what to do about it.
+
+To load the firmware and the driver of the cards the decision served, and to run every check on
+them, ask for it as root:
+
+```sh
+sudo gpu-check --load
+```
+
+That is the only mode that changes the machine. It loads the firmware first, then the driver,
+and then it runs every check: the identity of the card, its memory, its channel, and the
+environment of the machine.
+
+`--assume-loaded` runs every check and loads nothing: it is the mode of a machine that loaded
+the driver itself, such as a test boot that loads it and then watches what happens. The tool
+never loads a module in this mode, so the loader of the machine is left alone.
+
+`--check memory,channel` runs the checks that were named and the checks they depend on, and
+says for the others that they were not asked for. `--list` lists the checks and what each one
+needs. `--capture DIR` replays a recorded run instead of the machine: the cards, the steps and
+the facts of that run, with the result of the run of that day.
+
+For a machine-readable answer, `--json` prints one document and `--jsonl` prints a flushed
+stream of records: a header, a record per card, one record per check as it finishes, and an end
+record. The schema is `gpu-check.v1`
+([`schema/gpu-check-1.schema.json`](schema/gpu-check-1.schema.json),
+[`schema/gpu-check-stream-1.schema.json`](schema/gpu-check-stream-1.schema.json)), with the
+captured samples in [`schema/samples.json`](schema/samples.json). `--report FILE` writes the
+document to a file to attach to a report. The output holds no host name, no user name, no home
+path and no serial; the UUID of a card is hashed, never printed. Nothing is sent anywhere.
+
+The test-boot kit measures the card with this tool, so the rows of the kit that read the card
+are the words of the tool. The kit keeps only its own plumbing (the one-shot boot environment,
+the dead-man timer, the copy-out), and the probes of the library (the memory probe and the
+channel probe) are steps of the tool now, not programs the kit runs beside it.
+
+The decision comes from the provider records under [`data/providers`](data/providers), which are
+data and not code: one record per provider, holding the vendor it claims, the generations it
+covers, the firmware each of them needs and the backends it offers. A generation is the base of
+a card and a board is a decorator on top of it, so a board record may add a feature or override
+one, but it never decides whether a card is supported. The decision core of the tool itself names
+no vendor at all: the vendor knowledge lives in the provider records and in the probe adapters
+(`scripts/adapters/<vendor>.py`), one per vendor, and a lint in the test suite keeps it there.
+
+The device id lists and the feature flags of the generations come from NVIDIA's own
+`supported-gpus.json`, which is under the zlib licence; the record names the file and its
+checksum. See [`PROVENANCE.md`](PROVENANCE.md) and `man/gpu-check.8`.
+
+## The record of a run
+
+Every run of the card check is recorded in a SQLite database, so a run that happened last week can
+be read back, compared with the run of today, and the properties of the machine can be asked for.
+
+```sh
+gpu-check history            # the runs that are recorded, the newest first
+gpu-check show 3             # one run: the cards and the rows of their checks
+gpu-check compare 3 4        # two runs, and what ended differently in them
+gpu-check export 3 --json    # the document the run printed when it was made
+gpu-check properties 3       # the properties of a run, and the class of each
+gpu-check properties 3 --changed
+```
+
+The database is at `/var/db/gpu-check/` for root and at `$XDG_STATE_HOME/gpu-check/` for everybody
+else; `--db PATH` says where it goes and `--no-db` keeps no record at all. The tool is
+fail-closed: a run that cannot write its record stops and says why.
+
+The record is not a log file. Every state change of a run is an event, and the tables that hold
+the current state are written in the same transaction as the event that caused them, so they can
+be rebuilt from the events alone. The schema is versioned, and a file whose version is newer than
+the one the tool knows is refused, with both versions named. The schema is in the third normal
+form: the keys are integers, every reference is declared and enforced, a list is a table and
+never a column, and a value is a column of its own type or a blob.
+
+The table, the `--json` document and the `--jsonl` stream of a run are made of the same events,
+so they cannot drift: `gpu-check export RUN --json` is the same document, byte for byte, as the
+`--json` of the run when it was made.
+
+The properties are the state of the machine: the whole sysctl tree, the devices of the bus, the
+modules that are loaded, the environment of the kernel and of the loader, and what the kernel says
+it is. The machine is read twice in a run — once before the checks and once after them — and the
+difference between the two is what the run changed. A key that was not there and is there now is
+an event, and so is a key that was there and is not there any more. A key that is quiet in a run
+is `constant`, one that moves is `changing`, and one that only goes up is a `counter`: the
+counters are left out of `--changed` unless they are asked for.
+
+Nothing of an operating system is in the core of the library: a platform is a row of a table, and
+the work that needs an operating system is the work of a provider that registers itself. The
+FreeBSD provider and a fake one are in the tree, and the porting contract is in
+[`docs/GPU-CHECK-PLATFORMS.md`](docs/GPU-CHECK-PLATFORMS.md). The schema, the diagram and the
+reasoning behind every table are in [`docs/GPU-CHECK-DB.md`](docs/GPU-CHECK-DB.md), and the file
+itself is described in [`gpu-check.db(5)`](man/gpu-check.db.5).
 
 ## Diagnostics
 

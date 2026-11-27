@@ -1,0 +1,212 @@
+{
+ "schema": "gpu-check-capture/1",
+ "recorded": "2026-11-26T07:20:37Z",
+ "source": "the native tools test boot of 2026-11-26",
+ "devices": [
+  {
+   "card": {
+    "name": "vgapci1",
+    "selector": "pci13:1:0:0",
+    "vendor": "0x10de",
+    "device": "0x2d04",
+    "subvendor": "0x1462",
+    "subdevice": "0x5351",
+    "class": "0x030000",
+    "revision": "0xa1"
+   },
+   "firmware": {
+    "status": "pass",
+    "reason": "the recorded run loaded the firmware module nvidia_gsp_ga10x_fw"
+   },
+   "driver": {
+    "status": "pass",
+    "reason": "the recorded run loaded the driver modules nvidia+nvidia-modeset",
+    "modules": [
+     "nvidia",
+     "nvidia-modeset"
+    ]
+   },
+   "device_open": {
+    "status": "pass",
+    "reason": "a client opened on the card pci13:1:0:0"
+   },
+   "identity": {
+    "rm_index": 0,
+    "uuid_sha256": "sha256:2685e8a3bca6b52e",
+    "reason": "the device opened and its identity matches the card"
+   },
+   "memory": {
+    "steps": [
+     {
+      "name": "client_open",
+      "status": "pass",
+      "detail": "own RM session, VA space and spares (ALLOW_MAP)"
+     },
+     {
+      "name": "vaspace",
+      "status": "pass",
+      "detail": "base 0x100000 end 0x1fffffffff00000"
+     },
+     {
+      "name": "va_reserve",
+      "status": "pass",
+      "detail": "64 MiB"
+     },
+     {
+      "name": "alloc_vram",
+      "status": "pass",
+      "detail": "2 MiB"
+     },
+     {
+      "name": "vram_info",
+      "status": "pass",
+      "detail": "place video, page 65536, cpu attribute device"
+     },
+     {
+      "name": "alloc_sysmem",
+      "status": "pass",
+      "detail": "2 MiB"
+     },
+     {
+      "name": "map_gpu_vram",
+      "status": "pass",
+      "detail": "at the reservation start"
+     },
+     {
+      "name": "map_cpu_vram",
+      "status": "pass",
+      "detail": "read-write"
+     },
+     {
+      "name": "rw_vram",
+      "status": "pass",
+      "detail": "64 KiB written and read back equal"
+     },
+     {
+      "name": "map_gpu_sysmem",
+      "status": "pass",
+      "detail": "32 MiB into the reservation"
+     },
+     {
+      "name": "map_cpu_sysmem",
+      "status": "pass",
+      "detail": "read-write"
+     },
+     {
+      "name": "rw_sysmem",
+      "status": "pass",
+      "detail": "64 KiB written and read back equal"
+     },
+     {
+      "name": "export",
+      "status": "pass",
+      "detail": "descriptor"
+     },
+     {
+      "name": "second_client",
+      "status": "pass",
+      "detail": "opened"
+     },
+     {
+      "name": "import",
+      "status": "pass",
+      "detail": "the exported video memory"
+     },
+     {
+      "name": "read_import",
+      "status": "pass",
+      "detail": "the import reads the pattern"
+     },
+     {
+      "name": "va_release",
+      "status": "pass",
+      "detail": "released"
+     },
+     {
+      "name": "nothing_left",
+      "status": "pass",
+      "detail": "live objects 0, reservations 0, GPU maps 0, CPU maps 0"
+     },
+     {
+      "name": "no_refused_release",
+      "status": "pass",
+      "detail": "failed_releases 0"
+     }
+    ]
+   },
+   "channel": {
+    "steps": [
+     {
+      "name": "create",
+      "status": "fail",
+      "detail": "the channel allocation failed (RM status 0x1f)"
+     },
+     {
+      "name": "release",
+      "status": "not_reached",
+      "detail": "not reached"
+     },
+     {
+      "name": "latency",
+      "status": "not_reached",
+      "detail": "not reached"
+     },
+     {
+      "name": "stress",
+      "status": "not_reached",
+      "detail": "not reached"
+     },
+     {
+      "name": "isolation",
+      "status": "not_reached",
+      "detail": "not reached"
+     },
+     {
+      "name": "cleanup",
+      "status": "pass",
+      "detail": "live_channels 0, live_mem 0, live_bytes 0, live_reservations 0, live_gpu_maps 0, live_cpu_maps 0, failed_releases 0"
+     }
+    ]
+   },
+   "uvm": {
+    "status": "not_tested",
+    "reason": "the recorded run did not test the unified memory interface"
+   },
+   "prime": {
+    "status": "not_tested",
+    "reason": "the recorded run did not test the import path"
+   },
+   "display": {
+    "status": "not_tested",
+    "reason": "the recorded run did not test the display path"
+   }
+  }
+ ],
+ "environment": {
+  "status": "pass",
+  "reason": "the loaded modules are native",
+  "facts": {
+   "modules": [
+    "zfs",
+    "if_aq",
+    "filemon",
+    "vmm",
+    "hcons",
+    "hidmap",
+    "hms",
+    "hmt",
+    "hconf",
+    "hsctrl",
+    "ig4",
+    "imgact_binmisc",
+    "snd_uaudio",
+    "if_wg",
+    "cuse",
+    "mac_ntpd",
+    "nvidia_gsp_ga10x_fw",
+    "nvidia",
+    "nvidia-modeset"
+   ]
+  }
+ }
+}

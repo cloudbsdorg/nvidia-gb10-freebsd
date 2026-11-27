@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:gpu-check-stream:1.1",
+  "version": "1.1",
+  "title": "gpu-check JSON Lines stream (schema gpu-check.v1) of nvidia-gb10-freebsd",
+  "description": "One record of the stream gpu-check --jsonl prints: a header, a record per card, a record per check as it finishes, and an end record.  A consumer dispatches on kind; every record validates against one of the branches.  Version 1.1 adds the mode check, the flag capture, the title of a check and the steps of a probe; the record of a card holds no check: every check comes as its own record.",
+  "oneOf": [
+    {"$ref": "#/$defs/header"},
+    {"$ref": "#/$defs/device"},
+    {"$ref": "#/$defs/check"},
+    {"$ref": "#/$defs/error"},
+    {"$ref": "#/$defs/end"}
+  ],
+  "$defs": {
+    "schema_version": {
+      "type": "object",
+      "required": ["string", "major", "minor", "patch"],
+      "additionalProperties": false,
+      "properties": {
+        "string": {"const": "1.1"},
+        "major": {"const": 1},
+        "minor": {"const": 1},
+        "patch": {"const": 0}
+      }
+    },
+    "version": {
+      "type": "object",
+      "required": ["string", "major", "minor", "patch"],
+      "additionalProperties": false,
+      "properties": {
+        "string": {"type": "string", "minLength": 1},
+        "major": {"type": "integer", "minimum": 0},
+        "minor": {"type": "integer", "minimum": 0},
+        "patch": {"type": "integer", "minimum": 0},
+        "suffix": {"type": "string"}
+      }
+    },
+    "host": {
+      "type": "object",
+      "required": ["arch", "os", "os_release"],
+      "additionalProperties": false,
+      "properties": {
+        "arch": {"type": "string", "minLength": 1},
+        "os": {"const": "FreeBSD"},
+        "os_release": {"$ref": "#/$defs/version"}
+      }
+    },
+    "registry": {
+      "type": "object",
+      "required": ["providers"],
+      "additionalProperties": false,
+      "properties": {
+        "providers": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "header": {
+      "type": "object",
+      "required": ["kind", "schema", "schema_version", "tool", "mode", "fake", "capture", "host", "registry"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "header"},
+        "schema": {"const": "gpu-check.v1"},
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "tool": {"const": "gpu-check"},
+        "mode": {"enum": ["detect", "load", "assume-loaded", "check", "capture"]},
+        "fake": {"type": "boolean"},
+        "capture": {"type": "boolean"},
+        "host": {"$ref": "#/$defs/host"},
+        "registry": {"$ref": "#/$defs/registry"}
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["kind", "label", "selector", "name", "identity", "generation", "board", "decision", "features", "english"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "device"},
+        "label": {"type": "string", "pattern": "^gpu[0-9]+$"},
+        "selector": {"type": "string", "pattern": "^pci[0-9]+:[0-9]+:[0-9]+:[0-9]+$"},
+        "name": {"type": "string", "minLength": 1},
+        "identity": {
+          "type": "object",
+          "required": ["vendor", "device", "subvendor", "subdevice", "class", "revision"],
+          "additionalProperties": false,
+          "properties": {
+            "vendor": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+            "device": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+            "subvendor": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+            "subdevice": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+            "class": {"type": "string", "pattern": "^0x[0-9a-f]{6}$"},
+            "revision": {"type": "string", "pattern": "^0x[0-9a-f]{2}$"}
+          }
+        },
+        "generation": {
+          "type": "object",
+          "required": ["name", "arch_values", "source"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "arch_values": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+            "source": {"type": "string", "minLength": 1}
+          }
+        },
+        "board": {
+          "type": "object",
+          "required": ["name", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "reason": {"type": ["string", "null"]}
+          }
+        },
+        "decision": {
+          "type": "object",
+          "required": ["code", "reason_code", "provider", "family", "backend", "instance", "reason", "next", "warnings"],
+          "additionalProperties": false,
+          "properties": {
+            "code": {"enum": ["supported", "refused", "no_provider"]},
+            "reason_code": {
+              "type": ["string", "null"],
+              "pattern": "^(below_policy|uncovered|not_built_[a-z0-9_]+|no_provider)$"
+            },
+            "provider": {"type": ["string", "null"]},
+            "family": {"type": ["string", "null"]},
+            "backend": {"type": ["string", "null"]},
+            "instance": {"type": ["string", "null"]},
+            "reason": {"type": "string", "minLength": 1},
+            "next": {"type": ["string", "null"]},
+            "warnings": {"type": "array", "items": {"type": "string", "minLength": 1}}
+          }
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "name", "available"],
+            "additionalProperties": false,
+            "properties": {
+              "index": {"type": "integer", "minimum": 1},
+              "name": {"type": "string", "minLength": 1},
+              "available": {"type": "boolean"},
+              "reason": {"type": "string"},
+              "value": {"type": "string"}
+            }
+          }
+        },
+        "uuid_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{16}$"},
+        "english": {"type": "string", "minLength": 1}
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["name", "status", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "status": {"enum": ["pass", "fail", "not_reached"]},
+        "detail": {"type": "string"}
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["kind", "label", "index", "name", "title", "status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "check"},
+        "label": {"type": "string", "pattern": "^gpu[0-9]+$"},
+        "index": {"type": "integer", "minimum": 1},
+        "name": {"enum": ["detect", "decide", "firmware", "driver-loaded", "device-open", "identity", "memory", "channel", "uvm", "prime", "display", "no-linux-layer", "native-modules"]},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"enum": ["pass", "fail", "not_tested", "not_available"]},
+        "reason": {"type": "string", "minLength": 1},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/step"}}
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["kind", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "error"},
+        "error": {"type": "string", "minLength": 1}
+      }
+    },
+    "end": {
+      "type": "object",
+      "required": ["kind", "summary", "exit"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "end"},
+        "summary": {
+          "type": "object",
+          "required": ["devices", "supported", "refused", "no_provider", "checks"],
+          "additionalProperties": false,
+          "properties": {
+            "devices": {"type": "integer", "minimum": 0},
+            "supported": {"type": "integer", "minimum": 0},
+            "refused": {"type": "integer", "minimum": 0},
+            "no_provider": {"type": "integer", "minimum": 0},
+            "checks": {
+              "type": "object",
+              "required": ["pass", "fail", "not_tested", "not_available"],
+              "additionalProperties": false,
+              "properties": {
+                "pass": {"type": "integer", "minimum": 0},
+                "fail": {"type": "integer", "minimum": 0},
+                "not_tested": {"type": "integer", "minimum": 0},
+                "not_available": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "exit": {"type": "integer", "minimum": 0, "maximum": 7}
+      }
+    }
+  }
+}

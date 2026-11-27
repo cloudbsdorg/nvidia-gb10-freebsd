@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:gpu-check:history:1",
+  "version": "1",
+  "title": "gpu-check history document (schema gpu-check-history.v1) of nvidia-gb10-freebsd",
+  "description": "The document gpu-check history --json prints: the runs that are recorded in the database, the newest first.  Every run says what it was, where it was made and how it ended.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "schema",
+    "runs"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "$ref": "#/$defs/schema_version"
+    },
+    "tool": {
+      "const": "gpu-check"
+    },
+    "schema": {
+      "const": "gpu-check-history.v1"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/run"
+      }
+    }
+  },
+  "$defs": {
+    "schema_version": {
+      "type": "object",
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "string": {
+          "const": "1.1"
+        },
+        "major": {
+          "const": 1
+        },
+        "minor": {
+          "const": 1
+        },
+        "patch": {
+          "const": 0
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "pass",
+        "fail",
+        "not_tested",
+        "not_available"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pass": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fail": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_tested": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_available": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "id",
+        "started_at",
+        "ended_at",
+        "finished",
+        "mode",
+        "arch",
+        "exit_code",
+        "platform",
+        "host_hash",
+        "devices",
+        "events",
+        "checks",
+        "check_results"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "started_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "detect",
+            "load",
+            "assume-loaded",
+            "check",
+            "capture"
+          ]
+        },
+        "arch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 7
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1
+        },
+        "host_hash": {
+          "type": "string"
+        },
+        "devices": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "check_results": {
+          "$ref": "#/$defs/counts"
+        }
+      }
+    }
+  }
+}

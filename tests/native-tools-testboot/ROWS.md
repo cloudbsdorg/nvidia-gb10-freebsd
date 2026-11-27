@@ -25,10 +25,15 @@ It loads no Linuxulator module and no LinuxKPI module, and it runs no Linux bina
   rule: devd runs it when the device appears, and the kit cannot make it safe.
 - `/boot/modules.nvnative-test` holds a build of nvidia-gb10-freebsd main without the Linux dependency
   (see #2363): `nvidia_gsp_ga10x_fw.ko`, `nvidia.ko` and `nvidia-modeset.ko`, plus `nvrm-info`,
-  `libnvrm.so.1`, `mem_probe` (the memory probe of the S2 row) and `chan_probe` (the channel probe of the S3
-  row). `make-be.sh` and `check-be.sh` refuse a module
+  `libnvrm.so.1` (the library the tool reads the card through), `mem_probe` and `chan_probe` (the
+  probes of the library, kept staged: the tool runs the same steps through the library itself).
+  `make-be.sh` and `check-be.sh` refuse a module
   that depends on `linux*`, `drm*` or `dmabuf`, or that has undefined `linux_`, `lkpi_` or
   `linuxkpi_` symbols.
+- The kit itself holds `gpu-check` (`scripts/gpu-check`), the library it runs the checks from
+  (`lib/gpu-check`), the adapter of the vendor (`scripts/adapters/0x10de.py`) and the provider
+  records (`data/providers`). They are installed with the kit, under `/usr/local/share/nvidia-native-tools-test/repo`,
+  and the tool finds them beside itself.
 
 ## Statuses
 
@@ -68,11 +73,12 @@ planned row with its status. It carries two verdicts:
 | gpu-node, root-open, gpu-verify | `gpu-detect.sh` (vendored from uvm-bsd) picks the card by PCI class, vendor and driver parent, never by `/dev/nvidia0`; root opens the node once; the driver confirms the opened node is the chosen card |
 | gpu-detect-native | `gpu-detect.sh` ran under `ktrace -i -t cn`. Every file it executed (`pciconf`, `sysctl`, `awk` and the rest) must be FreeBSD-native, nothing may call kldload or kldunload, and no module may appear |
 | nvidiactl-open, modeset-open | root opens `/dev/nvidiactl` and `/dev/nvidia-modeset` |
-| nvrm-info | `tests/libnvrm/boot_nvrm_info.sh` runs `nvrm-info` (libnvrm, RM-direct) in every mode against the driver and compares it with sysctl (`hw.nvidia`, `dev.nvidia`), pciconf and what the board is (`make-be.sh -V -R -S`): the nominal VRAM and the most the driver may reserve (the reported VRAM must lie in nominal less reserve .. nominal), and the compute capability (compared with `compute_capability_major/minor`, not the RM's SM numbering). Per GPU: the uuid, found through the `dev.nvidia.<unit>.pci_bus_id` of the device's PCI location (a malformed one FAILs and `%location` is tried), must equal `hw.nvidia.gpus.<unit>.uuid` and `dev.nvidia.<unit>.uuid` (the latter required when the unit was found through `pci_bus_id`; a unit found only through `%location` needs only `hw.nvidia.gpus.<unit>.uuid`); `versions.driver` integers must equal `hw.nvidia.version_major/_minor/_patch` with `hw.nvidia.version_available` 1 and the string equal to the SOURCES tag, and `running_rm_version` must equal it (`tests/libnvrm/boot_compare.py`) |
-| nvrm-info-native | the row ran under `ktrace -i -t cn`. Every file that a successful execve ran (the image and its interpreters) must be a FreeBSD-branded ELF or a #! script, at an absolute path that still exists; a relative or vanished path is an error. Any kldload or kldunload call fails the row |
-| nvrm-info-no-new-module | no module appeared while it ran |
-| nvrm-s2-memory | `mem_probe` (`tests/libnvrm/mem_probe.c`) on every GPU: client with CPU mapping, VA, video and system memory, GPU and CPU mappings, pattern, export/import, nothing left; pass/fail from its exit; detail = the FAIL lines |
-| nvrm-s3-channel | `chan_probe` (`tests/libnvrm/chan_probe.c`) on every GPU: a compute GPFIFO channel; a semaphore release the GPU writes into a memory object of the probe (the release is seen: the payload comes back); the latency of a thousand releases (p50, p99 and max in nanoseconds); a stress loop of `nvidia_native_tools_testboot_chan_stress` releases (default 100000, `make-be.sh -c`) that may run `nvidia_native_tools_testboot_chan_stress_seconds` seconds (default 300, `make-be.sh -C`); the isolation: a push at an address that is not mapped kills one channel while the other one keeps releasing; nothing left behind; pass/fail from the exit; detail = the latency line and the stress line of the probe, or its FAIL lines |
+| nvrm-info | the identity of the card, as `gpu-check` read it from the resource manager: the tool's `identity` check. The tool reads the card through the library of this repository (the same one `nvrm-info` uses), so the row is the tool's own words: its status and its reason |
+| gpu-check | `gpu-check` (the diagnostic utility of this repository: `scripts/gpu-check`, the library it runs the checks from and the adapter of the vendor) ran against the card, with the staged modules and the staged `libnvrm.so.1`. The row is pass when the tool ran every check (its exit status 0, or 1 when a check failed), and fail when the tool could not run at all |
+| gpu-check-native | the row ran under `ktrace -i -t cn`. Every file that a successful execve ran (the image and its interpreters) must be a FreeBSD-branded ELF or a #! script, at an absolute path that still exists; a relative or vanished path is an error. Any kldload or kldunload call fails the row |
+| gpu-check-no-new-module | no module appeared while it ran |
+| nvrm-s2-memory | the tool's `memory` check: client with CPU mapping, VA, video and system memory, GPU and CPU mappings, pattern, export/import, nothing left. The row is what the tool said about the memory of the card: its status and its reason |
+| nvrm-s3-channel | the tool's `channel` check: a compute GPFIFO channel; a semaphore release the GPU writes into a memory object (the release is seen: the payload comes back); the latency of a thousand releases (p50, p99 and max in nanoseconds); a stress loop of `nvidia_native_tools_testboot_chan_stress` releases (default 100000, `make-be.sh -c`) that may run `nvidia_native_tools_testboot_chan_stress_seconds` seconds (default 300, `make-be.sh -C`); the isolation: a push at an address that is not mapped kills one channel while the other one keeps releasing; nothing left behind. The row is what the tool said about the channel of the card |
 | uvm-ioctl-suite, uvm-owner-probe, uvm-owner-race | `make-be.sh -u` classifies the supplied `nvidia-uvm.ko`. A module that declares MODULE_DEPEND on linux64elf (linux on amd64) and linux_common, and registers a Linux ioctl handler, is needs-linux; with no module the rows are not-available. The detail holds the kldxref and nm evidence |
 | prime-import | `make-be.sh -d` classifies the supplied `nvidia-drm.ko`; a drm-kmod module is needs-linuxkpi. With no module the row is not-available |
 | render-uapi | not-available: main has the header and documents only |
@@ -87,12 +93,17 @@ then copied to the copy-out directory, by default
 
 - `results.jsonl`: one `{"row","status","detail"}` per line.
 - `summary.json` and `summary.txt`: the reading. The last line of `summary.txt` is PASS, FAIL or
-  INCOMPLETE.
+  INCOMPLETE. `summary.json` holds the section `gpu_check`: the checks the tool made and what it
+  said about each of them, read from the database of the run when the run holds one.
 - `gpu-detect.json` and `gpu-verify.json`.
-- `nvrm-info/`: `nvrm-info.json`, `nvrm-info.jsonl`, `results.txt`, `mem_probe.txt` (the whole output of the
-  memory probe), `chan_probe.txt` and `chan_probe.json` (the whole output of the channel probe and its JSON
-  document), and the sysctl and pciconf captures.
-- `nvrm-info.kdump` and `nvrm-info.execs`: the trace and every executed file with its brand.
+- `gpu-check.jsonl`: the stream of the tool (JSON Lines): its header, the card, one record per check
+  and its end. `gpu-check.err` holds what the tool wrote on standard error.
+- `gpu-check.db`: the record of the run of the tool: the database of its events, its cards, its
+  checks and the properties of the machine. It is written by the tool itself (`--db`), so it is
+  the tool's own record and not a summary made by the kit. `summary.json` reads the section
+  `gpu_check` from it when it is there, and says so (`"source": "database"`); a run without it is
+  read from the stream (`"source": "stream"`).
+- `gpu-check.kdump` and `gpu-check.execs`: the trace and every executed file with its brand.
 - `env-*.kldstat` and `env-*.compat-linux`, plus `dmesg-*.txt` and `rc.log`.
 - `testboot-return.txt`, and `rc.log` again with the return in it: they are copied after the
   return. When the return reboots, the reboot may come first, and the full copies then stay in

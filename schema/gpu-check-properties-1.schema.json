@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:gpu-check:properties:1",
+  "version": "1",
+  "title": "gpu-check properties document (schema gpu-check-properties.v1) of nvidia-gb10-freebsd",
+  "description": "The document gpu-check properties --json prints: what the machine held while the run was made.  A property says where it came from, what it is, how it behaved in this run and the values it took.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "schema",
+    "run",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "$ref": "#/$defs/schema_version"
+    },
+    "tool": {
+      "const": "gpu-check"
+    },
+    "schema": {
+      "const": "gpu-check-properties.v1"
+    },
+    "run": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "properties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source",
+          "key",
+          "kind",
+          "classification",
+          "changed",
+          "values"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "int",
+              "uint",
+              "number",
+              "string",
+              "blob"
+            ]
+          },
+          "classification": {
+            "enum": [
+              "constant",
+              "changing",
+              "counter"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "schema_version": {
+      "type": "object",
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "string": {
+          "const": "1.1"
+        },
+        "major": {
+          "const": 1
+        },
+        "minor": {
+          "const": 1
+        },
+        "patch": {
+          "const": 0
+        }
+      }
+    }
+  }
+}

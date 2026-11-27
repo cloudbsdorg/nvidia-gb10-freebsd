@@ -1,0 +1,508 @@
+{
+ "schema_version": {
+  "string": "1.1",
+  "major": 1,
+  "minor": 1,
+  "patch": 0
+ },
+ "tool": "gpu-check",
+ "schema": "gpu-check.v1",
+ "host": {
+  "arch": "arm64",
+  "os": "FreeBSD",
+  "os_release": {
+   "string": "16.0-CURRENT",
+   "major": 16,
+   "minor": 0,
+   "patch": 0
+  }
+ },
+ "mode": "detect",
+ "fake": false,
+ "capture": false,
+ "registry": {
+  "providers": [
+   "nvidia-open"
+  ]
+ },
+ "devices": [
+  {
+   "label": "gpu0",
+   "selector": "pci0:0:1:0",
+   "name": "vgapci0",
+   "identity": {
+    "vendor": "0x1002",
+    "device": "0x7480",
+    "subvendor": "0x1002",
+    "subdevice": "0x0e1d",
+    "class": "0x030000",
+    "revision": "0xc1"
+   },
+   "generation": {
+    "name": null,
+    "arch_values": [],
+    "source": "the provider record"
+   },
+   "board": {
+    "name": null,
+    "reason": "no board record for the subsystem 1002:0e1d"
+   },
+   "decision": {
+    "code": "no_provider",
+    "reason_code": "no_provider",
+    "provider": null,
+    "family": null,
+    "backend": null,
+    "instance": null,
+    "reason": "no provider names this device",
+    "next": "none, this device is never loaded",
+    "warnings": []
+   },
+   "features": [],
+   "english": "gpu0 (pci0:0:1:0): vendor 1002:7480 (unknown generation) no_provider: no provider names this device: next: none, this device is never loaded",
+   "loaded": [],
+   "checks": [
+    {
+     "index": 1,
+     "name": "detect",
+     "title": "the card was found and its identity read",
+     "status": "pass",
+     "reason": "vendor 1002 device 7480 subsystem 1002:0e1d class 030000, generation unknown, board none"
+    },
+    {
+     "index": 2,
+     "name": "decide",
+     "title": "the provider was chosen or refused, and why",
+     "status": "not_available",
+     "reason": "no provider names this device"
+    },
+    {
+     "index": 3,
+     "name": "firmware",
+     "title": "the firmware the card needs was loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 4,
+     "name": "driver-loaded",
+     "title": "the driver modules were loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 5,
+     "name": "device-open",
+     "title": "the device opened and its identity confirmed",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 6,
+     "name": "identity",
+     "title": "the identity of the card, as the resource manager sees it",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 7,
+     "name": "memory",
+     "title": "memory allocated, mapped and copied",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 8,
+     "name": "channel",
+     "title": "a channel created, released, measured and cleaned up",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 9,
+     "name": "uvm",
+     "title": "the unified memory interface",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 10,
+     "name": "prime",
+     "title": "the path that imports the display of another card",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 11,
+     "name": "display",
+     "title": "the display and the console path",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 12,
+     "name": "no-linux-layer",
+     "title": "no module of the Linux layer is loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 13,
+     "name": "native-modules",
+     "title": "the modules of this card that are loaded are native",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    }
+   ]
+  },
+  {
+   "label": "gpu1",
+   "selector": "pci0:0:2:0",
+   "name": "vgapci1",
+   "identity": {
+    "vendor": "0x10de",
+    "device": "0x2d04",
+    "subvendor": "0x1462",
+    "subdevice": "0x5351",
+    "class": "0x030000",
+    "revision": "0xa1"
+   },
+   "generation": {
+    "name": "gb20x",
+    "arch_values": [
+     26,
+     27
+    ],
+    "source": "the provider record"
+   },
+   "board": {
+    "name": null,
+    "reason": "no board record for the subsystem 1462:5351"
+   },
+   "decision": {
+    "code": "supported",
+    "reason_code": null,
+    "provider": "nvidia-open",
+    "family": "gb20x",
+    "backend": "rm-open",
+    "instance": "rm-open-580.178.04",
+    "reason": "the backend rm-open covers the family gb20x",
+    "next": null,
+    "warnings": []
+   },
+   "features": [
+    {
+     "index": 1,
+     "name": "display",
+     "available": true
+    },
+    {
+     "index": 2,
+     "name": "backend_compute",
+     "available": true
+    },
+    {
+     "index": 3,
+     "name": "uvm",
+     "available": false,
+     "reason": "the UVM module is not built in this release"
+    },
+    {
+     "index": 4,
+     "name": "vulkan",
+     "available": false,
+     "reason": "native Vulkan is not built in this release"
+    },
+    {
+     "index": 5,
+     "name": "cuda",
+     "available": false,
+     "reason": "the native CUDA library is not built by this release"
+    },
+    {
+     "index": 6,
+     "name": "prime",
+     "available": true
+    },
+    {
+     "index": 7,
+     "name": "runtime_pm",
+     "available": true
+    },
+    {
+     "index": 8,
+     "name": "gsp",
+     "available": true
+    },
+    {
+     "index": 9,
+     "name": "open_rm",
+     "available": true
+    },
+    {
+     "index": 10,
+     "name": "hdmi_4k60_rgb444",
+     "available": true
+    },
+    {
+     "index": 11,
+     "name": "dp_ycbcr420",
+     "available": true
+    },
+    {
+     "index": 12,
+     "name": "dp_gsync",
+     "available": true
+    },
+    {
+     "index": 13,
+     "name": "hdmi_gsync",
+     "available": true
+    },
+    {
+     "index": 14,
+     "name": "vdpau_featureset",
+     "available": true,
+     "value": "K"
+    }
+   ],
+   "english": "gpu1 (pci0:0:2:0): nvidia 10de:2d04 (GB20X) supported: the backend rm-open covers the family gb20x",
+   "loaded": [],
+   "checks": [
+    {
+     "index": 1,
+     "name": "detect",
+     "title": "the card was found and its identity read",
+     "status": "pass",
+     "reason": "vendor 10de device 2d04 subsystem 1462:5351 class 030000, generation GB20X, board none"
+    },
+    {
+     "index": 2,
+     "name": "decide",
+     "title": "the provider was chosen or refused, and why",
+     "status": "pass",
+     "reason": "the provider nvidia-open chose the backend rm-open: the backend rm-open covers the family gb20x"
+    },
+    {
+     "index": 3,
+     "name": "firmware",
+     "title": "the firmware the card needs was loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 4,
+     "name": "driver-loaded",
+     "title": "the driver modules were loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 5,
+     "name": "device-open",
+     "title": "the device opened and its identity confirmed",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 6,
+     "name": "identity",
+     "title": "the identity of the card, as the resource manager sees it",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 7,
+     "name": "memory",
+     "title": "memory allocated, mapped and copied",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 8,
+     "name": "channel",
+     "title": "a channel created, released, measured and cleaned up",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 9,
+     "name": "uvm",
+     "title": "the unified memory interface",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 10,
+     "name": "prime",
+     "title": "the path that imports the display of another card",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 11,
+     "name": "display",
+     "title": "the display and the console path",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 12,
+     "name": "no-linux-layer",
+     "title": "no module of the Linux layer is loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 13,
+     "name": "native-modules",
+     "title": "the modules of this card that are loaded are native",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    }
+   ]
+  },
+  {
+   "label": "gpu2",
+   "selector": "pci0:0:3:0",
+   "name": "vgapci2",
+   "identity": {
+    "vendor": "0x1a03",
+    "device": "0x2000",
+    "subvendor": "0x1a03",
+    "subdevice": "0x2000",
+    "class": "0x030000",
+    "revision": "0x41"
+   },
+   "generation": {
+    "name": null,
+    "arch_values": [],
+    "source": "the provider record"
+   },
+   "board": {
+    "name": null,
+    "reason": "no board record for the subsystem 1a03:2000"
+   },
+   "decision": {
+    "code": "no_provider",
+    "reason_code": "no_provider",
+    "provider": null,
+    "family": null,
+    "backend": null,
+    "instance": null,
+    "reason": "no provider names this device",
+    "next": "none, this device is never loaded",
+    "warnings": []
+   },
+   "features": [],
+   "english": "gpu2 (pci0:0:3:0): vendor 1a03:2000 (unknown generation) no_provider: no provider names this device: next: none, this device is never loaded",
+   "loaded": [],
+   "checks": [
+    {
+     "index": 1,
+     "name": "detect",
+     "title": "the card was found and its identity read",
+     "status": "pass",
+     "reason": "vendor 1a03 device 2000 subsystem 1a03:2000 class 030000, generation unknown, board none"
+    },
+    {
+     "index": 2,
+     "name": "decide",
+     "title": "the provider was chosen or refused, and why",
+     "status": "not_available",
+     "reason": "no provider names this device"
+    },
+    {
+     "index": 3,
+     "name": "firmware",
+     "title": "the firmware the card needs was loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 4,
+     "name": "driver-loaded",
+     "title": "the driver modules were loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 5,
+     "name": "device-open",
+     "title": "the device opened and its identity confirmed",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 6,
+     "name": "identity",
+     "title": "the identity of the card, as the resource manager sees it",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 7,
+     "name": "memory",
+     "title": "memory allocated, mapped and copied",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 8,
+     "name": "channel",
+     "title": "a channel created, released, measured and cleaned up",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 9,
+     "name": "uvm",
+     "title": "the unified memory interface",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 10,
+     "name": "prime",
+     "title": "the path that imports the display of another card",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 11,
+     "name": "display",
+     "title": "the display and the console path",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 12,
+     "name": "no-linux-layer",
+     "title": "no module of the Linux layer is loaded",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    },
+    {
+     "index": 13,
+     "name": "native-modules",
+     "title": "the modules of this card that are loaded are native",
+     "status": "not_tested",
+     "reason": "not asked for: a run without --load does not touch the machine"
+    }
+   ]
+  }
+ ],
+ "summary": {
+  "devices": 3,
+  "supported": 1,
+  "refused": 0,
+  "no_provider": 2,
+  "checks": {
+   "pass": 4,
+   "fail": 0,
+   "not_tested": 33,
+   "not_available": 2
+  }
+ },
+ "exit": 0
+}

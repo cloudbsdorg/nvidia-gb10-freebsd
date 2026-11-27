@@ -6,3 +6,9 @@ tmp/
 work/
 tests/install-e2e/results/*/checkout/
 __pycache__/
+lib/gpu-check-db/*.o
+lib/gpu-check-db/*.pico
+lib/gpu-check-db/libgpubcheckdb.*
+lib/gpu-check-db/gpu-check.db.5.gz
+lib/gpu-check-db/fake/*.o
+lib/gpu-check-db/fake/libgpubcheckdb_fake.so

@@ -1,0 +1,1088 @@
+{
+ "schema_version": {
+  "string": "1.0",
+  "major": 1,
+  "minor": 0,
+  "patch": 0
+ },
+ "provider": "nvidia-open",
+ "vendor": "0x10de",
+ "vendor_name": "nvidia",
+ "classes": [
+  "0x03"
+ ],
+ "score": 100,
+ "fallback_ok": false,
+ "driver_branch": {
+  "string": "580.178.04",
+  "major": 580,
+  "minor": 178,
+  "patch": 4
+ },
+ "input": {
+  "file": "supported-gpus.json",
+  "licence": "zlib",
+  "sha256": "2fd600dd713ad843006aec6d3c2abf6787d45a2cbf55053b0c07b26e693d1c05",
+  "path": "NVIDIA-FreeBSD-x86_64-580.178.04/doc/supported-gpus/supported-gpus.json",
+  "note": "the device id lists and the feature flags of every family come from this file; the file is never copied by hand"
+ },
+ "preference": [],
+ "generation_order": [
+  {
+   "name": "gts2xx",
+   "arch_values": []
+  },
+  {
+   "name": "gf1xx",
+   "arch_values": []
+  },
+  {
+   "name": "gk1xx",
+   "arch_values": []
+  },
+  {
+   "name": "gm20x",
+   "arch_values": [
+    17,
+    18
+   ]
+  },
+  {
+   "name": "gp10x",
+   "arch_values": [
+    19
+   ]
+  },
+  {
+   "name": "gv10x",
+   "arch_values": [
+    20,
+    21
+   ]
+  },
+  {
+   "name": "tu10x",
+   "arch_values": [
+    22
+   ]
+  },
+  {
+   "name": "ga10x",
+   "arch_values": [
+    23
+   ]
+  },
+  {
+   "name": "ga100",
+   "arch_values": [
+    23
+   ]
+  },
+  {
+   "name": "gh100",
+   "arch_values": [
+    24
+   ]
+  },
+  {
+   "name": "ad10x",
+   "arch_values": [
+    25
+   ]
+  },
+  {
+   "name": "gb20x",
+   "arch_values": [
+    26,
+    27
+   ]
+  }
+ ],
+ "policy": {
+  "min_generation": "ga10x",
+  "reason": "the driver attaches to GA10X (RTX 30) and later only"
+ },
+ "feature_flags": [
+  {
+   "index": 1,
+   "name": "display"
+  },
+  {
+   "index": 2,
+   "name": "backend_compute"
+  },
+  {
+   "index": 3,
+   "name": "uvm"
+  },
+  {
+   "index": 4,
+   "name": "vulkan"
+  },
+  {
+   "index": 5,
+   "name": "cuda"
+  },
+  {
+   "index": 6,
+   "name": "prime"
+  },
+  {
+   "index": 7,
+   "name": "runtime_pm"
+  },
+  {
+   "index": 8,
+   "name": "gsp"
+  },
+  {
+   "index": 9,
+   "name": "open_rm"
+  },
+  {
+   "index": 10,
+   "name": "hdmi_4k60_rgb444"
+  },
+  {
+   "index": 11,
+   "name": "dp_ycbcr420"
+  },
+  {
+   "index": 12,
+   "name": "dp_gsync"
+  },
+  {
+   "index": 13,
+   "name": "hdmi_gsync"
+  },
+  {
+   "index": 14,
+   "name": "vdpau_featureset"
+  }
+ ],
+ "backends": [
+  {
+   "name": "rm-open",
+   "branch": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+   },
+   "archs": [
+    "amd64",
+    "arm64"
+   ],
+   "score": 20,
+   "modules": [
+    "nvidia",
+    "nvidia-modeset",
+    "nvidia-drm"
+   ],
+   "licence_class": "mit",
+   "features": {
+    "display": true,
+    "backend_compute": true,
+    "uvm": false,
+    "vulkan": false,
+    "cuda": false,
+    "prime": true
+   },
+   "feature_reasons": {
+    "uvm": "the UVM module is not built in this release",
+    "vulkan": "native Vulkan is not built in this release",
+    "cuda": "the native CUDA library is not built by this release"
+   }
+  }
+ ],
+ "families": [
+  {
+   "id": "gts2xx",
+   "arch_values": [],
+   "devids": [
+    "0x0100",
+    "0x0191",
+    "0x0193",
+    "0x0194",
+    "0x0400",
+    "0x0401",
+    "0x0402",
+    "0x0403",
+    "0x0404",
+    "0x0405",
+    "0x0406",
+    "0x0407",
+    "0x0408",
+    "0x0409",
+    "0x0420",
+    "0x0421",
+    "0x0422",
+    "0x0423",
+    "0x0424",
+    "0x0425",
+    "0x0426",
+    "0x0427",
+    "0x0428",
+    "0x042c",
+    "0x042e",
+    "0x0600",
+    "0x0601",
+    "0x0602",
+    "0x0604",
+    "0x0605",
+    "0x0606",
+    "0x0608",
+    "0x0609",
+    "0x060b",
+    "0x060c",
+    "0x060d",
+    "0x0610",
+    "0x0611",
+    "0x0612",
+    "0x0613",
+    "0x0614",
+    "0x0617",
+    "0x0622",
+    "0x0623",
+    "0x0625",
+    "0x0628",
+    "0x062a",
+    "0x062b",
+    "0x062c",
+    "0x062d",
+    "0x062e",
+    "0x0630",
+    "0x0635",
+    "0x0637",
+    "0x0640",
+    "0x0641",
+    "0x0643",
+    "0x0644",
+    "0x0645",
+    "0x0647",
+    "0x0648",
+    "0x0649",
+    "0x064a",
+    "0x064b",
+    "0x064c",
+    "0x065b",
+    "0x06e0",
+    "0x06e1",
+    "0x06e2",
+    "0x06e3",
+    "0x06e4",
+    "0x06e5",
+    "0x06e7",
+    "0x06e8",
+    "0x06e9",
+    "0x0840",
+    "0x0844",
+    "0x0845",
+    "0x0846",
+    "0x0847",
+    "0x0848",
+    "0x0849",
+    "0x084b",
+    "0x084f",
+    "0x0860",
+    "0x0861",
+    "0x0862",
+    "0x0863",
+    "0x0864",
+    "0x0866",
+    "0x0867",
+    "0x0869",
+    "0x086a",
+    "0x086c",
+    "0x086d",
+    "0x086e",
+    "0x086f",
+    "0x0870",
+    "0x0871",
+    "0x087a",
+    "0x0a23",
+    "0x0a62",
+    "0x0a65",
+    "0x0fed",
+    "0x0fee",
+    "0x1058",
+    "0x105b",
+    "0x10c0",
+    "0x10c3",
+    "0x1140",
+    "0x1295",
+    "0x1296",
+    "0x1299",
+    "0x129a"
+   ],
+   "generations": [
+    {
+     "name": "gts2xx",
+     "arch_values": [],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": false,
+    "dp_ycbcr420": false,
+    "dp_gsync": false,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GTS2XX (GeForce 2, 8, 9): no GSP firmware, no backend of ours yet; no architecture value in nv_ref.h",
+   "feature_values": {
+    "vdpau_featureset": "A"
+   }
+  },
+  {
+   "id": "gf1xx",
+   "arch_values": [],
+   "devids": [
+    "0x05e7",
+    "0x06c0",
+    "0x06c4",
+    "0x06ca",
+    "0x06cd",
+    "0x06d2",
+    "0x06de",
+    "0x06df",
+    "0x0dd1",
+    "0x0e22",
+    "0x0e23",
+    "0x0e24",
+    "0x0e30",
+    "0x0e31",
+    "0x1091",
+    "0x1094",
+    "0x1203",
+    "0x1205",
+    "0x13f2",
+    "0x17fd"
+   ],
+   "generations": [
+    {
+     "name": "gf1xx",
+     "arch_values": [],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": false,
+    "dp_ycbcr420": false,
+    "dp_gsync": false,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GF1XX (GTX 4): no GSP firmware, no backend of ours yet; no architecture value in nv_ref.h",
+   "feature_values": {
+    "vdpau_featureset": "A"
+   }
+  },
+  {
+   "id": "gk1xx",
+   "arch_values": [],
+   "devids": [
+    "0x0fc6",
+    "0x0fd4",
+    "0x0fe0",
+    "0x1004",
+    "0x1007",
+    "0x1008",
+    "0x100a",
+    "0x1021",
+    "0x1022",
+    "0x1023",
+    "0x1024",
+    "0x1026",
+    "0x1027",
+    "0x1028",
+    "0x1029",
+    "0x102a",
+    "0x102d",
+    "0x1180",
+    "0x1183",
+    "0x1184",
+    "0x1185",
+    "0x1187",
+    "0x1188",
+    "0x1189",
+    "0x118e",
+    "0x118f",
+    "0x1193",
+    "0x1195",
+    "0x1199",
+    "0x119d",
+    "0x119e",
+    "0x119f",
+    "0x11a0",
+    "0x11a1",
+    "0x11a2",
+    "0x11a3",
+    "0x11a7",
+    "0x11c0",
+    "0x11c2",
+    "0x11c3",
+    "0x11c4",
+    "0x11c6",
+    "0x11c8",
+    "0x11e0",
+    "0x11e1",
+    "0x11e2",
+    "0x11e3",
+    "0x1212",
+    "0x1213"
+   ],
+   "generations": [
+    {
+     "name": "gk1xx",
+     "arch_values": [],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": false,
+    "dp_ycbcr420": false,
+    "dp_gsync": false,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GK1XX (GTX 6, GTX 7): no GSP firmware, no backend of ours yet; no architecture value in nv_ref.h",
+   "feature_values": {
+    "vdpau_featureset": "C"
+   }
+  },
+  {
+   "id": "gm20x",
+   "arch_values": [
+    17,
+    18
+   ],
+   "devids": [
+    "0x139a",
+    "0x139b",
+    "0x13c0",
+    "0x13c2",
+    "0x13d7",
+    "0x13d8",
+    "0x13d9",
+    "0x13da",
+    "0x1401",
+    "0x1402",
+    "0x1406",
+    "0x1427",
+    "0x1617",
+    "0x1618",
+    "0x1619",
+    "0x161a",
+    "0x1667",
+    "0x17c8"
+   ],
+   "generations": [
+    {
+     "name": "gm20x",
+     "arch_values": [
+      17,
+      18
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": false,
+    "dp_ycbcr420": false,
+    "dp_gsync": false,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GM20X (GTX 9): no GSP firmware, no backend of ours yet",
+   "feature_values": {
+    "vdpau_featureset": "E"
+   }
+  },
+  {
+   "id": "gp10x",
+   "arch_values": [
+    19
+   ],
+   "devids": [
+    "0x1b06",
+    "0x1b80",
+    "0x1b81",
+    "0x1b82",
+    "0x1b83",
+    "0x1b84",
+    "0x1ba0",
+    "0x1ba1",
+    "0x1ba2",
+    "0x1be0",
+    "0x1be1",
+    "0x1c02",
+    "0x1c03",
+    "0x1c04",
+    "0x1c06",
+    "0x1c20",
+    "0x1c21",
+    "0x1c22",
+    "0x1c23",
+    "0x1c60",
+    "0x1c61",
+    "0x1c62",
+    "0x1c81",
+    "0x1c82",
+    "0x1c83",
+    "0x1c8c",
+    "0x1c8d",
+    "0x1c8f",
+    "0x1c91",
+    "0x1c92"
+   ],
+   "generations": [
+    {
+     "name": "gp10x",
+     "arch_values": [
+      19
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GP10X (GTX 10): no GSP firmware, no backend of ours yet",
+   "feature_values": {
+    "vdpau_featureset": "H"
+   }
+  },
+  {
+   "id": "gv10x",
+   "arch_values": [
+    20,
+    21
+   ],
+   "devids": [
+    "0x1db1",
+    "0x1db3",
+    "0x1db4",
+    "0x1db5",
+    "0x1db6",
+    "0x1db7",
+    "0x1db8",
+    "0x1df6"
+   ],
+   "generations": [
+    {
+     "name": "gv10x",
+     "arch_values": [
+      20,
+      21
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [],
+   "features": {
+    "runtime_pm": false,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": false,
+    "open_rm": false,
+    "gsp": false,
+    "vdpau_featureset": true
+   },
+   "note": "GV10X (V100): no GSP firmware, no backend of ours yet",
+   "feature_values": {
+    "vdpau_featureset": "I"
+   }
+  },
+  {
+   "id": "tu10x",
+   "arch_values": [
+    22
+   ],
+   "devids": [
+    "0x1e02",
+    "0x1e04",
+    "0x1e07",
+    "0x1e81",
+    "0x1e82",
+    "0x1e84",
+    "0x1e87",
+    "0x1e89",
+    "0x1e90",
+    "0x1e91",
+    "0x1e93",
+    "0x1ec2",
+    "0x1ec7",
+    "0x1ed0",
+    "0x1ed1",
+    "0x1ed3",
+    "0x1f02",
+    "0x1f03",
+    "0x1f06",
+    "0x1f07",
+    "0x1f08",
+    "0x1f0a",
+    "0x1f10",
+    "0x1f11",
+    "0x1f12",
+    "0x1f14",
+    "0x1f15",
+    "0x1f42",
+    "0x1f47",
+    "0x1f50",
+    "0x1f51",
+    "0x1f54",
+    "0x1f55",
+    "0x1f82",
+    "0x1f83",
+    "0x1f91",
+    "0x1f95",
+    "0x1f96",
+    "0x1f99",
+    "0x1f9d",
+    "0x1fdd",
+    "0x2182",
+    "0x2184",
+    "0x2187",
+    "0x2188",
+    "0x2191",
+    "0x2192",
+    "0x21c4",
+    "0x21d1",
+    "0x25a7",
+    "0x25a9",
+    "0x25ad",
+    "0x25ed"
+   ],
+   "generations": [
+    {
+     "name": "tu10x",
+     "arch_values": [
+      22
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "TU10X (RTX 20, GTX 16): the open RM, but the TU10X firmware image, which this repository builds for amd64 only",
+   "feature_values": {
+    "vdpau_featureset": "J"
+   },
+   "firmware": {
+    "image": "gsp_tu10x",
+    "module": "nvidia_gsp_tu10x_fw",
+    "archs": [
+     "amd64"
+    ],
+    "licence_class": "redistributable"
+   }
+  },
+  {
+   "id": "ga10x",
+   "arch_values": [
+    23
+   ],
+   "devids": [
+    "0x2203",
+    "0x2204",
+    "0x2206",
+    "0x2207",
+    "0x2208",
+    "0x220a",
+    "0x2216",
+    "0x2414",
+    "0x2420",
+    "0x2460",
+    "0x2482",
+    "0x2484",
+    "0x2486",
+    "0x2487",
+    "0x2488",
+    "0x2489",
+    "0x249c",
+    "0x249d",
+    "0x24a0",
+    "0x24c7",
+    "0x24c9",
+    "0x24dc",
+    "0x24dd",
+    "0x24e0",
+    "0x2503",
+    "0x2504",
+    "0x2507",
+    "0x2508",
+    "0x2520",
+    "0x2521",
+    "0x2523",
+    "0x2544",
+    "0x2560",
+    "0x2563",
+    "0x2582",
+    "0x2584",
+    "0x25a0",
+    "0x25a2",
+    "0x25a5",
+    "0x25ab",
+    "0x25ac",
+    "0x25e0",
+    "0x25e2",
+    "0x25e5",
+    "0x25ec",
+    "0x2822",
+    "0x28a3",
+    "0x28e3"
+   ],
+   "generations": [
+    {
+     "name": "ga10x",
+     "arch_values": [
+      23
+     ],
+     "tested_arch": [
+      "arm64"
+     ],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "GA10X (RTX 30): the open RM and the GSP firmware of the GA10X group",
+   "feature_values": {
+    "vdpau_featureset": "K"
+   },
+   "firmware": {
+    "image": "gsp_ga10x",
+    "module": "nvidia_gsp_ga10x_fw",
+    "archs": [
+     "amd64",
+     "arm64"
+    ],
+    "licence_class": "redistributable"
+   }
+  },
+  {
+   "id": "ga100",
+   "arch_values": [
+    23
+   ],
+   "devids": [
+    "0x20b0",
+    "0x20b2",
+    "0x20b3",
+    "0x20b5",
+    "0x20b7",
+    "0x20f1",
+    "0x2235",
+    "0x25b6"
+   ],
+   "generations": [
+    {
+     "name": "ga100",
+     "arch_values": [
+      23
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "GA100 (A100): the open RM, but the TU10X firmware image, which this repository builds for amd64 only",
+   "feature_values": {
+    "vdpau_featureset": "J"
+   },
+   "firmware": {
+    "image": "gsp_tu10x",
+    "module": "nvidia_gsp_tu10x_fw",
+    "archs": [
+     "amd64"
+    ],
+    "licence_class": "redistributable"
+   }
+  },
+  {
+   "id": "gh100",
+   "arch_values": [
+    24
+   ],
+   "devids": [
+    "0x230e",
+    "0x2321",
+    "0x2322",
+    "0x2324",
+    "0x2329",
+    "0x232c",
+    "0x2330",
+    "0x2331",
+    "0x2335",
+    "0x2339",
+    "0x233a",
+    "0x233b"
+   ],
+   "generations": [
+    {
+     "name": "gh100",
+     "arch_values": [
+      24
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "Hopper (GH100): the open RM and the GSP firmware of the GA10X group",
+   "feature_values": {
+    "vdpau_featureset": "K"
+   },
+   "firmware": {
+    "image": "gsp_ga10x",
+    "module": "nvidia_gsp_ga10x_fw",
+    "archs": [
+     "amd64",
+     "arm64"
+    ],
+    "licence_class": "redistributable"
+   }
+  },
+  {
+   "id": "ad10x",
+   "arch_values": [
+    25
+   ],
+   "devids": [
+    "0x2684",
+    "0x2685",
+    "0x2689",
+    "0x2702",
+    "0x2704",
+    "0x2705",
+    "0x2709",
+    "0x2717",
+    "0x2757",
+    "0x2782",
+    "0x2783",
+    "0x2786",
+    "0x2788",
+    "0x27a0",
+    "0x27e0",
+    "0x2803",
+    "0x2805",
+    "0x2808",
+    "0x2820",
+    "0x2860",
+    "0x2882",
+    "0x28a0",
+    "0x28a1",
+    "0x28e0",
+    "0x28e1"
+   ],
+   "generations": [
+    {
+     "name": "ad10x",
+     "arch_values": [
+      25
+     ],
+     "tested_arch": [],
+     "verified_on_hardware": []
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "Ada (AD10X): the open RM and the GSP firmware of the GA10X group",
+   "feature_values": {
+    "vdpau_featureset": "K"
+   },
+   "firmware": {
+    "image": "gsp_ga10x",
+    "module": "nvidia_gsp_ga10x_fw",
+    "archs": [
+     "amd64",
+     "arm64"
+    ],
+    "licence_class": "redistributable"
+   }
+  },
+  {
+   "id": "gb20x",
+   "arch_values": [
+    26,
+    27
+   ],
+   "devids": [
+    "0x2901",
+    "0x2941",
+    "0x2b85",
+    "0x2b87",
+    "0x2b8c",
+    "0x2bb1",
+    "0x2bb3",
+    "0x2bb4",
+    "0x2bb5",
+    "0x2c02",
+    "0x2c05",
+    "0x2c18",
+    "0x2c19",
+    "0x2c31",
+    "0x2c33",
+    "0x2c34",
+    "0x2c38",
+    "0x2c39",
+    "0x2c58",
+    "0x2c59",
+    "0x2c77",
+    "0x2c79",
+    "0x2d04",
+    "0x2d05",
+    "0x2d18",
+    "0x2d19",
+    "0x2d30",
+    "0x2d39",
+    "0x2d58",
+    "0x2d59",
+    "0x2d79",
+    "0x2d83",
+    "0x2d98",
+    "0x2db8",
+    "0x2db9",
+    "0x2dd8",
+    "0x2df9",
+    "0x2e12",
+    "0x2f04",
+    "0x2f18",
+    "0x2f38",
+    "0x2f58"
+   ],
+   "generations": [
+    {
+     "name": "gb20x",
+     "arch_values": [
+      26,
+      27
+     ],
+     "tested_arch": [
+      "arm64"
+     ],
+     "verified_on_hardware": [
+      "0x2d04"
+     ]
+    }
+   ],
+   "backends": [
+    "rm-open"
+   ],
+   "features": {
+    "runtime_pm": true,
+    "hdmi_4k60_rgb444": true,
+    "dp_ycbcr420": true,
+    "dp_gsync": true,
+    "hdmi_gsync": true,
+    "open_rm": true,
+    "gsp": true,
+    "vdpau_featureset": true
+   },
+   "note": "Blackwell (GB20X, GB10): the open RM and the GSP firmware of the GA10X group",
+   "feature_values": {
+    "vdpau_featureset": "K"
+   },
+   "firmware": {
+    "image": "gsp_ga10x",
+    "module": "nvidia_gsp_ga10x_fw",
+    "archs": [
+     "amd64",
+     "arm64"
+    ],
+    "licence_class": "redistributable"
+   }
+  }
+ ],
+ "decorators": []
+}

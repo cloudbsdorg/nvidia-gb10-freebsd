@@ -9,6 +9,7 @@
 #   man/run-nv-vulkan.sh.1   the Vulkan launcher
 #   man/pd_split.py.1        the prefill/decode split client
 #   man/bench_compare.py.1   the llama-bench comparison tables
+#   man/gpu-check.8           the card check command
 #
 # Cases:
 #   (a) mandoc is installed:      the lint tool is there
@@ -65,7 +66,7 @@ else
 	exit 1
 fi
 
-PAGES="man/run-nv-vulkan.sh.1 man/pd_split.py.1 man/bench_compare.py.1"
+PAGES="man/run-nv-vulkan.sh.1 man/pd_split.py.1 man/bench_compare.py.1 man/gpu-check.8 man/gpu-check.db.5"
 
 # (b) the pages exist.
 missing=
@@ -73,7 +74,7 @@ for page in $PAGES; do
 	[ -f "$REPO/$page" ] || missing="$missing $page"
 done
 if [ -z "$missing" ]; then
-	ok "(b) the three man pages are in the tree"
+	ok "(b) the man pages are in the tree"
 else
 	fail "(b) these man pages are missing:$missing"
 fi
@@ -113,6 +114,12 @@ check_words() {
 check_words man/run-nv-vulkan.sh.1 vulkaninfo list bench server llama-bench rpc
 check_words man/bench_compare.py.1 published delta format label-a label-b
 check_words man/pd_split.py.1 slot-file json label-prefill label-decode
+# The page spells the options the way mdoc does, with one dash.
+check_words man/gpu-check.8 -load -assume-loaded -check -list -json -jsonl -report -registry \
+	-pciconf-file -fake -capture -device -module-dir -arch
+# The page of the database names the tables and the commands that read a run
+# back: a page that lost one of them does not describe the database.
+check_words man/gpu-check.db.5 events runs properties schema_version history compare export
 
 printf 'passed: %s failed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -gt 0 ]; then

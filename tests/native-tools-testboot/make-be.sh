@@ -35,7 +35,9 @@
 #   --activate    finish with bectl activate -t BE (the orchestrator's decision; never while a Fable agent runs)
 #
 # What it does, in order (a failure after the clone exists removes the half-built boot environment):
-#   1. the kit must be committed (tests/native-tools-testboot, tests/libnvrm, lib/libnvrm, SOURCES); what is
+#   1. the kit must be committed (tests/native-tools-testboot, tests/libnvrm, lib/libnvrm, SOURCES, and the tool the
+#      kit measures the card with: scripts/gpu-check, scripts/adapters, lib/gpu-check, data/providers, and the
+#      migrations of the database of the runs in schema); what is
 #      installed is git archive of that commit; the vendored gpu-detect.sh and testboot-return equal their pins in
 #      VENDOR;
 #   2. each staged file equals its full hash; each staged .ko has no dependency and no undefined symbol of the
@@ -56,7 +58,8 @@
 #      of a service that loads one) is refused: devd runs it when the device appears, and the kit cannot make it safe;
 #   6. installs the staged files into the new directory /boot/modules.nvnative-test (root, 0444; nvrm-info,
 #      mem_probe and chan_probe 0555), the kit into /usr/local/share/nvidia-native-tools-test, the rc one-shot and
-#      testboot-return;
+#      testboot-return; the library that holds the database of the runs is installed too, when the tree has it, so
+#      the run is recorded in a database and not only in a stream;
 #   7. unmounts; with --activate arms the one-shot boot.
 # The running system is not touched: nothing is loaded, unloaded or rebooted.
 #
@@ -217,7 +220,7 @@ trap early_cleanup EXIT
 # 1. the kit: committed; installed from git archive of the commit
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 git_() { git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" "$@"; }
-PATHS="tests/native-tools-testboot tests/libnvrm lib/libnvrm SOURCES"
+PATHS="tests/native-tools-testboot tests/libnvrm lib/libnvrm SOURCES scripts/gpu-check scripts/adapters lib/gpu-check data/providers schema"
 if [ "$HOOKS" = 1 ] && [ -n "${NVNT_NO_GIT_CHECK:-}" ]; then
 	COMMIT=unchecked-test-hook
 	( cd "$REPO" && tar -cf "$SCRATCH/kit.tar" $PATHS )
@@ -237,6 +240,17 @@ for _f in nvidia_native_tools_testboot guard.sh summarize.py gpu-detect.sh testb
 	[ -f "$A/$_f" ] || { echo "make-be.sh: commit $COMMIT has no tests/native-tools-testboot/$_f" >&2; exit 1; }
 done
 [ -f "$SCRATCH/kit/tests/libnvrm/boot_nvrm_info.sh" ] && [ -f "$SCRATCH/kit/tests/libnvrm/boot_compare.py" ] && [ -f "$SCRATCH/kit/tests/libnvrm/schema_validate.py" ] || { echo "make-be.sh: commit $COMMIT lacks tests/libnvrm/boot_nvrm_info.sh, boot_compare.py or schema_validate.py" >&2; exit 1; }
+# the tool the kit measures the card with: the tool itself, the library it runs the checks from, the adapter of the
+# vendor and the provider records.  The kit reads them from $KROOT/repo, where the archive is unpacked: the tool finds
+# its library, its adapter and its provider records beside itself.
+for _f in scripts/gpu-check scripts/adapters/0x10de.py lib/gpu-check/gpu_check/registry.py data/providers/nvidia-open.json; do
+	[ -f "$SCRATCH/kit/$_f" ] || { echo "make-be.sh: commit $COMMIT has no $_f: the kit measures the card with gpu-check" >&2; exit 1; }
+done
+# the migrations of the database of the runs: the tool applies them to a new file, and it finds them in the tree it
+# stands in (the schema directory of the archive beside it).
+for _f in schema/gpu-check-db-1.sql schema/gpu-check-db-2.sql; do
+	[ -f "$SCRATCH/kit/$_f" ] || { echo "make-be.sh: commit $COMMIT has no $_f: the run cannot be recorded in a database" >&2; exit 1; }
+done
 pin() { awk -v f="$1" '$1 == "file" && $3 == f { on = 1; next } $1 == "file" { on = 0 } on && $1 == "sha256" { print $3; exit }' "$A/VENDOR"; }
 for _f in gpu-detect.sh testboot-return; do
 	_w=$(pin "$_f"); _g=$(sha256 -q "$A/$_f")
@@ -483,6 +497,20 @@ run install -d $ROOTOWN -m 0755 "$KROOT" "$KROOT/repo" "$KROOT/static-rows" "$MN
 tar -xf "$SCRATCH/kit.tar" -C "$KROOT/repo" || { echo "make-be.sh: the kit does not unpack into the clone" >&2; exit 1; }
 for _f in guard.sh summarize.py gpu-detect.sh native-tools-summary.schema.json; do run install $ROOTOWN -m 0444 "$A/$_f" "$KROOT/$_f"; done
 run install $ROOTOWN -m 0444 "$SHAFILE" "$KROOT/SHA256.txt"
+# The library that holds the database of the runs: the run is recorded in it when it is in the boot environment, and the
+# file is copied out with the run.  It is the product's library, built from this repository; the build tree holds it.
+# Its absence is not a refusal: the kit still measures the card, and the run is recorded as a stream only.
+GDBLIB=
+for _l in "$REPO/lib/gpu-check-db/libgpubcheckdb.so.1" "$REPO/work/build/gpubcheckdb-obj/libgpubcheckdb.so.1"; do
+	if [ -f "$_l" ]; then GDBLIB=$_l; break; fi
+done
+if [ -n "$GDBLIB" ]; then
+	run install $ROOTOWN -m 0444 "$GDBLIB" "$KROOT/libgpubcheckdb.so.1"
+	sha256 -q "$KROOT/libgpubcheckdb.so.1" > "$KROOT/gpu-check-db.sha256"
+	echo "the library of the database of the runs is installed ($GDBLIB)"
+else
+	echo "no library of the database of the runs in the tree: the run will be recorded as a stream only"
+fi
 for _r in "$SR"/*; do install $ROOTOWN -m 0444 "$_r" "$KROOT/static-rows/"; done
 [ -z "$ROOTOWN" ] || chown -R root:wheel "$KROOT"
 chmod -R go-w "$KROOT"

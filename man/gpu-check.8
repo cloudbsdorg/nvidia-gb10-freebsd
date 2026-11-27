@@ -1,0 +1,453 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.Dd November 26, 2026
+.Dt GPU-CHECK 8
+.Os
+.Sh NAME
+.Nm gpu-check
+.Nd say whether a GPU of this machine works with our driver
+.Sh SYNOPSIS
+.Nm
+.Op Fl -load
+.Op Fl -assume-loaded
+.Op Fl -check Ar id , Ns Ar id
+.Op Fl -list
+.Op Fl -json | Fl -jsonl
+.Op Fl -report Ar file
+.Op Fl -registry Ar dir
+.Op Fl -pciconf-file Ar file
+.Op Fl -fake Ar file
+.Op Fl -capture Ar dir
+.Op Fl -device Ar selector
+.Op Fl -module-dir Ar dir
+.Op Fl -arch Ar arch
+.Op Fl -db Ar path
+.Op Fl -no-db
+.Sh DESCRIPTION
+The
+.Nm
+utility reads the PCI display devices of this machine, asks every
+registered provider whether it covers each of them, and reports the
+decision with the reason.
+It never loads anything unless
+.Fl -load
+is given.
+.Pp
+The checks are registered in a library, one per check, and each one says
+what it needs: the root of the machine, the driver loaded, or the checks
+that must run before it.
+The command holds no list of its own: it asks the registry what to run.
+Adding a check is adding a function in the library, and nothing else.
+.Pp
+Without
+.Fl -load
+the tool only looks.
+It finds the display devices of
+.Xr pciconf 8 ,
+reads the identity of each one, and runs the device decision: which
+provider claims the card, which generation the card is, which board
+record covers it, and which backend of ours would drive it.
+A card that is refused is never touched.
+.Pp
+With
+.Fl -load
+the tool loads the firmware and the driver of every card the decision
+served, and then runs every check.
+The load needs root, because it loads kernel modules.
+.Pp
+With
+.Fl -assume-loaded
+the tool runs every check and loads nothing: the firmware and the driver
+are already loaded, and it says which of them are there and which are not.
+This is the mode of a machine that loaded the driver itself, such as a
+test boot that loads it and then watches what happens.
+The tool never loads a module in this mode, so the loader of the machine
+is left alone.
+.Pp
+With
+.Fl -check
+the tool runs the checks that were named and the checks they depend on,
+and says for the others that they were not asked for.
+.Pp
+The decision comes from the provider records, which are data and not code:
+one record per provider, under
+.Pa data/providers
+in the source tree.
+Every provider names the vendor it claims, the generations it covers and
+the backends it offers; the decision core of the tool names no vendor at all.
+The vendor knowledge lives in the provider records and in the probe adapters,
+one file per vendor, under
+.Pa scripts/adapters
+in the source tree.
+A generation is the base of a card and a board is a decorator on top of it,
+so a board record may add a feature or override one, but it never decides
+whether a card is supported.
+.Pp
+The output is one line per card and one row per check.
+Every check that was not run says so, and says why: a check is
+.Dq pass ,
+.Dq fail ,
+.Dq not tested
+or
+.Dq not available ,
+and the reason names the cause.
+The checks are:
+.Bl -tag -width "no-linux-layer"
+.It detect
+the card was found and its identity read: the vendor, the device id, the
+subsystem, the generation and the board.
+.It decide
+the provider was chosen or refused, and why.
+.It firmware
+the firmware the card needs was loaded.
+.It driver-loaded
+the driver modules were loaded.
+.It device-open
+the device opened and its identity confirmed against the card that
+.Xr pciconf 8
+named.
+.It identity
+the identity of the card, as the resource manager sees it.
+.It memory
+memory was allocated, mapped, written and read back.
+.It channel
+a channel was created, released, measured and cleaned up.
+.It uvm
+the unified memory interface.
+.It prime
+the path that imports the display of another card.
+.It display
+the display and console path.
+.It no-linux-layer
+no module of the Linux layer is loaded.
+.It native-modules
+the modules of this card that are loaded are native.
+.El
+.Pp
+The tool is written in Python 3 and uses nothing but its standard library,
+so it needs
+.Xr python3 8
+on the machine.
+.Pp
+The output holds no personal data: no host name, no user name, no home
+path and no serial.
+The UUID of a card is hashed, never printed.
+The
+.Nm
+sends nothing anywhere.
+.Pp
+Every run is recorded in a database, and the first word of the command
+line may name a command that reads that record back instead of making a
+run:
+.Bd -literal -offset indent
+gpu-check history [--last N]
+gpu-check show RUN
+gpu-check compare RUN RUN
+gpu-check export RUN
+gpu-check properties RUN [--changed] [--counters]
+.Ed
+.Pp
+The commands are described in the section
+.Sx READ-BACK COMMANDS .
+.Sh OPTIONS
+.Bl -tag -width "--pciconf-file file"
+.It Fl -load
+Load the firmware and the driver of every card the decision served, and
+run every check.
+Needs root.
+It is the only mode that changes the machine.
+A load run reads the provider records of the installed tree only, and it
+loads only the modules that are installed under
+.Pa /boot/modules ,
+as root-owned files.
+.It Fl -assume-loaded
+Run every check and load nothing: the firmware and the driver are already
+loaded.
+The tool says which of the modules of the card are loaded and which are
+not, and it never calls
+.Xr kldload 8 .
+The checks that open the card need the root of the machine, and say so
+when the run is not one.
+This mode and
+.Fl -load
+cannot be given together.
+.It Fl -check Ar id , Ns Ar id
+Run the checks with these ids, and the checks they depend on.
+The ids are the ones
+.Fl -list
+prints.
+A check that is not registered is a usage error: the message names the id
+that is not one and the checks that are.
+Without
+.Fl -load
+a check that needs the driver says so instead of running.
+.It Fl -list
+List the checks and what each one needs.
+Takes no other option.
+.It Fl -json
+Print one JSON document.
+Its schema is
+.Pa schema/gpu-check-1.schema.json .
+.It Fl -jsonl
+Print JSON Lines: a header record, one record per card, one record per
+check and an end record.
+Every line is flushed as it is written, so a reader sees the rows as they
+come.
+Its schema is
+.Pa schema/gpu-check-stream-1.schema.json .
+.It Fl -report Ar file
+Write the JSON document to
+.Ar file ,
+to attach to a report.
+Nothing is sent anywhere.
+The document holds no name, no home path and no serial number.
+.It Fl -registry Ar dir
+Read the provider records from
+.Ar dir
+instead of the default: the
+.Pa data/providers
+directory of the source tree, or the installed one.
+.It Fl -pciconf-file Ar file
+Read the
+.Xr pciconf 8
+output from
+.Ar file
+instead of running
+.Xr pciconf 8 .
+For tests, and for a machine where
+.Xr pciconf 8
+is not installed.
+.It Fl -fake Ar file
+Answer the checks from
+.Ar file
+instead of from the machine.
+A fake run loads nothing, needs no root, and says in its output that it
+was a fake run.
+The file is a JSON object with the keys
+.Pa kldload ,
+.Pa identity ,
+.Pa device_open ,
+.Pa memory ,
+.Pa channel ,
+.Pa uvm ,
+.Pa prime ,
+.Pa display
+and
+.Pa modules ;
+every one of them is optional, and each names a status
+.Pa pass ,
+.Pa fail ,
+.Pa not_tested
+or
+.Pa not_available
+with a message.
+The answer of a check that reads the card is an object:
+.Pa identity
+takes
+.Pa status ,
+.Pa pci_vendor ,
+.Pa pci_device ,
+.Pa uuid
+and
+.Pa message ,
+and the other checks take
+.Pa status
+and
+.Pa message .
+.Pa kldload
+is an object of module names, and every one of them takes
+.Pa status
+and
+.Pa message ;
+.Pa ok
+is a synonym of
+.Pa pass
+for a module load.
+The steps of a probe may be answered one by one, under
+.Pa memory_steps
+and
+.Pa channel_steps ;
+a step the file does not name passes.
+A file that says nothing about a probe does not answer it: the probe was
+not tested, and the row says so.
+.Pa modules
+is the list of the modules the machine of the fake run holds.
+An answer may also be a map of card selectors to answers, so one file can
+answer two cards of one machine apart.
+A status that is not one of the four, or an answer without a status, is
+refused: the file cannot be used, and the exit status is 2.
+.It Fl -capture Ar dir
+Replay a recorded run instead of looking at this machine.
+The directory holds a
+.Pa capture.json
+file, of the schema
+.Pa gpu-check-capture/1 ,
+with the cards of that run, the modules it loaded, the identity of each
+card and the steps of the probes.
+A replay needs no root, loads nothing, and says in its output that it
+replayed a recorded run.
+.It Fl -device Ar selector
+Check only the card with this selector, for example
+.Pa pci0:0:1:0 .
+A selector that matches no card is a usage error: the exit status is 2 and
+the message names the selector and the cards of the machine.
+.It Fl -module-dir Ar dir
+Load the modules from
+.Ar dir
+as well as from the default one
+.Pa /boot/modules .
+A test boot keeps its modules somewhere else; the option may be given more
+than once, and every directory must hold a root-owned file that nobody else
+may write, or the module is not loaded.
+.It Fl -arch Ar arch
+Pretend the machine is
+.Ar arch ,
+for example
+.Pa amd64
+or
+.Pa arm64 .
+The name is written as the records write it, so a spelling of the same
+architecture in upper case is accepted; a name that is not an architecture is
+a usage error.
+.It Fl -db Ar path
+Write the record of the run to
+.Ar path
+instead of the default.
+The default is
+.Pa /var/db/gpu-check/
+for root and
+.Pa $XDG_STATE_HOME/gpu-check/
+for everybody else.
+The file is a SQLite database in the write-ahead log mode, so it may be
+read while a run is writing to it.
+The schema of the file is versioned, and a file whose version is newer than
+the one this tool knows is refused: the refusal names both versions.
+.It Fl -no-db
+Keep no record of the run.
+The run works exactly as it does with a record, and nothing is written.
+.It Fl h , Fl -help
+Print the usage and exit.
+.El
+.Sh READ-BACK COMMANDS
+The commands below read the record of the runs back.
+They need no root, they change nothing, and every one of them takes
+.Fl -json
+and
+.Fl -jsonl .
+.Bl -tag -width "compare RUN RUN"
+.It Cm history Op Fl -last Ar n
+The runs that are recorded, the newest first.
+.Fl -last
+limits the answer to the last
+.Ar n
+runs.
+.It Cm show Ar run
+One run: the cards of it and the rows of their checks.
+.It Cm compare Ar run Ar run
+Two runs, and what ended differently in them.
+.It Cm export Ar run
+The document the run printed when it was made.
+With
+.Fl -json
+it is the same document, byte for byte, as the
+.Fl -json
+of the run itself.
+.It Cm properties Ar run Op Fl -changed Op Fl -counters
+The properties of a run, and the class of each of them.
+.Fl -changed
+shows only the properties that changed during the run.
+A counter is left out unless
+.Fl -counters
+is given.
+.El
+.Pp
+The documents answer against the schemas that are registered in
+.Pa schema/samples.json :
+.Pa schema/gpu-check-history-1.schema.json ,
+.Pa schema/gpu-check-compare-1.schema.json
+and
+.Pa schema/gpu-check-properties-1.schema.json .
+.Sh FILES
+.Bl -tag -width "data/providers/nvidia-open.json"
+.It Pa data/providers/nvidia-open.json
+The provider record of the NVIDIA driver: the generations it covers, the
+firmware each of them needs, the backends it offers and the policy floor.
+The device id lists and the feature flags of the generations come from
+NVIDIA's own
+.Nm supported-gpus.json ,
+which is under the zlib licence; the record names the file and its
+checksum.
+.It Pa schema/gpu-check-1.schema.json
+The schema of the JSON document.
+.It Pa schema/gpu-check-db-1.sql , Pa schema/gpu-check-db-2.sql
+The migrations of the database, one file per version of the schema.
+They are installed under
+.Pa /usr/local/share/gpu-check/schema
+and applied when the file is new and when the file is older than they are.
+.It Pa scripts/adapters
+The probe adapters of the source tree, one file per vendor, named after the
+vendor id of the cards it opens.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 3n
+.It 0
+Every card a provider claims is served.
+.It 1
+A check failed.
+A refused card is a refusal, not a failed check: the decision row of a
+refused card does not count here.
+.It 2
+A usage error, or a provider registry that cannot be used.
+A selector that matches no card is a usage error too.
+.It 3
+No card is claimed by any provider.
+.It 4
+The machine could not be looked at: the
+.Xr pciconf 8
+output could not be read.
+.It 6
+Some cards are served and some are refused.
+.It 7
+No claimed card is served.
+.El
+.Sh EXAMPLES
+Look at the cards of this machine and report the decision:
+.Bd -literal -offset indent
+gpu-check
+.Ed
+.Pp
+Load the driver of every card the decision served and run the checks
+(as root):
+.Bd -literal -offset indent
+doas gpu-check --load
+.Ed
+.Pp
+Measure a card whose driver is already loaded, without touching the
+loader:
+.Bd -literal -offset indent
+doas gpu-check --assume-loaded
+.Ed
+.Pp
+Run one check and the checks it depends on:
+.Bd -literal -offset indent
+gpu-check --check memory
+.Ed
+.Pp
+Write a report to attach:
+.Bd -literal -offset indent
+gpu-check --json --report gpu-check.json
+.Ed
+.Pp
+Look at one card of a mixed machine:
+.Bd -literal -offset indent
+gpu-check --device pci0:0:2:0
+.Ed
+.Sh SEE ALSO
+.Xr sqlite3 1 ,
+.Xr gpu-check.db 5 ,
+.Xr kldload 8 ,
+.Xr kldstat 8 ,
+.Xr pciconf 8 ,
+.Pa docs/DEVICE-DECISION.md ,
+.Pa docs/GPU-CHECK-DB.md

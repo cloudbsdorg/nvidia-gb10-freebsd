@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:gpu-check:compare:1",
+  "version": "1",
+  "title": "gpu-check compare document (schema gpu-check-compare.v1) of nvidia-gb10-freebsd",
+  "description": "The document gpu-check compare --json prints: two runs, side by side.  Only what is different is in it: the checks that ended differently and the properties that do not hold the same value.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "schema",
+    "runs",
+    "checks",
+    "properties",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "$ref": "#/$defs/schema_version"
+    },
+    "tool": {
+      "const": "gpu-check"
+    },
+    "schema": {
+      "const": "gpu-check-compare.v1"
+    },
+    "runs": {
+      "type": "object",
+      "required": [
+        "first",
+        "second"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "first": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "second": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "first",
+          "second",
+          "changed"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "first": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "second": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "properties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source",
+          "key",
+          "first",
+          "second"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "first": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "second": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "checks_changed",
+        "properties_changed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "checks_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "properties_changed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "schema_version": {
+      "type": "object",
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "string": {
+          "const": "1.1"
+        },
+        "major": {
+          "const": 1
+        },
+        "minor": {
+          "const": 1
+        },
+        "patch": {
+          "const": 0
+        }
+      }
+    }
+  }
+}

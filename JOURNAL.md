@@ -852,3 +852,110 @@ Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries th
 ## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
 - The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
   b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.
+
+## 2026-11-26T04:10Z #2456 card check: the decision as a command (agent round, worktree wt-2456-card-check)
+- Worktree from origin/main 4cd016d. No commit: everything is staged, the manager gates and commits.
+- What #2455's "decision code" is in this repository: the design only. docs/DEVICE-DECISION.md (merged in
+  PR #40) describes the decision step, the provider record, the indexed feature flags and the exit codes, but
+  no code was merged with it: there is no gpu-decide, no data/providers and no generated provider record. So this
+  round implements the stage-1 decision inside the card check, following that document: the layers (abstract
+  device, class, family, board decorator), the decision codes (supported, refused, no_provider, with
+  below_policy, uncovered and not_built_<arch>), the per-architecture build check, the binding and the exit codes.
+- scripts/gpu-check: the tool (Python 3, standard library only). It reads the display devices from pciconf, asks
+  every provider whether it claims the card, and reports the decision with the reason. --load (root, explicit)
+  loads the firmware and the driver of the served cards and runs the checks; it is written and tested against a
+  fake file only in this round, so nothing was ever loaded here. --json prints one document, --jsonl a flushed
+  stream, --report writes a file to attach. The output holds no host name, no user name, no home path and no
+  serial; the UUID is hashed.
+- data/providers/nvidia-open.json: the provider record. 12 generations (gts2xx to gb20x), 427 device ids and the
+  feature flags come from NVIDIA's supported-gpus.json (zlib), which the record names with its sha256. The
+  policy floor is ga10x (RTX 30 and later), the backend rm-open, the firmware gsp_ga10x (amd64 and arm64) and
+  gsp_tu10x (amd64 only). Decorators are empty: no real board needed one yet.
+- The shared code names no vendor: a lint in tests/gpu_check_test.sh greps the tool against a fixed pattern set
+  and against the names of the data files, and it must fail on a planted file that names a vendor. It fails
+  closed when the registry is missing.
+- Tests: tests/gpu_check_test.sh, 34 cases (the five card classes with a fake pciconf, the normal-user run, the
+  --load path against fakes, the schemas and their captured samples, the report file, the personal-data check,
+  the lint with its control, a broken record, the fake provider with its own feature indexes and a board
+  decorator, every row, --help and the man page). Red first: the first run of the suite failed 7 of 34 cases
+  (the schema of the version object, the stderr of the refusals, the UUID, the lint patterns, the uncovered
+  registry and the man page options); each failure was fixed, not hidden.
+- Also: man/gpu-check.1 (mandoc -T lint clean), schema/gpu-check-1.schema.json and
+  schema/gpu-check-stream-1.schema.json, both registered in schema/samples.json with a captured sample,
+  "make check-card" (ARGS=... goes to the tool), the install of the tool, its man page, its schemas and its
+  provider records, the README section and the PROVENANCE entry.
+- Open: the AMD and Intel providers of the design are not here; a card of another vendor reads no_provider,
+  which is the same answer the BMC adapter gets. The real memory probe of the load path (ctypes over
+  libnvrm) is written but never ran here: only the fake answered it. A test boot must check the rows the tool
+  cannot: suspend and resume, the display console path and the memory probe against the real card.
+
+## 2026-11-26T06:40Z #2456 card check: the gate's review findings fixed (agent round, worktree wt-2456-card-check)
+- The gate (logs/gates/B/wt-2456-card-check.gate.log, receipt 535d8825...) ran five review voices over the staged change and
+  all five answered FINDINGS: quality 11, security 4, correctness 9, falsification 9, interface 8. The scanners were
+  already clean (gitleaks, semgrep, trivy, openqodex, sonarqube; lizard and cpd had no source in scope).
+- The findings were deduplicated into 26 defects and every one was fixed with a test that fails first. Red first: the new
+  suite (tests/gpu_check_test.sh, 72 checks) fails 36 of them against the pre-fix tree (an export of the index), and
+  passes 72 of 72 after the fix. The proof of the shell injection is in that run: with the old Makefile,
+  "make check-card ARGS='--json; touch FILE'" created the marker file; now ARGS is refused and nothing runs.
+- The fake file: the presence of a fake is kept apart from its answers (None is the absent sentinel), so an empty fake
+  file is a fake run that loads nothing and needs no root. One status vocabulary (pass, fail, not_tested, not_available),
+  validated once when the file is read; "ok" stays a synonym of "pass" for a module load. The answers of the card
+  checks may be keyed by selector, so one file can answer two cards of one machine apart.
+- The error paths: one emitter per mode. A registry that cannot be used, a pciconf file that cannot be read and a
+  pciconf line that does not parse all print the error document (--json) or the error stream (--jsonl), and the stream
+  schema grew the error branch it was missing. The paths in the messages are reduced to the name of the file, and the
+  home path of the run is scrubbed: the output holds no home path at all.
+- The stream is flushed: the header is written before the first card, every card and every row as it is produced, and
+  only the end record is built at the end. The test reads the header while the tool is still working on 4000 cards.
+- The load path: the state of every row is the truth of what happened. "loaded" holds the modules that were loaded, in
+  the order they were loaded; a firmware that failed is not in it and a driver module that loaded before a later failure
+  is. The row "driver" became "driver_loaded", because it says the modules were loaded and the device_open row says
+  the device opened (the man page said "the driver attached to the card", which was neither).
+- The probes are per card: the adapter maps the pciconf selector to the device of the resource manager (bus and slot),
+  passes its index to the memory probe, and reports not_tested when two identical cards cannot be told apart.
+- The provider registry fails closed on more: the schema version must be the one the tool understands, a provider name
+  may not be used twice, the generation table and the families may not disagree, a policy floor with no architecture
+  value is a registry error, and a backend must name at least one module. The load path takes the modules of the
+  installed registry only, and only bare module names that resolve to a root-owned file under /boot/modules.
+- The report is written to a new file in the same directory and moved into place, so a symlink at the path is replaced
+  instead of followed and no file is truncated.
+- The vendor-free lint now keeps what it claims: the decision core of the tool names no vendor, the vendor knowledge
+  lives in the provider records and in the probe adapters (scripts/adapters/<vendor>.py, one per vendor, installed with
+  the tool). The lint takes its vocabulary from the records and from the adapters, refuses a vendor constant or a
+  vendor comparison whatever its value is, fails closed when the registry is missing (the lint itself, not a second
+  script) and refuses the planted controls (a vendor name in a string, an unknown vendor id, a program of a vendor).
+- The makefile: ARGS was free text in a recipe, and the shell ran it. The switches are CHECK_JSON, CHECK_LOAD and
+  CHECK_REPORT; they reach scripts/make.sh through the environment, are checked there, and reach the tool as fixed
+  flags and one quoted file name. No text of a switch is ever parsed by a shell.
+- The check row names and the schema: "compute" the feature flag became "backend_compute", because the compute row
+  follows the cuda flag and the two said opposite things about one card; a record may not name a flag after a check
+  that follows another flag. The schemas of the test suite were replaced by one checker (tests/schema_check.py) that
+  resolves nested $ref and holds minLength, and it is proved against the fixtures it must refuse.
+- The man page, the README and the install follow: the adapters are installed with the tool and the expected manifest
+  of the stock install names them.
+
+## 2026-11-26 #2456 the card check became one diagnostic utility (agent round, worktree wt-2456-card-check)
+- One tool, `gpu-check`, with the checks as registered providers: `lib/gpu-check/gpu_check/` holds the registry, the
+  checks, the probes, the environment rules, the table and the redaction, and the command holds no list of its own
+  (a check added to the library appears in the rows of the tool). The thirteen checks are detect, decide, firmware,
+  driver-loaded, device-open, identity, memory, channel, uvm, prime, display, no-linux-layer and native-modules.
+- The modes: no flags (detect and decide, as a normal user), --load (root, explicit), --assume-loaded (every check,
+  nothing loaded: the mode of a test boot), --check ID[,ID], --list and --capture DIR (a recorded run).
+- The output: a table of three columns (check, result, detail) that wraps a long detail under its row, coloured only
+  for a terminal and plain everywhere else (NO_COLOR says no), with the one line that counts the rows; --json, --jsonl
+  (flushed per row) and --report FILE against the versioned schemas, which are registered in schema/samples.json.
+- The test-boot kit calls the tool (`gpu-check --assume-loaded --jsonl` under ktrace) and its rows nvrm-info,
+  nvrm-s2-memory and nvrm-s3-channel are the tool's identity, memory and channel checks; summarize.py reads the
+  stream and holds it in the gpu_check section of summary.json. The kit keeps only its plumbing.
+- The tests: 108 cases in tests/gpu_check_test.sh (the golden table, the schemas, a mutant that drops a reason, the
+  replay of the recorded run of 2026-11-26), 27 unit cases for the paths a command never takes, and the checks
+  against the fake backend of our own library (the memory probe ran its 19 steps and the channel probe its 6, over
+  the software GPU of libnvrm, with NVRM_BACKEND=fake).
+- Two defects the tests found: the parser of the module listing took the header of "kldstat -v" for a module and
+  missed every module that came with another one (so the check of the environment could not see the Linux layer),
+  and a fake file could hold a step with a status that means nothing.
+- The coverage gate: tests/gpu_check_coverage_gate.py holds every file of the library at the floor it has today
+  (tests/data/gpu-check/coverage-floor.txt, a ratchet that may only go up), and a plant (a run that covers a part of
+  the library) proves the gate can fail.
+- The install: the man page is gpu-check.8 now (a system utility), and the library is installed with the tool
+  (/usr/local/share/gpu-check/lib/gpu_check), so the tool finds it beside itself.

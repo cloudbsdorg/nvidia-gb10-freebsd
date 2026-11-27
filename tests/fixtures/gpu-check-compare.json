@@ -1,0 +1,20 @@
+{
+ "schema_version": {
+  "string": "1.1",
+  "major": 1,
+  "minor": 1,
+  "patch": 0
+ },
+ "tool": "gpu-check",
+ "schema": "gpu-check-compare.v1",
+ "runs": {
+  "first": 1,
+  "second": 2
+ },
+ "checks": [],
+ "properties": [],
+ "summary": {
+  "checks_changed": 0,
+  "properties_changed": 0
+ }
+}

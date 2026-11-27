@@ -48,6 +48,15 @@ E2E_BACKEND = vmm
 E2E_SSH =
 JSON = 0
 JSONL = 0
+# The switches of the card check.  They are not defined here on purpose:
+# a variable the makefile defines overrides the one of the environment,
+# and these reach scripts/make.sh through the environment, never as the
+# text of a recipe.  So they may come from the environment or from the
+# command line, and no shell ever parses them.
+#   CHECK_JSON=0|1     print one JSON document
+#   CHECK_LOAD=0|1     load the firmware and the driver (as root)
+#   CHECK_REPORT=FILE  write the JSON document to FILE
+# ARGS is gone: it was free text in a recipe, and the shell ran it.
 
 DRIVER = sh scripts/make.sh
 DRIVER_ENV = MK_WORK="$(WORK)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_BSDSRCTOP="$(BSDSRCTOP)" MK_DRMKMODDIR="$(DRMKMODDIR)" MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_JSON="$(JSON)" MK_JSONL="$(JSONL)" MK_PURPOSE="$(REPO_PURPOSE)" MK_ACCEPT_NVIDIA_LICENSE="$(ACCEPT_NVIDIA_LICENSE)" MK_ACCEPT_ALL_LICENSES="$(ACCEPT_ALL_LICENSES)" MK_E2E_REPO_URL="$(E2E_REPO_URL)" MK_E2E_REF="$(E2E_REF)" MK_E2E_OS="$(E2E_OS)" MK_E2E_ARCH="$(E2E_ARCH)" MK_E2E_BACKEND="$(E2E_BACKEND)" MK_E2E_SSH="$(E2E_SSH)"
@@ -61,6 +70,9 @@ help:
 		"Targets (same names on every OS):" \
 		"  make help             this message (default)" \
 		"  make purpose          print REPO_PURPOSE (for machines)" \
+		"  make check-card      check whether the GPUs of this machine" \
+		"                        work with our driver (CHECK_JSON=1," \
+		"                        CHECK_LOAD=1, CHECK_REPORT=FILE)" \
 		"  make preflight        what is missing (JSON=1: JSON)" \
 		"  make install-prereqs  packages, NVIDIA sources (licence shown)," \
 		"                        FreeBSD and drm-kmod sources (deps," \
@@ -98,6 +110,9 @@ help:
 		"  E2E_OS= E2E_ARCH= E2E_BACKEND=vmm|ssh E2E_SSH=user@host" \
 		"  E2E_REPO_URL=     the test-install machine and source" \
 		"  E2E_REF=          ref to test (default: checkout HEAD)" \
+		"  CHECK_JSON=0|1     the card check prints one JSON document" \
+		"  CHECK_LOAD=0|1     the card check loads the driver (as root)" \
+		"  CHECK_REPORT=FILE  the card check writes the document to FILE" \
 		"" \
 		"Environment: DESTDIR and PREFIX may come from the environment;" \
 		"YES, ASSUME_YES and the licence settings never do (only the command line)." \
@@ -105,10 +120,16 @@ help:
 		"Run make in this directory as a normal user; steps that" \
 		"need root use doas, sudo or su."
 
-.PHONY: help purpose preflight install-prereqs deps install-deps configure build all test install deinstall uninstall test-install clean
+.PHONY: help purpose check-card preflight install-prereqs deps install-deps configure build all test install deinstall uninstall test-install clean
 
 purpose:
 	@printf '%s\n' "$(REPO_PURPOSE)"
+
+# The card check of this machine: the tool only looks.  The switches
+# (CHECK_JSON, CHECK_LOAD, CHECK_REPORT) reach the tool as fixed flags;
+# the text of a switch is never part of a recipe.
+check-card:
+	@$(DRIVER_ENV) $(DRIVER) check-card
 
 # The --json and --purpose arguments repeat MK_JSON and MK_PURPOSE on
 # purpose: the makefile-check hook reads them from this recipe.
