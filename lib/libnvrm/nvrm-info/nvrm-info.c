@@ -31,7 +31,7 @@ usage(FILE *fp)
 	    "usage: nvrm-info [--json | --jsonl | --schema] [--backend name]\n"
 	    "       nvrm-info --help\n"
 	    "\n"
-	    "  --json      one JSON document (schema nvrm-info/1); versions are\n"
+	    "  --json      one JSON document (schema nvrm-info/2); versions are\n"
 	    "              strings plus integer parts\n"
 	    "  --jsonl     JSON Lines: header, one record per GPU, end record;\n"
 	    "              versions are strings plus integer parts\n"

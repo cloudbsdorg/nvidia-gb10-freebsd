@@ -61,7 +61,8 @@ help:
 		"Targets (same names on every OS):" \
 		"  make help             this message (default)" \
 		"  make purpose          print REPO_PURPOSE (for machines)" \
-		"  make preflight        what is missing (JSON=1: JSON)" \
+		"  make preflight        what is missing, and whether each GPU is" \
+		"                        supported (JSON=1: JSON)" \
 		"  make install-prereqs  packages, NVIDIA sources (licence shown)," \
 		"                        FreeBSD and drm-kmod sources (deps," \
 		"                        install-deps: the same)" \

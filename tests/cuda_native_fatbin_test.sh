@@ -696,9 +696,9 @@ for man in nvfatbin.1 nvfatbin.5 cuda-objdump.1; do
 	[ $rc -eq 0 ] && [ ! -s "$W/$man.mandoc" ]
 	expect_rc "$man is mandoc -T lint -W warning clean" $rc 0
 done
-for file in fatbin/cnfatbin.h fatbin/cnfatbin.c fatbin/cntool.h \
-    fatbin/cntool.c fatbin/nvfatbin.c fatbin/cuda-objdump.c man/nvfatbin.1 \
-    man/nvfatbin.5 man/cuda-objdump.1; do
+for file in fatbin/cnfatbin.h fatbin/cnfatbin.c fatbin/cn_names.h \
+    fatbin/cntool.h fatbin/cntool.c fatbin/nvfatbin.c fatbin/cuda-objdump.c \
+    man/nvfatbin.1 man/nvfatbin.5 man/cuda-objdump.1; do
 	grep -q 'SPDX-License-Identifier: BSD-2-Clause' "$CN/$file" &&
 	    grep -q 'Copyright (c) 2026 REVYTECH, Inc\.' "$CN/$file"
 	expect_rc "$file carries the BSD-2 header" $? 0

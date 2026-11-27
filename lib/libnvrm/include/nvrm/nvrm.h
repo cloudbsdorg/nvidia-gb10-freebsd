@@ -40,11 +40,11 @@
 #define NVRM_RM_VERSION		"580.178.04"
 /* Library API version (shared object nvrm.so.1; symbol versions NVRM_1.0 for
  * discovery, NVRM_1.1 for memory and VA, NVRM_1.2 for version numbers,
- * NVRM_1.3 for channels).
+ * NVRM_1.3 for channels, NVRM_2.0 for the published chip family names).
  * PROVISIONAL: the interface and the structures below are frozen at the first
  * package release and not before; a future version may still reshape them. */
-#define NVRM_API_MAJOR		1
-#define NVRM_API_MINOR		3
+#define NVRM_API_MAJOR		2
+#define NVRM_API_MINOR		0
 
 #define NVRM_MAX_GPUS		32
 #define NVRM_MAX_CLASSES	200
@@ -85,7 +85,7 @@ enum nvrm_reason {
 	NVRM_R_RM_FAILED,
 	NVRM_R_RM_UNSUPPORTED,
 	NVRM_R_OS_NOT_REPORTED,
-	NVRM_R_FAMILY_UNKNOWN,	/* the GPU matched no generation table row */
+	NVRM_R_FAMILY_UNKNOWN,	/* the GPU matched no chip family table row */
 	NVRM_R_INPUT_MISSING,
 	NVRM_R_NO_NUMA,
 	NVRM_R_BACKEND_NONE,
@@ -183,6 +183,15 @@ typedef struct nvrm_field {
 	size_t		offset;		/* into nvrm_device_info */
 	int		hex;		/* text mode prints it in hex */
 	const char	*desc;
+	/* NVRM_2.0: the value is one of the published chip family names
+	 * (the family of a GPU).  The schema pins those names; the family
+	 * of the GPU is the same name the driver publishes.
+	 *
+	 * A flag, not a kind: the kind of a row is part of what a program
+	 * bound to NVRM_1.0 knows (the family row is one of its rows), and
+	 * a kind it does not know is a kind it cannot read.  The flag is
+	 * appended, so every member a 1.0 caller knows keeps its offset. */
+	int		chip_family;
 } nvrm_field;
 
 typedef struct nvrm_ctx nvrm_ctx;

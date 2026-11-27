@@ -2,15 +2,25 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * nvrm_table.c - the generation table.  This is data: every row is keyed by
+ * nvrm_table.c - the chip family table.  This is data: every row is keyed by
  * the pair (cls_gpfifo, cls_compute) and every class number is taken from the
  * class headers of open-gpu-kernel-modules 580.178.04 (src/common/sdk/nvidia/
  * inc/class/).  Rows are ordered newest first; the first row whose two key
  * classes the GPU lists wins.  A GPU that matches no row is still reported,
  * with the family-supplied values unavailable.
  *
- * Ada has no copy class of its own in the headers: its copy engines are the
- * ones of the generation before (0xC7B5), as the RM class lists show.
+ * The name of a row is the chip family it covers, never a marketing name,
+ * and it is the same name the driver publishes (the architecture table of
+ * src/gb10-archfloor/nv_arch_floor.h): the preflight JSON and
+ * hw.nvidia.min_architecture_name carry the same spelling, so a consumer
+ * compares the two as they are.
+ *
+ * The GA100 row is a profile of the GA10x family: the architecture value
+ * 0x17 is the GA10x family whatever the chip is.  The product identity is
+ * in chip_id and implementation, not in the family.
+ *
+ * AD10x has no copy class of its own in the headers: its copy engines are
+ * the ones of the generation before (0xC7B5), as the RM class lists show.
  *
  * Board decorators are PCI-subsystem entries that only add or override
  * options and never decide support.  No decorator goes in without a real
@@ -22,19 +32,19 @@
 #define MiB(x)	((uint64_t)(x) << 20)
 
 const nvrm_family nvrm_family_table[] = {
-	{ "blackwell-b", 0xCA6F, 0xCEC0, 0xCE97, 0xCAB5,
+	{ "GB20x", 0xCA6F, 0xCEC0, 0xCE97, 0xCAB5,
 	    { KiB(4), KiB(64), MiB(2), MiB(512) } },
-	{ "blackwell-a", 0xC96F, 0xCDC0, 0xCD97, 0xC9B5,
+	{ "GB10x", 0xC96F, 0xCDC0, 0xCD97, 0xC9B5,
 	    { KiB(4), KiB(64), MiB(2), MiB(512) } },
-	{ "hopper", 0xC86F, 0xCBC0, 0xCB97, 0xC8B5,
+	{ "GH100", 0xC86F, 0xCBC0, 0xCB97, 0xC8B5,
 	    { KiB(4), KiB(64), MiB(2), MiB(512) } },
-	{ "ada", 0xC56F, 0xC9C0, 0xC997, 0xC7B5,
+	{ "AD10x", 0xC56F, 0xC9C0, 0xC997, 0xC7B5,
 	    { KiB(4), KiB(64), MiB(2) } },
-	{ "ampere-ga10x", 0xC56F, 0xC7C0, 0xC797, 0xC7B5,
+	{ "GA10x", 0xC56F, 0xC7C0, 0xC797, 0xC7B5,
 	    { KiB(4), KiB(64), MiB(2) } },
-	{ "ampere-ga100", 0xC56F, 0xC6C0, 0xC697, 0xC6B5,
+	{ "GA10x", 0xC56F, 0xC6C0, 0xC697, 0xC6B5,
 	    { KiB(4), KiB(64), MiB(2) } },
-	{ "turing", 0xC46F, 0xC5C0, 0xC597, 0xC5B5,
+	{ "TU10x", 0xC46F, 0xC5C0, 0xC597, 0xC5B5,
 	    { KiB(4), KiB(64), MiB(2) } },
 };
 

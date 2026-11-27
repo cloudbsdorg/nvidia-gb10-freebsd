@@ -101,8 +101,8 @@ check_llvm || exit 2
 # Time: O(number of required source files).  Space: O(1).
 for src in sdk/include/cuda.h libdevice/libdevice.ll tools/nvptxas.sh \
     tools/cuda-native-tool-lib.sh fatbin/cnfatbin.h fatbin/cnfatbin.c \
-    fatbin/cntool.h fatbin/cntool.c fatbin/nvfatbin.c fatbin/cuda-objdump.c \
-    libcudart-stub/cudart_stub.c; do
+    fatbin/cn_names.h fatbin/cntool.h fatbin/cntool.c fatbin/nvfatbin.c \
+    fatbin/cuda-objdump.c libcudart-stub/cudart_stub.c; do
 	[ -f "$HERE/$src" ] || {
 		echo "mksdk: $HERE/$src is missing; the source tree is incomplete (check out lib/cuda-native again)" >&2
 		exit 1
@@ -175,6 +175,7 @@ for src in fatbin/cnfatbin.c fatbin/cntool.c fatbin/nvfatbin.c \
 	substitute "$HERE/$src" "$BUILD/$base" || exit 1
 done
 cp "$HERE/fatbin/cnfatbin.h" "$BUILD/cnfatbin.h" || exit 1
+cp "$HERE/fatbin/cn_names.h" "$BUILD/cn_names.h" || exit 1
 cp "$HERE/fatbin/cntool.h" "$BUILD/cntool.h" || exit 1
 # The schema cuda-objdump prints with --schema, as a C string.
 awk '{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); \

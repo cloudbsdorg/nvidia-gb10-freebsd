@@ -28,8 +28,9 @@
     {"index": 21, "name": "root", "state": "ok", "available": true, "reason": "sudo", "fix": ""}
   ],
   "items": [
-    {"index": 0, "selector": "vgapci1@pci13:1:0:0", "vendor": "0x10de", "device": "0x2d04", "class": "0x030000"}
+    {"index": 0, "selector": "vgapci1@pci13:1:0:0", "vendor": "0x10de", "device": "0x2d04", "class": "0x030000", "support": {"state": "supported", "architecture": "Blackwell", "source": "pci_vendors", "reason": "GB206 is Blackwell"}}
   ],
+  "min_architecture": {"value": 23, "name": "Ampere", "source": "header"},
   "device": "NVIDIA device present",
   "missing": 4
 }

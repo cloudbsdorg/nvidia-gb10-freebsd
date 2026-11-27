@@ -21,6 +21,7 @@
 #include <sha256.h>
 
 #include "cnfatbin.h"
+#include "cn_names.h"
 
 /* The number of strings every entry carries: triple, arch and our two. */
 #define CNFATBIN_STRINGS_PER_ENTRY 4
@@ -254,13 +255,10 @@ cnfatbin_register_mapping(const void *base, size_t length)
  * Every way a container can be refused: the short name the tools print and
  * the message they print with it.  One table, so the two cannot disagree,
  * and one entry per code, so a code cannot lose its name or its message.
+ * The shape of an entry is the one of cn_names.h, which libnvrm's table of
+ * reasons uses too.
  */
-struct cnfatbin_error_info {
-	const char *name;
-	const char *message;
-};
-
-static const struct cnfatbin_error_info error_table[] = {
+static const struct cn_name_entry error_table[] = {
 	[CNFATBIN_OK] = { "ok", "no error" },
 	[CNFATBIN_E_SHORT_INPUT] = {
 		"short-input", "input is shorter than the container header" },
@@ -309,17 +307,17 @@ _Static_assert(sizeof(error_table) / sizeof(error_table[0]) == CNFATBIN_ERROR_CO
 const char *
 cnfatbin_strerror(enum cnfatbin_error err)
 {
-	if ((int)err < 0 || (size_t)err >= CNFATBIN_ERROR_COUNT)
+	if (!cn_name_code_valid((int)err, CNFATBIN_ERROR_COUNT))
 		return "unknown error";
-	return error_table[err].message;
+	return error_table[err].text;
 }
 
 const char *
 cnfatbin_error_name(enum cnfatbin_error err)
 {
-	if ((int)err < 0 || (size_t)err >= CNFATBIN_ERROR_COUNT)
+	if (!cn_name_code_valid((int)err, CNFATBIN_ERROR_COUNT))
 		return "unknown";
-	return error_table[err].name;
+	return error_table[err].id;
 }
 
 const char *

@@ -131,6 +131,11 @@ if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/tree-a/nvidia/a.c" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia/nv_version_sysctl.c" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia/nv_version_sysctl.h" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia/nvrm_version.h" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv_arch_floor.c" ] \
+    && [ -f "$TESTROOT/build/tree-a/nvidia/nv_arch_floor.h" ] \
+    && [ ! -e "$TESTROOT/build/tree-a/nvidia-modeset/nv_arch_floor.c" ] \
+    && [ "$(grep -c '^src/gb10-archfloor/nv_arch_floor.c  [0-9a-f]*$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
+    && [ "$(grep -c '^src/gb10-archfloor/nv_arch_floor.h  [0-9a-f]*$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nv_version_sysctl.c" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nv_version_sysctl.h" ] \
     && [ -f "$TESTROOT/build/tree-a/nvidia-modeset/nvrm_version.h" ] \
@@ -142,7 +147,7 @@ if [ "$rc" -eq 0 ] && [ -f "$TESTROOT/build/tree-a/nvidia/a.c" ] \
     && [ "$(grep -c '^lib/libnvrm/include/nvrm/nvrm_version.h  [0-9a-f]*  nvidia-modeset/nvrm_version.h$' "$TESTROOT/build/tree-a/.prepared")" -eq 1 ] \
     && grep -q '^src/gb10-uvm/nv-uvm-interface.c  ' "$TESTROOT/build/tree-a/.prepared" \
     && grep -q '^ogkm:src/nvidia/interface/nv_uvm_types.h  ' "$TESTROOT/build/tree-a/.prepared"; then
-	ok "(a) no patches: source, UVM glue, version sysctl copies and shared parser recorded in both modules, exit 0"
+	ok "(a) no patches: source, UVM glue, version sysctl copies and shared parser recorded in both modules, architecture floor recorded for nvidia.ko, exit 0"
 else
 	fail "(a) no patches: rc=$rc out=$(cat "$TESTROOT/out-a")"
 fi

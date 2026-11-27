@@ -178,6 +178,13 @@ for m in make gmake; do
 	    && ok "$m -n install deinstall deps install-deps" || bad "$m -n of the install targets"
 done
 
+# The help fits an 80-column terminal.
+if (cd "$repo" && make -s help) | awk 'length > 79 { exit 1 }'; then
+	ok "make help fits in 80 columns"
+else
+	bad "make help has a line longer than 79 columns"
+fi
+
 # (y) the environment rule is part of the user-facing contract: staging
 # roots may come from the environment, but confirmation and licence choices
 # are command-line-only.  Check the values without running an install.
@@ -219,7 +226,8 @@ rc=$?
 if python3 -I - "$S/pf.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema_version"] == "1.0" and d["tool"] == "preflight"
+assert d["schema_version"] == "2.0" and d["tool"] == "preflight"
+assert d["schema_major"] == 2 and d["schema_minor"] == 0
 assert d["purpose"] == "application"
 assert d["device"] in ("no NVIDIA device", "NVIDIA device present", "device check unavailable")
 assert isinstance(d["status"], list) and isinstance(d["items"], list)

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia-gb10-freebsd:make-preflight:2.0",
+  "version": "2.0",
+  "description": "2.0 names the architecture of a GPU by its chip family (GA10x, GH100, GB20x and the rest): min_architecture.name and items[].support.architecture carry a chip family and refuse the older generation names. The document's schema_version is this schema's version as a string, and schema_major and schema_minor are the same version as integers. 1.1 added items[].support and min_architecture, and both are required: nvidia.ko attaches to GA10x and later GPUs only.",
+  "title": "make preflight JSON=1 (sh scripts/make.sh preflight --json) of nvidia-gb10-freebsd",
+  "type": "object",
+  "required": ["schema_version", "schema_major", "schema_minor", "tool", "purpose", "metadata", "status", "items", "min_architecture", "device", "missing"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "string", "const": "2.0"},
+    "schema_major": {"type": "integer", "const": 2},
+    "schema_minor": {"type": "integer", "const": 0},
+    "tool": {"const": "preflight"},
+    "purpose": {"enum": ["application", "library", "tool", "service", "docs", "config", "data", "skills", "infra", "fork"]},
+    "metadata": {
+      "type": "object",
+      "required": ["os", "arch", "release", "osreldate", "work"],
+      "additionalProperties": false,
+      "properties": {
+        "os": {"type": "string"}, "arch": {"type": "string"}, "release": {"type": "string"},
+        "osreldate": {"type": "string"}, "work": {"type": "string"}
+      }
+    },
+    "status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "name", "state", "available", "reason", "fix"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "name": {"type": "string", "minLength": 1},
+          "state": {"enum": ["ok", "missing", "warn"]},
+          "available": {"type": "boolean"},
+          "reason": {"type": "string"},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "selector", "vendor", "device", "class", "support"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "selector": {"type": "string"},
+          "vendor": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+          "device": {"type": "string", "pattern": "^0x[0-9a-f]{4}$"},
+          "class": {"type": "string", "pattern": "^0x[0-9a-f]{6}$"},
+          "support": {
+            "description": "Will nvidia.ko take this device. source kernel: nvidia.ko is loaded and said so (attached, or refused with its message); pci_vendors: the chip name from pciconf -lv looked up in src/gb10-archfloor/nv_arch_floor.h. architecture is the chip family of the chip name, null when there is none.",
+            "type": "object",
+            "required": ["state", "architecture", "source", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "state": {"enum": ["supported", "below-floor", "no-firmware", "unknown", "not-responding", "unreadable"]},
+              "architecture": {"type": ["string", "null"], "enum": ["GM10x", "GM20x", "GP10x", "GV10x", "GV11x", "TU10x", "GA10x", "GH100", "AD10x", "GB10x", "GB20x", null]},
+              "source": {"enum": ["kernel", "pci_vendors"]},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "min_architecture": {
+      "description": "The oldest GPU architecture the driver attaches to: value is the PMC_BOOT_42 architecture number, name its chip family (GA10x and the rest). source kernel: hw.nvidia.min_architecture of the loaded nvidia.ko, its name translated to the chip family this build uses; header: src/gb10-archfloor/nv_arch_floor.h; unavailable: neither could be read.",
+      "type": "object",
+      "required": ["value", "name", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "value": {"type": ["integer", "null"], "minimum": 0},
+        "name": {"type": ["string", "null"], "enum": ["GM10x", "GM20x", "GP10x", "GV10x", "GV11x", "TU10x", "GA10x", "GH100", "AD10x", "GB10x", "GB20x", null]},
+        "source": {"enum": ["kernel", "header", "unavailable"]}
+      }
+    },
+    "device": {"enum": ["no NVIDIA device", "NVIDIA device present", "device check unavailable"]},
+    "missing": {"type": "integer", "minimum": 0}
+  }
+}

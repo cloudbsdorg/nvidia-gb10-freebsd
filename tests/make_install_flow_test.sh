@@ -1626,14 +1626,43 @@ if [ "$_rt" = "$_all" ] && [ "$_hi" = c3a9ff ]; then
 else
 	bad "byte round trip: blk=[$([ "$_rt" = "$_all" ] && echo same || echo differs)] json high bytes=[$_hi]"
 fi
-# one decoder and one table: the blk decoder is esc_bytes in its own mode
-if [ "$(grep -c 'index("0123456789abcdef"' "$repo/scripts/make.sh")" = 1 ] \
-    && [ "$(grep -c 'function hv' "$repo/scripts/make.sh")" = 1 ] \
+# one decoder and one table: the blk decoder is esc_bytes in its own mode.
+# The rule is about the byte decoder: the escape table and the hexadecimal
+# digit table inside esc_bytes are written once, the byte-at-a-time pipeline
+# is written once, and json_str, blk_esc and blk_unesc call the decoder
+# instead of carrying a copy of it.  The count is scoped to the decoder: the
+# architecture table's own parser (arch_floor_table) reads the hexadecimal
+# constants of the header, and that is a different program with a different
+# job.  The rule that program has is checked below.
+_dec=$(sed -n '/^esc_bytes() {/,/^}/p' "$repo/scripts/make.sh")
+if [ "$(grep -c 'od -An -v -tx1' "$repo/scripts/make.sh")" = 1 ] \
+    && [ "$(grep -c '^esc_bytes() {' "$repo/scripts/make.sh")" = 1 ] \
+    && [ "$(printf '%s\n' "$_dec" | grep -c 'index("0123456789abcdef"')" = 1 ] \
+    && [ "$(printf '%s\n' "$_dec" | grep -c 'function hv')" = 1 ] \
+    && [ "$(grep -c '^blk_esc() {' "$repo/scripts/make.sh")" = 1 ] \
     && [ "$(grep -c '^blk_unesc() {' "$repo/scripts/make.sh")" = 1 ] \
-    && sed -n '/^blk_unesc() {/,/^}/p' "$repo/scripts/make.sh" | grep -q 'esc_bytes unblk'; then
+    && [ "$(grep -c '^json_str() {' "$repo/scripts/make.sh")" = 1 ] \
+    && sed -n '/^blk_esc() {/,/^}/p' "$repo/scripts/make.sh" | grep -q 'esc_bytes blk' \
+    && sed -n '/^blk_unesc() {/,/^}/p' "$repo/scripts/make.sh" | grep -q 'esc_bytes unblk' \
+    && sed -n '/^json_str() {/,/^}/p' "$repo/scripts/make.sh" | grep -q 'esc_bytes json'; then
 	ok "the byte decoder and the escape table are written once"
 else
 	bad "make.sh has more than one byte decoder"
+fi
+
+# The hexadecimal constants of the architecture table are read as numbers: the
+# digit b is eleven, not ten.  The GB20x row is 0x1b (27) and the GB10x row
+# is 0x1a (26); a parser that reads every digit from b to f as ten reads the
+# GB20x row as 0x1a, the value of the GB10x row, and the two chip families
+# stop telling themselves apart.
+fn_extract "$repo/scripts/make.sh" arch_floor_header arch_floor_table > "$S/arch-fns.sh"
+_at=$(. "$S/arch-fns.sh"; repo="$repo"; arch_floor_table 2>/dev/null)
+_gb10=$(printf '%s\n' "$_at" | awk '$1 == "arch" && $3 == "GB10x" { print $2; exit }')
+_gb20=$(printf '%s\n' "$_at" | awk '$1 == "arch" && $3 == "GB20x" { print $2; exit }')
+if [ "$_gb10" = 26 ] && [ "$_gb20" = 27 ]; then
+	ok "the architecture table reads a hexadecimal digit as its number (GB10x 26, GB20x 27)"
+else
+	bad "the architecture table reads the hexadecimal digits wrongly: GB10x=$_gb10 GB20x=$_gb20"
 fi
 
 # A test hook never reaches the package step, which runs as root on the live

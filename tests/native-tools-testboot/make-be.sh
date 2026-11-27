@@ -35,7 +35,8 @@
 #   --activate    finish with bectl activate -t BE (the orchestrator's decision; never while a Fable agent runs)
 #
 # What it does, in order (a failure after the clone exists removes the half-built boot environment):
-#   1. the kit must be committed (tests/native-tools-testboot, tests/libnvrm, lib/libnvrm, SOURCES); what is
+#   1. the kit must be committed (tests/native-tools-testboot, tests/libnvrm, lib/libnvrm,
+#      lib/cuda-native/fatbin/cn_names.h, SOURCES); what is
 #      installed is git archive of that commit; the vendored gpu-detect.sh and testboot-return equal their pins in
 #      VENDOR;
 #   2. each staged file equals its full hash; each staged .ko has no dependency and no undefined symbol of the
@@ -217,7 +218,7 @@ trap early_cleanup EXIT
 # 1. the kit: committed; installed from git archive of the commit
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 git_() { git -c safe.directory="$REPO" --no-optional-locks -C "$REPO" "$@"; }
-PATHS="tests/native-tools-testboot tests/libnvrm lib/libnvrm SOURCES"
+PATHS="tests/native-tools-testboot tests/libnvrm lib/libnvrm lib/cuda-native/fatbin/cn_names.h SOURCES"
 if [ "$HOOKS" = 1 ] && [ -n "${NVNT_NO_GIT_CHECK:-}" ]; then
 	COMMIT=unchecked-test-hook
 	( cd "$REPO" && tar -cf "$SCRATCH/kit.tar" $PATHS )

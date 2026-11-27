@@ -58,6 +58,56 @@ else
 	bad "the checked-in after files differ from make-after.py's output (rc=$rc)"
 fi
 
+# the capture is a record of a real boot: it keeps the values the library
+# published then, the marketing name of the generation.  The interface
+# publishes chip families now, so the test translates the recorded value to
+# the chip family the tree's own table gives for the classes of the capture
+# and checks that translation; the record itself is not edited.
+if grep -q '"family":{"available":true,"value":"blackwell-b"' "$DATA/nvrm-info.json"; then
+	ok "the capture keeps the family value the library published then"
+else
+	bad "the capture no longer carries the family value it was recorded with"
+fi
+if grep -q '"family":{"available":true,"value":"blackwell-b"' "$DATA/nvrm-info.after.json"; then
+	ok "the derived fixture keeps the family value of the capture"
+else
+	bad "the derived fixture no longer carries the family value of the capture"
+fi
+_mk_norm=$(python3 -I - "$DATA" "$REPO/lib/libnvrm/nvrm_table.c" "$W/normalized.json" <<'PYEOF'
+import json, re, sys
+data, table, out = sys.argv[1], sys.argv[2], sys.argv[3]
+doc = json.load(open(data + "/nvrm-info.json"))
+gpu = doc["devices"][0]["gpu"]
+rows = []
+for line in open(table):
+    m = re.match(r'\s*\{\s*"([^"]*)",\s*(0x[0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+),', line)
+    if m:
+        rows.append((m.group(1), int(m.group(2), 16), int(m.group(3), 16)))
+family = None
+for name, gpfifo, compute in rows:      # newest first: the first match wins
+    if gpfifo == gpu["cls_gpfifo"]["value"] and compute == gpu["cls_compute"]["value"]:
+        family = name
+        break
+if family is None:
+    print("no row of the chip family table matches the classes of the capture",
+          file=sys.stderr)
+    sys.exit(1)
+gpu["family"]["value"] = family
+json.dump(doc, open(out, "w"), separators=(",", ":"))
+print(family)
+PYEOF
+)
+if [ $? -eq 0 ] && [ -n "$_mk_norm" ]; then
+	ok "the capture translated at test time gives the chip family of the tree's table ($_mk_norm)"
+else
+	bad "the capture cannot be translated to a chip family of the tree's table"
+fi
+if [ -f "$W/normalized.json" ] && grep -q '"value":"GB20x"' "$W/normalized.json"; then
+	ok "the translated capture carries the chip family (GB20x)"
+else
+	bad "the translated capture does not carry the chip family"
+fi
+
 # make-after.py derives from the capture: a capture whose GPU is unit 0 gives dev.nvidia.0.*, and a
 # GPU at another PCI location gives that location; a chip the table does not know is an error
 mkdir -p "$W/gen0"

@@ -402,7 +402,7 @@
 -#endif
 +    /*
 +     * RM passes the width of the physical address the GPU can drive
-+     * (osDmaSetAddressSize(), osinit.c; 47 bits or more on Blackwell).
++     * (osDmaSetAddressSize(), osinit.c; 47 bits or more on GB10x and later).
 +     * Honour it on every architecture: a fixed 32-bit mask on arm64
 +     * made nv_set_dma_address_size() report a 4 GB window to nvidia-uvm
 +     * (nv-uvm-interface.c dma_addressable_limit) and confined every RM

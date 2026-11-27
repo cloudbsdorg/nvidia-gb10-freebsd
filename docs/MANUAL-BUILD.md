@@ -12,8 +12,9 @@ repository root and check its result before continuing.
   `nv-kernel-amd64.o`). On amd64 the open core is still rebuilt; NVIDIA's prebuilt
   `nv-kernel.o` is not what the final `nvidia.ko` links. Kernel modules are linked with
   the base system's `ld.lld` (`/usr/bin` ahead of `/usr/local/bin`).
-- An Ampere-generation or newer NVIDIA GPU (RTX 30 series and later, and data-centre parts of
-  the same generations). Turing needs `gsp_tu10x`, which this build does not produce.
+- A GPU of the GA10x (RTX 30) generation or newer (the RTX 30 series and later, and data-centre parts of
+  the same generations). The GA100 requires `gsp_tu10x`, and this build does not carry that image, so it
+  refuses a GA100 when it probes it.
 - `git`, `gmake` and `zstd`, plus the base system's `clang` and `ld.lld`:
 
   ```sh
