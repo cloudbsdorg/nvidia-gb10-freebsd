@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
-.Dd November 22, 2026
+.Dd November 27, 2026
 .Dt NVRM_CHAN 3
 .Os
 .Sh NAME
@@ -130,6 +130,8 @@ and length in
 Addresses are nonzero, four-byte aligned and below 2^40; lengths are from 1
 through 2^21-1.
 .Dv NVRM_GP_NO_PREFETCH
+(the same bit is named
+.Dv NVRM_GP_SYNC_WAIT )
 requests a fetch only after prior work finishes.
 .Dv NVRM_GP_INCOMPLETE
 joins an element to the next one.
@@ -204,9 +206,14 @@ child is refused, then a dead channel is lost, and only then is a point above
 the submitted count invalid.
 A zero
 .Fa timeout_ns
-does not sleep;
+takes the library's default, two seconds
+.Pq Dv NVRM_CHAN_WAIT_DEFAULT_NS ;
 .Dv UINT64_MAX
 means no limit.
+A wait that runs out of time fails with
+.Er NVRM_E_TIMEOUT ,
+and its message names what it waited for: the semaphore's address, the point,
+the value the semaphore holds and the ring's get and put offsets.
 .Pp
 An execution fault kills only its channel.
 A dead channel stays dead: submission and kicking fail, while status,

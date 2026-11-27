@@ -95,7 +95,13 @@
 # usage: BOOT_EXPECT_VRAM_BYTES=N BOOT_EXPECT_VRAM_RESERVE_MAX_BYTES=R \
 #            BOOT_EXPECT_SM=M.m [BOOT_MEM_PROBE=path] [BOOT_CHAN_PROBE=path] \
 #            [BOOT_CHAN_STRESS=N] [BOOT_CHAN_STRESS_SECONDS=S] \
+#            [BOOT_PROBE_TIMEOUT=S] \
 #            boot_nvrm_info.sh OUTDIR [NVRM_INFO [SCHEMA]]
+# BOOT_PROBE_TIMEOUT is the number of seconds a probe may run (default: 120): a probe that waits
+# for a GPU that will not answer is killed when the time is up, and its row says "timed out".
+# It must be a number of seconds greater than zero: timeout's duration zero means no limit at all,
+# and a probe with no limit is the hang this deadline was made to stop, so a value that is not a
+# positive number is refused and the rows that run a probe fail instead of running without one.
 # Writes OUTDIR/results.txt (one PASS/FAIL/INFO line per check, last line
 # "== done rc=N"), OUTDIR/nvrm-info.json, nvrm-info.jsonl, sysctl.txt,
 # pciconf.txt, dmesg-nvrm.txt, kldstat.txt, kldstat-after.txt.  Exit status:
@@ -203,13 +209,48 @@ if [ -n "$SCHEMA" ] && [ -f "$SCHEMA" ]; then
 fi
 
 # the memory calls on the real driver
+# Every probe runs under a deadline: a probe that waits for a GPU that will
+# not answer must not hold the boot open.  BOOT_PROBE_TIMEOUT is the number
+# of seconds a probe may run (default: 120); the probe is killed when the
+# time is up and the row says "timed out".
+BOOT_PROBE_TIMEOUT=${BOOT_PROBE_TIMEOUT:-120}
+# The deadline must be a number of seconds greater than zero.  timeout's
+# duration zero means no limit at all, and a probe with no limit is exactly
+# the hang this deadline was made to stop: so a value that is not a
+# positive number is refused here, and the rows that run a probe fail
+# instead of running a probe without a deadline.
+_probe_deadline=
+case $BOOT_PROBE_TIMEOUT in
+'' | *[!0-9]*) : ;;
+*)
+	if [ "$BOOT_PROBE_TIMEOUT" -gt 0 ]; then
+		_probe_deadline=$BOOT_PROBE_TIMEOUT
+	fi
+	;;
+esac
+if [ -z "$_probe_deadline" ]; then
+	fail "BOOT_PROBE_TIMEOUT='$BOOT_PROBE_TIMEOUT' is not a number of seconds greater than zero: the probe rows have no deadline and are refused"
+fi
 PROBE=${BOOT_MEM_PROBE:-$HERE/mem_probe}
 if [ -x "$PROBE" ]; then
-	"$PROBE" >"$OUT/mem_probe.txt" 2>&1
-	rc=$?
-	grep -E '^(PASS|FAIL|INFO) ' "$OUT/mem_probe.txt" >>"$R"
-	if [ $rc -eq 0 ]; then pass "mem_probe: every memory step passed on every GPU"
-	else fail "mem_probe exited $rc ($OUT/mem_probe.txt)"; fi
+	if [ -n "$_probe_deadline" ]; then
+		timeout -k 5 "$_probe_deadline" "$PROBE" >"$OUT/mem_probe.txt" 2>&1
+		rc=$?
+		grep -E '^(PASS|FAIL|INFO) ' "$OUT/mem_probe.txt" >>"$R"
+		if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
+			# the note goes into the probe's own output after the
+			# grep, so that the row below is the only copy of it in
+			# results.txt: one failure is one failure
+			echo "FAIL mem_probe: timed out after $_probe_deadline s" >>"$OUT/mem_probe.txt"
+			fail "mem_probe: timed out after $_probe_deadline s"
+		elif [ $rc -eq 0 ]; then
+			pass "mem_probe: every memory step passed on every GPU"
+		else
+			fail "mem_probe exited $rc ($OUT/mem_probe.txt)"
+		fi
+	else
+		fail "mem_probe not run: the row has no deadline (see the BOOT_PROBE_TIMEOUT row)"
+	fi
 elif [ "${BOOT_S1_ONLY:-}" = 1 ]; then
 	info "memory probe not run: BOOT_S1_ONLY=1 (a discovery-only kit)"
 else
@@ -222,12 +263,28 @@ BOOT_CHAN_STRESS_SECONDS=${BOOT_CHAN_STRESS_SECONDS:-300}
 export BOOT_CHAN_STRESS BOOT_CHAN_STRESS_SECONDS
 CPROBE=${BOOT_CHAN_PROBE:-$HERE/chan_probe}
 if [ -x "$CPROBE" ]; then
-	"$CPROBE" >"$OUT/chan_probe.txt" 2>&1
-	rc=$?
-	grep -E '^(PASS|FAIL|INFO) ' "$OUT/chan_probe.txt" >>"$R"
-	"$CPROBE" --json >"$OUT/chan_probe.json" 2>&1
-	if [ $rc -eq 0 ]; then pass "chan_probe: every channel step passed on every GPU"
-	else fail "chan_probe exited $rc ($OUT/chan_probe.txt)"; fi
+	if [ -n "$_probe_deadline" ]; then
+		timeout -k 5 "$_probe_deadline" "$CPROBE" >"$OUT/chan_probe.txt" 2>&1
+		rc=$?
+		grep -E '^(PASS|FAIL|INFO) ' "$OUT/chan_probe.txt" >>"$R"
+		if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
+			echo "FAIL chan_probe: timed out after $_probe_deadline s" >>"$OUT/chan_probe.txt"
+			fail "chan_probe: timed out after $_probe_deadline s"
+			# the json run would wait another whole deadline for a
+			# probe that has already hung: it is not run
+			echo "NOTE chan_probe: the json run is skipped: the probe had already timed out" >>"$OUT/chan_probe.txt"
+		else
+			if [ $rc -eq 0 ]; then pass "chan_probe: every channel step passed on every GPU"
+			else fail "chan_probe exited $rc ($OUT/chan_probe.txt)"; fi
+			timeout -k 5 "$_probe_deadline" "$CPROBE" --json >"$OUT/chan_probe.json" 2>&1
+			jrc=$?
+			if [ $jrc -eq 124 ] || [ $jrc -eq 137 ]; then
+				fail "chan_probe --json: timed out after $_probe_deadline s"
+			fi
+		fi
+	else
+		fail "chan_probe not run: the row has no deadline (see the BOOT_PROBE_TIMEOUT row)"
+	fi
 elif [ "${BOOT_S1_ONLY:-}" = 1 ]; then
 	info "channel probe not run: BOOT_S1_ONLY=1 (a discovery-only kit)"
 else

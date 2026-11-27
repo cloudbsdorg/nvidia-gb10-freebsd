@@ -847,6 +847,11 @@ EOF
 		expect 2 $? "make-be.sh -$_opt: a missing control module is a usage error"
 		grep -q "control module $T/missing-$_opt.ko is missing or unreadable" "$T/missing-$_opt.out" && ok "make-be.sh -$_opt: the usage error names the missing control" || no "make-be.sh -$_opt: $(cat "$T/missing-$_opt.out")"
 	done
+	# a probe timeout of zero is no deadline at all (timeout's duration zero means no limit), and a probe
+	# with no limit is the hang the deadline was made to stop: it is refused here, not written to rc.conf.d
+	env GB10_TEST_HOOKS=1 NVNT_BECTL="$T/bectl" NVNT_MNT="$T/missing-t/root" NVNT_NOT_ROOT=1 NVNT_NO_GIT_CHECK=1 GB10_WORK="$WORK" sh "$KIT/make-be.sh" -T 0 > "$T/missing-t.out" 2>&1
+	expect 2 $? "make-be.sh -T 0: a probe timeout of zero is a usage error"
+	grep -q -- "-T must be more than zero seconds" "$T/missing-t.out" && ok "make-be.sh -T 0: the usage error says why" || no "make-be.sh -T 0: $(cat "$T/missing-t.out")"
 	mkclone "$T/clone/root"
 	MB -D 20990102 -m "$STAGE" -o "$WORK/logs/native-tools-testboot" > "$T/mb.out" 2>&1; expect 0 $? "make-be.sh builds the fake clone"
 	R=$T/clone/root
@@ -921,6 +926,8 @@ EOF
 	[ "$_cst" = 100000 ] && ok "make-be.sh: the channel stress count is written to rc.conf.d ($_cst)" || no "make-be.sh: the channel stress count is '${_cst:-unset}', wanted 100000"
 	_css=$(sed -n 's/^nvidia_native_tools_testboot_chan_stress_seconds="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
 	[ "$_css" = 300 ] && ok "make-be.sh: the channel stress seconds are written to rc.conf.d ($_css)" || no "make-be.sh: the channel stress seconds are '${_css:-unset}', wanted 300"
+	_cpt=$(sed -n 's/^nvidia_native_tools_testboot_probe_timeout="\(.*\)"$/\1/p' "$R/etc/rc.conf.d/nvidia_native_tools_testboot" 2> /dev/null)
+	[ "$_cpt" = 120 ] && ok "make-be.sh: the probe timeout is written to rc.conf.d ($_cpt)" || no "make-be.sh: the probe timeout is '${_cpt:-unset}', wanted 120"
 	for _f in nvidia.ko nvidia-modeset.ko nvidia_gsp_ga10x_fw.ko nvrm-info libnvrm.so.1 mem_probe chan_probe; do
 		cmp -s "$STAGE/$_f" "$R/boot/modules.nvnative-test/$_f" && ok "make-be.sh: $_f is installed" || no "make-be.sh: $_f is not installed"
 	done

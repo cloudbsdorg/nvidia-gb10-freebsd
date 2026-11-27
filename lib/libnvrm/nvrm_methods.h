@@ -69,6 +69,32 @@ nvrm_method_op(uint32_t hdr)
 	return ((hdr >> 29) & 7U);
 }
 
+/*
+ * The GPFIFO entry of a pushbuffer fetch, in the wire format of the class
+ * the board's channel has (and of every class that came before it):
+ *
+ *   the first word   the pushbuffer's address, its bits 31:2 in the field
+ *                    GET (31:2) and the FETCH bit (0) below it;
+ *   the second word  the length of the pushbuffer in dwords (LENGTH, 30:10),
+ *                    the SYNC bit (31) and the address's bits 39:32
+ *                    (GET_HI, 7:0).
+ *
+ * The GET_HI field is what NVIDIA's own client writes: the host HAL of
+ * open-gpu-kernel-modules (kernel-open/nvidia-uvm/, the set_gpfifo_entry
+ * function of the host HAL) puts NvU64_HI32(pushbuffer_va) there, and the
+ * push library of the same tree
+ * (src/common/unix/nvidia-push/src/nvidia-push.c, FillGpEntry) does the
+ * same.  The same bits are named OPCODE in the class headers (clc36f.h,
+ * cla06f.h, clc86f.h and clca6f.h), because a control entry - one that
+ * sets the pushbuffer segment's extended base - spells its opcode there
+ * (the set_gpfifo_pushbuffer_segment_base function of the same HAL); a
+ * fetch entry carries the address's high byte there instead.
+ *
+ * The fetch takes the low 40 bits of the address: the upper bits are the
+ * channel's pushbuffer segment's extended base, which the core sets with a
+ * control entry of its own and does not change from submit to submit.  So
+ * an address at or above 2^40 cannot be fetched, and the core refuses it.
+ */
 static inline uint32_t
 nvrm_gp_entry0(uint64_t va)
 {
@@ -76,12 +102,13 @@ nvrm_gp_entry0(uint64_t va)
 }
 
 static inline uint32_t
-nvrm_gp_entry1(uint64_t va, uint32_t dwords, int no_prefetch)
+nvrm_gp_entry1(uint64_t va, uint32_t dwords, int sync)
 {
 	return ((uint32_t)((va >> 32) & 0xffU) | (dwords << 10) |
-	    (no_prefetch ? (1U << 31) : 0));
+	    (sync ? (1U << 31) : 0));
 }
 
+/* The address an entry names: its low 40 bits. */
 static inline uint64_t
 nvrm_gp_decode_va(uint32_t e0, uint32_t e1)
 {
@@ -95,10 +122,18 @@ nvrm_gp_decode_dwords(uint32_t e1)
 	return ((e1 >> 10) & 0x1fffffU);
 }
 
+/* The SYNC bit of an entry: the fetch waits for the work before it.  The
+ * name the library has always used is the older one. */
 static inline int
 nvrm_gp_decode_no_prefetch(uint32_t e1)
 {
 	return ((e1 >> 31) != 0);
+}
+
+static inline int
+nvrm_gp_decode_sync(uint32_t e1)
+{
+	return (nvrm_gp_decode_no_prefetch(e1));
 }
 
 /* A release segment holds eight dwords; the incrementing header and five

@@ -23,6 +23,7 @@
 void (*nvrm_barrier_hook)(int);
 void (*nvrm_chan_presleep_hook)(void);
 uint64_t nvrm_chan_slice_ns = NVRM_CHAN_SLICE_DEFAULT_NS;
+uint64_t nvrm_chan_wait_default_ns = NVRM_CHAN_WAIT_DEFAULT_NS;
 
 /*
  * The client's message belongs to its most recent call.  Channel calls on
@@ -113,6 +114,19 @@ static int
 deadline_reached(uint64_t deadline)
 {
 	return (deadline != UINT64_MAX && now_ns() >= deadline);
+}
+
+/*
+ * The timeout a wait takes: the caller's, the library's default when the
+ * caller names none, and no limit when the caller asks for one.  A wait
+ * that names none still has a deadline: the default.
+ */
+static uint64_t
+wait_timeout(uint64_t timeout_ns)
+{
+	if (timeout_ns == 0)
+		return (nvrm_chan_wait_default_ns);
+	return (timeout_ns);
 }
 
 /* The turn condition runs on the monotonic clock, like every deadline here. */
@@ -579,7 +593,7 @@ place_batch(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 		idx = (ch->gp_put + i) & (ch->entries - 1);
 		ring[idx * 2] = nvrm_gp_entry0(e[i].va);
 		ring[idx * 2 + 1] = nvrm_gp_entry1(e[i].va, e[i].dwords,
-		    (e[i].flags & NVRM_GP_NO_PREFETCH) != 0);
+		    (e[i].flags & NVRM_GP_SYNC_WAIT) != 0);
 		ch->slot_point[idx] = 0;
 	}
 	idx = (ch->gp_put + n) & (ch->entries - 1);
@@ -662,7 +676,9 @@ submit_step(nvrm_chan *ch, submit_ctx *sc, int *rc)
 	if (!deadline_reached(sc->deadline))
 		return (STEP_SLEEP);
 	*rc = fail(ch->cl, NVRM_E_TIMEOUT, "timed out waiting for GPFIFO "
-	    "ring space");
+	    "ring space: the put is %u, the get is %u and %u entries are "
+	    "free", ch->gp_put, __atomic_load_n(&ch->gp_get, __ATOMIC_ACQUIRE),
+	    space);
 	return (STEP_DONE);
 }
 
@@ -774,8 +790,11 @@ wait_loop(nvrm_chan *ch, uint64_t point, uint64_t deadline)
 			return (lost(ch));
 		if (deadline_reached(deadline))
 			return (fail(ch->cl, NVRM_E_TIMEOUT, "timed out "
-			    "waiting for progress point %ju",
-			    (uintmax_t)point));
+			    "waiting for progress point %ju: the semaphore "
+			    "0x%jx holds %ju, the put is %u and the get is %u",
+			    (uintmax_t)point, (uintmax_t)ch->sem_va,
+			    (uintmax_t)ch->completed, ch->gp_put,
+			    __atomic_load_n(&ch->gp_get, __ATOMIC_ACQUIRE)));
 		sleep_for_progress(ch, gen, deadline);
 	}
 }
@@ -783,7 +802,7 @@ wait_loop(nvrm_chan *ch, uint64_t point, uint64_t deadline)
 int
 nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns)
 {
-	uint64_t deadline = make_deadline(timeout_ns);
+	uint64_t deadline = make_deadline(wait_timeout(timeout_ns));
 	int rc = NVRM_OK;
 
 	clear_err(ch->cl);

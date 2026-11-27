@@ -30,14 +30,25 @@
 #include <nvrm/nvrm.h>
 #include <nvrm/nvrm_chan.h>
 
+#include "probe_util.h"
+
 #define KiB	(1024ULL * 1024)
 
 #define FRAME_BYTES		(4 * KiB)	/* the semaphore, the pushbuffer */
 #define FRAME_DWORDS		6	/* the words of a semaphore release */
 #define ISOLATION_VA_BYTES	(64 * KiB)	/* reserved, never mapped */
 #define ISOLATION_DWORDS	8
-#define SUBMIT_TIMEOUT_NS	(10ULL * 1000 * 1000 * 1000)
-#define WAIT_TIMEOUT_NS		(10ULL * 1000 * 1000 * 1000)
+/*
+ * Every wait has a deadline and every step has one too: a probe that waits
+ * for a GPU that never answers must say so and stop, not hold a test boot
+ * open.  The wait's deadline is two seconds; the step's is the backstop for
+ * a step whose waits all answer but whose work takes longer than that.
+ * Both are set from the environment (BOOT_CHAN_WAIT_NS and
+ * BOOT_CHAN_STEP_NS).
+ */
+#define WAIT_TIMEOUT_DEFAULT_NS	(2ULL * 1000 * 1000 * 1000)
+#define STEP_SECONDS_DEFAULT	30ULL
+#define SUBMIT_TIMEOUT_DEFAULT_NS	(10ULL * 1000 * 1000 * 1000)
 #define LATENCY_SAMPLES		1000
 #define STRESS_DEFAULT		100000ULL
 #define STRESS_SECONDS_DEFAULT	300ULL
@@ -45,6 +56,14 @@
 #define MAX_GPUS		16
 #define MAX_STEPS		16
 #define DETAIL_LEN		256
+/*
+ * The pushbuffer slots: one per submit, so that no submit fetches the same
+ * address twice in a row (the way NVIDIA's own pushbuffer library always
+ * pushes its methods at a new offset).  A slot is a whole cache line and
+ * the pushbuffer holds as many slots as it has room for.
+ */
+#define PB_SLOT_BYTES		64
+#define PB_SLOTS		(FRAME_BYTES / PB_SLOT_BYTES)
 
 /*
  * The wire format of the pushbuffer: the values of nvrm_methods.h, which is a
@@ -89,6 +108,8 @@ typedef struct gpu_ctx {
 	probe_mem	sem;	/* the semaphore the GPU writes */
 	probe_mem	pb;	/* the pushbuffer the GPU reads */
 	uint64_t	bad_va;	/* reserved, never mapped */
+	unsigned	pb_slot;	/* the pushbuffer slot of the next submit */
+	unsigned	submits;	/* the submits done so far */
 } gpu_ctx;
 
 static const char *const step_names[] = {
@@ -103,32 +124,11 @@ static char gpu_name[64];
 static gpu_rec gpus[MAX_GPUS];
 static unsigned ngpus;
 static gpu_rec *cur;
-
-/* The monotonic clock, in nanoseconds. */
-static uint64_t
-now_ns(void)
-{
-	struct timespec ts;
-
-	(void)clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec);
-}
-
-/* A number from the environment, or the default when it is not one. */
-static uint64_t
-env_u64(const char *name, uint64_t dflt)
-{
-	const char *v = getenv(name);
-	char *end;
-	uint64_t n;
-
-	if (v == NULL || *v == '\0')
-		return (dflt);
-	n = (uint64_t)strtoull(v, &end, 10);
-	if (end == v || *end != '\0' || n == 0)
-		return (dflt);
-	return (n);
-}
+/* The timeout of every wait, and the deadline of every step: both are set
+ * from the environment, and both have a default, so that no wait and no
+ * step can hold a test boot open. */
+static uint64_t wait_ns = WAIT_TIMEOUT_DEFAULT_NS;
+static uint64_t step_ns = STEP_SECONDS_DEFAULT * 1000000000ULL;
 
 /* Order of the samples, for the percentiles. */
 static int
@@ -299,12 +299,19 @@ mem_release(nvrm_client *cl, probe_mem *m)
  * The six words of a semaphore release, in the wire format of the
  * pushbuffer: an incrementing header, the address of the semaphore (two
  * words), the payload (two words) and the word that executes the release.
+ *
+ * Every submit writes its frame into a slot of its own: the GPU is told to
+ * fetch a new address every time, the way NVIDIA's own pushbuffer library
+ * always pushes its methods at a new offset.  The slot's offset comes back
+ * so that the caller can read the words out again for the log.
  */
 static int
-write_frame(nvrm_mem *mem, uint64_t sem_va, uint64_t payload)
+write_frame(gpu_ctx *g, uint64_t sem_va, uint64_t payload, uint64_t *offp)
 {
 	uint32_t w[FRAME_DWORDS];
+	uint64_t off = (uint64_t)(g->pb_slot % PB_SLOTS) * PB_SLOT_BYTES;
 
+	g->pb_slot++;
 	w[0] = method_header(0, MTHD_SEM_ADDR_LO, FRAME_DWORDS - 1,
 	    MTHD_OP_INC);
 	w[1] = (uint32_t)sem_va & 0xfffffffcU;
@@ -312,20 +319,82 @@ write_frame(nvrm_mem *mem, uint64_t sem_va, uint64_t payload)
 	w[3] = (uint32_t)payload;
 	w[4] = (uint32_t)(payload >> 32);
 	w[5] = SEM_RELEASE | SEM_WFI | SEM_PAYLOAD_64;
-	return (nvrm_mem_write(mem, 0, w, sizeof(w)));
+	if (nvrm_mem_write(g->pb.mem, off, w, sizeof(w)) != NVRM_OK)
+		return (NVRM_E_RM);
+	*offp = off;
+	return (NVRM_OK);
+}
+
+/* The value the probe's own semaphore holds, or 0 when it cannot be read. */
+static uint64_t
+sem_value(gpu_ctx *g)
+{
+	uint64_t value = 0;
+
+	if (nvrm_mem_read(g->sem.mem, 0, &value, sizeof(value)) != NVRM_OK)
+		return (0);
+	return (value);
+}
+
+/*
+ * What the channel and the pushbuffer say, for the log: the ring's ends, the
+ * point the core is at, the value of the semaphore the GPU writes and the
+ * words of the pushbuffer the GPU was told to fetch.  A boot that stops on a
+ * submit leaves these lines behind, so the next boot says where it stopped.
+ */
+static void
+print_submit(gpu_ctx *g, const char *what, unsigned n, uint64_t va,
+    uint64_t off, uint64_t payload)
+{
+	nvrm_chan_status st = { 0 };
+	uint32_t w[FRAME_DWORDS];
+	char words[128];
+	size_t i, at;
+
+	if (g->ch[0] == NULL)
+		return;
+	if (nvrm_chan_status_get(g->ch[0], &st) != NVRM_OK)
+		return;
+	words[0] = '\0';
+	if (nvrm_mem_read(g->pb.mem, off, w, sizeof(w)) == NVRM_OK) {
+		for (i = 0, at = 0; i < FRAME_DWORDS && at < sizeof(words) - 12;
+		    i++)
+			at += (size_t)snprintf(words + at, sizeof(words) - at,
+			    "%s%08x", i == 0 ? "" : " ", w[i]);
+	}
+	info_line("submit", "%s %u: pb 0x%jx + 0x%jx, payload 0x%016jx, "
+	    "words %s", what, n, (uintmax_t)va, (uintmax_t)off,
+	    (uintmax_t)payload, words);
+	info_line("state", "%s %u: gp_get %u gp_put %u submitted %ju "
+	    "completed %ju, the semaphore holds 0x%016jx", what, n, st.gp_get,
+	    st.gp_put, (uintmax_t)st.submitted, (uintmax_t)st.completed,
+	    (uintmax_t)sem_value(g));
+}
+
+/*
+ * The log of a submit: the first few of every step, and every one that
+ * failed.  A boot that stops on a submit leaves the lines of the submit it
+ * stopped on behind.
+ */
+static void
+log_submit(gpu_ctx *g, const char *what, uint64_t va, uint64_t off,
+    uint64_t payload, int failed)
+{
+	if (g->submits < 3 || failed)
+		print_submit(g, what, g->submits, va, off, payload);
 }
 
 /* Push one entry and wait for it: the error code of the submit or of the wait. */
 static int
 push_wait(nvrm_chan *ch, nvrm_gp_entry *e, nvrm_submit_opts *o,
-    nvrm_submit_result *r)
+    nvrm_submit_result *r, uint64_t wait_ns)
 {
 	int rc;
 
 	rc = nvrm_chan_submit(ch, e, 1, o, r);
 	if (rc != NVRM_OK)
 		return (rc);
-	return (nvrm_chan_wait(ch, r->point, WAIT_TIMEOUT_NS));
+	return (nvrm_chan_wait(ch, r->point, wait_ns));
 }
 
 /*
@@ -334,35 +403,41 @@ push_wait(nvrm_chan *ch, nvrm_gp_entry *e, nvrm_submit_opts *o,
  * did, the error code otherwise.
  */
 static int
-release_once(gpu_ctx *g, uint64_t payload, char *why, size_t whylen)
+release_once(gpu_ctx *g, uint64_t payload, char *why, size_t whylen,
+    uint64_t wait_ns)
 {
 	nvrm_gp_entry e;
 	nvrm_submit_opts o;
 	nvrm_submit_result r;
 	nvrm_chan_status st = { 0 };
 	uint64_t value = 0;
+	uint64_t off = 0;
 	int rc;
 
-	rc = write_frame(g->pb.mem, g->sem.va, payload);
+	rc = write_frame(g, g->sem.va, payload, &off);
 	if (rc != NVRM_OK) {
 		snprintf(why, whylen, "the frame: %s", nvrm_client_errmsg(g->cl));
 		return (rc);
 	}
-	e.va = g->pb.va;
+	e.va = g->pb.va + off;
 	e.dwords = FRAME_DWORDS;
 	e.flags = 0;
 	o.size = sizeof(o);
 	o.flags = 0;
-	o.timeout_ns = SUBMIT_TIMEOUT_NS;
+	o.timeout_ns = SUBMIT_TIMEOUT_DEFAULT_NS;
 	r.size = sizeof(r);
 	rc = nvrm_chan_submit(g->ch[0], &e, 1, &o, &r);
 	if (rc != NVRM_OK) {
 		snprintf(why, whylen, "submit: %s", nvrm_client_errmsg(g->cl));
+		log_submit(g, "submit", e.va, off, payload, 1);
+		g->submits++;
 		return (rc);
 	}
-	rc = nvrm_chan_wait(g->ch[0], r.point, WAIT_TIMEOUT_NS);
+	rc = nvrm_chan_wait(g->ch[0], r.point, wait_ns);
+	log_submit(g, "submit", e.va, off, payload, rc != NVRM_OK);
+	g->submits++;
 	if (rc != NVRM_OK) {
-		snprintf(why, whylen, "wait: %s (%s)", nvrm_strerror(rc),
+		snprintf(why, whylen, "wait: %s (%s)", nvrm_client_errmsg(g->cl),
 		    chan_status_text(g->ch[0], &st));
 		return (rc);
 	}
@@ -464,7 +539,7 @@ step_release(gpu_ctx *g)
 {
 	char why[DETAIL_LEN];
 
-	if (release_once(g, RELEASE_PAYLOAD, why, sizeof(why)) != 0) {
+	if (release_once(g, RELEASE_PAYLOAD, why, sizeof(why), wait_ns) != 0) {
 		step(0, "release", "%s", why);
 		return (0);
 	}
@@ -473,57 +548,76 @@ step_release(gpu_ctx *g)
 	return (1);
 }
 
-/* c: a thousand releases, and the time each of them took. */
+/* c: a thousand releases, and the time each of them took.  The step has a
+ * deadline of its own: a wait that never returns must not keep the step (or
+ * the boot) running. */
 static int
 step_latency(gpu_ctx *g)
 {
 	uint64_t samples[LATENCY_SAMPLES];
-	uint64_t t0, t1;
+	uint64_t t0, t1, deadline;
 	nvrm_gp_entry e;
 	nvrm_submit_opts o;
 	nvrm_submit_result r;
-	unsigned i, failed = 0;
+	unsigned i, failed = 0, done = 0;
 	char why[DETAIL_LEN], err[DETAIL_LEN];
-	int rc;
+	int rc, timed_out = 0;
 
-	e.va = g->pb.va;
-	e.dwords = FRAME_DWORDS;
-	e.flags = 0;
 	o.size = sizeof(o);
 	o.flags = 0;
-	o.timeout_ns = SUBMIT_TIMEOUT_NS;
+	o.timeout_ns = SUBMIT_TIMEOUT_DEFAULT_NS;
 	r.size = sizeof(r);
 	snprintf(err, sizeof(err), "none");
+	deadline = now_ns() + step_ns;
 	/* Time: O(LATENCY_SAMPLES) submissions; Space: O(LATENCY_SAMPLES). */
 	for (i = 0; i < LATENCY_SAMPLES; i++) {
-		rc = write_frame(g->pb.mem, g->sem.va, (uint64_t)i + 1);
+		uint64_t off = 0;
+
+		if (now_ns() >= deadline) {
+			timed_out = 1;
+			break;
+		}
+		rc = write_frame(g, g->sem.va, (uint64_t)i + 1, &off);
+		e.va = g->pb.va + off;
+		e.dwords = FRAME_DWORDS;
+		e.flags = 0;
 		t0 = now_ns();
 		if (rc == NVRM_OK)
-			rc = push_wait(g->ch[0], &e, &o, &r);
+			rc = push_wait(g->ch[0], &e, &o, &r, wait_ns);
 		t1 = now_ns();
-		samples[i] = t1 - t0;
+		samples[done++] = t1 - t0;
+		log_submit(g, "latency", e.va, off, (uint64_t)i + 1,
+		    rc != NVRM_OK);
+		g->submits++;
 		if (rc != NVRM_OK) {
 			failed++;
 			if (failed == 1)
 				snprintf(err, sizeof(err), "%s",
 				    nvrm_client_errmsg(g->cl));
+			/* the channel is not answering: the step stops here
+			 * instead of waiting a thousand times more */
+			break;
 		}
 	}
-	qsort(samples, LATENCY_SAMPLES, sizeof(samples[0]), cmp_u64);
-	cur->lat_p50 = samples[(LATENCY_SAMPLES - 1) / 2];
-	cur->lat_p99 = samples[(LATENCY_SAMPLES * 99) / 100];
-	cur->lat_max = samples[LATENCY_SAMPLES - 1];
-	if (failed != 0)
+	qsort(samples, done, sizeof(samples[0]), cmp_u64);
+	if (done != 0) {
+		cur->lat_p50 = samples[(done - 1) / 2];
+		cur->lat_p99 = samples[(done * 99) / 100];
+		cur->lat_max = samples[done - 1];
+	}
+	if (timed_out)
+		snprintf(why, sizeof(why), "timed out after %u of %u waits: %s",
+		    done, LATENCY_SAMPLES, failed != 0 ? err : "none failed");
+	else if (failed != 0)
 		snprintf(why, sizeof(why), "%u of %u waits failed: %s", failed,
-		    LATENCY_SAMPLES, err);
+		    done, err);
 	else
-		snprintf(why, sizeof(why), "%u waits returned 0",
-		    LATENCY_SAMPLES);
-	step(failed == 0, "latency", "%s", why);
+		snprintf(why, sizeof(why), "%u waits returned 0", done);
+	step(failed == 0 && !timed_out, "latency", "%s", why);
 	info_line("latency_ns", "p50 %ju ns, p99 %ju ns, max %ju ns",
 	    (uintmax_t)cur->lat_p50, (uintmax_t)cur->lat_p99,
 	    (uintmax_t)cur->lat_max);
-	return (failed == 0);
+	return (failed == 0 && !timed_out);
 }
 
 /* d: the stress loop, as long as the environment asks for. */
@@ -545,18 +639,28 @@ step_stress(gpu_ctx *g)
 	e.flags = 0;
 	o.size = sizeof(o);
 	o.flags = 0;
-	o.timeout_ns = SUBMIT_TIMEOUT_NS;
+	o.timeout_ns = SUBMIT_TIMEOUT_DEFAULT_NS;
 	r.size = sizeof(r);
 	start = now_ns();
 	deadline = start + seconds * 1000000000ULL;
 	/* Time: O(planned) submissions; Space: O(1). */
 	while (done < planned && now_ns() < deadline) {
-		rc = write_frame(g->pb.mem, g->sem.va, RELEASE_PAYLOAD);
+		uint64_t off = 0;
+
+		rc = write_frame(g, g->sem.va, RELEASE_PAYLOAD, &off);
+		e.va = g->pb.va + off;
+		e.dwords = FRAME_DWORDS;
+		e.flags = 0;
 		if (rc == NVRM_OK)
-			rc = push_wait(g->ch[0], &e, &o, &r);
+			rc = push_wait(g->ch[0], &e, &o, &r, wait_ns);
+		log_submit(g, "stress", e.va, off, RELEASE_PAYLOAD, rc != NVRM_OK);
+		g->submits++;
 		done++;
-		if (rc != NVRM_OK)
+		if (rc != NVRM_OK) {
 			failed++;
+			/* the channel is not answering: the step stops here */
+			break;
+		}
 	}
 	cur->st_done = done;
 	cur->st_planned = planned;
@@ -607,10 +711,10 @@ step_isolation(gpu_ctx *g)
 	e.flags = 0;
 	o.size = sizeof(o);
 	o.flags = 0;
-	o.timeout_ns = SUBMIT_TIMEOUT_NS;
+	o.timeout_ns = SUBMIT_TIMEOUT_DEFAULT_NS;
 	r.size = sizeof(r);
 	rc = nvrm_chan_submit(ch2, &e, 1, &o, &r);
-	wrc = nvrm_chan_wait(ch2, r.point, WAIT_TIMEOUT_NS);
+	wrc = nvrm_chan_wait(ch2, r.point, wait_ns);
 	(void)nvrm_chan_status_get(ch2, &st);
 	/* The channel is dead when the wait says so, or when it timed out and
 	 * the status says the channel died with an error.  A backend that
@@ -623,7 +727,7 @@ step_isolation(gpu_ctx *g)
 	snprintf(dead_text, sizeof(dead_text), "%s (%s)",
 	    dead ? "the second channel died" :
 	    "the second channel is alive", chan_status_text(ch2, &st));
-	if (release_once(g, RELEASE_PAYLOAD, why, sizeof(why)) == 0) {
+	if (release_once(g, RELEASE_PAYLOAD, why, sizeof(why), wait_ns) == 0) {
 		live = 1;
 		snprintf(live_text, sizeof(live_text), "%s",
 		    "the first channel still released the payload");
@@ -817,6 +921,12 @@ main(int argc, char **argv)
 	}
 	json_mode = argc == 2;
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	/* The timeout of every wait and the deadline of every step: both have
+	 * a default and both are settable, so that a probe never waits for a
+	 * GPU that will not answer. */
+	wait_ns = env_u64("BOOT_CHAN_WAIT_NS", WAIT_TIMEOUT_DEFAULT_NS);
+	step_ns = env_u64("BOOT_CHAN_STEP_NS",
+	    STEP_SECONDS_DEFAULT * 1000000000ULL);
 	if (nvrm_enumerate(&ctx, NULL, err, sizeof(err)) != NVRM_OK) {
 		if (!json_mode)
 			printf("FAIL enumerate: %s\n", err);
@@ -826,7 +936,9 @@ main(int argc, char **argv)
 	}
 	n = nvrm_device_count(ctx);
 	if (!json_mode)
-		printf("INFO backend %s, %u GPU(s)\n", nvrm_backend_name(ctx), n);
+		printf("INFO backend %s, %u GPU(s), wait timeout %ju ns, step "
+		    "deadline %ju ns\n", nvrm_backend_name(ctx), n,
+		    (uintmax_t)wait_ns, (uintmax_t)step_ns);
 	if (n == 0) {
 		if (!json_mode)
 			printf("FAIL enumerate: no GPU\n");

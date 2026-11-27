@@ -6,9 +6,11 @@
  * submit queue, semaphore methods, copies, faults, lifetime and concurrency.
  */
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <inttypes.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2083,6 +2085,103 @@ test_wait_rules(void)
 	teardown(cl);
 }
 
+/*
+ * The child of the deadline test: it opens a client of its own (a forked
+ * child may not use the client's of its parent: the owner is the process
+ * that opened it), submits, and waits for a GPU that never answers.  It
+ * returns 0 when the wait stopped at its deadline and said what it waited
+ * for.
+ */
+static int
+wait_deadline_child(void)
+{
+	nvrm_gp_entry e;
+	nvrm_submit_opts o = { .size = sizeof(o) };
+	nvrm_submit_result r = { .size = sizeof(r) };
+	nvrm_chan_info info = { .size = sizeof(info) };
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	test_buf pb;
+	const char *msg;
+	uint64_t began, took;
+	char want[64];
+	int rc;
+
+	nvrm_fake_chan_manual(1);
+	cl = open_client();
+	ch = make_chan(cl, NVRM_ENG_COMPUTE, 8);
+	if (buf_init(cl, &pb, 4096) != NVRM_OK)
+		return (1);
+	make_nops(&pb, 1);
+	e = buf_entry(&pb, 0, 0);
+	if (nvrm_chan_submit(ch, &e, 1, &o, &r) != NVRM_OK)
+		return (1);
+	if (nvrm_chan_info_get(ch, &info) != NVRM_OK)
+		return (1);
+	began = monotime();
+	rc = nvrm_chan_wait(ch, r.point, 0);
+	took = monotime() - began;
+	if (rc != NVRM_E_TIMEOUT)
+		return (1);
+	/* the wait stopped at the deadline, and not a moment sooner or
+	 * later: a wait that names no timeout takes the library's default */
+	if (took < nvrm_chan_wait_default_ns / 2 ||
+	    took > nvrm_chan_wait_default_ns * 4)
+		return (1);
+	/* the message says what it waited for: the semaphore's address, the
+	 * point it was waiting for, and the ring's two ends */
+	msg = nvrm_client_errmsg(cl);
+	if (msg == NULL || strstr(msg, "semaphore") == NULL ||
+	    strstr(msg, "put is") == NULL || strstr(msg, "get is") == NULL)
+		return (1);
+	snprintf(want, sizeof(want), "0x%jx", (uintmax_t)info.sem_va);
+	if (strstr(msg, want) == NULL)
+		return (1);
+	snprintf(want, sizeof(want), "progress point %ju:", (uintmax_t)r.point);
+	if (strstr(msg, want) == NULL)
+		return (1);
+	return (0);
+}
+
+/*
+ * A fake GPU that never releases: the wait must stop at its deadline and
+ * say what it waited for.  The wait runs in a child process under a
+ * timeout, so that a wait that never stops fails the test instead of
+ * hanging the suite.
+ */
+static void
+test_wait_default_deadline(void)
+{
+	pid_t pid;
+	int status;
+	unsigned i;
+	int stopped = 0;
+
+	setup();
+	pid = fork();
+	CHECK(pid >= 0);
+	if (pid == 0)
+		_exit(wait_deadline_child());
+	/* the child must stop: it waits at most a minute */
+	for (i = 0; i < 600; i++) {
+		if (waitpid(pid, &status, WNOHANG) == pid) {
+			stopped = 1;
+			break;
+		}
+		usleep(100000);
+	}
+	if (!stopped) {
+		(void)kill(pid, SIGKILL);
+		(void)waitpid(pid, &status, 0);
+	}
+	CHECK(stopped);
+	if (stopped) {
+		CHECK(WIFEXITED(status));
+		CHECK_EQ(WEXITSTATUS(status), 0);
+	}
+	teardown(NULL);
+}
+
 static void
 check_copy_results(const test_buf *src, const test_buf *dst)
 {
@@ -3249,6 +3348,7 @@ run_review_tests(const char *only)
 	RUN(test_fork_child_release_held);
 	RUN(test_fork_child_scan);
 	RUN(test_wait_rules);
+	RUN(test_wait_default_deadline);
 	RUN(test_copy);
 	RUN(test_lifetime);
 	RUN(test_errmsg_race);

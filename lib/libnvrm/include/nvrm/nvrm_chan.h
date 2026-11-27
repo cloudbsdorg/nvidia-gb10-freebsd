@@ -29,6 +29,13 @@ enum nvrm_runlist {
 #define NVRM_CHAN_ENTRIES_MIN		8
 #define NVRM_CHAN_ENTRIES_MAX		32768	/* powers of two only */
 
+/*
+ * The timeout a wait takes when the caller names none: two seconds.  Every
+ * wait has a deadline: a wait that names UINT64_MAX waits without one, and
+ * that is the caller's own choice.
+ */
+#define NVRM_CHAN_WAIT_DEFAULT_NS	2000000000ULL
+
 typedef struct nvrm_chan_params {
 	uint32_t	size;		/* sizeof(nvrm_chan_params); 0 means that */
 	uint32_t	engines;	/* NVRM_ENG_* */
@@ -36,8 +43,18 @@ typedef struct nvrm_chan_params {
 	uint32_t	flags;		/* none yet: must be 0 */
 } nvrm_chan_params;
 
-/* One GPFIFO element: a pushbuffer segment in GPU memory. */
-#define NVRM_GP_NO_PREFETCH	0x1	/* fetch only after prior work is done */
+/*
+ * One GPFIFO element: a pushbuffer segment in GPU memory.
+ *
+ * The two flags are the bits of the GPFIFO entry the MIT sources name
+ * (cla16f.h, clc86f.h): bit 31 of the entry's second word is the SYNC
+ * field (0: the fetch proceeds, 1: the fetch waits for the work before it),
+ * and the entry's first word carries the "fetch conditional" bit.  The name
+ * NVRM_GP_SYNC_WAIT says what the bit does; NVRM_GP_NO_PREFETCH is the name
+ * it had before and means the same thing.
+ */
+#define NVRM_GP_SYNC_WAIT	0x1	/* fetch only after prior work is done */
+#define NVRM_GP_NO_PREFETCH	NVRM_GP_SYNC_WAIT
 #define NVRM_GP_INCOMPLETE	0x2	/* keep this element with the next one */
 #define NVRM_GP_KNOWN		0x3
 
@@ -127,6 +144,14 @@ int	nvrm_chan_submit(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 	    const nvrm_submit_opts *o, nvrm_submit_result *r);
 int	nvrm_chan_kick(nvrm_chan *ch);
 int	nvrm_chan_gp_space(nvrm_chan *ch, unsigned *n);
+/*
+ * Wait until the channel's progress semaphore has reached the point.  The
+ * timeout_ns is the time the wait may take: 0 means the library's default
+ * (NVRM_CHAN_WAIT_DEFAULT_NS) and UINT64_MAX means no limit.  A wait that
+ * runs out of time returns NVRM_E_TIMEOUT, and the client's message names
+ * what it waited for: the semaphore's address, the point it was waiting
+ * for, the value the semaphore holds and the ring's get and put offsets.
+ */
 int	nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns);
 int	nvrm_chan_status_get(nvrm_chan *ch, nvrm_chan_status *st);
 int	nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info);

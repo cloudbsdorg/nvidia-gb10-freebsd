@@ -397,6 +397,13 @@ extern void nvrm_fake_chan_read_fail(unsigned nth);
 /* Client close: forget and free the channels whose destroy was refused. */
 void	nvrm_chan_release_held(nvrm_client *cl);
 extern uint64_t nvrm_chan_slice_ns;
+/*
+ * The timeout a wait takes when the caller names none (timeout_ns 0).  It is
+ * NVRM_CHAN_WAIT_DEFAULT_NS (two seconds) unless a caller sets it; a test
+ * may set it to something short, so that a wait that runs out of time is
+ * quick to see.
+ */
+extern uint64_t nvrm_chan_wait_default_ns;
 /* Test seam: runs between the unlock and the sleep of a waiter. */
 extern void (*nvrm_chan_presleep_hook)(void);
 

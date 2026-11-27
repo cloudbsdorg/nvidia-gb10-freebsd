@@ -24,14 +24,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <nvrm/nvrm.h>
 
+#include "probe_util.h"
+
 #define MiB	(1024ULL * 1024)
+
+/*
+ * The deadline of one GPU's probe: a probe that runs out of time says so
+ * and stops, instead of holding a test boot open.  It is set from the
+ * environment (BOOT_MEM_GPU_NS); the default is thirty seconds.
+ */
+#define MEM_GPU_DEFAULT_NS	(30ULL * 1000 * 1000 * 1000)
 
 static int fails;
 static char gpu_name[64];
+static uint64_t gpu_deadline_ns;
+
+/* True once the GPU's deadline has passed. */
+static int
+timed_out(void)
+{
+	return (now_ns() >= gpu_deadline_ns);
+}
 
 static int
 step(int ok, const char *what, const char *fmt, ...)
@@ -108,6 +126,8 @@ probe(nvrm_device *dev)
 	void *p;
 	int rc, fd = -1;
 
+	gpu_deadline_ns = now_ns() + env_u64("BOOT_MEM_GPU_NS",
+	    MEM_GPU_DEFAULT_NS);
 	rc = nvrm_client_open(dev, &o, &cl, err, sizeof(err));
 	if (!step(rc == NVRM_OK, "client_open", "%s", rc == NVRM_OK ?
 	    "own RM session, VA space and spares (ALLOW_MAP)" : err))
@@ -118,6 +138,10 @@ probe(nvrm_device *dev)
 	else
 		step(vi.end > vi.base, "vaspace", "base 0x%jx end 0x%jx",
 		    (uintmax_t)vi.base, (uintmax_t)vi.end);
+	if (timed_out()) {
+		step(0, "deadline", "the probe ran out of time");
+		goto out;
+	}
 	rc = nvrm_va_reserve(cl, &vp, &va);
 	if (!step(rc == NVRM_OK, "va_reserve", "%s", rc == NVRM_OK ? "64 MiB" :
 	    nvrm_client_errmsg(cl)))
@@ -159,7 +183,7 @@ probe(nvrm_device *dev)
 	}
 	/* sharing: the pattern written into the video memory is what an import
 	 * by a second client reads */
-	if (v != NULL) {
+	if (v != NULL && !timed_out()) {
 		rc = nvrm_mem_export_fd(v, &fd);
 		step(rc == NVRM_OK, "export", "%s", rc == NVRM_OK ? "descriptor" :
 		    nvrm_client_errmsg(cl));
@@ -184,6 +208,8 @@ probe(nvrm_device *dev)
 			    "the import reads other bytes");
 		} else if (im != NULL)
 			step(0, "read_import", "%s", nvrm_client_errmsg(cl2));
+	} else if (timed_out()) {
+		step(0, "deadline", "the probe ran out of time");
 	}
 out:
 	if (im != NULL)

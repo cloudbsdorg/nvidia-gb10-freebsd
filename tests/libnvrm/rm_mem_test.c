@@ -2425,6 +2425,20 @@ map_page(NvHandle h, size_t len)
 	return (p);
 }
 
+/* The work submit token the RM issues: the RM writes it into the channel's
+ * error notifier, in the notification slot the RM names
+ * NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN, and the client
+ * reads it from there before every kickoff.  The token the RM returned when
+ * the channel was made is the first one only. */
+static void
+set_token(void *notif, uint32_t token)
+{
+	volatile NvNotification *n = notif;
+
+	n[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN].info32 =
+	    (NvV32)token;
+}
+
 /* The handle of the ring: the client's memory object of the ring's size. */
 static NvHandle
 ring_handle(int fd, uint64_t bytes)
@@ -2708,6 +2722,7 @@ test_chan_submit(void)
 	nvrm_submit_result sr = { 0 };
 	nvrm_chan_status st = { 0 };
 	volatile uint32_t *userd, *um;
+	volatile NvNotification *notif;
 	int fd;
 
 	up();
@@ -2717,7 +2732,10 @@ test_chan_submit(void)
 	/* the pages the GPU sees: the userd page and the usermode page */
 	userd = map_page(M.chan_userd, 4096);
 	um = map_page(M.um_h, 65536);
-	CHECK(userd != NULL && um != NULL);
+	notif = map_page(M.chan_notif, 4096);
+	CHECK(userd != NULL && um != NULL && notif != NULL);
+	/* the RM wrote the token it issued into the notifier */
+	set_token(notif, M.token);
 	/* the submit publishes the put offset and rings the doorbell */
 	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
 	CHECK_EQ(sr.accepted, 1);
@@ -2735,6 +2753,53 @@ test_chan_submit(void)
 	nvrm_client_close(cl);
 	CHECK_EQ(live_in_session(fd), 0);
 	down("chan submit");
+}
+
+/* The doorbell must carry the token the RM has issued NOW.  The token the
+ * RM returned when the channel was made is the first one only: the RM
+ * issues a new token every time the channel has taken one, and a doorbell
+ * rung with a spent token does not start new work, so the second
+ * submission of a channel would never be picked up.  The RM writes each
+ * token it issues into the channel's error notifier, and the client reads
+ * it from there before every kickoff. */
+static void
+test_chan_token(void)
+{
+	nvrm_client *cl;
+	nvrm_chan *ch;
+	nvrm_gp_entry e[1] = { { 0x1000, 4, 0 } };
+	nvrm_submit_opts so = { 0, 0, 0 };
+	nvrm_submit_result sr = { 0 };
+	volatile uint32_t *um;
+	volatile NvNotification *notif;
+	uint32_t first, second;
+	int fd;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+	fd = M.session_fd;
+	ch = make_chan(cl, NVRM_ENG_COMPUTE);
+	um = map_page(M.um_h, 65536);
+	notif = map_page(M.chan_notif, 4096);
+	CHECK(um != NULL && notif != NULL);
+	/* the token the RM issued for the channel */
+	first = M.token;
+	set_token(notif, first);
+	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
+	CHECK_EQ(um[DOORBELL_OFF / 4], first);
+	/* the RM issues the next token when the channel has taken the first
+	 * one: it writes it into the notifier */
+	second = first + 0x1000;
+	set_token(notif, second);
+	CHECK_EQ(nvrm_chan_submit(ch, e, 1, &so, &sr), NVRM_OK);
+	CHECK_EQ(sr.point, 2);
+	/* the doorbell carries the token the RM has issued now */
+	CHECK_EQ(um[DOORBELL_OFF / 4], second);
+	nvrm_chan_destroy(ch);
+	CHECK_EQ(live_in_session(fd), 4);
+	nvrm_client_close(cl);
+	CHECK_EQ(live_in_session(fd), 0);
+	down("chan token");
 }
 
 static void
@@ -3361,6 +3426,7 @@ test_chan_two_clients(void)
 	X("chan", test_chan_copy) \
 	X("chan", test_chan_engines) \
 	X("chan", test_chan_submit) \
+	X("chan", test_chan_token) \
 	X("chan", test_chan_wait) \
 	X("chan", test_chan_error) \
 	X("chan", test_chan_class) \

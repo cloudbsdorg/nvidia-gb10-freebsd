@@ -428,7 +428,11 @@ alloc_engines(nvrm_bchan *b, const nvrm_bchan_cfg *cfg, char *err,
 }
 
 /* The work submit token of the channel: the value the doorbell rings
- * with. */
+ * with.  The RM must be asked for it after the channel is allocated (the
+ * push library of open-gpu-kernel-modules says so: "This isn't actually
+ * used for anything but RM needs it to be called after the channel has
+ * been allocated, for reasons").  It is the first token only: the current
+ * one is in the notifier, and rm_token() reads it there. */
 static int
 get_token(nvrm_bchan *b, char *err, size_t errlen)
 {
@@ -680,6 +684,35 @@ rm_gp_put(nvrm_bchan *b, uint32_t put)
 	*p = put;
 }
 
+/*
+ * The work submit token the channel is waiting for: the value the doorbell
+ * rings with.  The RM hands out one token per submission and the current
+ * one is in the channel's error notifier, in the notification slot the RM
+ * names NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN: the RM
+ * writes the token it issues there, and NVIDIA's own clients read it back
+ * from that slot before every kickoff (open-gpu-kernel-modules 580.178.04:
+ * nv_gpu_ops.c, nvGpuOpsGetWorkSubmissionInfo, which points
+ * channel->pWorkSubmissionToken at errorNotifier +
+ * WORK_SUBMIT_TOKEN * sizeof(NvNotification) +
+ * offsetof(NvNotification, info32); and the push library of the same tree,
+ * nvidia-push.c, which writes pTokenNotifier->info32 to the doorbell).
+ *
+ * The token the RM returned when the channel was made is the first one
+ * only: a doorbell rung with a token the RM has already spent does not
+ * start new work, so the second submission of a channel would never be
+ * picked up.  The notifier's slot is read instead, every time.
+ */
+static uint32_t
+rm_token(nvrm_bchan *b)
+{
+	const volatile NvNotification *n;
+
+	n = (const volatile NvNotification *)((char *)b->notif_cpu +
+	    (size_t)NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN *
+	    sizeof(NvNotification));
+	return ((uint32_t)n->info32);
+}
+
 /* The doorbell: one aligned store of the token in the usermode page. */
 static void
 rm_doorbell(nvrm_bchan *b)
@@ -688,7 +721,7 @@ rm_doorbell(nvrm_bchan *b)
 
 	p = (volatile uint32_t *)((char *)b->c->usermode_cpu +
 	    NVC361_NOTIFY_CHANNEL_PENDING);
-	*p = b->token;
+	*p = rm_token(b);
 }
 
 /* The error of the channel: the status of the first notification of the

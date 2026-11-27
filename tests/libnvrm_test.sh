@@ -1221,6 +1221,36 @@ mkdir -p "$W/bootcf"
 BOOT_CHAN_PROBE=/usr/bin/false BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootcf" "$INFO" "$SCHEMA" >/dev/null 2>&1
 grep -q "^FAIL chan_probe exited 1 ($W/bootcf/chan_probe.txt)" "$W/bootcf/results.txt"; rc=$?
 expect_rc "boot script: a failing channel probe is a FAIL naming its output file" $rc 0
+# a probe that waits for a GPU that will not answer must not hold the boot
+# open: the row has a deadline of its own and says "timed out"
+mkdir -p "$W/boott"
+printf '#!/bin/sh\nsleep 3600\n' > "$W/hangprobe.sh"
+chmod 0755 "$W/hangprobe.sh"
+BOOT_MEM_PROBE="$W/hangprobe.sh" BOOT_PROBE_TIMEOUT=2 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/boott" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q '^FAIL mem_probe: timed out after 2 s' "$W/boott/results.txt"; rc=$?
+expect_rc "boot script: a probe that waits for a GPU that will not answer is killed at the row deadline" $rc 0
+mkdir -p "$W/bootct"
+BOOT_CHAN_PROBE="$W/hangprobe.sh" BOOT_PROBE_TIMEOUT=2 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootct" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q '^FAIL chan_probe: timed out after 2 s' "$W/bootct/results.txt"; rc=$?
+expect_rc "boot script: a channel probe that waits for a GPU that will not answer is killed at the row deadline" $rc 0
+# a probe that ignores SIGTERM is killed by the -k escalation, and the row is
+# still one failure and not two
+mkdir -p "$W/bootk"
+printf '#!/bin/sh\ntrap "" TERM\nsleep 3600\n' > "$W/stubborn.sh"
+chmod 0755 "$W/stubborn.sh"
+BOOT_MEM_PROBE="$W/stubborn.sh" BOOT_PROBE_TIMEOUT=1 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootk" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q '^FAIL mem_probe: timed out after 1 s' "$W/bootk/results.txt"; rc=$?
+expect_rc "boot script: a probe that ignores SIGTERM is still killed at the row deadline" $rc 0
+_n=$(grep -c '^FAIL mem_probe' "$W/bootk/results.txt")
+expect_rc "boot script: a probe that timed out is one failure and not two" "$_n" 1
+# a deadline of zero is no deadline at all: the row is refused, and the probe
+# is not run without one
+mkdir -p "$W/bootz"
+BOOT_MEM_PROBE="$W/hangprobe.sh" BOOT_PROBE_TIMEOUT=0 BOOT_ALLOW_FAKE=1 NVRM_BACKEND=fake sh "$T/boot_nvrm_info.sh" "$W/bootz" "$INFO" "$SCHEMA" >/dev/null 2>&1
+grep -q '^FAIL BOOT_PROBE_TIMEOUT=.*is not a number of seconds greater than zero' "$W/bootz/results.txt"; rc=$?
+expect_rc "boot script: a probe timeout of zero is refused: it is no deadline at all" $rc 0
+grep -q '^FAIL mem_probe not run: the row has no deadline' "$W/bootz/results.txt"; rc=$?
+expect_rc "boot script: a probe row without a deadline fails instead of running the probe" $rc 0
 grep -q '^PASS GPU 0 sm_count' "$W/boot/results.txt"; rc=$?
 expect_rc "boot script: compares GPU values" $rc 0
 

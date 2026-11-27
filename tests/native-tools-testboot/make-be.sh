@@ -7,7 +7,7 @@
 #
 # Usage: make-be.sh [-N NORMAL_BE] [-b BASE_BE] [-D YYYYMMDD] [-n SEQ] [-m STAGEDIR] [-s SHA256FILE] [-o COPYOUT]
 #                   [-V VRAM_BYTES] [-R RESERVE_BYTES] [-S SM] [-u UVM_KO] [-d DRM_KO] [-c CHAN_STRESS]
-#                   [-C CHAN_STRESS_SECONDS] [--dry-run] [--activate]      (run as root)
+#                   [-C CHAN_STRESS_SECONDS] [-T PROBE_TIMEOUT] [--dry-run] [--activate]      (run as root)
 #   -N NORMAL_BE  the boot environment the host returns to (default cloudbsd-current)
 #   -b BASE_BE    the boot environment to clone (default NORMAL_BE)
 #   -D, -n        the name is nvidia-native-tools-test-<DATE>-<SEQ> (today, 1); an existing name is refused with the
@@ -31,6 +31,8 @@
 #                 the module is read, never installed
 #   -c N          how many semaphore releases the channel probe pushes in its stress loop (default 100000)
 #   -C S          how long that stress loop may run, in seconds (default 300); the probe stops earlier when it is done
+#   -T S          how long a probe row may run, in seconds (default 120); a probe that waits for a GPU that will not
+#                 answer is killed when the time is up, and its row says "timed out"
 #   --dry-run     build and check the boot environment, never arm it (the default)
 #   --activate    finish with bectl activate -t BE (the orchestrator's decision; never while a Fable agent runs)
 #
@@ -101,6 +103,7 @@ RESERVE=$BOARD_VRAM_RESERVE_MAX_BYTES
 SM=$BOARD_SM
 CHAN_STRESS=100000
 CHAN_STRESS_SECONDS=300
+PROBE_TIMEOUT=120
 UVMKO=
 DRMKO=
 ACTIVATE=0
@@ -129,6 +132,7 @@ while [ $# -gt 0 ]; do
 	-d) need "$1" "$#"; [ -f "$2" ] && [ -r "$2" ] || usage "control module $2 is missing or unreadable"; DRMKO=$2; shift 2 ;;
 	-c) need "$1" "$#"; CHAN_STRESS=$2; shift 2 ;;
 	-C) need "$1" "$#"; CHAN_STRESS_SECONDS=$2; shift 2 ;;
+	-T) need "$1" "$#"; PROBE_TIMEOUT=$2; shift 2 ;;
 	--dry-run) ACTIVATE=0; shift ;;
 	--activate) ACTIVATE=1; shift ;;
 	-h | --help) help ;;
@@ -152,6 +156,10 @@ case $SM in [0-9]*.[0-9]*) ;; *) echo "make-be.sh: -S must be major.minor" >&2; 
 case $SM in *[!0-9.]* | *.*.*) echo "make-be.sh: -S must be major.minor" >&2; exit 2 ;; esac
 case $CHAN_STRESS in '' | *[!0-9]*) echo "make-be.sh: -c must be a number of releases" >&2; exit 2 ;; esac
 case $CHAN_STRESS_SECONDS in '' | *[!0-9]*) echo "make-be.sh: -C must be a number of seconds" >&2; exit 2 ;; esac
+case $PROBE_TIMEOUT in '' | *[!0-9]*) echo "make-be.sh: -T must be a number of seconds" >&2; exit 2 ;; esac
+# timeout's duration zero means no limit at all: a probe row with no limit is the hang the
+# deadline was made to stop, so zero is refused here rather than written to rc.conf.d
+if [ "$PROBE_TIMEOUT" -lt 1 ]; then echo "make-be.sh: -T must be more than zero seconds" >&2; exit 2; fi
 _l=$(guard_plain_path "$COPYOUT") || { echo "make-be.sh: -o: ${_l#* }" >&2; exit 2; }
 # The person who runs the kit is the one who has to read the results: record who that is, so the one-shot can give
 # the run directory to them.  doas and sudo tell it (DOAS_USER, SUDO_USER); without them the owner of the copy-out
@@ -491,8 +499,8 @@ run install $ROOTOWN -m 0555 "$A/nvidia_native_tools_testboot" "$MNT/usr/local/e
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.version"
 printf '%s\n' "$BE" > "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
 chmod 0444 "$MNT/usr/local/etc/nvidia_native_tools_testboot.marker"
-printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_owner="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_vram_reserve="%s"\nnvidia_native_tools_testboot_sm="%s"\nnvidia_native_tools_testboot_chan_stress="%s"\nnvidia_native_tools_testboot_chan_stress_seconds="%s"\n' \
-    "$NORMAL" "$COPYOUT" "$_OWNER" "$VRAM" "$RESERVE" "$SM" "$CHAN_STRESS" "$CHAN_STRESS_SECONDS" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
+printf 'nvidia_native_tools_testboot_enable="YES"\nnvidia_native_tools_testboot_normal_be="%s"\nnvidia_native_tools_testboot_copyout="%s"\nnvidia_native_tools_testboot_owner="%s"\nnvidia_native_tools_testboot_vram="%s"\nnvidia_native_tools_testboot_vram_reserve="%s"\nnvidia_native_tools_testboot_sm="%s"\nnvidia_native_tools_testboot_chan_stress="%s"\nnvidia_native_tools_testboot_chan_stress_seconds="%s"\nnvidia_native_tools_testboot_probe_timeout="%s"\n' \
+    "$NORMAL" "$COPYOUT" "$_OWNER" "$VRAM" "$RESERVE" "$SM" "$CHAN_STRESS" "$CHAN_STRESS_SECONDS" "$PROBE_TIMEOUT" > "$MNT/etc/rc.conf.d/nvidia_native_tools_testboot"
 
 # 7. done
 run $BECTL umount "$BE"
