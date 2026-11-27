@@ -1,6 +1,13 @@
 --- nvidia/nvidia_os.c.orig
 +++ nvidia/nvidia_os.c
-@@ -12,15 +12,163 @@
+@@ -5,29 +5,177 @@
+  * Corporation.  Any use, reproduction, or disclosure without the written
+  * permission of NVIDIA Corporation is prohibited.
+  *
+  * _NVRM_COPYRIGHT_END_
+  */
+ 
+ #include "os-interface.h"
  #include "nv.h"
  #include "nv-freebsd.h"
  #include "nv-retpoline.h"
@@ -22,7 +29,7 @@
  MALLOC_DEFINE(M_NVIDIA, "nvidia", "NVIDIA memory allocations");
  TASKQUEUE_DEFINE_THREAD(nvidia);
  NvBool os_is_unload_flush_ongoing = NV_FALSE;
- 
++
 +#if defined(__aarch64__)
 +/*
 + * arm64 PCIe BAR memory-attribute policy state, decided once at module
@@ -122,7 +129,7 @@
 +    unsigned long ram_pages = 0;
 +    unsigned long pages = 0;
 +    vm_paddr_t pa;
-+
+ 
 +    for (pa = start & ~(vm_paddr_t)PAGE_MASK; pa < start + size;
 +         pa += PAGE_SIZE) {
 +        pages++;
@@ -164,7 +171,21 @@
  NvU64 os_page_size     = PAGE_SIZE;
  NvU64 os_max_page_size = PAGE_SIZE;
  NvU64 os_page_mask     = ~PAGE_MASK;
-@@ -119,7 +267,21 @@
+ NvU8  os_page_shift    = PAGE_SHIFT;
+ 
+ NvBool os_cc_enabled = 0;
+ NvBool os_cc_sev_snp_enabled = 0;
+ NvBool os_cc_snp_vtom_enabled = 0;
+ NvBool os_cc_tdx_enabled = 0;
+ NvBool os_cc_sme_enabled = 0;
+@@ -112,32 +260,53 @@
+ {
+     if (__NV_ITHREAD() && (MicroSeconds > NV_MAX_ISR_DELAY_US))
+         return NV_ERR_GENERIC;
+     DELAY(MicroSeconds);
+     return NV_OK;
+ }
+ 
  NvU64 NV_API_CALL os_get_cpu_frequency(void)
  {
      /* round up by 4999 before division by 1000000 in osGetCpuFrequency() */
@@ -186,7 +207,41 @@
  }
  
  NvU32 NV_API_CALL os_get_current_process(void)
-@@ -205,8 +367,16 @@
+ {
+     return curproc->p_pid;
+ }
+ 
+ void NV_API_CALL os_get_current_process_name(char *buf, NvU32 len)
+ {
+-    strncpy(buf, curproc->p_comm, len - 1);
+-    buf[len - 1] = '\0';
++    /*
++     * A zero length must write nothing at all: len - 1 would be
++     * UINT32_MAX and the copy would run off the end of the buffer, and
++     * the terminator would land outside it.  Any other length is bounded
++     * and terminated.
++     */
++    if (len == 0)
++        return;
++    snprintf(buf, len, "%s", curproc->p_comm);
+ }
+ 
+ NV_STATUS NV_API_CALL os_get_current_thread(NvU64 *threadId)
+ {
+     if (__NV_ITHREAD())
+         *threadId = 0;
+     else
+         *threadId = (NvU64) CURTHREAD->td_tid;
+ 
+     return NV_OK;
+@@ -198,92 +367,204 @@
+ NvBool NV_API_CALL os_check_access(RsAccessRight accessRight)
+ {
+     // Fine-grain privileges not yet suppported on this OS
+     return os_is_administrator();
+ }
+ 
+ NvU8 NV_API_CALL os_io_read_byte(
      NvU32 address
  )
  {
@@ -203,7 +258,7 @@
  }
  
  void NV_API_CALL os_io_write_byte(
-@@ -214,16 +384,31 @@
+     NvU32 address,
      NvU8  value
  )
  {
@@ -235,7 +290,7 @@
  }
  
  void NV_API_CALL os_io_write_word(
-@@ -231,16 +416,31 @@
+     NvU32 address,
      NvU16 value
  )
  {
@@ -267,7 +322,7 @@
  }
  
  void NV_API_CALL os_io_write_dword(
-@@ -248,8 +448,15 @@
+     NvU32 address,
      NvU32 value
  )
  {
@@ -283,7 +338,10 @@
  }
  
  void* NV_API_CALL os_map_kernel_space(
-@@ -260,6 +467,7 @@
+     NvU64 start,
+     NvU64 size,
+     NvU32 mode
+ )
  {
      int map_mode;
  
@@ -291,7 +349,16 @@
      switch (mode) {
          case NV_MEMORY_CACHED:
              map_mode = PAT_WRITE_BACK;
-@@ -276,6 +484,72 @@
+             break;
+         case NV_MEMORY_WRITECOMBINED:
+             map_mode = PAT_WRITE_COMBINING;
+             break;
+         case NV_MEMORY_UNCACHED:
+         case NV_MEMORY_DEFAULT:
+             map_mode = PAT_UNCACHEABLE;
+             break;
+         default:
+             nv_printf(NV_DBG_ERRORS,
                        "NVRM: unknown mode in os_map_kernel_space()\n");
              return NULL;
      }
@@ -326,7 +393,7 @@
 +     */
 +    {
 +        enum gb10_memattr attr;
-+
+ 
 +        switch (gb10_range_action(gb10_range_kind_of(start, size))) {
 +            case GB10_MAP_SYSTEM_POLICY:
 +                attr = gb10_ram_memattr(mode);
@@ -361,10 +428,25 @@
 +#else
 +#error "nvidia_os.c: unsupported architecture"
 +#endif
- 
++
      return pmap_mapdev_attr(start, size, map_mode);
  }
-@@ -584,7 +858,20 @@
+ 
+ void NV_API_CALL os_unmap_kernel_space(
+     void *address,
+     NvU64 size
+ )
+ {
+     /*
+      * As of this FreeBSD version this function accepts a pointer value
+@@ -577,21 +858,34 @@
+     return NV_ERR_NOT_SUPPORTED;
+ }
+ 
+ NV_STATUS NV_API_CALL os_flush_cpu_cache_all(void)
+ {
+     return NV_ERR_NOT_SUPPORTED;
+ }
  
  static void sfence_action_func(void *arg)
  {
@@ -385,128 +467,139 @@
  }
  
  void NV_API_CALL os_flush_cpu_write_combine_buffer(void)
-@@ -732,23 +1019,59 @@
--void* NV_API_CALL os_alloc_rwlock(void)
--{
--    struct sx *sx = NULL;
--
--    NV_STATUS rmStatus = os_alloc_mem((void *)&sx, sizeof(struct sx));
--    if (rmStatus != NV_OK)
--    {
--        nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate rwlock!\n");
--        return NULL;
--    }
--
--    sx_init(sx, "os.rwlock_sx");
--    return sx;
--}
--
--void NV_API_CALL os_free_rwlock(void *pRwLock)
--{
--    struct sx *sx = (struct sx *)pRwLock;
--    if (sx != NULL) {
--        sx_destroy(sx);
--        os_free_mem(sx);
--    }
--}
+ {
+     smp_rendezvous(NULL, sfence_action_func, NULL, NULL);
+     sfence_action_func(NULL);
+ }
+ 
+ NV_STATUS NV_API_CALL os_alloc_mutex(void **mutex)
+ {
+@@ -722,38 +1016,92 @@
+     mtx_lock(&os_sema->mutex_mtx);
+     if (os_sema->count < 0) {
+         cv_signal(&os_sema->mutex_cv);
+     }
+     os_sema->count++;
+     mtx_unlock(&os_sema->mutex_mtx);
+ 
+     return NV_OK;
+ }
+ 
 +/*
-+ * WITNESS keys locks by *name*, not address.  Every rwlock the RM allocates
-+ * was named "os.rwlock_sx", so the second sx_xlock() taken while the first is
-+ * still held trips WITNESS's "acquiring duplicate lock of same type" check and
-+ * fails SysCap object construction (NVRM 0x56, seen on the arm64 WITNESS boot
-+ * path).  Give each rwlock a unique, stable name by embedding the name buffer
-+ * next to the lock and suffixing a per-instance id, mirroring Linux's
-+ * CONFIG_LOCKDEP per-instance lock_class_key.
++ * The RM's lock classes, and how WITNESS sees them.
++ *
++ * WITNESS keys a lock by its *name*, not by its address: witness_init()
++ * looks the name up in a hash and every lock with that name shares one
++ * witness object (kern/subr_witness.c: enroll()).  The RM has three lock
++ * classes and one name for each: "os.lock_sx" (the RM mutex, allocated by
++ * os_alloc_mutex()), "os.rwlock_sx" (this one) and "os.lock_mtx" (the RM
++ * spinlock).  One name per class is what keeps the WITNESS order graph
++ * bounded: a per-instance name ("os.rwlock_sx.0", "os.rwlock_sx.1", ...)
++ * adds one node to that graph per lock the RM ever allocates, and the RM
++ * allocates one per process, so the graph grows without bound.
++ *
++ * The price of one name per class is that WITNESS can no longer tell two
++ * instances of a class apart, so nesting two of them looks like taking one
++ * lock twice and trips the "acquiring duplicate lock of same type" check,
++ * which is fatal on a WITNESS kernel (it failed SysCap object construction
++ * with NVRM 0x56 on the arm64 boot path).  The RM does nest two instances of
++ * a class - its portSync layer takes a second PORT_RWLOCK while it holds
++ * one - so the report is a false positive here, and SX_DUPOK says so: it
++ * suppresses the duplicate-acquire report for this lock and nothing else.
++ * That is what the kernel itself does for the pid hash (kern_proc.c:
++ * sx_init_flags(..., "pidhash", SX_DUPOK)).
++ *
++ * RECURSE and DUPOK are different things.  RECURSE makes this lock
++ * re-entrant, which the RM needs because its rwlock is a Linux rw_semaphore:
++ * the same lock may be taken again by the thread that holds it (a
++ * recursive read lock, or a writer that upgrades), which a plain sx
++ * forbids.  NVIDIA makes the same choice for the RM mutex "os.lock_sx"
++ * above.  DUPOK only silences the WITNESS report for a *different* instance
++ * of the same class.
++ *
++ * The lock order reversal this class is part of is not ours to fix: the RM
++ * takes its own lock and then calls into VFS, and the VFS holds the file
++ * system's lock across the device's call, so both orders exist inside the
++ * closed RM core (the file system's lock is "fops_sx" in the WITNESS
++ * output).  Which path takes which lock first:
++ *
++ *   fops_sx -> os.rwlock_sx   the device's read/write/ioctl path: the VFS
++ *                             holds the file system's lock across the call,
++ *                             and the RM takes its own lock inside it.
++ *   os.rwlock_sx -> fops_sx   the RM holds its own lock while it looks up
++ *                             or opens a file: nv_add_mapping_context_to_
++ *                             to_file() takes the file's private lock under
++ *                             the RM lock.
++ *
++ * Neither order can be changed from here - the first is the VFS's and the
++ * second is the closed RM core's - so it is documented instead.  What the
++ * fixed naming buys is that the cycle is one node in the order graph and is
++ * therefore reported once per boot; with a name per instance it was one
++ * node per RM lock and was reported once per process.
 + */
-+struct os_rwlock {
-+    struct sx sx;
-+    char     name[32];
-+};
+ void* NV_API_CALL os_alloc_rwlock(void)
+ {
+     struct sx *sx = NULL;
+ 
+     NV_STATUS rmStatus = os_alloc_mem((void *)&sx, sizeof(struct sx));
+     if (rmStatus != NV_OK)
+     {
+         nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate rwlock!\n");
+         return NULL;
+     }
+ 
+-    sx_init(sx, "os.rwlock_sx");
++    sx_init_flags(sx, "os.rwlock_sx", SX_RECURSE | SX_DUPOK);
 +
-+static NvU32 nv_rwlock_next_id = 0;
+     return sx;
+ }
+ 
+ void NV_API_CALL os_free_rwlock(void *pRwLock)
+ {
+     struct sx *sx = (struct sx *)pRwLock;
 +
-+void* NV_API_CALL os_alloc_rwlock(void)
-+{
-+    struct os_rwlock *rwl = NULL;
-+    NvU32 id;
-+
-+    NV_STATUS rmStatus = os_alloc_mem((void *)&rwl, sizeof(struct os_rwlock));
-+    if (rmStatus != NV_OK)
-+    {
-+        nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate rwlock!\n");
-+        return NULL;
-+    }
-+
-+    id = atomic_fetchadd_32(&nv_rwlock_next_id, 1);
-+    snprintf(rwl->name, sizeof(rwl->name), "os.rwlock_sx.%u", id);
-+    /*
-+     * The RM rwlock is a Linux rw_semaphore: readers may be re-acquired
-+     * recursively and a writer may upgrade, which a plain (non-reentrant)
-+     * sx forbids - the second acquisition of the *same* rwlock then trips
-+     * WITNESS's recursion check ("acquiring duplicate lock of same type")
-+     * and fails SysCap object construction (NVRM 0x56).  Mark it
-+     * recursive, exactly as os_alloc_mutex() does the RM mutex with
-+     * SX_RECURSE at the os.lock_sx site above.
-+     */
-+    sx_init_flags(&rwl->sx, rwl->name, SX_RECURSE);
-+
-+    return &rwl->sx;
-+}
-+
-+void NV_API_CALL os_free_rwlock(void *pRwLock)
-+{
-+    struct os_rwlock *rwl;
-+
-+    if (pRwLock == NULL)
-+        return;
-+
-+    /*
-+     * The sx handle is the first member of struct os_rwlock, so the
-+     * container-of is the identity cast.
-+     */
-+    rwl = (struct os_rwlock *)pRwLock;
-+    sx_destroy(&rwl->sx);
-+    os_free_mem(rwl);
-+}
-@@ -842,30 +1165,48 @@
+     if (sx != NULL) {
+         sx_destroy(sx);
+         os_free_mem(sx);
+     }
+ }
+ 
+ NV_STATUS NV_API_CALL os_acquire_rwlock_read(void *pRwLock)
+ {
+     struct sx *sx = (struct sx *)pRwLock;
+ 
+@@ -836,30 +1184,38 @@
+ }
+ 
+ void NV_API_CALL os_disable_console_access(void)
+ {
+ }
+ 
  void NV_API_CALL os_enable_console_access(void)
  {
  }
  
 +/*
-+ * WITNESS keys spin locks by *name*, not address, and the RM re-acquires this
-+ * lock within one critical section (tlsEntryGet -> gpumgrGetGpu at
-+ * kgspInitRm_IMPL, the 0x56 backtrace).  The shared, non-recursive "os.lock_mtx"
-+ * therefore tripped "acquiring duplicate lock of same type" and aborted RM
-+ * bring-up.  Give each spin lock a unique name and mark it recursive, mirroring
-+ * os_alloc_rwlock() above.
++ * The RM spinlock class: one name for every instance (see os_alloc_rwlock()
++ * above for why the name is fixed and what it costs), recursive because the
++ * RM takes this lock again within one critical section (tlsEntryGet ->
++ * gpumgrGetGpu at kgspInitRm_IMPL, the 0x56 backtrace), and DUPOK because
++ * two different instances of the class are nested legitimately and WITNESS
++ * can no longer tell them apart.
 + */
-+struct os_spinlock {
-+    struct mtx mtx;
-+    char       name[32];
-+};
-+
-+static NvU32 nv_spinlock_next_id = 0;
-+
  NV_STATUS NV_API_CALL os_alloc_spinlock(void **lock)
  {
      NV_STATUS status;
--    struct mtx *mtx;
-+    struct os_spinlock *osl;
-+    NvU32 id;
+     struct mtx *mtx;
  
--    status = os_alloc_mem((void **)&mtx, sizeof(struct mtx));
-+    status = os_alloc_mem((void **)&osl, sizeof(struct os_spinlock));
+     status = os_alloc_mem((void **)&mtx, sizeof(struct mtx));
      if (status != NV_OK)
          return status;
  
 -    mtx_init(mtx, "os.lock_mtx", NULL, MTX_DEF);
-+    id = atomic_fetchadd_32(&nv_spinlock_next_id, 1);
-+    snprintf(osl->name, sizeof(osl->name), "os.lock_mtx.%u", id);
-+    mtx_init(&osl->mtx, osl->name, NULL, MTX_DEF | MTX_RECURSE);
++    mtx_init(mtx, "os.lock_mtx", NULL, MTX_DEF | MTX_RECURSE | MTX_DUPOK);
  
--    *lock = (void *)mtx;
-+    *lock = (void *)&osl->mtx;
+     *lock = (void *)mtx;
  
      return NV_OK;
  }
@@ -515,14 +608,14 @@
  {
      struct mtx *mtx = lock;
  
-     if (mtx != NULL) {
-         mtx_assert(mtx, MA_OWNED);
-         mtx_destroy(mtx);
--        os_free_mem(mtx);
-+        os_free_mem((struct os_spinlock *)mtx);
-     }
+@@ -996,34 +1352,43 @@
  }
-@@ -1003,6 +1317,7 @@
+ 
+ NV_STATUS NV_API_CALL os_unlock_user_pages(
+     NvU64  page_count,
+     void  *page_array,
+     NvU32  flags
+ )
  {
      NvBool write = FLD_TEST_DRF(_LOCK_USER_PAGES, _FLAGS, _WRITE, _YES, flags);
      vm_page_t *user_pages = page_array;
@@ -530,7 +623,13 @@
      NvU32 i;
  
      for (i = 0; i < page_count; i++) {
-@@ -1016,12 +1331,20 @@
+         /*
+          * FreeBSD commit eeacb3b02ff5e7dd916c852c69cf2839c0d33627 loosened
+          * the synchronization requirements for vm_page's, so for older versions
+          * we must lock the pages individually before unwiring them.
+          */
+ #if __FreeBSD_version < 1300035
+         vm_page_lock(user_pages[i]);
  #endif
  
          if (write) {
@@ -551,3 +650,6 @@
           * we can unconditionally unwire the page since either way it is
           * wired.
           */
+         vm_page_unwire(user_pages[i], PQ_ACTIVE);
+ 
+ #if __FreeBSD_version < 1300035

@@ -1,16 +1,20 @@
 --- nvidia/nvidia_subr.c.orig
 +++ nvidia/nvidia_subr.c
-@@ -1575,6 +1575,24 @@
+@@ -1574,6 +1574,27 @@
+ 
      return 0;
  }
- 
++
 +/*
 + * nv_alias_pages() - describe memory the RM did not get from nv_alloc_pages().
 + *
 + * GB10: the RM places every display (ISO) allocation in the firmware scanout
 + * carveout that GSP reports (NV2080_CTRL_CMD_FB_GET_CARVEOUT_REGION_INFO;
-+ * on the DGX Spark 0x300000000 + 48 MiB = IORT RMR 0 = \_SB.PCIF.RP0.IGPU
-+ * _CRS).  That range is RAM the firmware keeps out of the OS memory map, so
++ * on the DGX Spark 0x300000000 + 48 MiB = \_SB.PCIF.RP0.IGPU _CRS).  That
++ * address is the top of IORT RMR 1 (0x280000000 + 2 GiB), not RMR 0 as an
++ * earlier version of this comment said; nothing in the code depends on which
++ * RMR the range belongs to.  That range is RAM the firmware keeps out of the
++ * OS memory map, so
 + * it has no vm_page and is not in the direct map.  Build the same
 + * nvidia_alloc a contiguous allocation gets, but backed by a pmap_mapdev
 + * mapping instead of kmem: the kernel mapping, the OBJT_SG object used for
@@ -21,11 +25,10 @@
 + * Only contiguous carveout ranges that are not managed RAM are accepted.
 + */
 +static unsigned int nv_alias_logged;
-+
+ 
  NV_STATUS NV_API_CALL nv_alias_pages(
      nv_state_t *nv,
-     NvU32       count,
-@@ -1587,7 +1605,98 @@
+@@ -1587,9 +1608,100 @@
      void      **priv_data
  )
  {
@@ -105,8 +108,8 @@
 +    free(at, M_NVIDIA);
 +
 +    return NV_ERR_NO_MEMORY;
-+}
-+
+ }
+ 
 +static NvS32 nv_free_aliased_pages(
 +    void *private
 +)
@@ -122,10 +125,12 @@
 +    free(at, M_NVIDIA);
 +
 +    return 0;
- }
- 
++}
++
  NV_STATUS NV_API_CALL nv_alloc_pages(
-@@ -1647,6 +1756,13 @@
+     nv_state_t *nv,
+     NvU32       count,
+@@ -1647,6 +1759,13 @@
  {
      NV_STATUS status = NV_OK;
  

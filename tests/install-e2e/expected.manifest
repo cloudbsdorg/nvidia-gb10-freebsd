@@ -1,7 +1,8 @@
-# The files and links make install writes on a stock FreeBSD arm64 install
+# The files and links make install writes on a stock FreeBSD install
 # (PREFIX=/usr/local, no other drm.ko installed): path mode owner:group, or
 # path link target.  tests/install-e2e/guest.sh compares the installed
-# manifest (/var/db/nvidia-gb10-freebsd/installed.manifest) with this file.
+# manifest (/var/db/nvidia-gb10-freebsd/installed.manifest) with this file
+# and with expected.manifest.arm64 on arm64; see expected-manifest.sh.
 /boot/modules/dmabuf.ko 555 root:wheel
 /boot/modules/drm.ko 555 root:wheel
 /boot/modules/nvidia-drm.ko 555 root:wheel
@@ -48,6 +49,7 @@
 /usr/local/share/man/man3/nvrm_source_name.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_strerror.3 link nvrm.3
 /usr/local/share/man/man3/nvrm_symbol_version.3 link nvrm.3
+/usr/local/share/man/man4/gb10smmu.4 444 root:wheel
 /usr/local/share/man/man4/nvidia.4 444 root:wheel
 /usr/local/share/man/man4/nvidia_drm_render.4 444 root:wheel
 /usr/local/share/man/man4/nvidia_linux.4 444 root:wheel

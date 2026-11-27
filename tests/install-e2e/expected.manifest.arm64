@@ -1,0 +1,5 @@
+# The files and links make install writes on arm64 only.  The module of ours
+# programs the SMMUv3 in front of the GB10 GPU, which is an arm64 thing, so
+# it is installed on arm64 and on no other architecture.
+# See expected-manifest.sh, which merges this file into expected.manifest.
+/boot/modules/gb10smmu.ko 555 root:wheel

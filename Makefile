@@ -66,7 +66,8 @@ help:
 		"                        install-deps: the same)" \
 		"  make configure        loader.conf and rc.conf for boot loading:" \
 		"                        shows the change, backs up, asks" \
-		"  make build            every module, drm.ko, libnvrm, nvrm-info" \
+		"  make build            every module, drm.ko, gb10smmu.ko (arm64)," \
+		"                        libnvrm, nvrm-info" \
 		"  make test             the repository unit tests" \
 		"  make install          prerequisites, build if needed, then install" \
 		"  make deinstall        remove what install and configure wrote" \

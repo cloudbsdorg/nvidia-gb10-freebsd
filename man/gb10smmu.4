@@ -1,0 +1,205 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.\" The module itself is from Dave Cottlehuber (dch), BSD-2-Clause.
+.Dd November 24, 2026
+.Dt GB10SMMU 4
+.Os
+.Sh NAME
+.Nm gb10smmu
+.Nd SMMU in front of the GB10 GPU (kernel module gb10smmu.ko)
+.Sh SYNOPSIS
+To load the module at boot time, place the following lines in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+gb10smmu_load="YES"
+gb10smmu.mode="2"
+.Ed
+.Pp
+The mode is required: without it the module refuses to load.
+The loader loads the module before any other module of the package, so the
+GPU finds the SMMU answering while its firmware starts.
+.Pp
+Or load it by hand, with the mode set first:
+.Bd -literal -offset indent
+kenv gb10smmu.mode=2
+kldload /boot/modules/gb10smmu.ko
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+module programs the SMMUv3 that stands in front of the GPU of an NVIDIA
+GB10 (the DGX Spark).
+.Fx
+leaves that SMMU switched off, in global bypass, so every request
+the GPU makes to it is ignored.
+.Pp
+The GB10 boot ROM translates the address of the GSP firmware image with PCIe
+ATS before it reads it.
+With nothing answering, the SEC2 chain-of-trust command fails with the
+undocumented error
+.Ql 0x6
+and the GPU firmware never boots.
+.Nm
+answers those requests: it builds a stream table in which the stream IDs of
+the GPU use stage-2 translation and every other stream stays in bypass.
+.Pp
+The module is native
+.Fx :
+it uses no Linux interface and no Linux
+source.
+It is a bring-up aid, not an IOMMU driver.
+It gives no DMA isolation, it knows the one SMMU of the one machine it runs
+on, and it programs the SMMU by hand.
+The proper fix is an IOMMU in the kernel: a device attachment that goes
+through it, with IORT RMR support.
+.Pp
+The module finds the GB10 in the device tree of the running machine before
+it touches anything, and it programs the SMMU that stands in front of that
+GPU and of no other SMMU.
+A machine without the GPU has nothing for the module to program: it refuses
+to load and says so.
+The SMMU it programs is the one the machine's own description names, never
+one that is hardcoded in the module.
+.Pp
+The module is built and installed on arm64 only, and the loader is told to
+load it only on a machine that has the GB10 GPU.
+.Sh THE FACTS IT READS
+Every address and every ID the module programs comes from the machine
+itself, from the ACPI IORT table, which the firmware writes and
+.Fx
+exposes through
+.Xr acpi 4 .
+The module reads three things from it:
+.Bl -tag -width Ds -offset indent
+.It SMMUv3 node
+the node of the GPU:
+its base address, the register block the module maps and programs;
+.It ID mapping
+the mappings that give the PCI requester IDs of the GPU the stream IDs of
+the SMMU, which is how the module learns which stream table entries need
+stage-2 translation and which stay in bypass.
+The GPU may have more than one such mapping, and the module installs all
+of them;
+.It RMR nodes
+the memory ranges the firmware reserves for the GPU, which the trap mode
+maps and every other access terminates.
+.El
+.Pp
+The table is read by a parser that bounds every read against the length of
+the table and against the length of the node the read belongs to, and that
+gives up on anything it cannot make sense of.
+There is no best effort: when the table does not add up, the module
+refuses to load and says which node and which offset are at fault.
+The same goes for a table that describes no SMMU for the GPU, or that maps
+no requester ID to one, or that holds fewer nodes than it claims, or more
+than it claims.
+It does not fall back to an address of another board.
+.Pp
+The addresses the first version of the module used are kept only as a
+cross-check: when the IORT says something else, the module says so and
+programs what the IORT says.
+.Pp
+One thing does not come from the table: the PCI identity of the GPU.
+The module reads it from the device tree of the running machine, and it
+programs nothing when the machine has no such GPU.
+.Sh MODES
+The mode is chosen with the
+.Ev gb10smmu.mode
+loader variable, before the module loads.
+It is required.
+.Bl -tag -width Ds -offset indent
+.It Va 1
+.Ql trap :
+the stage-2 table maps only the RMR regions the IORT reserves for the GPU.
+Every other access is terminated and recorded in the event queue, so the
+module can show what the GPU asks for.
+The stage-2 table maps in blocks of 2 MiB, so a reserved region has to be
+a whole number of 2 MiB blocks; a region that is not one cannot be mapped
+without also mapping memory the firmware did not reserve, and the module
+refuses to load and says which region it is.
+.It Va 2
+.Ql identity :
+the stage-2 table identity-maps the first 512 GiB in 1 GiB blocks.
+This is the mode the GB10 needs.
+.El
+.Pp
+Three more loader variables:
+.Bl -tag -width Ds -offset indent
+.It Va gb10smmu.rmr
+Whether the trap mode maps the RMR regions at all.
+It is on by default;
+set it to 0 to map nothing and see every access.
+.It Va gb10smmu.eats
+Whether the stage-2 stream table entries allow ATS translation requests:
+0 refuses them, 1 allows them, 2 allows them with PASID.
+It is 1 by default.
+.It Va gb10smmu.seg
+.It Va gb10smmu.rid
+The PCI segment number and the PCI requester ID of the GPU.
+They say which node of the IORT is the GPU's.
+They default to the ones the GPU has in the device tree of the running
+machine, which is where a single-segment machine has it.
+Set them when the machine's firmware describes the GPU somewhere else.
+.El
+.Sh LOAD ORDER
+.Nm
+must be loaded before the nvidia(4) driver.
+The GPU translates its addresses while its firmware starts, which is before
+the driver opens the device, so the SMMU has to be answering by then.
+.Pp
+The module refuses to load while the nvidia(4) driver is attached to a
+device, and it says so.
+.Pp
+The check for the driver and the change of the SMMU are one thing: they
+happen under the same holds, the module's own lock and the bus-level
+hold, so a driver that attaches at that moment waits for the module
+instead of finding the SMMU half programmed.
+.Pp
+Never unload
+.Nm
+while the nvidia(4) driver
+is loaded.
+Unloading puts the SMMU back into global bypass, and a GPU that runs with a
+translation table it can no longer answer faults.
+The module refuses to unload when the driver is still attached, and when it
+cannot put the SMMU back into bypass.
+A refused unload leaves the module loaded: the kernel does not unload a
+module whose unload handler returns an error.
+.Sh FILES
+.Bl -tag -width Ds -offset indent
+.It Pa /boot/modules/gb10smmu.ko
+The module.
+.El
+.Sh DIAGNOSTICS
+The module has three nodes under
+.Pa debug.gb10smmu :
+.Bl -tag -width Ds -offset indent
+.It Va dump
+Writable.
+Writing 1 to it prints the state of the SMMU, the facts the IORT gave and
+the events the event queue holds:
+.Bd -literal -offset indent
+sysctl debug.gb10smmu.dump=1
+.Ed
+.It Va events
+Read-only.
+The number of events taken from the event queue:
+.Bd -literal -offset indent
+sysctl debug.gb10smmu.events
+.Ed
+.It Va mode
+Read-only.
+The mode the module runs in:
+.Bd -literal -offset indent
+sysctl debug.gb10smmu.mode
+.Ed
+.El
+.Pp
+See
+.Xr sysctl 8 .
+.Sh SEE ALSO
+.Xr acpi 4 ,
+.Xr loader.conf 5 ,
+.Xr kldload 8 ,
+.Xr sysctl 8

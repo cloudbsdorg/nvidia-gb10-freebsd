@@ -850,7 +850,19 @@ kv_unset() {
 # runs the GPU through GSP), and nvidia_gb10_autoload in rc.conf, which the
 # installed devd rule reads before it loads nvidia-drm when an NVIDIA
 # display device appears.
+#
+# On arm64 the module of ours goes in as well: gb10smmu.ko has to answer
+# the GPU's translation requests before the nvidia driver opens the
+# device, and the mode it needs is required, so the loader configuration
+# has to carry both.  It comes first: the loader loads the modules of the
+# file in the order of the file, and the nvidia driver is loaded later, by
+# devd.  The module is only loaded on a machine that has the GB10 GPU: it
+# has nothing to program without it.
 config_lines() {
+	if gb10smmu_wanted; then
+		printf '%s\n' "/boot/loader.conf gb10smmu_load YES" \
+		    "/boot/loader.conf gb10smmu.mode 2"
+	fi
 	printf '%s\n' "/boot/loader.conf hw.nvidia.registry.EnableGpuFirmware 1" \
 	    "/etc/rc.conf nvidia_gb10_autoload YES"
 }
@@ -1011,10 +1023,66 @@ module_list() {
 	module_table | cut -d '|' -f 2
 }
 
+# gb10smmu.ko is ours, not NVIDIA's: it programs the SMMUv3 in front of the
+# GB10 GPU and is built from src/gb10-smmu on its own.  It is an arm64
+# thing, so it is built and installed on arm64 only.
+gb10smmu_buildable() {
+	case $(uname -m) in
+	arm64|aarch64) return 0 ;;
+	esac
+	return 1
+}
+
+# The PCI identity of the GB10 GPU: the module programs the SMMU in front
+# of that GPU and of no other device.  The vendor is NVIDIA's, the device
+# ID is the GB10's.
+GB10_PCI_VENDOR=10de
+GB10_PCI_DEVICE=2e12
+
+# gb10_gpu_present - has this machine the GB10 GPU?
+#
+# The probe reads the PCI devices of the running machine.  A configuration
+# written for another machine (an image build) says what that machine has:
+# MK_GB10_PCI=1 for a machine with the GPU, MK_GB10_PCI=0 for one without.
+gb10_gpu_present() {
+	case ${MK_GB10_PCI:-} in
+	1) return 0 ;;
+	0) return 1 ;;
+	esac
+	pciconf -v 2>/dev/null |
+	    grep -q "vendor=0x$GB10_PCI_VENDOR device=0x$GB10_PCI_DEVICE"
+}
+
+# gb10smmu_wanted - is the loader to load the module of ours?
+#
+# The module is loaded on arm64, but only on a machine that has the GB10
+# GPU: it has nothing to program without the GPU, and a machine that has
+# the GPU without the module answering faults the GPU's firmware.
+gb10smmu_wanted() {
+	gb10smmu_buildable || return 1
+	gb10_gpu_present || return 1
+	return 0
+}
+
+# Every module this repository installs, by the path it is installed at:
+# the ones out of the NVIDIA tree, ours (gb10smmu.ko, arm64 only), and the
+# DRM modules of ours (drm.ko and dmabuf.ko) when no other drm.ko is
+# installed.  The install list, the staged file list, the manifest and the
+# deinstall all read this one list.
+install_module_list() {
+	module_list | sed 's|.*/|/boot/modules/|'
+	if drm_wanted; then
+		printf '%s\n' "/boot/modules/drm.ko" "/boot/modules/dmabuf.ko"
+	fi
+	if gb10smmu_buildable; then
+		printf '%s\n' "/boot/modules/gb10smmu.ko"
+	fi
+}
+
 # drm_wanted: build and install our drm.ko and dmabuf.ko unless someone
 # else's drm.ko is installed.
 drm_wanted() {
-	! foreign_drm "$DESTDIR"
+	! foreign_drm "${DESTDIR:-}"
 }
 
 do_build() {
@@ -1069,6 +1137,14 @@ EOF
 		readelf -p .comment "$TREE/$_ko" 2>/dev/null | grep -q 'Linker: LLD' \
 		    || die "$TREE/$_ko was not linked by LLD"
 	done
+	# Our own module, next to the other ones: the SMMU in front of the
+	# GB10 GPU.  It is arm64 only and it is built, never loaded.
+	if gb10smmu_buildable; then
+		step gb10smmu sh "$repo/scripts/build-gb10smmu.sh"
+		[ -s "$WORK/build/gb10smmu.ko" ] || die "missing after the build: $WORK/build/gb10smmu.ko"
+		readelf -p .comment "$WORK/build/gb10smmu.ko" 2>/dev/null | grep -q 'Linker: LLD' \
+		    || die "$WORK/build/gb10smmu.ko was not linked by LLD"
+	fi
 	build_stamp > "$WORK/build/stamp"
 	note "build: OK (logs in $LOGDIR)"
 }
@@ -1157,6 +1233,10 @@ stage() {
 	for _ko in $(module_list); do
 		install -m 555 -- "$TREE/$_ko" "$_m/"
 	done
+	if gb10smmu_buildable; then
+		[ -s "$WORK/build/gb10smmu.ko" ] || die "stage: $WORK/build/gb10smmu.ko is missing: run make build"
+		install -m 555 -- "$WORK/build/gb10smmu.ko" "$_m/gb10smmu.ko"
+	fi
 	if drm_wanted; then
 		install -m 555 -- "$WORK/build/drm.ko" "$_m/drm.ko"
 		install -m 555 -- "$WORK/build/dmabuf.ko" "$_m/dmabuf.ko"
@@ -1197,8 +1277,8 @@ allowed_path() {
 	case $_ap in
 	/boot/modules/drm.ko|/boot/modules/dmabuf.ko) return 0 ;;
 	/boot/modules/*)
-		# the modules of module_table, and nothing else
-		module_list | sed 's|.*/|/boot/modules/|' | grep -qxF -- "$_ap"
+		# the modules we install, and nothing else
+		install_module_list | grep -qxF -- "$_ap"
 		return ;;
 	esac
 	case ${_ap#"$_pp"} in
@@ -1207,7 +1287,7 @@ allowed_path() {
 	/include/nvrm/nvrm.h|/sbin/nvrm-info|/share/man/man7/nvrm.7|/share/man/man8/nvrm-info.8|\
 	/share/nvrm/schema/nvrm-info-1.schema.json|/share/licenses/$name/NVIDIA-LICENSE|/share/licenses/$name/LICENSE)
 		return 0 ;;
-	/share/man/man4/nvidia*.4|/share/man/man3/nvrm*.3)
+	/share/man/man4/nvidia*.4|/share/man/man4/gb10smmu.4|/share/man/man3/nvrm*.3)
 		case ${_ap##*/} in
 		*[!A-Za-z0-9_.-]*) return 1 ;;
 		esac
@@ -1607,6 +1687,9 @@ do_install() {
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || _ok=0
 	done
+	if gb10smmu_buildable; then
+		[ -s "$WORK/build/gb10smmu.ko" ] || _ok=0
+	fi
 	[ -f "$LIBOBJ/info/nvrm-info" ] || _ok=0
 	if [ "$_ok" = 1 ] && [ -f "$WORK/build/stamp" ] && [ "$(build_stamp)" = "$(cat "$WORK/build/stamp")" ]; then
 		install_progress build "the build is current"
@@ -2012,6 +2095,9 @@ install_stage() {
 	_d=$2
 	_pfx=$3
 	_mode=${4:-root}
+	# The allow-list reads the DESTDIR to know whether somebody else's
+	# drm.ko is in the way, so it has to be the one being installed into.
+	DESTDIR=$_d
 	_own="-o root -g wheel"
 	[ "$_mode" = user ] && _own=
 	_man=$_d$STATEDIR/installed.manifest
@@ -2244,7 +2330,7 @@ EOF
 
 # kernel module names (as kldstat -n takes them) of every module we install
 module_names() {
-	module_list | while read -r _ko; do
+	install_module_list | while read -r _ko; do
 		basename "$_ko" .ko
 	done
 }
@@ -2439,6 +2525,7 @@ _configure)
 	apply_config "$2"
 	;;
 _module-list) module_list ;;
+_install-module-list) DESTDIR=$(destdir); install_module_list ;;
 _next-steps)
 	setup
 	install_next_steps

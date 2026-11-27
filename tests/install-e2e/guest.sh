@@ -272,7 +272,18 @@ fi
 if [ -n "$exp_man" ] && [ -n "$inst_man" ]; then
 	if [ -f "$W/$exp_man" ] && [ -f "$inst_man" ]; then
 		awk '$1 ~ /^@/ || $2 == "dir" || $1 ~ /installed\.manifest$/ { next } { if ($2 == "link") print $1, "link", $4; else print $1, $2, $3 }' "$inst_man" | sort > "$results/installed.norm"
-		grep -v '^#' "$W/$exp_man" | awk 'NF' | sort > "$results/expected.norm"
+		# The manifest of this architecture: the common file, plus the
+		# arm64-only file on arm64.  The module of ours is arm64 only,
+		# so it is in the second file and in no other.
+		{
+			grep -v '^#' "$W/$exp_man" | awk 'NF'
+			case $(uname -m) in
+			arm64|aarch64)
+				[ -f "$W/$exp_man.arm64" ] && \
+				    grep -v '^#' "$W/$exp_man.arm64" | awk 'NF'
+				;;
+			esac
+		} | sort > "$results/expected.norm"
 		if cmp -s "$results/installed.norm" "$results/expected.norm"; then
 			record manifest-expected true 0 0 "$(wc -l < "$results/expected.norm" | tr -d ' ') entries equal $exp_man"
 		else
