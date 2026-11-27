@@ -176,6 +176,10 @@ nvrm_rm_new_handle(nvrm_backend *be)
 
 /* ---- backend ops ------------------------------------------------------- */
 
+/* The host's cache line size, read when the backend opens. */
+static void
+read_atom_size(nvrm_backend *be);
+
 static int
 rm_probe(void)
 {
@@ -306,6 +310,32 @@ read_sysctls(nvrm_backend *be)
 		be->wc = 0;
 		be->wc_reason = NVRM_R_OS_NOT_REPORTED;
 	}
+	read_atom_size(be);
+}
+
+/*
+ * The granularity a flush to the GPU must use: the host's cache line size.
+ * The OS layer does not always report one, and the page size is then the
+ * answer, because the page size is always a multiple of the cache line
+ * size and a flush at that granularity is safe.  The value is read once,
+ * at open: a sysctl cannot be read in capability mode.
+ */
+static void
+read_atom_size(nvrm_backend *be)
+{
+	static const char *const names[] = {
+		"hw.dcache.line_size", "hw.icache.line_size"
+	};
+	size_t i;
+	int v;
+
+	for (i = 0; i < nitems(names); i++) {
+		if (read_int_sysctl(names[i], &v) == 0 && v > 0) {
+			be->atom_size = (uint64_t)v;
+			return;
+		}
+	}
+	be->atom_size = (uint64_t)sysconf(_SC_PAGESIZE);
 }
 
 static void
@@ -798,6 +828,19 @@ prop_memory(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
 	}
 }
 
+/* The engine: the warps of a multiprocessor, and the video memory. */
+static int
+prop_engine(nvrm_gpu *g, enum nvrm_prop p, uint64_t *out)
+{
+	if (p == NVRM_P_MAX_WARPS_PER_MP)
+		return (info_one_gr(g,
+		    NV2080_CTRL_GR_INFO_INDEX_MAX_WARPS_PER_SM, out));
+	if (p == NVRM_P_VRAM_HEAP)
+		return (info_one_fb(g, NV2080_CTRL_FB_INFO_INDEX_HEAP_SIZE,
+		    out));
+	return (info_one_fb(g, NV2080_CTRL_FB_INFO_INDEX_HEAP_FREE, out));
+}
+
 /* GPU info index behind each capability flag that has one. */
 static const NvU32 cap_gpu_index[] = {
 	[NVRM_P_CAP_DMABUF - NVRM_P_CAP_DMABUF] =
@@ -845,6 +888,8 @@ rm_gpu_u64(nvrm_gpu *g, enum nvrm_prop p, uint32_t arg, uint64_t *out)
 		return (prop_gpu(g, p, arg, out));
 	if (p <= NVRM_P_NUMA_NODE)
 		return (prop_memory(g, p, out));
+	if (p <= NVRM_P_VRAM_FREE)
+		return (prop_engine(g, p, out));
 	if (p <= NVRM_P_CAP_OS_DEVICE_WC)
 		return (prop_cap(g, p, out));
 	return (NVRM_R_BACKEND_NONE);
@@ -888,6 +933,27 @@ rm_gpu_gsp(nvrm_gpu *g, char *buf, size_t len)
 	return (0);
 }
 
+/* The marketing name of the GPU. */
+static int
+rm_gpu_name(nvrm_gpu *g, char *buf, size_t len)
+{
+	NV2080_CTRL_GPU_GET_NAME_STRING_PARAMS p;
+	NvU32 st;
+
+	memset(&p, 0, sizeof(p));
+	p.gpuNameStringFlags =
+	    NV2080_CTRL_GPU_GET_NAME_STRING_FLAGS_TYPE_ASCII;
+	st = nvrm_rm_control(g->be, g->subdevice,
+	    NV2080_CTRL_CMD_GPU_GET_NAME_STRING, &p, sizeof(p));
+	if (st != NV_OK)
+		return (status_reason(st));
+	p.gpuNameString.ascii[sizeof(p.gpuNameString.ascii) - 1] = '\0';
+	if (p.gpuNameString.ascii[0] == '\0')
+		return (NVRM_R_RM_FAILED);
+	snprintf(buf, len, "%s", (const char *)p.gpuNameString.ascii);
+	return (0);
+}
+
 static int
 rm_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 {
@@ -899,6 +965,8 @@ rm_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 		return (rm_gpu_vbios(g, buf, len));
 	if (p == NVRM_SP_GSP_FIRMWARE)
 		return (rm_gpu_gsp(g, buf, len));
+	if (p == NVRM_SP_DEVICE_NAME)
+		return (rm_gpu_name(g, buf, len));
 	if (p != NVRM_SP_UUID)
 		return (NVRM_R_BACKEND_NONE);
 	memset(&gid, 0, sizeof(gid));
@@ -935,6 +1003,35 @@ rm_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 
 /* Descriptors: rights and the escape allow list.  After this the process may
  * enter capability mode and keep querying through the same descriptor. */
+/* The zcull information of the graphics engine. */
+static int
+rm_gpu_zcull(nvrm_gpu *g, nvrm_zcull_info *out)
+{
+	NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS p;
+	NvU32 st;
+
+	memset(&p, 0, sizeof(p));
+	st = nvrm_rm_control(g->be, g->subdevice,
+	    NV2080_CTRL_CMD_GR_GET_ZCULL_INFO, &p, sizeof(p));
+	if (st != NV_OK)
+		return (status_reason(st));
+	out->width_align_pixels = p.widthAlignPixels;
+	out->height_align_pixels = p.heightAlignPixels;
+	out->aliquot_total = p.aliquotTotal;
+	out->region_bytes = p.zcullRegionByteMultiplier;
+	out->region_header_bytes = p.zcullRegionHeaderSize;
+	out->subregion_header_bytes = p.zcullSubregionHeaderSize;
+	return (0);
+}
+
+/* The host's cache line size, read when the backend opened. */
+static int
+rm_host_atom_size(nvrm_gpu *g, uint64_t *out)
+{
+	*out = g->be->atom_size;
+	return (0);
+}
+
 static int
 rm_limit(nvrm_backend *be, int allow_alloc)
 {
@@ -967,6 +1064,8 @@ const nvrm_backend_ops nvrm_backend_rm_ops = {
 	.gpu_u64 = rm_gpu_u64,
 	.gpu_str = rm_gpu_str,
 	.gpu_classes = rm_gpu_classes,
+	.gpu_zcull = rm_gpu_zcull,
+	.host_atom_size = rm_host_atom_size,
 	.limit = rm_limit,
 	.mem = &nvrm_rm_mem_ops,
 };

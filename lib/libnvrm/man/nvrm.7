@@ -21,17 +21,45 @@ id, raw RM SM version and compute capability, GPC, TPC and SM counts, the class
 list, memory sizes, page sizes and the capability flags.
 .It family
 Values only a generation table knows, selected by the pair of GPFIFO and
-compute classes the GPU lists: family name, the channel, compute, 3D and copy
-classes and the page size candidates.
+compute classes the GPU lists: the name of the chip family, the channel,
+compute, 3D, copy, 2D, memory-to-memory and video decode classes, the thread
+blocks a multiprocessor holds, the shared memory, and the page size
+candidates.
 A GPU the table does not know is still described; the family values are then
 unavailable with the reason
 .Li family_unknown .
-The library core names no chip.
+The library core names no chip, and a family is named after its chip family
+(GA10x, AD10x, GB10x, GB20x and the like), never after an architecture.
 .It board decorators
 Entries keyed by PCI subsystem identifiers that only add or override options.
 A decorator never decides whether a GPU is supported.
 None exists yet: none is added without a real board that needs it.
 .El
+.Ss The device and its engine
+The marketing name of the GPU is in
+.Li device_name ,
+and the name of the chipset in
+.Li chipset_name ;
+the chipset is what the architecture and the implementation identify, and the
+family is the group of chipsets the generation table knows.
+.Li mp_per_tpc
+is the number of multiprocessors of a TPC,
+.Li max_warps_per_mp
+the number of warps a multiprocessor holds, and
+.Li max_blocks_per_mp
+the number of thread blocks it holds.
+.Li nc_atom_size
+is the granularity a flush to the GPU must use, in bytes.
+The zcull members hold what the graphics engine needs to place a surface:
+the width and height alignment in pixels, the number of aliquots the GPU has,
+the bytes one aliquot takes, and the sizes of the region and the subregion
+headers.
+The video memory in use is in
+.Li vram_used ,
+and the video memory still free in
+.Li vram_free ;
+the free memory is what the RM reports and the used memory is the difference
+between the heap and the free memory.
 .Ss Availability
 Every value is available, or carries a reason identifier and a source:
 .Li rm ,
@@ -84,6 +112,8 @@ the OS layer does not report the value.
 the GPU matched no row of the generation table (the family is unknown).
 .It Li family_has_no_class
 the family is known and has no class of this kind.
+.It Li family_has_no_value
+the family is known but has no value of this kind.
 .It Li input_unavailable
 a value this one is computed from is unavailable.
 .It Li no_numa_node
@@ -200,7 +230,7 @@ a dead channel from the other channels of its client.
 .Ss JSON
 Schema
 .Li nvrm-info/1 ,
-minor 3;
+minor 4;
 documents name it in the
 .Li schema
 member.

@@ -116,6 +116,17 @@ avail(nvrm_u64 *f, uint64_t value, int source)
 	f->source = source;
 }
 
+/* A string field: the value, or the reason it is not there. */
+static void
+set_str(nvrm_str *f, const char *value, int reason, int source)
+{
+	memset(f->value, 0, sizeof(f->value));
+	if (value != NULL)
+		snprintf(f->value, sizeof(f->value), "%s", value);
+	f->reason = reason;
+	f->source = source;
+}
+
 void
 nvrm_info_init(nvrm_device_info *info)
 {
@@ -158,6 +169,9 @@ static const int prop_source[NVRM_P_COUNT] = {
 	[NVRM_P_BAR1_KB] = NVRM_S_RM,
 	[NVRM_P_MAX_PAGE_SIZE] = NVRM_S_RM,
 	[NVRM_P_NUMA_NODE] = NVRM_S_RM,
+	[NVRM_P_MAX_WARPS_PER_MP] = NVRM_S_RM,
+	[NVRM_P_VRAM_HEAP] = NVRM_S_RM,
+	[NVRM_P_VRAM_FREE] = NVRM_S_RM,
 	[NVRM_P_CAP_DMABUF] = NVRM_S_RM,
 	[NVRM_P_CAP_ATS] = NVRM_S_RM,
 	[NVRM_P_CAP_SELF_HOSTED] = NVRM_S_RM,
@@ -222,6 +236,31 @@ query_identity(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	    sizeof(info->uuid.value));
 	info->uuid.reason = r;
 	info->uuid.source = NVRM_S_RM;
+	r = ops->gpu_str(g, NVRM_SP_DEVICE_NAME, info->device_name.value,
+	    sizeof(info->device_name.value));
+	info->device_name.reason = r;
+	info->device_name.source = NVRM_S_RM;
+}
+
+/* The name of the chipset: what the architecture and the implementation
+ * say the chip is.  It is a name, not a number the caller has to know. */
+static void
+query_chipset(nvrm_device_info *info)
+{
+	const char *name;
+
+	if (!NVRM_HAVE(info->architecture) || !NVRM_HAVE(info->implementation)) {
+		set_str(&info->chipset_name, NULL, NVRM_R_INPUT_MISSING,
+		    NVRM_S_DERIVED);
+		return;
+	}
+	name = nvrm_chipset_name_for(info->architecture.value,
+	    info->implementation.value);
+	if (name == NULL)
+		set_str(&info->chipset_name, NULL, NVRM_R_FAMILY_UNKNOWN,
+		    NVRM_S_DERIVED);
+	else
+		set_str(&info->chipset_name, name, NVRM_R_NONE, NVRM_S_DERIVED);
 }
 
 static int
@@ -307,11 +346,14 @@ query_gpu_class(const nvrm_backend_ops *ops, nvrm_gpu *g,
 
 			avail(&info->tpc_count, tpcs, NVRM_S_RM);
 			r = ops->gpu_u64(g, NVRM_P_SM_PER_TPC, 0, &per_tpc);
-			if (r != 0)
+			if (r != 0) {
 				unavail(&info->sm_count, r, NVRM_S_RM);
-			else
+				unavail(&info->mp_per_tpc, r, NVRM_S_RM);
+			} else {
 				avail(&info->sm_count, tpcs * per_tpc,
 				    NVRM_S_DERIVED);
+				avail(&info->mp_per_tpc, per_tpc, NVRM_S_RM);
+			}
 		}
 	}
 
@@ -325,6 +367,71 @@ query_gpu_class(const nvrm_backend_ops *ops, nvrm_gpu *g,
 		for (k = 0; k < n; k++)
 			info->classes.value[k] = ids[k];
 	}
+}
+
+/* The zcull information: six numbers, all from one call. */
+static void
+set_zcull(nvrm_device_info *info, int reason, const nvrm_zcull_info *zc)
+{
+	struct {
+		nvrm_u64	*f;
+		uint64_t	v;
+	} rows[6];
+	unsigned i;
+
+	rows[0].f = &info->zcull_width_align_pixels;
+	rows[0].v = zc->width_align_pixels;
+	rows[1].f = &info->zcull_height_align_pixels;
+	rows[1].v = zc->height_align_pixels;
+	rows[2].f = &info->zcull_aliquot_total;
+	rows[2].v = zc->aliquot_total;
+	rows[3].f = &info->zcull_region_bytes;
+	rows[3].v = zc->region_bytes;
+	rows[4].f = &info->zcull_region_header_bytes;
+	rows[4].v = zc->region_header_bytes;
+	rows[5].f = &info->zcull_subregion_header_bytes;
+	rows[5].v = zc->subregion_header_bytes;
+	for (i = 0; i < 6; i++) {
+		if (reason != 0)
+			unavail(rows[i].f, reason, NVRM_S_RM);
+		else
+			avail(rows[i].f, rows[i].v, NVRM_S_RM);
+	}
+}
+
+/* The limits of the engine, the video memory in use and the host's cache
+ * line: what a consumer of the device needs and the class layer does not
+ * hold. */
+static void
+query_engine(const nvrm_backend_ops *ops, nvrm_gpu *g,
+    nvrm_device_info *info)
+{
+	nvrm_zcull_info zc;
+	nvrm_u64 heap;
+	uint64_t v;
+	int r;
+
+	get_u64(ops, g, &info->max_warps_per_mp, NVRM_P_MAX_WARPS_PER_MP, 0, 1);
+
+	memset(&zc, 0, sizeof(zc));
+	r = ops->gpu_zcull(g, &zc);
+	set_zcull(info, r, &zc);
+
+	r = ops->host_atom_size(g, &v);
+	if (r != 0)
+		unavail(&info->nc_atom_size, r, NVRM_S_OS);
+	else
+		avail(&info->nc_atom_size, v, NVRM_S_OS);
+
+	get_u64(ops, g, &info->vram_free, NVRM_P_VRAM_FREE, 0, 1);
+	get_u64(ops, g, &heap, NVRM_P_VRAM_HEAP, 0, 1);
+	if (!NVRM_HAVE(heap) || !NVRM_HAVE(info->vram_free))
+		unavail(&info->vram_used, NVRM_R_INPUT_MISSING, NVRM_S_DERIVED);
+	else if (heap.value < info->vram_free.value)
+		unavail(&info->vram_used, NVRM_R_VALUE_UNUSABLE, NVRM_S_DERIVED);
+	else
+		avail(&info->vram_used, heap.value - info->vram_free.value,
+		    NVRM_S_DERIVED);
 }
 
 static int
@@ -398,6 +505,13 @@ nvrm_apply_family(nvrm_device_info *info, const nvrm_family *table,
 		unavail(&info->cls_compute, reason, NVRM_S_FAMILY);
 		unavail(&info->cls_eng3d, reason, NVRM_S_FAMILY);
 		unavail(&info->cls_copy, reason, NVRM_S_FAMILY);
+		unavail(&info->cls_eng2d, reason, NVRM_S_FAMILY);
+		unavail(&info->cls_m2mf, reason, NVRM_S_FAMILY);
+		unavail(&info->cls_vdec, reason, NVRM_S_FAMILY);
+		unavail(&info->max_blocks_per_mp, reason, NVRM_S_FAMILY);
+		unavail(&info->max_smem_per_wg, reason, NVRM_S_FAMILY);
+		info->sm_smem_sizes.reason = reason;
+		info->sm_smem_sizes.count = 0;
 		info->page_sizes.reason = reason;
 		return;
 	}
@@ -408,6 +522,35 @@ nvrm_apply_family(nvrm_device_info *info, const nvrm_family *table,
 	family_class(&info->cls_compute, info, fam->cls_compute);
 	family_class(&info->cls_eng3d, info, fam->cls_eng3d);
 	family_class(&info->cls_copy, info, fam->cls_copy);
+	family_class(&info->cls_eng2d, info, fam->cls_eng2d);
+	family_class(&info->cls_m2mf, info, fam->cls_m2mf);
+	family_class(&info->cls_vdec, info, fam->cls_vdec);
+
+	/* What only the family knows: the blocks a multiprocessor holds and
+	 * the shared memory.  A family that does not say has no value of
+	 * this kind. */
+	if (fam->max_blocks_per_mp == 0)
+		unavail(&info->max_blocks_per_mp, NVRM_R_FAMILY_NO_VALUE,
+		    NVRM_S_FAMILY);
+	else
+		avail(&info->max_blocks_per_mp, fam->max_blocks_per_mp,
+		    NVRM_S_FAMILY);
+	if (fam->max_smem_per_wg == 0)
+		unavail(&info->max_smem_per_wg, NVRM_R_FAMILY_NO_VALUE,
+		    NVRM_S_FAMILY);
+	else
+		avail(&info->max_smem_per_wg, fam->max_smem_per_wg, NVRM_S_FAMILY);
+	info->sm_smem_sizes.source = NVRM_S_FAMILY;
+	info->sm_smem_sizes.count = 0;
+	if (fam->sm_smem_sizes[0] == 0) {
+		info->sm_smem_sizes.reason = NVRM_R_FAMILY_NO_VALUE;
+	} else {
+		info->sm_smem_sizes.reason = NVRM_R_NONE;
+		for (i = 0, k = 0; i < NVRM_MAX_SMEM &&
+		    fam->sm_smem_sizes[i] != 0; i++)
+			info->sm_smem_sizes.value[k++] = fam->sm_smem_sizes[i];
+		info->sm_smem_sizes.count = k;
+	}
 
 	/* Page sizes: the row's sizes, capped by what the RM says is usable. */
 	if (!NVRM_HAVE(info->max_page_size)) {
@@ -460,6 +603,8 @@ nvrm_query_device(const nvrm_backend_ops *ops, nvrm_gpu *g,
 	get_version(ops, g, &info->vbios, NVRM_SP_VBIOS, 16);
 	get_version(ops, g, &info->gsp_firmware, NVRM_SP_GSP_FIRMWARE, 10);
 	query_gpu_class(ops, g, info);
+	query_chipset(info);
+	query_engine(ops, g, info);
 
 	get_u64(ops, g, &info->vram_size, NVRM_P_VRAM_KB, 0, 1024);
 	get_u64(ops, g, &info->bar1_size, NVRM_P_BAR1_KB, 0, 1024);

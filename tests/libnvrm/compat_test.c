@@ -39,6 +39,13 @@ static const char *const v10[] = {
 static const char *const later[] = {
 	"rm_sm_version", "compute_capability_major",
 	"compute_capability_minor", "vbios", "gsp_firmware",
+	"device_name", "chipset_name", "mp_per_tpc", "max_warps_per_mp",
+	"max_blocks_per_mp", "cls_eng2d", "cls_m2mf", "cls_vdec",
+	"nc_atom_size", "max_smem_per_wg", "sm_smem_sizes",
+	"zcull_width_align_pixels", "zcull_height_align_pixels",
+	"zcull_aliquot_total", "zcull_region_bytes",
+	"zcull_region_header_bytes", "zcull_subregion_header_bytes",
+	"vram_used", "vram_free",
 };
 #define NLATER (sizeof(later) / sizeof(later[0]))
 

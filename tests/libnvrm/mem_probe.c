@@ -95,8 +95,8 @@ probe(nvrm_device *dev)
 {
 	nvrm_open_opts o = { 0, NVRM_OPEN_ALLOW_MAP, 4, 4 };
 	nvrm_va_params vp = { 0, 0, 64 * MiB, 2 * MiB, 0 };	/* any page fits */
-	nvrm_mem_params vram = { 0, NVRM_MEM_VRAM, 0, 0, 2 * MiB, 0, 0 };
-	nvrm_mem_params sys = { 0, NVRM_MEM_SYSMEM, 0, 0, 2 * MiB, 0, 0 };
+	nvrm_mem_params vram = { 0, NVRM_MEM_VRAM, 0, 0, 2 * MiB, 0, 0, 0, 0 };
+	nvrm_mem_params sys = { 0, NVRM_MEM_SYSMEM, 0, 0, 2 * MiB, 0, 0, 0, 0 };
 	nvrm_gpu_map_params gp = { 0 };
 	nvrm_vaspace_info vi = { 0 };
 	nvrm_mem_info mi = { 0 };

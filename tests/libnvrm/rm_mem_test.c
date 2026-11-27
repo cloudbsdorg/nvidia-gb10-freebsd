@@ -1512,6 +1512,130 @@ test_fork_child(void)
 	down("fork child");
 }
 
+/* The page kind, the compression, the handle of the object, a CPU
+ * mapping at a fixed address and the overmap of a client mapping. */
+static void
+test_extended_mem(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	nvrm_mem_params p = { 0, NVRM_MEM_SYSMEM, 0, 0, 64 * 1024, 0, 0 };
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	void *area, *a;
+
+	up();
+	cl = client(NVRM_OPEN_ALLOW_MAP);
+
+	/* the page kind of the object reaches the RM */
+	{
+		static const struct {
+			uint32_t	pte_kind;
+			uint32_t	format;
+		} kinds[] = {
+			{ NVRM_PTE_KIND_DEFAULT, NVOS32_ATTR_FORMAT_PITCH },
+			{ NVRM_PTE_KIND_PITCH, NVOS32_ATTR_FORMAT_PITCH },
+			{ NVRM_PTE_KIND_BLOCK_LINEAR,
+			    NVOS32_ATTR_FORMAT_BLOCK_LINEAR },
+			{ NVRM_PTE_KIND_SWIZZLED, NVOS32_ATTR_FORMAT_SWIZZLED },
+		};
+		unsigned i;
+
+		for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+			p.pte_kind = kinds[i].pte_kind;
+			CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
+			CHECK_EQ(DRF_VAL(OS32, _ATTR, _FORMAT, M.last_alloc.attr),
+			    kinds[i].format);
+			nvrm_mem_free(m);
+		}
+	}
+
+	/* the compression of the object reaches the RM */
+	p.pte_kind = NVRM_PTE_KIND_DEFAULT;
+	{
+		static const struct {
+			uint32_t	compress;
+			uint32_t	compr;
+		} compressions[] = {
+			{ NVRM_COMPRESS_NONE, NVOS32_ATTR_COMPR_NONE },
+			{ NVRM_COMPRESS_REQUIRED, NVOS32_ATTR_COMPR_REQUIRED },
+			{ NVRM_COMPRESS_ANY, NVOS32_ATTR_COMPR_ANY },
+		};
+		unsigned i, n = sizeof(compressions) / sizeof(compressions[0]);
+
+		for (i = 0; i < n; i++) {
+			p.compress = compressions[i].compress;
+			CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
+			CHECK_EQ(DRF_VAL(OS32, _ATTR, _COMPR, M.last_alloc.attr),
+			    compressions[i].compr);
+			/* the last object stays: the handle of it is checked below */
+			if (i + 1 < n)
+				nvrm_mem_free(m);
+		}
+	}
+	/* the handle of the object is the one the RM gave it */
+	CHECK(info_of(m).handle != 0);
+	CHECK_EQ(info_of(m).pte_kind, NVRM_PTE_KIND_DEFAULT);
+	CHECK_EQ(info_of(m).compress, NVRM_COMPRESS_ANY);
+	nvrm_mem_free(m);
+
+	/* a CPU mapping at a fixed address */
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
+	CHECK_EQ((uint64_t)(uintptr_t)a, mp.fixed);
+	CHECK_EQ(M.nmapmem, 1);
+
+	/* the overmap: the range stays mapped and the RM forgets the mapping */
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_OK);
+	CHECK_EQ(M.nunmapmem, 1);
+	memset(a, 0x5a, 16);
+	CHECK_EQ(((unsigned char *)a)[0], 0x5a);
+	/* the call to the driver fails */
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
+	M.fail_nr = NV_ESC_RM_UNMAP_MEMORY;
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_E_IO);
+	M.fail_nr = 0;
+	/* the anonymous mapping cannot be made */
+	{
+		char err[160];
+
+		CHECK_EQ(cl->mops->overmap_cpu(m->b, (void *)0x1001, 4096, 0,
+		    err, sizeof(err)), NVRM_E_IO);
+	}
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp.fixed), NVRM_OK);
+	nvrm_mem_free(m);
+
+	/* the RM refuses the unmap of the overmap: the range stays as it is */
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
+	M.status_nr = NV_ESC_RM_UNMAP_MEMORY;
+	M.status_val = NV_ERR_INVALID_OBJECT;
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_E_RM);
+	M.status_nr = 0;
+	/* the mapping is still there: the caller unmaps it */
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp.fixed), NVRM_OK);
+	nvrm_mem_free(m);
+
+	nvrm_client_close(cl);
+	down("extended mem");
+}
+
 int
 main(void)
 {
@@ -1525,6 +1649,7 @@ main(void)
 	test_alloc_sysmem();
 	test_map_gpu();
 	test_map_cpu();
+	test_extended_mem();
 	test_share();
 	test_fork_child();
 	return (t_done("rm_mem_test"));

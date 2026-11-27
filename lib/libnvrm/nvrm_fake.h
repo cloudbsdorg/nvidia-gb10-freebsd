@@ -16,6 +16,8 @@ void	nvrm_fake_inject_uuid_fail(int reason);
 void	nvrm_fake_inject_str_fail(int prop, int reason);
 void	nvrm_fake_inject_classes(const uint32_t *list, unsigned n);
 void	nvrm_fake_inject_classes_fail(int reason);
+void	nvrm_fake_inject_zcull_fail(int reason);
+void	nvrm_fake_inject_atom_size(uint64_t bytes, int reason);
 void	nvrm_fake_inject_clear(void);
 int	nvrm_fake_fd(void);
 
@@ -34,7 +36,7 @@ enum {
 	NVRM_FAKE_OP_RIGHTS, NVRM_FAKE_OP_DESC_SIZE,
 	/* releases the "RM" refuses: what they hold stays until client close */
 	NVRM_FAKE_OP_VA_RELEASE, NVRM_FAKE_OP_FREE, NVRM_FAKE_OP_UNMAP_GPU,
-	NVRM_FAKE_OP_UNMAP_CPU,
+	NVRM_FAKE_OP_UNMAP_CPU, NVRM_FAKE_OP_OVERMAP_CPU,
 	NVRM_FAKE_OP__COUNT
 };
 

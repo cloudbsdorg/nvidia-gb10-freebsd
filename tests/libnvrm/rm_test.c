@@ -1044,6 +1044,82 @@ test_running_reason_ids(void)
 	CHECK_EQ(be.running.reason, NVRM_R_NONE);
 }
 
+/* The engine information, the names and the video memory: what the RM
+ * answers for them. */
+static void
+test_engine_info(void)
+{
+	nvrm_ctx *ctx;
+	const nvrm_device_info *i;
+	char err[300];
+	int rc;
+
+	reset_kernel();
+	ctx = enum_rm(&rc, err, sizeof(err));
+	i = info0(ctx);
+	/* the marketing name of the GPU */
+	CHECK_STR(i->device_name.value, "NVIDIA Test Graphics Adapter");
+	CHECK(i->device_name.source == NVRM_S_RM);
+	/* the engine limits */
+	CHECK_EQ(i->max_warps_per_mp.value, 48);
+	CHECK_EQ(i->mp_per_tpc.value, 2);
+	/* the zcull information */
+	CHECK_EQ(i->zcull_width_align_pixels.value, 64);
+	CHECK_EQ(i->zcull_height_align_pixels.value, 32);
+	CHECK_EQ(i->zcull_aliquot_total.value, 1024);
+	CHECK_EQ(i->zcull_region_bytes.value, 64);
+	CHECK_EQ(i->zcull_region_header_bytes.value, 32);
+	CHECK_EQ(i->zcull_subregion_header_bytes.value, 16);
+	/* the cache line the OS layer reports */
+	CHECK_EQ(i->nc_atom_size.value, 64);
+	CHECK(i->nc_atom_size.source == NVRM_S_OS);
+	/* the video memory */
+	CHECK_EQ(i->vram_free.value, 12ULL * 1024 * 1024);
+	CHECK_EQ(i->vram_used.value, 4ULL * 1024 * 1024);
+	CHECK(i->vram_used.source == NVRM_S_DERIVED);
+	nvrm_close(ctx);
+
+	/* a cache line of zero: the page size is the safe answer */
+	reset_kernel();
+	K.fn_cache_line = 0;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(info0(ctx)->nc_atom_size.value, (uint64_t)getpagesize());
+	nvrm_close(ctx);
+
+	/* no cache line at all: the page size is the safe answer */
+	reset_kernel();
+	K.fn_cache_line = -1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK_EQ(info0(ctx)->nc_atom_size.value, (uint64_t)getpagesize());
+	nvrm_close(ctx);
+
+	/* the name control fails */
+	reset_kernel();
+	K.fail_name = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK(!NVRM_HAVE(info0(ctx)->device_name));
+	CHECK_EQ(info0(ctx)->device_name.reason, NVRM_R_RM_UNSUPPORTED);
+	nvrm_close(ctx);
+
+	/* an empty name is not a name */
+	reset_kernel();
+	K.device_name = "";
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK(!NVRM_HAVE(info0(ctx)->device_name));
+	CHECK_EQ(info0(ctx)->device_name.reason, NVRM_R_RM_FAILED);
+	nvrm_close(ctx);
+
+	/* the zcull control fails */
+	reset_kernel();
+	K.fail_zcull = 1;
+	ctx = enum_rm(&rc, err, sizeof(err));
+	CHECK(!NVRM_HAVE(info0(ctx)->zcull_width_align_pixels));
+	CHECK_EQ(info0(ctx)->zcull_width_align_pixels.reason,
+	    NVRM_R_RM_UNSUPPORTED);
+	CHECK(!NVRM_HAVE(info0(ctx)->zcull_subregion_header_bytes));
+	nvrm_close(ctx);
+}
+
 int
 main(void)
 {
@@ -1062,5 +1138,6 @@ main(void)
 	test_least_privilege();
 	test_misc();
 	test_running_reason_ids();
+	test_engine_info();
 	return (t_done("rm_test"));
 }

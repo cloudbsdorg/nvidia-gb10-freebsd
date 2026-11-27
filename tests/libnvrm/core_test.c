@@ -96,6 +96,30 @@ must_enum(const char *profile)
 	return (ctx);
 }
 
+/*
+ * A value the device cannot report: it is absent, and it says why.  The
+ * reason of a value is read through its address, so one helper serves every
+ * kind of value the device model has.  An expected reason of -1 says that
+ * the value must be absent but that which reason it carries does not
+ * matter.
+ */
+struct absent_value {
+	const int	*reason;	/* the reason field of the value */
+	int		expected;	/* the reason it must carry, or -1 */
+};
+
+static void
+expect_absent(const struct absent_value *values, unsigned n)
+{
+	unsigned i;
+
+	for (i = 0; i < n; i++) {
+		CHECK(*values[i].reason != NVRM_R_NONE);
+		if (values[i].expected >= 0)
+			CHECK_EQ(*values[i].reason, values[i].expected);
+	}
+}
+
 /* ---- registry ---------------------------------------------------------- */
 
 static int probe_yes(void) { return (1); }
@@ -293,21 +317,31 @@ static const char *const field_os[] = {
 };
 static const char *const field_rm[] = {
 	"pci_subsystem_vendor", "pci_subsystem_device", "pci_revision",
-	"rm_gpu_id", "uuid", "architecture", "implementation",
+	"rm_gpu_id", "uuid", "device_name", "architecture", "implementation",
 	"sm_version_major", "sm_version_minor", "rm_sm_version",
 	"gpc_count", "tpc_count", "classes", "vram_size", "bar1_size",
 	"max_page_size", "numa_node", "vbios", "gsp_firmware",
+	"mp_per_tpc", "max_warps_per_mp",
+	"zcull_width_align_pixels", "zcull_height_align_pixels",
+	"zcull_aliquot_total", "zcull_region_bytes",
+	"zcull_region_header_bytes", "zcull_subregion_header_bytes",
+	"vram_free",
 };
 static const char *const field_derived[] = {
 	"chip_id", "compute_capability_major", "compute_capability_minor",
-	"sm_count",
+	"sm_count", "chipset_name", "vram_used",
 };
 static const char *const field_family[] = {
 	"cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "family",
-	"page_sizes",
+	"page_sizes", "cls_eng2d", "cls_m2mf", "cls_vdec",
+	"max_blocks_per_mp", "max_smem_per_wg", "sm_smem_sizes",
+};
+static const char *const field_os_new[] = {
+	"nc_atom_size",
 };
 static const source_group field_sources[] = {
 	SOURCE_GROUP(NVRM_S_OS, field_os),
+	SOURCE_GROUP(NVRM_S_OS, field_os_new),
 	SOURCE_GROUP(NVRM_S_RM, field_rm),
 	SOURCE_GROUP(NVRM_S_DERIVED, field_derived),
 	SOURCE_GROUP(NVRM_S_FAMILY, field_family),
@@ -364,9 +398,9 @@ check_source_labels(const nvrm_device_info *i)
 		    field_sources, SOURCE_COUNT(field_sources));
 	}
 	CHECK_EQ(matched, nvrm_nfields);
-	CHECK_EQ(SOURCE_COUNT(field_os) + SOURCE_COUNT(field_rm) +
-	    SOURCE_COUNT(field_derived) + SOURCE_COUNT(field_family),
-	    nvrm_nfields);
+	CHECK_EQ(SOURCE_COUNT(field_os) + SOURCE_COUNT(field_os_new) +
+	    SOURCE_COUNT(field_rm) + SOURCE_COUNT(field_derived) +
+	    SOURCE_COUNT(field_family), nvrm_nfields);
 	/* Capability names, not positions, pin the labels of appended flags. */
 	for (c = 0; c < NVRM_NCAPS; c++)
 		rows += check_source_label(nvrm_cap_name(c), i->caps[c].source,
@@ -457,7 +491,43 @@ test_model_discrete(void)
 	CHECK_EQ(i->cls_compute.value, 0xCEC0);
 	CHECK_EQ(i->cls_eng3d.value, 0xCE97);
 	CHECK_EQ(i->cls_copy.value, 0xCAB5);
-	CHECK_EQ(i->classes.count, 6);
+	/* the chip family, never an architecture name */
+	CHECK_STR(i->family.value, "GB20x");
+	/* the chipset the architecture and the implementation name */
+	CHECK_STR(i->chipset_name.value, "GB206");
+	CHECK(i->chipset_name.source == NVRM_S_DERIVED);
+	/* the marketing name of the GPU */
+	CHECK_STR(i->device_name.value, "NVIDIA Test Graphics Adapter");
+	CHECK(i->device_name.source == NVRM_S_RM);
+	/* the engine limits */
+	CHECK_EQ(i->mp_per_tpc.value, 2);
+	CHECK_EQ(i->max_warps_per_mp.value, 48);
+	CHECK_EQ(i->max_blocks_per_mp.value, 24);
+	CHECK(i->max_blocks_per_mp.source == NVRM_S_FAMILY);
+	CHECK_EQ(i->cls_eng2d.value, 0x902D);
+	CHECK_EQ(i->cls_vdec.value, 0xCEB0);
+	/* this family has no inline-to-memory class: said, not guessed */
+	CHECK(!NVRM_HAVE(i->cls_m2mf));
+	CHECK_EQ(i->cls_m2mf.reason, NVRM_R_FAMILY_NO_CLASS);
+	/* the shared memory */
+	CHECK_EQ(i->max_smem_per_wg.value, 99ULL << 10);
+	CHECK_EQ(i->sm_smem_sizes.count, 5);
+	CHECK_EQ(i->sm_smem_sizes.value[0], 8ULL << 10);
+	CHECK_EQ(i->sm_smem_sizes.value[4], 100ULL << 10);
+	/* the host's cache line and the zcull information */
+	CHECK_EQ(i->nc_atom_size.value, 64);
+	CHECK(i->nc_atom_size.source == NVRM_S_OS);
+	CHECK_EQ(i->zcull_width_align_pixels.value, 64);
+	CHECK_EQ(i->zcull_height_align_pixels.value, 32);
+	CHECK_EQ(i->zcull_aliquot_total.value, 1024);
+	CHECK_EQ(i->zcull_region_bytes.value, 64);
+	CHECK_EQ(i->zcull_region_header_bytes.value, 32);
+	CHECK_EQ(i->zcull_subregion_header_bytes.value, 16);
+	/* the video memory in use and still free */
+	CHECK_EQ(i->vram_free.value, 12ULL << 30);
+	CHECK_EQ(i->vram_used.value, 4ULL << 30);
+	CHECK(i->vram_used.source == NVRM_S_DERIVED);
+	CHECK_EQ(i->classes.count, 8);
 	CHECK_EQ(i->page_sizes.count, 4);	/* 4K 64K 2M 512M under cap */
 	CHECK_EQ(i->page_sizes.value[3], 512ULL << 20);
 	/* no NUMA node: unavailable with the reason, not a made-up -1 */
@@ -565,15 +635,19 @@ test_model_unknown_and_sparse(void)
 	nvrm_fake_inject_value(NVRM_P_SM_VERSION, 0);
 	ctx = must_enum("unknown");
 	i = info_of(ctx, 0);
-	CHECK(!NVRM_HAVE(i->sm_version_major));
-	CHECK_EQ(i->sm_version_major.reason, NVRM_R_RM_UNSUPPORTED);
-	CHECK(!NVRM_HAVE(i->sm_version_minor));
-	CHECK(!NVRM_HAVE(i->rm_sm_version));
-	CHECK_EQ(i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED);
-	CHECK(!NVRM_HAVE(i->compute_capability_major));
-	CHECK_EQ(i->compute_capability_major.reason, NVRM_R_FAMILY_UNKNOWN);
-	CHECK(!NVRM_HAVE(i->compute_capability_minor));
-	CHECK_EQ(i->compute_capability_minor.reason, NVRM_R_FAMILY_UNKNOWN);
+	{
+		const struct absent_value absent[] = {
+			{ &i->sm_version_major.reason, NVRM_R_RM_UNSUPPORTED },
+			{ &i->sm_version_minor.reason, -1 },
+			{ &i->rm_sm_version.reason, NVRM_R_RM_UNSUPPORTED },
+			{ &i->compute_capability_major.reason,
+			    NVRM_R_FAMILY_UNKNOWN },
+			{ &i->compute_capability_minor.reason,
+			    NVRM_R_FAMILY_UNKNOWN },
+		};
+
+		expect_absent(absent, sizeof(absent) / sizeof(absent[0]));
+	}
 	nvrm_close(ctx);
 
 	/* everything missing: every value says why, nothing is a fake zero */
@@ -619,7 +693,7 @@ test_model_ada(void)
 	nvrm_fake_inject_classes(ada, 4);
 	ctx = must_enum("discrete");
 	i = info_of(ctx, 0);
-	CHECK_STR(i->family.value, "ada");
+	CHECK_STR(i->family.value, "AD10x");
 	CHECK(NVRM_HAVE(i->cls_eng3d));
 	CHECK(NVRM_HAVE(i->cls_copy));
 	CHECK_EQ(i->cls_copy.value, 0xC7B5);
@@ -631,14 +705,14 @@ test_model_ada(void)
 	nvrm_fake_inject_classes(ada_nocopy, 3);
 	ctx = must_enum("discrete");
 	i = info_of(ctx, 0);
-	CHECK_STR(i->family.value, "ada");
+	CHECK_STR(i->family.value, "AD10x");
 	CHECK(!NVRM_HAVE(i->cls_copy));
 	CHECK_EQ(i->cls_copy.reason, NVRM_R_CLASS_ABSENT);
 	nvrm_close(ctx);
 	/* a table row with no class of a kind: the table says so */
 	{
 		static const nvrm_family row[] = {
-			{ "row", 1, 2, 3, 0, { 0 } },
+			{ "row", 1, 2, 3, 0, 0, 0, 0, 0, 0, { 0 }, { 0 } },
 		};
 		nvrm_device_info info;
 
@@ -652,7 +726,121 @@ test_model_ada(void)
 		CHECK(!NVRM_HAVE(info.cls_copy));
 		CHECK_EQ(info.cls_copy.reason, NVRM_R_FAMILY_NO_CLASS);
 		CHECK(NVRM_HAVE(info.cls_eng3d));
+		/* the row has no class of the new kinds, and no value of them */
+		CHECK(!NVRM_HAVE(info.cls_eng2d));
+		CHECK_EQ(info.cls_eng2d.reason, NVRM_R_FAMILY_NO_CLASS);
+		CHECK(!NVRM_HAVE(info.cls_m2mf));
+		CHECK(!NVRM_HAVE(info.cls_vdec));
+		CHECK(!NVRM_HAVE(info.max_blocks_per_mp));
+		CHECK_EQ(info.max_blocks_per_mp.reason, NVRM_R_FAMILY_NO_VALUE);
+		CHECK(!NVRM_HAVE(info.max_smem_per_wg));
+		CHECK_EQ(info.max_smem_per_wg.reason, NVRM_R_FAMILY_NO_VALUE);
+		CHECK(!NVRM_HAVE(info.sm_smem_sizes));
+		CHECK_EQ(info.sm_smem_sizes.reason, NVRM_R_FAMILY_NO_VALUE);
 	}
+}
+
+/* The names, the engine limits, the zcull information and the video
+ * memory: what a consumer of the device needs. */
+static void
+test_model_engine(void)
+{
+	nvrm_ctx *ctx;
+	const nvrm_device_info *i;
+
+	/* a GPU the table does not know: no family values and no chipset name */
+	reset_env();
+	ctx = must_enum("unknown");
+	i = info_of(ctx, 0);
+	CHECK(!NVRM_HAVE(i->chipset_name));
+	CHECK_EQ(i->chipset_name.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(!NVRM_HAVE(i->cls_eng2d));
+	CHECK_EQ(i->cls_eng2d.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(!NVRM_HAVE(i->cls_m2mf));
+	CHECK(!NVRM_HAVE(i->cls_vdec));
+	CHECK(!NVRM_HAVE(i->max_blocks_per_mp));
+	CHECK_EQ(i->max_blocks_per_mp.reason, NVRM_R_FAMILY_UNKNOWN);
+	CHECK(!NVRM_HAVE(i->max_smem_per_wg));
+	CHECK(!NVRM_HAVE(i->sm_smem_sizes));
+	CHECK_EQ(i->sm_smem_sizes.reason, NVRM_R_FAMILY_UNKNOWN);
+	nvrm_close(ctx);
+
+	/* the GB100 part: the family that has the inline-to-memory class */
+	reset_env();
+	ctx = must_enum("gb100");
+	i = info_of(ctx, 0);
+	CHECK_STR(i->family.value, "GB10x");
+	CHECK_STR(i->chipset_name.value, "GB100");
+	CHECK_EQ(i->cls_m2mf.value, 0xCD40);
+	CHECK_EQ(i->cls_vdec.value, 0xCDB0);
+	CHECK_EQ(i->cls_eng2d.value, 0x902D);
+	CHECK_EQ(i->max_warps_per_mp.value, 64);
+	CHECK_EQ(i->max_blocks_per_mp.value, 24);
+	CHECK_EQ(i->max_smem_per_wg.value, 99ULL << 10);
+	CHECK_EQ(i->sm_smem_sizes.count, 5);
+	nvrm_close(ctx);
+
+	/* the sparse GPU: the zcull information, the cache line and the names
+	 * are all missing, and each one says why */
+	reset_env();
+	ctx = must_enum("sparse");
+	i = info_of(ctx, 0);
+	{
+		const struct absent_value absent[] = {
+			{ &i->zcull_width_align_pixels.reason, NVRM_R_RM_FAILED },
+			{ &i->nc_atom_size.reason, NVRM_R_OS_NOT_REPORTED },
+			{ &i->device_name.reason, NVRM_R_RM_FAILED },
+			{ &i->chipset_name.reason, NVRM_R_INPUT_MISSING },
+			/* no heap and no free memory: the used memory cannot be
+			 * computed */
+			{ &i->vram_used.reason, NVRM_R_INPUT_MISSING },
+		};
+
+		expect_absent(absent, sizeof(absent) / sizeof(absent[0]));
+		/* the two values the sparse GPU names no reason for */
+		CHECK(!NVRM_HAVE(i->zcull_subregion_header_bytes));
+		CHECK(!NVRM_HAVE(i->vram_free));
+	}
+	nvrm_close(ctx);
+
+	/* an injected cache line size, and an injected failure of the zcull
+	 * call and of the cache line */
+	reset_env();
+	nvrm_fake_inject_atom_size(128, 0);
+	ctx = must_enum("discrete");
+	CHECK_EQ(info_of(ctx, 0)->nc_atom_size.value, 128);
+	nvrm_close(ctx);
+	reset_env();
+	nvrm_fake_inject_zcull_fail(NVRM_R_RM_UNSUPPORTED);
+	nvrm_fake_inject_atom_size(128, NVRM_R_OS_NOT_REPORTED);
+	ctx = must_enum("discrete");
+	i = info_of(ctx, 0);
+	CHECK(!NVRM_HAVE(i->zcull_aliquot_total));
+	CHECK_EQ(i->zcull_aliquot_total.reason, NVRM_R_RM_UNSUPPORTED);
+	CHECK(!NVRM_HAVE(i->nc_atom_size));
+	CHECK_EQ(i->nc_atom_size.reason, NVRM_R_OS_NOT_REPORTED);
+	nvrm_close(ctx);
+
+	/* the heap is there but the free memory is not: the used memory
+	 * cannot be computed either */
+	reset_env();
+	nvrm_fake_inject(NVRM_P_VRAM_FREE, NVRM_R_RM_FAILED);
+	ctx = must_enum("discrete");
+	i = info_of(ctx, 0);
+	CHECK(!NVRM_HAVE(i->vram_free));
+	CHECK(!NVRM_HAVE(i->vram_used));
+	CHECK_EQ(i->vram_used.reason, NVRM_R_INPUT_MISSING);
+	nvrm_close(ctx);
+
+	/* a heap smaller than the free memory: the answer cannot be right */
+	reset_env();
+	nvrm_fake_inject_value(NVRM_P_VRAM_HEAP, 1024);
+	ctx = must_enum("discrete");
+	i = info_of(ctx, 0);
+	CHECK(!NVRM_HAVE(i->vram_used));
+	CHECK_EQ(i->vram_used.reason, NVRM_R_VALUE_UNUSABLE);
+	CHECK(NVRM_HAVE(i->vram_free));
+	nvrm_close(ctx);
 }
 
 static const nvrm_device_info *
@@ -810,8 +998,8 @@ static void
 test_family_match(void)
 {
 	static const nvrm_family tab[] = {
-		{ "new", 10, 20, 0, 0, { 0 } },
-		{ "old", 1, 2, 0, 0, { 0 } },
+		{ "new", 10, 20, 0, 0, 0, 0, 0, 0, 0, { 0 }, { 0 } },
+		{ "old", 1, 2, 0, 0, 0, 0, 0, 0, 0, { 0 }, { 0 } },
 	};
 	uint64_t both_old[] = { 2, 1 }, only_gpfifo[] = { 10 };
 	uint64_t only_compute[] = { 20 }, all[] = { 1, 2, 10, 20 };
@@ -825,7 +1013,8 @@ test_family_match(void)
 	/* a row with every page-size slot used: the scan ends on the count */
 	{
 		static const nvrm_family wide[] = {
-			{ "wide", 1, 2, 0, 0, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+			{ "wide", 1, 2, 0, 0, 0, 0, 0, 0, 0,
+			    { 1, 2, 3, 4, 5, 6, 7, 8 }, { 1, 2, 3, 4, 5, 6, 7, 8 } },
 		};
 		nvrm_device_info info;
 
@@ -838,6 +1027,8 @@ test_family_match(void)
 		info.max_page_size.value = 6;
 		nvrm_apply_family(&info, wide, 1);
 		CHECK_EQ(info.page_sizes.count, 6);
+		/* every shared memory slot is used: the scan ends on the count */
+		CHECK_EQ(info.sm_smem_sizes.count, 8);
 		info.max_page_size.value = 100;
 		nvrm_apply_family(&info, wide, 1);
 		CHECK_EQ(info.page_sizes.count, 8);
@@ -1009,8 +1200,12 @@ test_abi_1_0_layout(void)
 	CHECK_EQ(offsetof(nvrm_device_info, vbios), 4056);
 	CHECK_EQ(offsetof(nvrm_device_info, gsp_firmware),
 	    4056 + sizeof(nvrm_version_field));
+	/* the members added after NVRM_1.3 follow the version fields */
+	CHECK_EQ(offsetof(nvrm_device_info, device_name),
+	    offsetof(nvrm_device_info, gsp_firmware) +
+	    sizeof(nvrm_version_field));
 	CHECK_EQ(sizeof(nvrm_device_info), offsetof(nvrm_device_info,
-	    gsp_firmware) + sizeof(nvrm_version_field));
+	    vram_free) + sizeof(nvrm_u64));
 }
 
 static void
@@ -1128,7 +1323,7 @@ test_field_table(void)
 		 * and a duplicated row is caught by the count and by the
 		 * pairwise distinct offsets. */
 		CHECK_EQ(nvrm_nfields - appended, NVRM_NFIELDS_1_0);
-		CHECK_EQ(appended, 5);
+		CHECK_EQ(appended, 5 + 19);
 		for (j = 0; j < nvrm_nfields; j++) {
 			unsigned k;
 
@@ -1159,8 +1354,8 @@ test_field_table(void)
 		    offsetof(nvrm_device_info, decorators) +
 		    sizeof(np->decorators));
 		CHECK_EQ(sizeof(nvrm_device_info),
-		    offsetof(nvrm_device_info, gsp_firmware) +
-		    sizeof(np->gsp_firmware));
+		    offsetof(nvrm_device_info, vram_free) +
+		    sizeof(np->vram_free));
 		CHECK_EQ(sizeof(np->caps) / sizeof(np->caps[0]), NVRM_NCAPS);
 		CHECK_EQ(sizeof(np->decorators) / sizeof(np->decorators[0]),
 		    NVRM_MAX_DECORATORS);
@@ -1456,21 +1651,21 @@ static void
 test_public_versions(void)
 {
 	static const uint32_t built_for[] = { 580, 178, 4 };
-	static const uint32_t library[] = { 1, 3, 0 };
-	static const uint32_t symbols[] = { 1, 3 };
-	static const uint32_t schema[] = { 1, 3 };
+	static const uint32_t library[] = { 1, 4, 0 };
+	static const uint32_t symbols[] = { 1, 4 };
+	static const uint32_t schema[] = { 1, 4 };
 	nvrm_ctx *ctx;
 	const nvrm_version *v;
 
 	CHECK_EQ(NVRM_API_MAJOR, 1);
-	CHECK_EQ(NVRM_API_MINOR, 3);
+	CHECK_EQ(NVRM_API_MINOR, 4);
 	t_check_version(nvrm_built_for_version(), NVRM_RM_VERSION, built_for, 3,
 	    "");
-	t_check_version(nvrm_library_version(), "1.3.0", library, 3, "");
+	t_check_version(nvrm_library_version(), "1.4.0", library, 3, "");
 	v = nvrm_symbol_version();
-	t_check_version(v, "NVRM_1.3", symbols, 2, "");
+	t_check_version(v, "NVRM_1.4", symbols, 2, "");
 	CHECK(v == nvrm_symbol_version());
-	t_check_version(nvrm_schema_version(), "1.3", schema, 2, "");
+	t_check_version(nvrm_schema_version(), "1.4", schema, 2, "");
 	CHECK(nvrm_schema_version() == nvrm_schema_version());
 	CHECK(nvrm_built_for_version() == nvrm_built_for_version());
 	CHECK(nvrm_library_version() == nvrm_library_version());
@@ -1510,7 +1705,7 @@ test_json(void)
 	CHECK(strstr(buf, "{,") == NULL && strstr(buf, ",,") == NULL &&
 	    strstr(buf, ",}") == NULL && strstr(buf, "}\"") == NULL);
 	CHECK(strstr(buf, "\"kind\":\"document\"") != NULL);
-	CHECK(strstr(buf, "\"schema_minor\":3") != NULL);
+	CHECK(strstr(buf, "\"schema_minor\":4") != NULL);
 	CHECK(strstr(buf, "\"built_for_rm_version\":\"580.178.04\"") != NULL);
 	CHECK(strstr(buf, "\"running_rm_version\":{\"available\":true,"
 	    "\"value\":\"580.178.04\",\"source\":\"os\"}") != NULL);
@@ -1522,13 +1717,13 @@ test_json(void)
 	    "\"string\":\"580.178.04\",\"major\":580,\"minor\":178,"
 	    "\"patch\":4,\"parts\":[580,178,4],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library\":{\"available\":true,"
-	    "\"string\":\"1.3.0\",\"major\":1,\"minor\":3,\"patch\":0,"
-	    "\"parts\":[1,3,0],\"source\":\"derived\"}") != NULL);
+	    "\"string\":\"1.4.0\",\"major\":1,\"minor\":4,\"patch\":0,"
+	    "\"parts\":[1,4,0],\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\":{\"available\":true,"
-	    "\"string\":\"NVRM_1.3\",\"major\":1,\"minor\":3,\"patch\":0,"
-	    "\"parts\":[1,3],\"source\":\"derived\"}") != NULL);
-	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.3\","
-	    "\"major\":1,\"minor\":3,\"patch\":0,\"parts\":[1,3],"
+	    "\"string\":\"NVRM_1.4\",\"major\":1,\"minor\":4,\"patch\":0,"
+	    "\"parts\":[1,4],\"source\":\"derived\"}") != NULL);
+	CHECK(strstr(buf, "\"schema\":{\"available\":true,\"string\":\"1.4\","
+	    "\"major\":1,\"minor\":4,\"patch\":0,\"parts\":[1,4],"
 	    "\"source\":\"derived\"}") != NULL);
 	CHECK(strstr(buf, "\"pci_vendor\":{\"available\":true,\"value\":4318,"
 	    "\"source\":\"os\"}") != NULL);
@@ -1634,7 +1829,7 @@ test_json_versions_and_errors(nvrm_ctx *ctx)
 	CHECK_EQ(nvrm_json_schema(fp), 0);
 	fflush(fp);
 	CHECK(strstr(buf, "urn:cloudbsd:nvrm:schema:nvrm-info/1") != NULL);
-	CHECK(strstr(buf, "major version 1, minor 3") != NULL);
+	CHECK(strstr(buf, "major version 1, minor 4") != NULL);
 	CHECK(strstr(buf, "\"version\": {") != NULL);
 	CHECK(strstr(buf, "\"versions\": {") != NULL);
 	CHECK(strstr(buf, "\"library_symbols\": { \"$ref\": "
@@ -1733,6 +1928,7 @@ test_boot_select(void)
 	X("model", test_model_unknown_and_sparse) \
 	X("model", test_device_versions) \
 	X("model", test_model_injections) \
+	X("model", test_model_engine) \
 	X("model", test_compute_capability_table) \
 	X("model", test_family_match) \
 	X("decorators", test_decorators) \

@@ -335,7 +335,7 @@ open_client(unsigned flags, unsigned map_slots, unsigned export_slots)
 static nvrm_mem *
 alloc_mem(nvrm_client *cl, int kind, uint64_t bytes, uint64_t page_size)
 {
-	nvrm_mem_params p = { 0, (uint32_t)kind, 0, 0, bytes, 0, page_size };
+	nvrm_mem_params p = { 0, (uint32_t)kind, 0, 0, bytes, 0, page_size, 0, 0 };
 	nvrm_mem *m = NULL;
 
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
@@ -1129,9 +1129,14 @@ test_cpu_map(void)
 	CHECK(addr != NULL);
 	nvrm_mem_info_get(m, &mi);
 	CHECK_EQ(mi.cpu_mapped, 1);
-	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr2), NVRM_E_BUSY);
+	/* a second mapping of the same object is allowed */
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr2), NVRM_OK);
+	CHECK(addr2 != addr);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mapped, 1);
+	CHECK_EQ(mi.cpu_mappings, 2);
 	stats_get(cl, &st);
-	CHECK_EQ(st.live_cpu_maps, 1);
+	CHECK_EQ(st.live_cpu_maps, 2);
 	/* the accessors: bounds, and the bytes arrive */
 	fill(buf, sizeof(buf), 3);
 	CHECK_EQ(nvrm_mem_write(m, 5, buf, 4096), NVRM_OK);
@@ -1148,6 +1153,7 @@ test_cpu_map(void)
 	CHECK_EQ(map_gpu(m, va, 0, 0, 0), NVRM_OK);
 	CHECK_EQ(nvrm_fake_gpu_access(cl, va + 5, back, 4096, 0), 0);
 	CHECK(memcmp(buf, back, 4096) == 0);
+	/* the unmap removes every mapping of the object */
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_E_INVAL);
 	stats_get(cl, &st);
@@ -2198,6 +2204,12 @@ test_fork_child(void)
 	CHECK_EQ(st.spare_descriptors, spare);
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
 	CHILD_DENIED(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p));
+	{
+		nvrm_cpu_map_params mp = { sizeof(mp) };
+
+		mp.prot = NVRM_CPU_READ;
+		CHILD_DENIED(nvrm_mem_map_cpu_at(m, &mp, &p));
+	}
 #undef CHILD_DENIED
 	CHECK_EQ(nvrm_mem_unmap_gpu(m, va), NVRM_OK);
 	nvrm_mem_free(unmapped);
@@ -2468,6 +2480,255 @@ test_close_with_channel(void)
 	teardown();
 }
 
+/*
+ * The extended mapping calls: a CPU mapping at a chosen address, a second
+ * mapping of an object, the overmap of a client mapping and the unmap of a
+ * range of GPU addresses.
+ */
+
+/*
+ * The parameters of the CPU mapping call are checked, a mapping is made at
+ * a fixed address of the caller's own and the mapping made by the call is
+ * unmapped again by its address.  The mapping at the fixed address is left
+ * mapped: the caller needs it.
+ */
+static void *
+test_map_cpu_at_params(nvrm_client *cl, nvrm_mem *m)
+{
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	nvrm_mem_info mi = { sizeof(mi) };
+	nvrm_client_stats st = { sizeof(st) };
+	void *addr, *area, *fixed;
+
+	/* the parameters of the call are checked */
+	mp.size = 1;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_INVAL);
+	mp.size = sizeof(mp);
+	mp.reserved[0] = 1;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_INVAL);
+	mp.reserved[0] = 0;
+	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	/* a fixed address that is not a multiple of the page size */
+	mp.fixed = 0x1001;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_INVAL);
+	/* a fixed address that is already mapped */
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &addr),
+	    NVRM_OK);
+	mp.fixed = (uint64_t)(uintptr_t)addr & ~(uint64_t)4095;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_BUSY);
+
+	/* a mapping at a fixed address of its own */
+	area = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 8192);
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_OK);
+	CHECK_EQ((uint64_t)(uintptr_t)fixed, mp.fixed);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 2);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_cpu_maps, 2);
+
+	/* the unmap of one mapping, by its address */
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr), NVRM_OK);
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr),
+	    NVRM_E_INVAL);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 1);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_cpu_maps, 1);
+	return (fixed);
+}
+
+/* The overmap of a client mapping: the range stays mapped and reads as
+ * zeros. */
+static void
+test_overmap_cpu(nvrm_client *cl, nvrm_mem *m, void *fixed)
+{
+	nvrm_mem_info mi = { sizeof(mi) };
+	nvrm_client_stats st = { sizeof(st) };
+	uint8_t buf[4096];
+	char vec[64];
+
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)fixed, 1),
+	    NVRM_E_INVAL);		/* not the range of the mapping */
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, 0x1234, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)fixed, 0),
+	    NVRM_OK);
+	memset(fixed, 0x5a, sizeof(buf));
+	CHECK(memcmp((char *)fixed, (char *)fixed, sizeof(buf)) == 0);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 0);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_cpu_maps, 0);
+	/* the range is still mapped: it is the caller's now */
+	CHECK(mincore(fixed, sizeof(buf), vec) == 0);
+	munmap(fixed, 8192);
+}
+
+/* A refused overmap leaves the mapping alone. */
+static void
+test_overmap_cpu_fail(nvrm_client *cl, nvrm_mem *m)
+{
+	nvrm_mem_info mi = { sizeof(mi) };
+	void *addr;
+
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_OK);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_OVERMAP_CPU, 1);
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)addr, 0),
+	    NVRM_E_RM);
+	nvrm_fake_mem_fail_clear();
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 1);
+	/* the fake refuses an overmap it cannot make */
+	{
+		char err[128];
+
+		CHECK_EQ(cl->mops->overmap_cpu(m->b, (void *)0x1001, 4096, 0,
+		    err, sizeof(err)), NVRM_E_IO);
+	}
+	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+}
+
+/* The unmap of a range of GPU addresses. */
+static void
+test_unmap_gpu_range(nvrm_client *cl)
+{
+	nvrm_client_stats st = { sizeof(st) };
+	nvrm_mem *m2;
+	uint64_t va, va2;
+
+	va = reserve(cl, 1 * MiB, 0, 0);
+	va2 = reserve(cl, 1 * MiB, 0, 0);
+	m2 = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
+	CHECK_EQ(map_gpu(m2, va, 0, 0, 0), NVRM_OK);
+	CHECK_EQ(map_gpu(m2, va2, 0, 0, 0), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 2);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va, 0), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, UINT64_MAX, 2), NVRM_E_INVAL);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va, 4096), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 1);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va2, 4096), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 0);
+
+	/* a mapping that lies below the range is left alone */
+	CHECK_EQ(map_gpu(m2, va, 0, 0, 0), NVRM_OK);
+	CHECK_EQ(map_gpu(m2, va2, 0, 0, 0), NVRM_OK);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va2 + 4096, 4096), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 2);
+	/* a refused unmap stops the call and says so */
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_UNMAP_GPU, 1);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va, 4096), NVRM_E_RM);
+	nvrm_fake_mem_fail_clear();
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 2);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va, 4096), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 1);
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va2, 4096), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 0);
+}
+
+/* More mappings: the list of the mappings is walked. */
+static void
+test_map_list(nvrm_mem *m)
+{
+	nvrm_mem_info mi = { sizeof(mi) };
+	void *addr3, *addr4, *addr5;
+
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr3), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr4), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr5), NVRM_OK);
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 3);
+	/* the second mapping is found by walking the list */
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr4), NVRM_OK);
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr4),
+	    NVRM_E_INVAL);
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr3), NVRM_OK);
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, (uint64_t)(uintptr_t)addr5), NVRM_OK);
+}
+
+/* A fixed address that is too high, and the record of the mapping that
+ * cannot be made: the mapping is given back. */
+static void
+test_map_cpu_refused(nvrm_client *cl, nvrm_mem *m)
+{
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	nvrm_client_stats st = { sizeof(st) };
+	void *addr, *fixed;
+
+	/* a fixed address that is too high */
+	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	mp.fixed = UINT64_MAX - 4095;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_INVAL);
+	mp.fixed = 0;
+
+	/* the record of the mapping cannot be made: the mapping is given back */
+	calloc_calls = 0;
+	fail_calloc_at(1);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &addr), NVRM_E_NOMEM);
+	fail_calloc_at(0);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_cpu_maps, 0);
+}
+
+/* The page kind and the compression of an allocation. */
+static void
+test_alloc_page_kind(nvrm_client *cl)
+{
+	nvrm_mem_params p = { sizeof(p) };
+	nvrm_mem_info mi = { sizeof(mi) };
+	nvrm_mem *m2;
+
+	p.kind = NVRM_MEM_SYSMEM;
+	p.bytes = 4096;
+	p.pte_kind = NVRM_PTE_KIND_BLOCK_LINEAR;
+	p.compress = NVRM_COMPRESS_ANY;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_OK);
+	nvrm_mem_info_get(m2, &mi);
+	CHECK_EQ(mi.pte_kind, NVRM_PTE_KIND_BLOCK_LINEAR);
+	CHECK_EQ(mi.compress, NVRM_COMPRESS_ANY);
+	CHECK(mi.handle != 0);
+	nvrm_mem_free(m2);
+	/* a value this version does not know is refused */
+	p.pte_kind = NVRM_PTE_KIND_SWIZZLED + 1;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_E_INVAL);
+	p.pte_kind = 0;
+	p.compress = NVRM_COMPRESS_ANY + 1;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_E_INVAL);
+}
+
+static void
+test_extended_maps(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	void *fixed;
+
+	setup("discrete", "amd64");
+	cl = open_client(NVRM_OPEN_ALLOW_MAP, 8, 1);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 8192, 0);
+
+	fixed = test_map_cpu_at_params(cl, m);
+	test_overmap_cpu(cl, m, fixed);
+	test_overmap_cpu_fail(cl, m);
+	test_unmap_gpu_range(cl);
+	test_map_list(m);
+	test_map_cpu_refused(cl, m);
+	test_alloc_page_kind(cl);
+
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	teardown();
+}
+
 #define MEM_TESTS(X, N)						\
 	X("va", test_va_basic) \
 	X("va", test_va_fixed_and_free) \
@@ -2484,6 +2745,7 @@ test_close_with_channel(void)
 	X("gpu", test_gpu_model) \
 	X("sparse", test_sparse) \
 	X("cpu", test_cpu_map) \
+	X("cpu", test_extended_maps) \
 	X("cpu", test_device_attr) \
 	X("readback", test_readback) \
 	X("loop", test_loop) \

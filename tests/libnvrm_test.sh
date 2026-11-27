@@ -395,7 +395,7 @@ mutant rm-version-errno nvrm_rm.c 's/rc != 0 \&\& errno != EINVAL/0/' rm_test
 mutant owner-core nvrm_mem.c '/^nvrm_mem_alloc/,/^}/s/	rc = owner_check(cl);/	rc = NVRM_OK;/' mem_test
 mutant owner-skip-release nvrm_mem.c '/^nvrm_mem_free/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' mem_test
 mutant owner-flag-gmap nvrm_mem.c '/^gmap_drop/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' mem_test
-mutant owner-flag-cpu nvrm_mem.c '/^cpu_drop/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' rm_mem_test
+mutant owner-flag-cpu nvrm_mem.c '/^cmap_drop/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' rm_mem_test
 mutant owner-flag-va nvrm_mem.c '/^nvrm_va_release/,/^}/s/r->b, nvrm_owner_is_me(\&cl->owner)/r->b, 1/' rm_mem_test
 mutant owner-flag-close nvrm_mem.c '/^nvrm_client_close/,/^}/s/nvrm_owner_is_me(\&cl->owner)/1/' rm_mem_test
 mutant rm-free-owner nvrm_rm_mem.c '/^free_object/,/^}/s/if (!owner)/if (0)/' rm_mem_test
@@ -709,9 +709,9 @@ mod("cap-unpinned", lambda x: x["$defs"]["device"]["properties"]["capabilities"]
 base = open(sys.argv[2]).read().splitlines()
 open(w + "/ids-empty.txt", "w").write("# nothing\n")
 open(w + "/ids-nocap.txt", "w").write("\n".join(l for l in base if not l.startswith("capability ")) + "\n")
-open(w + "/ids-extra.txt", "w").write("\n".join(base + ["reason 15 never_existed 0"]) + "\n")
-open(w + "/ids-new-m0.txt", "w").write("\n".join(base + ["reason 15 a_new_reason %d" % CUR]) + "\n")
-open(w + "/ids-new-m1.txt", "w").write("\n".join(base + ["reason 15 a_new_reason %d" % NEXT]) + "\n")
+open(w + "/ids-extra.txt", "w").write("\n".join(base + ["reason 16 never_existed 0"]) + "\n")
+open(w + "/ids-new-m0.txt", "w").write("\n".join(base + ["reason 16 a_new_reason %d" % CUR]) + "\n")
+open(w + "/ids-new-m1.txt", "w").write("\n".join(base + ["reason 16 a_new_reason %d" % NEXT]) + "\n")
 open(w + "/ids-renamed.txt", "w").write("\n".join(l.replace("family_unknown", "no_family_entry") for l in base) + "\n")
 def bump(x):
     add_reason(x)
@@ -764,7 +764,7 @@ if [ $rc -eq 1 ]; then ok "identifiers: an id added to the schema must be append
 $IDCHK 2>&1 >/dev/null | grep -q '^usage: ids_check.py'; rc=$?
 expect_rc "identifiers: the usage message is printed (not None)" $rc 0
 $IDCHK "$SCHEMA" "$W/ids-extra.txt" >"$W/ids-extra.out" 2>&1; rc=$?
-if [ $rc -eq 1 ] && grep -q 'never_existed (number 15) is gone' "$W/ids-extra.out"; then ok "identifiers: a baseline id the schema lacks FAILs (and the check that says so is compare, not the gap check)"; else bad "identifiers: extra baseline id gave rc=$rc"; fi
+if [ $rc -eq 1 ] && grep -q 'never_existed (number 16) is gone' "$W/ids-extra.out"; then ok "identifiers: a baseline id the schema lacks FAILs (and the check that says so is compare, not the gap check)"; else bad "identifiers: extra baseline id gave rc=$rc"; fi
 # the minor of each id: a line cannot name a minor above the schema's, and an id
 # added since the parent commit must raise it
 $IDCHK --strict "$W/ids-add-reason.json" "$W/ids-new-m1.txt" >"$W/ids-m1.out" 2>&1; rc=$?
@@ -955,7 +955,7 @@ grep -v '^#' "$IDS" | cmp -s - "$W/emitted.ids"; rc=$?
 expect_rc "identifiers: --emit writes exactly the baseline (minors included)" $rc 0
 $IDCHK --emit "$W/ids-add-reason-m1.json" "$IDS" >"$W/emitted-m1.ids"; rc=$?
 expect_rc "identifiers: --emit with the old baseline runs" $rc 0
-grep -q "^reason 15 a_new_reason $((MINOR + 1))\$" "$W/emitted-m1.ids" && grep -q '^reason 5 family_unknown 0$' "$W/emitted-m1.ids"; rc=$?
+grep -q "^reason 16 a_new_reason $((MINOR + 1))\$" "$W/emitted-m1.ids" && grep -q '^reason 5 family_unknown 0$' "$W/emitted-m1.ids"; rc=$?
 expect_rc "identifiers: --emit keeps the old lines at their minor and gives the new id the schema minor" $rc 0
 $IDCHK --frozen "$IDS" "$W/emitted-m1.ids" "$W/ids-add-reason-m1.json" >/dev/null 2>&1; rc=$?
 expect_rc "identifiers: a baseline regenerated with --emit and the old baseline passes --frozen" $rc 0
@@ -999,12 +999,12 @@ grep -q 'takes no --backend' "$W/u2.err"; rc=$?
 expect_rc "--schema with --backend: the message says why" $rc 0
 NVRM_FAKE_PROFILE=discrete $INFO >"$W/text.out"; rc=$?
 expect_rc "text mode rc" $rc 0
-grep -q 'sm_count  *36' "$W/text.out" && grep -q 'family  *blackwell-b' "$W/text.out"
+grep -q 'sm_count  *36' "$W/text.out" && grep -q 'family  *GB20x' "$W/text.out"
 rc=$?
 expect_rc "text mode shows the values" $rc 0
 grep -q 'built for RM 580.178.04, running RM 580.178.04' "$W/text.out"; rc=$?
 expect_rc "text mode shows the built-for and the running RM version" $rc 0
-for v in 'RM API version 580.178.04' 'library version 1.3.0' 'library symbol version NVRM_1.3' 'schema version 1.3'; do
+for v in 'RM API version 580.178.04' 'library version 1.4.0' 'library symbol version NVRM_1.4' 'schema version 1.4'; do
 	grep -Fqx "$v" "$W/text.out"; rc=$?
 	expect_rc "text mode shows the version string: $v" $rc 0
 done
@@ -1489,21 +1489,22 @@ cmp -s "$W/exported.txt" "$W/declared.txt"; rc=$?
 expect_rc "the library exports exactly the functions its public headers declare" $rc 0
 [ $rc -eq 0 ] || diff "$W/exported.txt" "$W/declared.txt"
 # symbol versions: discovery is NVRM_1.0, memory and VA NVRM_1.1, version
-# numbers NVRM_1.2, channels NVRM_1.3, and each version's calls are the ones its
-# man page documents
+# numbers NVRM_1.2, channels NVRM_1.3, the extended memory calls NVRM_1.4,
+# and each version's calls are the ones its man page documents
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.0$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported10.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.1$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported11.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.2$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported12.txt"
 nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.3$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported13.txt"
-[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ -s "$W/exported13.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" "$W/exported13.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
-expect_rc "every export is in NVRM_1.0, NVRM_1.1, NVRM_1.2 or NVRM_1.3, and all are used" $rc 0
+nm -D --defined-only "$O/lib/libnvrm.so.1" | awk '$2=="T" && $3 ~ /@@NVRM_1\.4$/ {sub(/@@.*/,"",$3); print $3}' | sort >"$W/exported14.txt"
+[ -s "$W/exported10.txt" ] && [ -s "$W/exported11.txt" ] && [ -s "$W/exported12.txt" ] && [ -s "$W/exported13.txt" ] && [ -s "$W/exported14.txt" ] && [ $(cat "$W/exported10.txt" "$W/exported11.txt" "$W/exported12.txt" "$W/exported13.txt" "$W/exported14.txt" | wc -l) -eq $(wc -l <"$W/exported.txt") ]; rc=$?
+expect_rc "every export is in NVRM_1.0, NVRM_1.1, NVRM_1.2, NVRM_1.3 or NVRM_1.4, and all are used" $rc 0
 readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_client_open@@NVRM_1\.1' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_enumerate@@NVRM_1\.0' && readelf --dyn-syms -W "$O/lib/libnvrm.so.1" | grep -q 'nvrm_chan_create@@NVRM_1\.3'; rc=$?
 expect_rc "readelf: discovery, memory and channel symbol versions" $rc 0
 # (LLD does not write the parent of a version node into the object, so the
 # inheritance is checked where it is declared)
-grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map" && grep -q '^} NVRM_1\.2;$' "$L/Version.map"; rc=$?
-expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0, NVRM_1.2 NVRM_1.1 and NVRM_1.3 NVRM_1.2" $rc 0
-for v in NVRM_1.0 NVRM_1.1 NVRM_1.2 NVRM_1.3; do
+grep -q '^} NVRM_1\.0;$' "$L/Version.map" && grep -q '^} NVRM_1\.1;$' "$L/Version.map" && grep -q '^} NVRM_1\.2;$' "$L/Version.map" && grep -q '^} NVRM_1\.3;$' "$L/Version.map"; rc=$?
+expect_rc "Version.map: NVRM_1.1 inherits NVRM_1.0, NVRM_1.2 NVRM_1.1, NVRM_1.3 NVRM_1.2 and NVRM_1.4 NVRM_1.3" $rc 0
+for v in NVRM_1.0 NVRM_1.1 NVRM_1.2 NVRM_1.3 NVRM_1.4; do
 	objdump -T "$O/lib/libnvrm.so.1" 2>/dev/null | grep -q "$v" || readelf -V "$O/lib/libnvrm.so.1" | grep -q "$v"
 	rc=$?
 	expect_rc "symbols carry the version $v" $rc 0
@@ -1540,17 +1541,26 @@ done
 grep -qi "zero-initialize" "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) tells callers to zero-initialize the options" $rc 0
 cat "$W/exported10.txt" "$W/exported12.txt" | sort >"$W/exported10_12.txt"
-for pg in nvrm:10_12:NVRM_FUNCS nvrm_mem:11:NVRM_MEM_FUNCS nvrm_chan:13:NVRM_CHAN_FUNCS; do
+for pg in nvrm:10_12:NVRM_FUNCS nvrm_mem:11_14:NVRM_MEM_FUNCS nvrm_chan:13:NVRM_CHAN_FUNCS; do
 	_page=${pg%%:*}; _rest=${pg#*:}; _v=${_rest%%:*}; _var=${_rest#*:}
-	case $_v in 10_12) _lbl="NVRM_1.0 and NVRM_1.2" ;; *) _lbl="NVRM_1.${_v#1}" ;; esac
+	case $_v in
+	10_12) _lbl="NVRM_1.0 and NVRM_1.2" ;;
+	11_14) _lbl="NVRM_1.1 and NVRM_1.4" ;;
+	*) _lbl="NVRM_1.${_v#1}" ;;
+	esac
+	: >"$W/exported-$_v.txt"
+	for _w in $(echo "$_v" | tr '_' ' '); do
+		cat "$W/exported${_w}.txt" >>"$W/exported-$_v.txt"
+	done
+	sort -o "$W/exported-$_v.txt" "$W/exported-$_v.txt"
 	sed -n '/^\.Sh SYNOPSIS/,/^\.Sh DESCRIPTION/p' "$L/man/$_page.3" | grep -oE '^\.Fn nvrm_[a-z_0-9]+' | awk '{print $2}' | sort -u >"$W/man-fn-$_page.txt"
 	grep -oE '^\.Nm nvrm_[a-z_0-9]+' "$L/man/$_page.3" | awk '{print $2}' | sort -u >"$W/man-nm-$_page.txt"
 	(cd "$L" && make -V "$_var" OGKM=$OGKM) | tr ' ' '\n' | grep '^nvrm_' | sort -u >"$W/mk-$_page.txt"
-	cmp -s "$W/exported$_v.txt" "$W/man-fn-$_page.txt"; rc=$?
+	cmp -s "$W/exported-$_v.txt" "$W/man-fn-$_page.txt"; rc=$?
 	expect_rc "$_page(3) SYNOPSIS has every $_lbl function" $rc 0
-	cmp -s "$W/exported$_v.txt" "$W/man-nm-$_page.txt"; rc=$?
+	cmp -s "$W/exported-$_v.txt" "$W/man-nm-$_page.txt"; rc=$?
 	expect_rc "$_page(3) NAME has every $_lbl function" $rc 0
-	cmp -s "$W/exported$_v.txt" "$W/mk-$_page.txt"; rc=$?
+	cmp -s "$W/exported-$_v.txt" "$W/mk-$_page.txt"; rc=$?
 	expect_rc "the Makefile man links to $_page(3) cover every $_lbl function" $rc 0
 done
 mandoc -T lint -W warning "$L/man/nvrm_mem.3" >"$W/lint-mem.out" 2>&1; rc=$?
@@ -1566,8 +1576,8 @@ for f in nvrm_version nvrm_version_parse nvrm_version_find nvrm_version_format; 
 done
 grep -q 'versions' "$L/man/nvrm.3" && grep -q 'parts' "$L/man/nvrm.3" && grep -q 'source' "$L/man/nvrm.3"; rc=$?
 expect_rc "nvrm(3) documents the JSON version object and its integer parts" $rc 0
-grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 3;' "$L/man/nvrm.7"; rc=$?
-expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 3" $rc 0
+grep -q 'compute_capability_major' "$L/man/nvrm.7" && grep -q 'rm_sm_version' "$L/man/nvrm.7" && grep -q 'minor 4;' "$L/man/nvrm.7"; rc=$?
+expect_rc "nvrm(7) distinguishes compute capability from RM SM numbering and names schema minor 4" $rc 0
 for s in version_string version_major version_minor version_patch version_suffix version_available; do
 	grep -q "hw.nvidia.$s" "$L/nvrm-info/nvrm-info.8"; rc=$?
 	expect_rc "nvrm-info(8) documents hw.nvidia.$s" $rc 0

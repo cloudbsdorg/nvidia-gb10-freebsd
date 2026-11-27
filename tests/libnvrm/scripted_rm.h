@@ -31,6 +31,12 @@ static struct {
 	uint32_t	gpu_id[2];
 	int		have_card[2];
 	int		fn_wc;		/* sysctl wc value; -1 = sysctl fails */
+	int		fn_cache_line;	/* sysctl cache line size; -1 = no answer */
+	const char	*device_name;	/* the marketing name of the GPU */
+	int		fail_name;		/* the name control fails */
+	int		fail_zcull;		/* the zcull control fails */
+	uint32_t	max_warps_per_sm;
+	uint64_t	vram_heap, vram_free;
 	int		fn_ver;		/* 1 = hw.nvidia.version works */
 	int		fail_banner_read; /* probe succeeds, data read fails */
 	int		banner_probe_zero; /* probe reports a zero length */
@@ -102,6 +108,11 @@ reset_kernel(void)
 	K.gpu_id[1] = 0x0e00;
 	K.have_card[0] = K.have_card[1] = 1;
 	K.fn_wc = 1;
+	K.fn_cache_line = 64;
+	K.device_name = "NVIDIA Test Graphics Adapter";
+	K.max_warps_per_sm = 48;
+	K.vram_heap = 16 * 1024 * 1024;
+	K.vram_free = 12 * 1024 * 1024;
 	K.fn_ver = 1;
 	K.numa = -1;
 	K.gpu_info_fail_index = -1;
@@ -193,60 +204,101 @@ k_sysctl_int(void *old, size_t *len, int value)
 	return (0);
 }
 
+/* The sysctl is not one of ours: the caller says so. */
+enum { K_SYSCTL_OTHER = -2 };
+
+/* The version banner: the string the RM driver prints. */
+static int
+k_sysctl_banner(void *old, size_t *len)
+{
+	if (!K.fn_ver) {
+		errno = ENOENT;
+		return (-1);
+	}
+	if (old == NULL) {
+		K.saw_version_probe++;
+		if (K.banner_probe_zero) {
+			*len = 0;
+			return (0);
+		}
+	} else {
+		K.banner_reads++;
+		if (K.fail_banner_read) {
+			errno = EIO;
+			return (-1);
+		}
+	}
+	return (k_sysctl_string(old, len, K.banner));
+}
+
+/* The parts of the version: its string and its numbers. */
+static int
+k_sysctl_version_part(const char *name, void *old, size_t *len)
+{
+	if (!K.version_parts) {
+		errno = ENOENT;
+		return (-1);
+	}
+	if (strcmp(name, "hw.nvidia.version_string") == 0)
+		return (k_sysctl_string(old, len, K.version_string));
+	if (strcmp(name, "hw.nvidia.version_major") == 0)
+		return (k_sysctl_int(old, len, K.version_major));
+	if (strcmp(name, "hw.nvidia.version_minor") == 0)
+		return (k_sysctl_int(old, len, K.version_minor));
+	if (strcmp(name, "hw.nvidia.version_patch") == 0)
+		return (k_sysctl_int(old, len, K.version_patch));
+	if (strcmp(name, "hw.nvidia.version_suffix") == 0)
+		return (k_sysctl_string(old, len, K.version_suffix));
+	if (strcmp(name, "hw.nvidia.version_available") == 0)
+		return (k_sysctl_int(old, len, K.version_available));
+	return (K_SYSCTL_OTHER);
+}
+
+/* The write-combining flag of the device. */
+static int
+k_sysctl_wc(void *old, size_t *len)
+{
+	if (K.fn_wc < 0) {
+		errno = ENOENT;
+		return (-1);
+	}
+	if (K.fn_wc_short) {
+		int v = K.fn_wc;
+
+		memcpy(old, &v, *len < sizeof(v) ? *len : sizeof(v));
+		*len = 2;
+		return (0);
+	}
+	return (k_sysctl_int(old, len, K.fn_wc));
+}
+
+/* The cache line size of the CPU. */
+static int
+k_sysctl_cache_line(void *old, size_t *len)
+{
+	if (K.fn_cache_line < 0) {
+		errno = ENOENT;
+		return (-1);
+	}
+	return (k_sysctl_int(old, len, K.fn_cache_line));
+}
+
 static int
 k_sysctl(const char *name, void *old, size_t *len)
 {
-	if (strcmp(name, "hw.nvidia.version") == 0) {
-		if (!K.fn_ver) {
-			errno = ENOENT;
-			return (-1);
-		}
-		if (old == NULL) {
-			K.saw_version_probe++;
-			if (K.banner_probe_zero) {
-				*len = 0;
-				return (0);
-			}
-		} else {
-			K.banner_reads++;
-			if (K.fail_banner_read) {
-				errno = EIO;
-				return (-1);
-			}
-		}
-		return (k_sysctl_string(old, len, K.banner));
-	}
-	if (strncmp(name, "hw.nvidia.version_", 18) == 0) {
-		if (!K.version_parts) {
-			errno = ENOENT;
-			return (-1);
-		}
-		if (strcmp(name, "hw.nvidia.version_string") == 0)
-			return (k_sysctl_string(old, len, K.version_string));
-		if (strcmp(name, "hw.nvidia.version_major") == 0)
-			return (k_sysctl_int(old, len, K.version_major));
-		if (strcmp(name, "hw.nvidia.version_minor") == 0)
-			return (k_sysctl_int(old, len, K.version_minor));
-		if (strcmp(name, "hw.nvidia.version_patch") == 0)
-			return (k_sysctl_int(old, len, K.version_patch));
-		if (strcmp(name, "hw.nvidia.version_suffix") == 0)
-			return (k_sysctl_string(old, len, K.version_suffix));
-		if (strcmp(name, "hw.nvidia.version_available") == 0)
-			return (k_sysctl_int(old, len, K.version_available));
-	}
-	if (strcmp(name, "hw.nvidia.altra_device_wc_active") == 0) {
-		if (K.fn_wc < 0) {
-			errno = ENOENT;
-			return (-1);
-		}
-		if (K.fn_wc_short) {
-			int v = K.fn_wc;
+	int rc;
 
-			memcpy(old, &v, *len < sizeof(v) ? *len : sizeof(v));
-			*len = 2;
-			return (0);
-		}
-		return (k_sysctl_int(old, len, K.fn_wc));
+	if (strcmp(name, "hw.nvidia.version") == 0)
+		return (k_sysctl_banner(old, len));
+	if (strncmp(name, "hw.nvidia.version_", 18) == 0) {
+		rc = k_sysctl_version_part(name, old, len);
+		if (rc != K_SYSCTL_OTHER)
+			return (rc);
+	} else if (strcmp(name, "hw.nvidia.altra_device_wc_active") == 0) {
+		return (k_sysctl_wc(old, len));
+	} else if (strcmp(name, "hw.dcache.line_size") == 0 ||
+	    strcmp(name, "hw.icache.line_size") == 0) {
+		return (k_sysctl_cache_line(old, len));
 	}
 	bad("unexpected sysctl");
 	return (-1);
@@ -425,6 +477,9 @@ handle_control(NVOS54_PARAMETERS *p)
 		case NV2080_CTRL_GR_INFO_INDEX_LITTER_NUM_SM_PER_TPC:
 			a->grInfoList[0].data = 2;
 			break;
+		case NV2080_CTRL_GR_INFO_INDEX_MAX_WARPS_PER_SM:
+			a->grInfoList[0].data = K.max_warps_per_sm;
+			break;
 		default:
 			p->status = NV_ERR_INVALID_ARGUMENT;
 		}
@@ -456,6 +511,12 @@ handle_control(NVOS54_PARAMETERS *p)
 			break;
 		case NV2080_CTRL_FB_INFO_INDEX_BAR1_SIZE:
 			a->fbInfoList[0].data = 8 * 1024 * 1024;
+			break;
+		case NV2080_CTRL_FB_INFO_INDEX_HEAP_SIZE:
+			a->fbInfoList[0].data = K.vram_heap;
+			break;
+		case NV2080_CTRL_FB_INFO_INDEX_HEAP_FREE:
+			a->fbInfoList[0].data = K.vram_free;
 			break;
 		default:
 			p->status = NV_ERR_INVALID_ARGUMENT;
@@ -502,6 +563,37 @@ handle_control(NVOS54_PARAMETERS *p)
 			bad("GPU info index not expected");
 			p->status = NV_ERR_INVALID_ARGUMENT;
 		}
+		return;
+	}
+	case NV2080_CTRL_CMD_GPU_GET_NAME_STRING: {
+		NV2080_CTRL_GPU_GET_NAME_STRING_PARAMS *a =
+		    NvP64_VALUE(p->params);
+
+		NEED(0, NV2080_CTRL_GPU_GET_NAME_STRING_PARAMS);
+		if (K.fail_name) {
+			p->status = NV_ERR_NOT_SUPPORTED;
+			return;
+		}
+		snprintf((char *)a->gpuNameString.ascii,
+		    sizeof(a->gpuNameString.ascii), "%s", K.device_name);
+		return;
+	}
+	case NV2080_CTRL_CMD_GR_GET_ZCULL_INFO: {
+		NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS *a = NvP64_VALUE(p->params);
+
+		NEED(0, NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS);
+		if (K.fail_zcull) {
+			p->status = NV_ERR_NOT_SUPPORTED;
+			return;
+		}
+		a->widthAlignPixels = 64;
+		a->heightAlignPixels = 32;
+		a->pixelSquaresByAliquots = 256;
+		a->aliquotTotal = 1024;
+		a->zcullRegionByteMultiplier = 64;
+		a->zcullRegionHeaderSize = 32;
+		a->zcullSubregionHeaderSize = 16;
+		a->subregionCount = 4;
 		return;
 	}
 	case NV2080_CTRL_CMD_GPU_GET_GID_INFO: {

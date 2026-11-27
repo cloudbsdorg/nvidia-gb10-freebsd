@@ -20,6 +20,10 @@
  * lock.  Only the registry of backends is shared by every context: it is
  * filled once, however many threads reach it first; nothing else is promised
  * across threads.
+ * The calls of one client (the memory and the virtual address calls of
+ * nvrm_mem(3)) take the client's own lock, so several threads may use one
+ * client at the same time.  The calls of a context (nvrm_enumerate,
+ * nvrm_device_refresh) do not, and nvrm_close must not race with them.
  * The fake backend keeps process-wide test state: use it from one thread.
  * After
  * fork() the child must not use a context except to call nvrm_close(), which
@@ -40,15 +44,16 @@
 #define NVRM_RM_VERSION		"580.178.04"
 /* Library API version (shared object nvrm.so.1; symbol versions NVRM_1.0 for
  * discovery, NVRM_1.1 for memory and VA, NVRM_1.2 for version numbers,
- * NVRM_1.3 for channels).
+ * NVRM_1.3 for channels, NVRM_1.4 for the extended device and memory calls).
  * PROVISIONAL: the interface and the structures below are frozen at the first
  * package release and not before; a future version may still reshape them. */
 #define NVRM_API_MAJOR		1
-#define NVRM_API_MINOR		3
+#define NVRM_API_MINOR		4
 
 #define NVRM_MAX_GPUS		32
 #define NVRM_MAX_CLASSES	200
 #define NVRM_MAX_PAGE_SIZES	8
+#define NVRM_MAX_SMEM		8
 #define NVRM_STR_MAX		96
 #define NVRM_MAX_DECORATORS	4
 #define NVRM_NCAPS		7
@@ -95,6 +100,8 @@ enum nvrm_reason {
 	NVRM_R_FAMILY_NO_CLASS,	/* the family is known and has no class of this kind */
 	NVRM_R_VERSION_UNPARSED,	/* a version has no readable numeric scheme */
 	NVRM_R_VERSION_INCONSISTENT,	/* the version sysctls disagree */
+	NVRM_R_FAMILY_NO_VALUE,	/* the family is known but has no value of
+				   this kind */
 	NVRM_R__COUNT
 };
 
@@ -171,6 +178,34 @@ typedef struct nvrm_device_info {
 	nvrm_u64	compute_capability_major, compute_capability_minor;
 	/* firmware versions reported by the RM */
 	nvrm_version_field vbios, gsp_firmware;
+	/* NVRM_1.4: appended, so every earlier member keeps its offset.
+	 * device_name is the RM's marketing name; chipset_name is the name of
+	 * the chipset (the generation table's family gives the family). */
+	nvrm_str	device_name;
+	nvrm_str	chipset_name;
+	/* The multiprocessors of a TPC, the warps of a multiprocessor and the
+	 * thread blocks a multiprocessor may hold. */
+	nvrm_u64	mp_per_tpc;
+	nvrm_u64	max_warps_per_mp;
+	nvrm_u64	max_blocks_per_mp;
+	/* The 2D, the memory-to-memory and the video decode classes. */
+	nvrm_u64	cls_eng2d, cls_m2mf, cls_vdec;
+	/* The host's cache line size: the granularity a flush to the GPU
+	 * needs. */
+	nvrm_u64	nc_atom_size;
+	/* The shared memory a work group may use, and the sizes a
+	 * multiprocessor may be given. */
+	nvrm_u64	max_smem_per_wg;
+	nvrm_list	sm_smem_sizes;
+	/* The zcull (zero cull) information of the graphics engine. */
+	nvrm_u64	zcull_width_align_pixels;
+	nvrm_u64	zcull_height_align_pixels;
+	nvrm_u64	zcull_aliquot_total;
+	nvrm_u64	zcull_region_bytes;
+	nvrm_u64	zcull_region_header_bytes;
+	nvrm_u64	zcull_subregion_header_bytes;
+	/* The video memory in use and the video memory still free. */
+	nvrm_u64	vram_used, vram_free;
 } nvrm_device_info;
 
 /* Describes one member of nvrm_device_info (the one definition that drives
@@ -322,7 +357,33 @@ typedef struct nvrm_mem_params {
 	 * against: what the object got, or for an import the smallest page
 	 * the RM's answer allows (nvrm_mem(3)). */
 	uint64_t	page_size;
+	/* The page kind of the object (the kind of the page table entries
+	 * the GPU builds for it) and whether the object may be compressed.
+	 * NVRM_1.4: appended, so an earlier member keeps its offset. */
+	uint32_t	pte_kind;	/* enum nvrm_pte_kind */
+	uint32_t	compress;	/* enum nvrm_compress */
 } nvrm_mem_params;
+
+/* The page kind (the PTE kind) of an allocation: how the GPU addresses the
+ * pages of the object.  NVRM_PTE_KIND_DEFAULT lets the library pick, which
+ * is the pitch layout every generation supports. */
+enum nvrm_pte_kind {
+	NVRM_PTE_KIND_DEFAULT = 0,
+	NVRM_PTE_KIND_PITCH = 1,
+	NVRM_PTE_KIND_BLOCK_LINEAR = 2,
+	NVRM_PTE_KIND_SWIZZLED = 3
+};
+#define NVRM_PTE_KNOWN_KINDS	NVRM_PTE_KIND_SWIZZLED
+
+/* Whether an allocation may be compressed.  NVRM_COMPRESS_NONE asks for no
+ * compression, NVRM_COMPRESS_REQUIRED asks for it, NVRM_COMPRESS_ANY lets
+ * the driver decide. */
+enum nvrm_compress {
+	NVRM_COMPRESS_NONE = 0,
+	NVRM_COMPRESS_REQUIRED = 1,
+	NVRM_COMPRESS_ANY = 2
+};
+#define NVRM_COMPRESS_KNOWN	NVRM_COMPRESS_ANY
 
 #define NVRM_MAP_READ_ONLY	0x1	/* the GPU may only read through this mapping */
 #define NVRM_MAP_KNOWN_FLAGS	NVRM_MAP_READ_ONLY
@@ -342,9 +403,28 @@ typedef struct nvrm_mem_info {
 	uint32_t	cpu_attr;	/* enum nvrm_cpu_attr a CPU mapping gets */
 	uint64_t	bytes;
 	uint64_t	page_size;
-	uint32_t	cpu_mapped;
+	uint32_t	cpu_mapped;	/* 1 when the object has a CPU mapping */
 	uint32_t	gpu_maps;
+	/* NVRM_1.4: appended, so an earlier member keeps its offset. */
+	uint64_t	handle;		/* the driver's handle of the object */
+	uint32_t	cpu_mappings;	/* how many CPU mappings the object has */
+	uint32_t	pte_kind;	/* enum nvrm_pte_kind the object got */
+	uint32_t	compress;	/* enum nvrm_compress the object got */
 } nvrm_mem_info;
+
+/* Where and how a CPU mapping is made.  NVRM_1.4. */
+typedef struct nvrm_cpu_map_params {
+	uint32_t	size;		/* sizeof(nvrm_cpu_map_params); 0 means that */
+	uint32_t	prot;		/* NVRM_CPU_READ and/or NVRM_CPU_WRITE */
+	/* The address the mapping must have, or 0 for one the library
+	 * picks.  A fixed address must be a multiple of the host page
+	 * size, and the range it covers must be free of other mappings. */
+	uint64_t	fixed;
+	/* Room for later options.  Must be zero: a nonzero value is
+	 * refused with NVRM_E_INVAL, so a caller built for a later meaning
+	 * of the members cannot silently get this version's behaviour. */
+	uint32_t	reserved[4];
+} nvrm_cpu_map_params;
 
 /* What a client holds now and what it has done: leak checks read this.
  * size is 0 or sizeof(nvrm_client_stats) for the whole structure, or
@@ -413,7 +493,22 @@ void		nvrm_mem_free(nvrm_mem *mem);
 int		nvrm_mem_info_get(const nvrm_mem *mem, nvrm_mem_info *info);
 int		nvrm_mem_map_gpu(nvrm_mem *mem, const nvrm_gpu_map_params *p);
 int		nvrm_mem_unmap_gpu(nvrm_mem *mem, uint64_t va);
+/* Unmap every GPU mapping that overlaps the range.  A mapping that only
+ * partly overlaps the range is unmapped in full. */
+int		nvrm_mem_unmap_gpu_range(nvrm_client *cl, uint64_t va,
+		    uint64_t length);
 int		nvrm_mem_map_cpu(nvrm_mem *mem, unsigned prot, void **addr);
+/* Map the object for the CPU at a chosen address, or at one the library
+ * picks.  An object may have more than one CPU mapping. */
+int		nvrm_mem_map_cpu_at(nvrm_mem *mem,
+		    const nvrm_cpu_map_params *p, void **addr);
+/* Unmap the CPU mapping at this address. */
+int		nvrm_mem_unmap_cpu_at(nvrm_mem *mem, uint64_t addr);
+/* Replace the CPU mapping at this address with anonymous memory, in place:
+ * the range stays mapped, and the driver is told to forget the mapping it
+ * made. */
+int		nvrm_mem_overmap_cpu(nvrm_mem *mem, uint64_t addr,
+		    uint64_t length);
 int		nvrm_mem_unmap_cpu(nvrm_mem *mem);
 int		nvrm_mem_read(nvrm_mem *mem, uint64_t offset, void *buf,
 		    size_t len);

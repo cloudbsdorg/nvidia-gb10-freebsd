@@ -804,7 +804,10 @@ NVIDIA's MIT nvidia-drm sources and by Mesa. Provenance: [`PROVENANCE.md`](PROVE
 LinuxKPI and no Linux layer. `nvrm_enumerate()` opens `/dev/nvidiactl`, checks that the kernel
 module is the RM version the library was built for (580.178.04), lists and attaches the probed
 GPUs and describes each one (PCI identity, UUID, architecture, SM version, GPC/TPC/SM counts,
-class list, VRAM, BAR1, page sizes, capability flags). Every value is available or carries a
+class list, VRAM, BAR1, page sizes, capability flags), and what the engine and the driver report
+about it (the marketing name, the chipset, the multiprocessors of a TPC, the warps and the thread
+blocks of a multiprocessor, the 2D, memory-to-memory and video decode classes, the shared
+memory, the zcull information, the video memory in use and still free). Every value is available or carries a
 reason; the layers are abstract device, class, family (a generation table keyed by class ids)
 and board decorators (none yet). Backends are providers: `rm` and `fake`
 (`NVRM_BACKEND=fake`, for CI without a GPU). After enumeration the process may enter Capsicum
@@ -830,6 +833,14 @@ RM refuses is counted (`failed_releases`) and its addresses are never reused. Th
 software GPU (video and system memory in one shared object, a VA table, sparse reads), so the whole
 API is tested without hardware; the RM backend is tested against a scripted kernel
 (`tests/libnvrm/rm_mem_test.c`).
+
+The extended memory calls (API minor 4, symbol version `NVRM_1.4`) are what a Vulkan driver needs
+on top of that: an allocation with a chosen page kind (the PTE kind) and compression, a CPU
+mapping at an address the caller chooses and a second CPU mapping of the same object, the
+overmap of a client mapping (the range is replaced with anonymous memory in place, and the driver
+is told to forget the mapping it made), the unmap of a range of GPU addresses, and the driver's
+handle of an object. The calls of one client take the client's own lock, so several threads may
+use one client at the same time; the calls of a context do not.
 
 ## Native test boot (no Linux layer)
 

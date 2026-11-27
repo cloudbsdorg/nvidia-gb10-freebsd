@@ -102,6 +102,8 @@ static const struct { const char *id, *text; } reasons[NVRM_R__COUNT] = {
 	    "the version string has no readable numeric scheme" },
 	[NVRM_R_VERSION_INCONSISTENT] = { "version_inconsistent",
 	    "the kernel module version sysctls disagree with its version string" },
+	[NVRM_R_FAMILY_NO_VALUE] = { "family_has_no_value",
+	    "the GPU family is known but has no value of this kind" },
 };
 
 const char *

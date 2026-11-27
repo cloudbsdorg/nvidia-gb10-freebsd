@@ -33,6 +33,7 @@ reason 11 value_unusable 0
 reason 12 family_has_no_class 0
 reason 13 version_unparsed 2
 reason 14 version_inconsistent 2
+reason 15 family_has_no_value 4
 error 1 no_backend 0
 error 2 open_failed 0
 error 3 version_mismatch 0

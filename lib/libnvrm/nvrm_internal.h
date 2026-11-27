@@ -44,6 +44,10 @@ enum nvrm_prop {
 	NVRM_P_BAR1_KB,
 	NVRM_P_MAX_PAGE_SIZE,
 	NVRM_P_NUMA_NODE,		/* -1 reported as NVRM_R_NO_NUMA */
+	/* The warps of one multiprocessor, and the video memory heap. */
+	NVRM_P_MAX_WARPS_PER_MP,
+	NVRM_P_VRAM_HEAP,		/* the video memory heap, in bytes */
+	NVRM_P_VRAM_FREE,		/* the video memory still free, in bytes */
 	NVRM_P_CAP_DMABUF,		/* capability flags: value 0 or 1 */
 	NVRM_P_CAP_ATS,
 	NVRM_P_CAP_SELF_HOSTED,
@@ -58,12 +62,25 @@ enum nvrm_sprop {
 	NVRM_SP_UUID,
 	NVRM_SP_VBIOS,
 	NVRM_SP_GSP_FIRMWARE,
+	NVRM_SP_DEVICE_NAME,		/* the marketing name of the GPU */
 	NVRM_SP_COUNT
 };
 
+/* The zcull (zero cull) information of the graphics engine: what the
+ * driver needs to allocate and manage the zcull regions. */
+typedef struct nvrm_zcull_info {
+	uint64_t	width_align_pixels;
+	uint64_t	height_align_pixels;
+	uint64_t	aliquot_total;
+	uint64_t	region_bytes;		/* per aliquot */
+	uint64_t	region_header_bytes;
+	uint64_t	subregion_header_bytes;
+} nvrm_zcull_info;
+
 /* The order of the properties is part of the code: the capability flags are
  * the last NVRM_NCAPS properties, in the order of nvrm_cap_name(), and
- * rm_gpu_u64() dispatches on ranges (pci, gpu, memory, capabilities). */
+ * rm_gpu_u64() dispatches on ranges (pci, gpu, memory, engine, memory
+ * heap, capabilities). */
 _Static_assert(NVRM_P_CAP_OS_DEVICE_WC - NVRM_P_CAP_DMABUF + 1 == NVRM_NCAPS,
     "NVRM_NCAPS must equal the number of capability properties");
 _Static_assert(NVRM_P_CAP_OS_DEVICE_WC + 1 == NVRM_P_COUNT,
@@ -97,6 +114,11 @@ typedef struct nvrm_backend_ops {
 	/* Class ids the GPU supports; returns 0 or an enum nvrm_reason. */
 	int	(*gpu_classes)(nvrm_gpu *gpu, uint32_t *list, unsigned max,
 		    unsigned *n);
+	/* The zcull information of the graphics engine; returns 0 or an
+	 * enum nvrm_reason. */
+	int	(*gpu_zcull)(nvrm_gpu *gpu, nvrm_zcull_info *out);
+	/* The host's cache line size in bytes; returns 0 or a reason. */
+	int	(*host_atom_size)(nvrm_gpu *gpu, uint64_t *out);
 	/* Limit the descriptors for Capsicum.  Returns enum nvrm_error. */
 	int	(*limit)(nvrm_backend *be, int allow_alloc);
 	/* Memory and VA (S2); NULL when the backend has none. */
@@ -132,16 +154,28 @@ void	nvrm_owner_fork_seam(void);
 /* Test seam: stands in for issetugid(); NULL = the real one. */
 extern int (*nvrm_issetugid_hook)(void);
 
-/* Generation table (nvrm_table.c). */
+/* Generation table (nvrm_table.c).  The name of a row is the name of the
+ * chip family; the library core names no chip and no architecture. */
 typedef struct nvrm_family {
 	const char	*name;
 	uint32_t	cls_gpfifo, cls_compute, cls_eng3d, cls_copy;
+	uint32_t	cls_eng2d, cls_m2mf, cls_vdec;
+	/* The thread blocks a multiprocessor may hold, and the shared
+	 * memory a work group may use and a multiprocessor may be given
+	 * (in bytes).  A zero class means the family has no such class. */
+	uint64_t	max_blocks_per_mp;
+	uint64_t	max_smem_per_wg;
+	uint64_t	sm_smem_sizes[NVRM_MAX_SMEM];	/* 0 ends */
 	uint64_t	page_sizes[NVRM_MAX_PAGE_SIZES];	/* 0 ends */
 } nvrm_family;
 extern const nvrm_family nvrm_family_table[];
 extern const unsigned nvrm_family_count;
 int	nvrm_compute_capability_for(uint64_t architecture,
 	    uint64_t implementation, uint32_t *major, uint32_t *minor);
+/* The name of the chipset for an architecture and an implementation; 0
+ * when the table has no row for the pair. */
+const char *nvrm_chipset_name_for(uint64_t architecture,
+	    uint64_t implementation);
 
 /* Board decorators: add or override options, never decide support. */
 typedef struct nvrm_decorator {
@@ -202,6 +236,8 @@ typedef struct nvrm_balloc {
 	int		kind;		/* NVRM_MEM_VRAM or NVRM_MEM_SYSMEM */
 	int		place;		/* enum nvrm_place */
 	uint64_t	bytes, alignment, page_size;
+	uint32_t	pte_kind;	/* enum nvrm_pte_kind */
+	uint32_t	compress;	/* enum nvrm_compress */
 } nvrm_balloc;
 
 /* How the CPU side of system memory is mapped, as the backend learned it
@@ -213,6 +249,7 @@ typedef struct nvrm_bmem_info {
 	uint64_t	bytes, page_size;
 	int		place;
 	int		coherency;	/* NVRM_COH_*; system memory only */
+	uint64_t	handle;		/* the driver's handle of the object */
 } nvrm_bmem_info;
 
 /*
@@ -247,11 +284,18 @@ typedef struct nvrm_mem_ops {
 	int	(*unmap_gpu)(nvrm_bmem *m, nvrm_bres *r, uint64_t va,
 		    uint64_t length, int owner, char *err, size_t errlen);
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
-	 * descriptor carry one mapping); the core closes it on unmap. */
-	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, void **addr,
+	 * descriptor carry one mapping); the core closes it on unmap.
+	 * A fixed address asks for the mapping to be made at that address;
+	 * 0 lets the backend pick one. */
+	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed,
+		    void **addr, uint64_t *cookie, char *err, size_t errlen);
+	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, uint64_t cookie, int owner,
 		    char *err, size_t errlen);
-	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, int owner, char *err,
-		    size_t errlen);
+	/* Replace the mapping at addr with anonymous memory, in place, and
+	 * tell the driver to forget the mapping it made.  The range is not
+	 * unmapped: the caller may map over it again at once. */
+	int	(*overmap_cpu)(nvrm_bmem *m, void *addr, uint64_t length,
+		    uint64_t cookie, char *err, size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
 		    nvrm_bmem_info *out, char *err, size_t errlen);
@@ -393,6 +437,17 @@ typedef struct nvrm_gmap {
 	nvrm_mem	*mem;
 } nvrm_gmap;
 
+/* One CPU mapping of an object: the address, the descriptor that carries
+ * it and the protection it was made with. */
+typedef struct nvrm_cmap {
+	struct nvrm_cmap	*next;
+	uint64_t	addr;		/* the address the mapping has */
+	uint64_t	length;
+	int		fd;		/* the descriptor carrying the mapping */
+	unsigned	prot;
+	uint64_t	cookie;		/* what the backend needs to unmap it */
+} nvrm_cmap;
+
 struct nvrm_mem {
 	nvrm_client	*cl;
 	struct nvrm_mem	*next;
@@ -400,9 +455,13 @@ struct nvrm_mem {
 	int		kind, place, cpu_attr;
 	uint64_t	bytes, page_size;
 	unsigned	ngmaps;
-	void		*cpu_addr;
-	int		cpu_fd;		/* the descriptor carrying the mapping */
-	unsigned	cpu_prot;
+	/* The CPU mappings of the object: there may be more than one, and
+	 * each has its own descriptor. */
+	nvrm_cmap	*cmaps;
+	unsigned	ncmaps;
+	uint64_t	handle;		/* the driver's handle of the object */
+	uint32_t	pte_kind;		/* enum nvrm_pte_kind the object got */
+	uint32_t	compress;		/* enum nvrm_compress the object got */
 };
 
 typedef struct nvrm_pool {
@@ -413,6 +472,9 @@ typedef struct nvrm_pool {
 struct nvrm_client {
 	const nvrm_backend_ops *ops;
 	const nvrm_mem_ops *mops;
+	/* The client's own lock: every call of nvrm_mem(3) takes it, so
+	 * several threads may use one client at the same time. */
+	pthread_mutex_t lock;
 	nvrm_bclient	*bc;
 	nvrm_va		*va;
 	uint64_t	va_base, va_end;

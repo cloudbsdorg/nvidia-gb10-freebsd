@@ -41,14 +41,26 @@ typedef struct fake_profile {
 	const char	*uuid;
 	const char	*vbios;
 	const char	*gsp_firmware;
+	const char	*device_name;
 	int		sfail[NVRM_SP_COUNT];
 	const uint32_t	*classes;
 	unsigned	nclasses;
 	int		classes_fail;
+	/* The zcull information of the graphics engine. */
+	nvrm_zcull_info	zcull;
+	int		zcull_fail;
+	/* The host's cache line size. */
+	uint64_t	atom_size;
+	int		atom_fail;
 } fake_profile;
 
-static const uint32_t classes_b[] = { 0x0080, 0x2080, 0xcec0, 0xce97, 0xcab5,
-    0xca6f };
+/* The classes of a GB20x part: the channel, the compute, the 3D and the
+ * copy class, the 2D class and the video decoder. */
+static const uint32_t classes_b[] = { 0x0080, 0x2080, 0xca6f, 0xcec0, 0xce97,
+    0xcab5, 0x902d, 0xceb0 };
+/* The classes of a GB100 part: with the inline-to-memory class. */
+static const uint32_t classes_gb100[] = { 0x0080, 0x2080, 0xc96f, 0xcdc0,
+    0xcd97, 0xc9b5, 0x902d, 0xcd40, 0xcdb0 };
 static const uint32_t classes_unknown[] = { 0x0080, 0x2080, 0x1234, 0x5678 };
 
 #define PCI(dom, bus, slot, ven, dev, sven, sdev, rev) \
@@ -72,6 +84,9 @@ static fake_profile profiles[] = {
 			[NVRM_P_VRAM_KB] = 16ULL * 1024 * 1024,
 			[NVRM_P_BAR1_KB] = 16ULL * 1024 * 1024,
 			[NVRM_P_MAX_PAGE_SIZE] = 512ULL << 20,
+			[NVRM_P_MAX_WARPS_PER_MP] = 48,
+			[NVRM_P_VRAM_HEAP] = 16ULL << 30,
+			[NVRM_P_VRAM_FREE] = 12ULL << 30,
 			[NVRM_P_CAP_DMABUF] = 1,
 			[NVRM_P_CAP_DISPLAY] = 1,
 		},
@@ -81,8 +96,11 @@ static fake_profile profiles[] = {
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000a1",
 		.vbios = "96.06.1e.00.4a",
 		.gsp_firmware = "580.178.04",
+		.device_name = "NVIDIA Test Graphics Adapter",
 		.classes = classes_b,
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
+		.zcull = { 64, 32, 1024, 64, 32, 16 },
+		.atom_size = 64,
 	},
 	{
 		.name = "unified",
@@ -97,6 +115,9 @@ static fake_profile profiles[] = {
 			[NVRM_P_BAR1_KB] = 0,
 			[NVRM_P_MAX_PAGE_SIZE] = 2ULL << 20,
 			[NVRM_P_NUMA_NODE] = 0,
+			[NVRM_P_MAX_WARPS_PER_MP] = 48,
+			[NVRM_P_VRAM_HEAP] = 0,
+			[NVRM_P_VRAM_FREE] = 0,
 			[NVRM_P_CAP_DMABUF] = 1,
 			[NVRM_P_CAP_SOC] = 1,
 			[NVRM_P_CAP_COHERENT_MEMORY] = 1,
@@ -106,8 +127,11 @@ static fake_profile profiles[] = {
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000b2",
 		.vbios = "97.06.1e.00.4a",
 		.gsp_firmware = "580.178.04",
+		.device_name = "NVIDIA Test Unified Adapter",
 		.classes = classes_b,
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
+		.zcull = { 64, 32, 1024, 64, 32, 16 },
+		.atom_size = 64,
 	},
 	{
 		/* GB20C: architecture and implementation known, no compute table
@@ -124,8 +148,11 @@ static fake_profile profiles[] = {
 		},
 		.tpc_mask = { 0x1 },
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000c2",
+		.device_name = "NVIDIA Test Untabled Adapter",
 		.classes = classes_b,
 		.nclasses = sizeof(classes_b) / sizeof(classes_b[0]),
+		.zcull = { 64, 32, 1024, 64, 32, 16 },
+		.atom_size = 64,
 	},
 	{
 		/* A GPU the generation table does not know. */
@@ -143,8 +170,41 @@ static fake_profile profiles[] = {
 		},
 		.tpc_mask = { 0x1 },
 		.uuid = "GPU-00000000-0000-4000-8000-0000000000c3",
+		.device_name = "NVIDIA Test Unknown Adapter",
 		.classes = classes_unknown,
 		.nclasses = sizeof(classes_unknown) / sizeof(classes_unknown[0]),
+		.zcull = { 64, 32, 1024, 64, 32, 16 },
+		.atom_size = 64,
+	},
+	{
+		/* A GB100 part: the family with the inline-to-memory class. */
+		.name = "gb100",
+		.val = {
+			PCI(0, 3, 0, 0x10de, 0x2e10, 0x10de, 0x0000, 0xa1),
+			[NVRM_P_ARCHITECTURE] = 0x1a0,
+			[NVRM_P_IMPLEMENTATION] = 0,
+			[NVRM_P_SM_VERSION] = 0x0a00,
+			[NVRM_P_SM_PER_TPC] = 2,
+			[NVRM_P_GPC_MASK] = 0x1,
+			[NVRM_P_VRAM_KB] = 0,
+			[NVRM_P_BAR1_KB] = 0,
+			[NVRM_P_MAX_PAGE_SIZE] = 2ULL << 20,
+			[NVRM_P_MAX_WARPS_PER_MP] = 64,
+			[NVRM_P_VRAM_HEAP] = 0,
+			[NVRM_P_VRAM_FREE] = 0,
+			[NVRM_P_NUMA_NODE] = 0,
+			[NVRM_P_CAP_SOC] = 1,
+			[NVRM_P_CAP_COHERENT_MEMORY] = 1,
+		},
+		.tpc_mask = { 0x1ff },
+		.uuid = "GPU-00000000-0000-4000-8000-0000000000d4",
+		.vbios = "97.06.1e.00.4a",
+		.gsp_firmware = "580.178.04",
+		.device_name = "NVIDIA Test System-on-Chip Adapter",
+		.classes = classes_gb100,
+		.nclasses = sizeof(classes_gb100) / sizeof(classes_gb100[0]),
+		.zcull = { 64, 32, 1024, 64, 32, 16 },
+		.atom_size = 64,
 	},
 	{
 		/* Everything optional is missing: the reasons are the output. */
@@ -170,6 +230,9 @@ static fake_profile profiles[] = {
 			[NVRM_P_BAR1_KB] = NVRM_R_RM_FAILED,
 			[NVRM_P_MAX_PAGE_SIZE] = NVRM_R_RM_UNSUPPORTED,
 			[NVRM_P_NUMA_NODE] = NVRM_R_NO_NUMA,
+			[NVRM_P_MAX_WARPS_PER_MP] = NVRM_R_RM_UNSUPPORTED,
+			[NVRM_P_VRAM_HEAP] = NVRM_R_RM_FAILED,
+			[NVRM_P_VRAM_FREE] = NVRM_R_RM_FAILED,
 			[NVRM_P_CAP_DMABUF] = NVRM_R_BACKEND_NONE,
 			[NVRM_P_CAP_ATS] = NVRM_R_BACKEND_NONE,
 			[NVRM_P_CAP_SELF_HOSTED] = NVRM_R_BACKEND_NONE,
@@ -179,11 +242,15 @@ static fake_profile profiles[] = {
 			[NVRM_P_CAP_OS_DEVICE_WC] = NVRM_R_BACKEND_NONE,
 		},
 		.uuid = NULL,
+		.device_name = NULL,
 		.sfail = {
 			[NVRM_SP_GSP_FIRMWARE] = NVRM_R_RM_UNSUPPORTED,
+			[NVRM_SP_DEVICE_NAME] = NVRM_R_RM_FAILED,
 		},
 		.classes = NULL, .nclasses = 0,
 		.classes_fail = NVRM_R_RM_FAILED,
+		.zcull_fail = NVRM_R_RM_FAILED,
+		.atom_fail = NVRM_R_OS_NOT_REPORTED,
 	},
 };
 /* CPD-ON */
@@ -200,6 +267,9 @@ static int last_fd = -1;
 static const uint32_t *inject_classes;
 static unsigned inject_nclasses;
 static int inject_classes_fail;
+static int inject_zcull_fail;
+static int inject_atom_fail;
+static uint64_t inject_atom_size;
 
 void
 nvrm_fake_inject(int prop, int reason)
@@ -246,11 +316,27 @@ nvrm_fake_inject_classes_fail(int reason)
 }
 
 void
+nvrm_fake_inject_zcull_fail(int reason)
+{
+	inject_zcull_fail = reason;
+}
+
+void
+nvrm_fake_inject_atom_size(uint64_t bytes, int reason)
+{
+	inject_atom_size = bytes;
+	inject_atom_fail = reason;
+}
+
+void
 nvrm_fake_inject_clear(void)
 {
 	inject_classes_fail = 0;
 	inject_classes = NULL;
 	inject_nclasses = 0;
+	inject_zcull_fail = 0;
+	inject_atom_fail = 0;
+	inject_atom_size = 0;
 	memset(inject_fail, 0, sizeof(inject_fail));
 	memset(inject_has_val, 0, sizeof(inject_has_val));
 	inject_tpc_fail_gpc = -1;
@@ -324,7 +410,7 @@ fake_open(nvrm_backend **bep, char *err, size_t errlen)
 		if (i == NPROFILES) {
 			snprintf(err, errlen, "fake backend: unknown profile "
 			    "\"%.*s\" in NVRM_FAKE_PROFILE (known: discrete, "
-			    "unified, untabled, unknown, sparse)", (int)len, p);
+			    "unified, untabled, gb100, unknown, sparse)", (int)len, p);
 			free(be);
 			return (NVRM_E_INVAL);
 		}
@@ -474,6 +560,9 @@ fake_gpu_str(nvrm_gpu *g, enum nvrm_sprop p, char *buf, size_t len)
 	case NVRM_SP_GSP_FIRMWARE:
 		value = g->p->gsp_firmware;
 		break;
+	case NVRM_SP_DEVICE_NAME:
+		value = g->p->device_name;
+		break;
 	default:
 		return (NVRM_R_BACKEND_NONE);
 	}
@@ -506,6 +595,30 @@ fake_gpu_classes(nvrm_gpu *g, uint32_t *list, unsigned max, unsigned *n)
 	*n = 0;
 	for (i = 0; i < nc && i < max; i++)
 		list[(*n)++] = cls[i];
+	return (0);
+}
+
+static int
+fake_gpu_zcull(nvrm_gpu *g, nvrm_zcull_info *out)
+{
+	if (roundtrip(g) != 0)
+		return (NVRM_R_OS_CALL_FAILED);
+	if (inject_zcull_fail != 0)
+		return (inject_zcull_fail);
+	if (g->p->zcull_fail != 0)
+		return (g->p->zcull_fail);
+	*out = g->p->zcull;
+	return (0);
+}
+
+static int
+fake_host_atom_size(nvrm_gpu *g, uint64_t *out)
+{
+	if (inject_atom_fail != 0)
+		return (inject_atom_fail);
+	if (g->p->atom_fail != 0)
+		return (g->p->atom_fail);
+	*out = inject_atom_size != 0 ? inject_atom_size : g->p->atom_size;
 	return (0);
 }
 
@@ -547,6 +660,8 @@ const nvrm_backend_ops nvrm_backend_fake_ops = {
 	.gpu_u64 = fake_gpu_u64,
 	.gpu_str = fake_gpu_str,
 	.gpu_classes = fake_gpu_classes,
+	.gpu_zcull = fake_gpu_zcull,
+	.host_atom_size = fake_host_atom_size,
 	.limit = fake_limit,
 	.mem = &nvrm_fake_mem_ops,
 	.chan = &nvrm_fake_chan_ops,

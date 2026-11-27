@@ -17,8 +17,12 @@
 .Nm nvrm_mem_info_get ,
 .Nm nvrm_mem_map_gpu ,
 .Nm nvrm_mem_unmap_gpu ,
+.Nm nvrm_mem_unmap_gpu_range ,
 .Nm nvrm_mem_map_cpu ,
+.Nm nvrm_mem_map_cpu_at ,
 .Nm nvrm_mem_unmap_cpu ,
+.Nm nvrm_mem_unmap_cpu_at ,
+.Nm nvrm_mem_overmap_cpu ,
 .Nm nvrm_mem_read ,
 .Nm nvrm_mem_write ,
 .Nm nvrm_mem_export_fd ,
@@ -55,9 +59,17 @@ libnvrm
 .Ft int
 .Fn nvrm_mem_unmap_gpu "nvrm_mem *mem" "uint64_t va"
 .Ft int
+.Fn nvrm_mem_unmap_gpu_range "nvrm_client *cl" "uint64_t va" "uint64_t length"
+.Ft int
 .Fn nvrm_mem_map_cpu "nvrm_mem *mem" "unsigned prot" "void **addr"
 .Ft int
+.Fn nvrm_mem_map_cpu_at "nvrm_mem *mem" "const nvrm_cpu_map_params *p" "void **addr"
+.Ft int
 .Fn nvrm_mem_unmap_cpu "nvrm_mem *mem"
+.Ft int
+.Fn nvrm_mem_unmap_cpu_at "nvrm_mem *mem" "uint64_t addr"
+.Ft int
+.Fn nvrm_mem_overmap_cpu "nvrm_mem *mem" "uint64_t addr" "uint64_t length"
 .Ft int
 .Fn nvrm_mem_read "nvrm_mem *mem" "uint64_t offset" "void *buf" "size_t len"
 .Ft int
@@ -207,6 +219,25 @@ is 0 or a power of two.
 and
 .Va reserved
 must be 0.
+.Va pte_kind
+is the page kind of the object, that is the kind of the page table entries the
+GPU builds for it:
+.Dv NVRM_PTE_KIND_DEFAULT
+lets the library pick, which is the pitch layout every generation supports,
+.Dv NVRM_PTE_KIND_PITCH ,
+.Dv NVRM_PTE_KIND_BLOCK_LINEAR
+and
+.Dv NVRM_PTE_KIND_SWIZZLED
+ask for one of them.
+.Va compress
+is
+.Dv NVRM_COMPRESS_NONE ,
+.Dv NVRM_COMPRESS_REQUIRED
+or
+.Dv NVRM_COMPRESS_ANY ,
+which say whether the object may be compressed.
+A value this version does not know is refused with
+.Dv NVRM_E_INVAL .
 .Fn nvrm_mem_register_user
 makes an object of whole host pages of the caller's own address space; they
 must stay mapped until the object is freed.
@@ -216,6 +247,11 @@ unmaps the object everywhere and frees it.
 reports its kind, place
 .Pq Dv NVRM_PLACE_VIDMEM or Dv NVRM_PLACE_SYSMEM ,
 CPU attribute, size, page size and mappings.
+It also reports the driver's handle of the object in
+.Va handle ,
+the number of CPU mappings in
+.Va cpu_mappings ,
+and the page kind and the compression the object was made with.
 .Ss GPU mappings
 .Fn nvrm_mem_map_gpu
 maps
@@ -237,6 +273,17 @@ lets the GPU only read.
 .Fn nvrm_mem_unmap_gpu
 removes the object's mapping that starts at
 .Fa va .
+.Fn nvrm_mem_unmap_gpu_range
+removes every mapping of the client that overlaps the range of
+.Fa length
+bytes at
+.Fa va ,
+whatever object it was made from.
+A mapping that only partly overlaps the range is removed in full: the driver
+maps whole objects, and a part of a mapping cannot be left behind.
+The call stops at the first mapping the driver refuses to unmap and returns
+.Dv NVRM_E_RM ;
+the mappings it removed are gone, and the call can be repeated.
 .Ss CPU mappings
 .Fn nvrm_mem_map_cpu
 maps the whole object for the CPU, with
@@ -250,7 +297,34 @@ and refuses registered user pages, which are mapped already.
 The kernel module keeps one mapping per descriptor, so each CPU mapping holds
 one mapping descriptor until it is unmapped.
 .Fn nvrm_mem_unmap_cpu
-removes it.
+removes every CPU mapping of the object.
+.Pp
+An object may have more than one CPU mapping, and
+.Fn nvrm_mem_map_cpu_at
+makes one at an address the caller chooses:
+.Va fixed
+is that address, which must be a multiple of the host page size and must not
+cover a mapped range, or 0 for an address the library picks.
+.Va prot
+is the protection, as above, and
+.Va size
+must be 0 or
+.Li sizeof(nvrm_cpu_map_params) ;
+.Va reserved
+must be 0.
+.Fn nvrm_mem_unmap_cpu_at
+removes the mapping at one address.
+.Pp
+.Fn nvrm_mem_overmap_cpu
+replaces the mapping at
+.Fa addr
+with anonymous memory, in place: the range stays mapped, reads as zeros, and
+the driver is told to forget the mapping it made.
+The replacement is made before the driver is told, so that the range is never
+free and no other thread can take the address in between; the range is not
+unmapped, because the caller now owns it.
+.Fa length
+is the length of the range, or 0 for the length of the mapping.
 .Pp
 The memory attribute of the mapping is
 .Va cpu_attr

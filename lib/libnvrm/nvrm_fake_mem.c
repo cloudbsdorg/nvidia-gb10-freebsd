@@ -493,6 +493,7 @@ fk_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	out->bytes = o->bytes;
 	out->page_size = ps;
 	out->place = a->place;
+	out->handle = o->serial;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -516,6 +517,7 @@ fk_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	out->bytes = bytes;
 	out->page_size = 4096;
 	out->place = NVRM_PLACE_SYSMEM;
+	out->handle = m->serial;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -615,31 +617,59 @@ fk_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
 }
 
 static int
-fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
-    size_t errlen)
+fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed, void **addr,
+    uint64_t *cookie, char *err, size_t errlen)
 {
 	void *p;
 	int pr = ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
 	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0);
+	int flags = MAP_SHARED;
 
 	INJECT(NVRM_FAKE_OP_MAP_CPU, err, errlen);
-	p = mmap(NULL, m->o->bytes, pr, MAP_SHARED, fd, (off_t)m->o->off);
+	if (fixed != 0)
+		flags |= MAP_FIXED;
+	p = mmap(fixed != 0 ? (void *)(uintptr_t)fixed : NULL, m->o->bytes, pr,
+	    flags, fd, (off_t)m->o->off);
 	if (p == MAP_FAILED) {
 		snprintf(err, errlen, "fake backend: mmap failed: %s",
 		    strerror(errno));
 		return (NVRM_E_IO);
 	}
 	*addr = p;
+	*cookie = m->serial;
 	return (NVRM_OK);
 }
 
 static int
-fk_unmap_cpu(nvrm_bmem *m, void *addr, int owner, char *err, size_t errlen)
+fk_unmap_cpu(nvrm_bmem *m, void *addr, uint64_t cookie, int owner, char *err,
+    size_t errlen)
 {
+	(void)cookie;
 	munmap(addr, m->o->bytes);
 	if (!owner)
 		return (NVRM_OK);
 	INJECT(NVRM_FAKE_OP_UNMAP_CPU, err, errlen);
+	return (NVRM_OK);
+}
+
+/* Replace the mapping with anonymous memory, in place: the range stays
+ * mapped and reads as zeros. */
+static int
+fk_overmap_cpu(nvrm_bmem *m, void *addr, uint64_t length, uint64_t cookie,
+    char *err, size_t errlen)
+{
+	void *p;
+
+	(void)m;
+	(void)cookie;
+	INJECT(NVRM_FAKE_OP_OVERMAP_CPU, err, errlen);
+	p = mmap(addr, length, PROT_READ | PROT_WRITE,
+	    MAP_FIXED | MAP_ANON, -1, 0);
+	if (p == MAP_FAILED) {
+		snprintf(err, errlen, "fake backend: the anonymous mapping "
+		    "failed: %s", strerror(errno));
+		return (NVRM_E_IO);
+	}
 	return (NVRM_OK);
 }
 
@@ -729,6 +759,7 @@ fk_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	out->bytes = o->bytes;
 	out->page_size = o->page_size;
 	out->place = o->place;
+	out->handle = o->serial;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -779,6 +810,7 @@ const nvrm_mem_ops nvrm_fake_mem_ops = {
 	.unmap_gpu = fk_unmap_gpu,
 	.map_cpu = fk_map_cpu,
 	.unmap_cpu = fk_unmap_cpu,
+	.overmap_cpu = fk_overmap_cpu,
 	.export_fd = fk_export_fd,
 	.import_fd = fk_import_fd,
 	.host_arm64 = fk_host_arm64,

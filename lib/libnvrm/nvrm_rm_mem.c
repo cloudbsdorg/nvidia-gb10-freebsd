@@ -94,7 +94,6 @@ struct nvrm_bmem {
 	NvHandle	h;
 	uint64_t	bytes;
 	int		place;
-	NvP64		cookie;		/* the CPU mapping's RM address */
 };
 
 #define SYS	(nvrm_rm_get_sys())
@@ -454,6 +453,37 @@ import_coherency(NvU32 attr)
 	}
 }
 
+/* The page kind of an allocation: the format of the pages the GPU builds
+ * for it.  The default is the pitch layout every generation supports. */
+static NvU32
+pte_kind_attr(uint32_t kind)
+{
+	switch (kind) {
+	case NVRM_PTE_KIND_PITCH:
+		return (DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH));
+	case NVRM_PTE_KIND_BLOCK_LINEAR:
+		return (DRF_DEF(OS32, _ATTR, _FORMAT, _BLOCK_LINEAR));
+	case NVRM_PTE_KIND_SWIZZLED:
+		return (DRF_DEF(OS32, _ATTR, _FORMAT, _SWIZZLED));
+	default:
+		return (DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH));
+	}
+}
+
+/* Whether an allocation may be compressed. */
+static NvU32
+compress_attr(uint32_t compress)
+{
+	switch (compress) {
+	case NVRM_COMPRESS_REQUIRED:
+		return (DRF_DEF(OS32, _ATTR, _COMPR, _REQUIRED));
+	case NVRM_COMPRESS_ANY:
+		return (DRF_DEF(OS32, _ATTR, _COMPR, _ANY));
+	default:
+		return (DRF_DEF(OS32, _ATTR, _COMPR, _NONE));
+	}
+}
+
 typedef struct surface_raw {
 	uint64_t	bytes;
 	NvU32		attr, space;
@@ -546,7 +576,7 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 		return (NVRM_E_NOMEM);
 	}
 	fill_alloc(&p, a->bytes);
-	p.attr = DRF_DEF(OS32, _ATTR, _FORMAT, _PITCH) |
+	p.attr = pte_kind_attr(a->pte_kind) | compress_attr(a->compress) |
 	    (vid ? DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM) |
 		DRF_DEF(OS32, _ATTR, _COHERENCY, _WRITE_COMBINE) :
 		DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
@@ -608,6 +638,7 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	out->page_size = got;
 	out->place = a->place;
 	out->coherency = NVRM_COH_CACHED;
+	out->handle = (uint64_t)m->h;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -648,6 +679,7 @@ rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	out->page_size = 4096;
 	out->place = NVRM_PLACE_SYSMEM;
 	out->coherency = NVRM_COH_CACHED;
+	out->handle = (uint64_t)m->h;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -719,19 +751,18 @@ rmm_unmap_gpu(nvrm_bmem *m, nvrm_bres *r, uint64_t va, uint64_t length,
 
 /* ---- CPU mappings -------------------------------------------------------- */
 
+/* Tell the driver to forget the CPU mapping it made. */
 static int
-rm_unmap_memory(nvrm_bmem *m, int owner, char *err, size_t errlen)
+rm_forget_mapping(nvrm_bclient *c, NvHandle h, uint64_t cookie, char *err,
+    size_t errlen)
 {
 	NVOS34_PARAMETERS p;
-	nvrm_bclient *c = m->c;
 
-	if (!owner)
-		return (NVRM_OK);
 	memset(&p, 0, sizeof(p));
 	p.hClient = c->s->client;
 	p.hDevice = c->device;
-	p.hMemory = m->h;
-	p.pLinearAddress = m->cookie;
+	p.hMemory = h;
+	p.pLinearAddress = (NvP64)cookie;
 	if (SYS->ioctl(c->s->fd, IOC_UNMAP_MEMORY, &p) != 0)
 		return (status_fail(err, errlen, "NV_ESC_RM_UNMAP_MEMORY",
 		    IOCTL_FAILED));
@@ -740,13 +771,23 @@ rm_unmap_memory(nvrm_bmem *m, int owner, char *err, size_t errlen)
 }
 
 static int
-rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
+rm_unmap_memory(nvrm_bmem *m, uint64_t cookie, int owner, char *err,
     size_t errlen)
+{
+	if (!owner)
+		return (NVRM_OK);
+	return (rm_forget_mapping(m->c, m->h, cookie, err, errlen));
+}
+
+static int
+rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed, void **addr,
+    uint64_t *cookie, char *err, size_t errlen)
 {
 	nv_ioctl_nvos33_parameters_with_fd p;
 	nvrm_bclient *c = m->c;
 	char scratch[8];
 	void *a;
+	int flags = MAP_SHARED;
 
 	memset(&p, 0, sizeof(p));
 	p.params.hClient = c->s->client;
@@ -761,27 +802,55 @@ rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, void **addr, char *err,
 	if (p.params.status != NV_OK)
 		return (status_fail(err, errlen, "NV_ESC_RM_MAP_MEMORY",
 		    p.params.status));
-	m->cookie = p.params.pLinearAddress;
 	/* The OS layer set the mapping context on this descriptor; the
 	 * offset is not used (nvidia_mmap_dev_single). */
-	a = mmap(NULL, m->bytes, ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
-	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0), MAP_SHARED, fd, 0);
+	if (fixed != 0)
+		flags |= MAP_FIXED;
+	a = mmap(fixed != 0 ? (void *)(uintptr_t)fixed : NULL, m->bytes,
+	    ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
+	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0), flags, fd, 0);
 	if (a == MAP_FAILED) {
 		snprintf(err, errlen, "mmap of the device failed: %s",
 		    strerror(errno));
 		/* The mmap error is the one to report. */
-		(void)rm_unmap_memory(m, 1, scratch, sizeof(scratch));
+		(void)rm_unmap_memory(m, (uint64_t)p.params.pLinearAddress, 1,
+		    scratch, sizeof(scratch));
 		return (NVRM_E_IO);
 	}
+	*cookie = (uint64_t)p.params.pLinearAddress;
 	*addr = a;
 	return (NVRM_OK);
 }
 
 static int
-rmm_unmap_cpu(nvrm_bmem *m, void *addr, int owner, char *err, size_t errlen)
+rmm_unmap_cpu(nvrm_bmem *m, void *addr, uint64_t cookie, int owner, char *err,
+    size_t errlen)
 {
 	munmap(addr, m->bytes);
-	return (rm_unmap_memory(m, owner, err, errlen));
+	return (rm_unmap_memory(m, cookie, owner, err, errlen));
+}
+
+/*
+ * Replace the CPU mapping with anonymous memory, in place.  The range is
+ * replaced first, so that it stays mapped and no other thread can take
+ * the address in between; then the driver is told to forget the mapping
+ * it made, without the range being unmapped.
+ */
+static int
+rmm_overmap_cpu(nvrm_bmem *m, void *addr, uint64_t length, uint64_t cookie,
+    char *err, size_t errlen)
+{
+	nvrm_bclient *c = m->c;
+	void *a;
+
+	a = mmap(addr, length, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON, -1,
+	    0);
+	if (a == MAP_FAILED) {
+		snprintf(err, errlen, "the anonymous mapping failed: %s",
+		    strerror(errno));
+		return (NVRM_E_IO);
+	}
+	return (rm_forget_mapping(c, m->h, cookie, err, errlen));
 }
 
 /* ---- sharing ------------------------------------------------------------- */
@@ -845,6 +914,7 @@ rmm_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	}
 	m->bytes = out->bytes;
 	m->place = out->place;
+	out->handle = (uint64_t)m->h;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -872,6 +942,7 @@ const nvrm_mem_ops nvrm_rm_mem_ops = {
 	.unmap_gpu = rmm_unmap_gpu,
 	.map_cpu = rmm_map_cpu,
 	.unmap_cpu = rmm_unmap_cpu,
+	.overmap_cpu = rmm_overmap_cpu,
 	.export_fd = rmm_export_fd,
 	.import_fd = rmm_import_fd,
 	.host_arm64 = rmm_host_arm64,

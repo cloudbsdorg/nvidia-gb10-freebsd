@@ -90,3 +90,14 @@ NVRM_1.3 {
 		nvrm_chan_info_get;
 		nvrm_chan_destroy;
 } NVRM_1.2;
+
+/* API minor 4: the extended memory calls: a CPU mapping at a chosen
+ * address, a second CPU mapping of an object, the overmap of a client
+ * mapping and the unmap of a range of GPU addresses (nvrm_mem(3)). */
+NVRM_1.4 {
+	global:
+		nvrm_mem_map_cpu_at;
+		nvrm_mem_unmap_cpu_at;
+		nvrm_mem_overmap_cpu;
+		nvrm_mem_unmap_gpu_range;
+} NVRM_1.3;

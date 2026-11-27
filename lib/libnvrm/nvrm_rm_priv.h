@@ -49,6 +49,8 @@ struct nvrm_backend {
 	nvrm_str		running;
 	nvrm_version		driver, rm_api;
 	int			wc, wc_reason;
+	/* The host's cache line size, read when the backend opens. */
+	uint64_t	atom_size;
 };
 
 /* Derive the running version (nvrm_rm_running_version) from the driver one. */
