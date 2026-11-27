@@ -23,8 +23,11 @@
 #   configure        show the boot configuration change (loader.conf and
 #                    rc.conf), back the files up, ask, apply
 #   build            build every module, drm.ko and dmabuf.ko when no other
-#                    drm.ko is installed, libnvrm and nvrm-info
-#   test             run the repository unit tests
+#                    drm.ko is installed, libnvrm and nvrm-info; every
+#                    module must be one LLD linked, and the build refuses
+#                    one it cannot prove that of
+#   test             run the repository unit tests; a test that skips says
+#                    so, and one that exits 77 without saying so fails
 #   install          block before writing when a prerequisite cannot be fixed;
 #                    otherwise ask once, up front, for everything that runs as
 #                    root (YES=1 answers; no terminal and no YES=1 is a
@@ -250,6 +253,11 @@ setup() {
 	STAGE=$WORK/stage
 	LIBOBJ=$WORK/build/libnvrm-obj
 	DRMOBJ=$WORK/build/drm-obj
+	# The record of what linked each module: the sha256 of the artifact
+	# and the absolute path of the linker that linked it.  lld_check reads
+	# it, so a module is checked against the linker that produced it and
+	# never against the linker the host happens to have.
+	lld_provenance=$WORK/build/lld-provenance
 	GB10_WORK=$WORK
 	TMPDIR=$WORK/tmp
 	export GB10_WORK TMPDIR SYSDIR BSDSRCTOP DRMKMODDIR
@@ -463,7 +471,10 @@ add_item() {
 #   MODE json  backslash, quote, and every control character 0x00-0x1f and
 #              0x7f as a JSON escape (\n \r \t \b \f, or \u00XX).
 #   MODE blk   backslash as \\, "|" as \p, newline as \n, carriage return as
-#              \r, every other control character 0x00-0x1f and 0x7f as \xHH.
+#              \r, "$" as \$, "`" as \`, every other control character
+#              0x00-0x1f and 0x7f as \xHH.  A dollar sign and a backtick
+#              are escaped as well: a record holds data the user typed (a
+#              PREFIX), and no shell that reads a record may expand it.
 #   MODE unblk the inverse of blk: any byte round-trips.
 # The escapes the two encodings share (92 10 13) are written once, below.
 esc_bytes() {
@@ -476,7 +487,13 @@ esc_bytes() {
 		if (mode == "json") {
 			split("34 9 8 12", xcode, " "); split("\" t b f", xletter, " ")
 		} else {
-			split("124", xcode, " "); split("p", xletter, " ")
+			# the pipe, the dollar sign and the backtick: a record
+			# that carries one of them raw would be split by the
+			# reader, or expanded by any shell that reads it
+			split("124 36 96", xcode, " ")
+			split("p", xletter, " ")
+			xletter[2] = "$"
+			xletter[3] = "`"
 		}
 		for (k = 1; k in xcode; k++) { ncode++; code[ncode] = xcode[k]; letter[ncode] = xletter[k] }
 		for (k = 1; k <= ncode; k++) { enc[code[k]] = letter[k]; dec[letter[k]] = code[k] }
@@ -1577,25 +1594,103 @@ drm_wanted() {
 	! foreign_drm "$DESTDIR"
 }
 
-# lld_check FILE: fail the build unless FILE was linked by LLD.  The
-# .comment section names the linker only on some hosts: older FreeBSD
-# wrote "Linker: LLD" there, while FreeBSD 16 with LLD 21.1.8 writes only
-# "FreeBSD clang version 21.1.8" (ld.lld -r and /usr/bin/ld alike).  So
-# the historic signal passes, a module linked by GNU ld never passes, and
-# when .comment says nothing about the linker the base linker this tree
-# requires decides.
+# lld_fix: the fix for a module the linker check refuses.  Every refusal
+# names it: "not linked by LLD" on its own is a dead end, and the person
+# who reads it has to know what to do next.
+lld_fix() {
+	printf '%s' "rebuild the module with the base toolchain: put /usr/bin ahead of /usr/local/bin in PATH (the base ld.lld is required) and run make build again"
+}
+
+# lld_linker: the absolute path of the linker this build links modules
+# with, when that linker is LLD.  The base kernel build links a module
+# with "ld" from PATH, so that is what is resolved, and the path is made
+# absolute: the record below then names the linker that ran, not the one
+# PATH happened to name.  A linker that does not report LLD is refused: a
+# module linked by GNU ld does not load on FreeBSD 16.  The reason goes to
+# stderr and the path to stdout, so a caller can say what was wrong.
+lld_linker() {
+	_llk=$(command -v ld 2>/dev/null || true)
+	if [ -z "$_llk" ]; then
+		printf '%s\n' "ld is not on PATH" >&2
+		return 1
+	fi
+	case $_llk in
+	/*) ;;
+	*)
+		printf '%s\n' "the linker $_llk is not an absolute path" >&2
+		return 1
+		;;
+	esac
+	if ! "$_llk" --version 2>/dev/null | head -n 1 | grep -q LLD; then
+		printf '%s\n' "$_llk is not LLD: put /usr/bin ahead of /usr/local/bin in PATH (the base ld.lld is required) and run make build again" >&2
+		return 1
+	fi
+	printf '%s\n' "$_llk"
+}
+
+# lld_record FILE: record that the linker this build links with linked
+# FILE.  One line per artifact: the sha256 of the artifact and the
+# absolute path of the linker that linked it.  The record is what ties an
+# artifact to the linker that produced it, so a check never has to guess
+# from the host what linked one file, and an artifact that this build did
+# not link has no record.
+lld_record() {
+	_lr_f=$1
+	[ -n "${lld_provenance:-}" ] || die "the build has nowhere to record what linked $_lr_f"
+	_lr_l=$(lld_linker) || die "the module link needs LLD: put /usr/bin ahead of /usr/local/bin in PATH (the base ld.lld is required) and run make build again"
+	_lr_h=$(sha256 -q "$_lr_f") || die "cannot read $_lr_f"
+	printf '%s %s\n' "$_lr_h" "$_lr_l" >> "$lld_provenance"
+}
+
+# lld_check FILE: fail the build unless FILE is a module LLD linked.  The
+# evidence is the artifact itself and the build's own record of what
+# linked it: FILE must be a readable ELF relocatable, its .comment must
+# not name another linker, and either the .comment names LLD or the build
+# recorded that LLD linked this exact file (its sha256 and the absolute
+# path of the linker).  A file whose linker cannot be shown to be LLD
+# fails the build: the host's linker is not evidence about one file, and
+# an unreadable or truncated file is not a module.  The .comment names
+# the linker only on some hosts: older FreeBSD wrote "Linker: LLD"
+# there, while FreeBSD 16 with LLD 21.1.8 writes only "FreeBSD clang
+# version 21.1.8" (ld.lld -r and /usr/bin/ld alike), so the record is
+# what the check falls back on.  Every refusal names the fix (lld_fix) and,
+# when the comment names another linker, names that linker too: the
+# message the user reads is an action, not a dead end.
 lld_check() {
-	_lc=$(readelf -p .comment "$1" 2>/dev/null || true)
-	if printf '%s\n' "$_lc" | grep -q 'Linker: LLD'; then
+	_lck_f=$1
+	if [ ! -f "$_lck_f" ] || [ ! -r "$_lck_f" ]; then
+		die "$_lck_f cannot be read: a module that cannot be read is not a module. $(lld_fix)"
+	fi
+	if ! readelf -h "$_lck_f" 2>/dev/null | grep -q 'Relocatable file'; then
+		die "$_lck_f is not an ELF module: readelf does not read it as a relocatable file. $(lld_fix)"
+	fi
+	_lck_c=$(readelf -p .comment "$_lck_f" 2>/dev/null || true)
+	# The comment names the linker that did it when it names one at all:
+	# the refusal says which linker it was, not only that it was not LLD.
+	_lck_other=$(printf '%s\n' "$_lck_c" | grep -i -m1 'GNU ld\|GNU gold\|gold\|mold\|ld\.bfd\|BFD' 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+	if [ -n "$_lck_other" ]; then
+		die "$_lck_f was not linked by LLD: its comment names another linker ($_lck_other). $(lld_fix)"
+	fi
+	if printf '%s\n' "$_lck_c" | grep -q 'Linker: LLD'; then
 		return 0
 	fi
-	if printf '%s\n' "$_lc" | grep -qi 'GNU ld'; then
-		die "$1 was linked by GNU ld, not by LLD"
+	# The comment does not name the linker, so the build's record is the
+	# evidence, and it is tied to this exact file.
+	if [ -z "${lld_provenance:-}" ] || [ ! -f "$lld_provenance" ]; then
+		die "$_lck_f was not linked by LLD: the build recorded no linker for it. $(lld_fix)"
 	fi
-	if /usr/bin/ld --version 2>/dev/null | grep -q LLD; then
-		return 0
+	_lck_h=$(sha256 -q "$_lck_f") || die "cannot read $_lck_f"
+	_lck_l=$(awk -v h="$_lck_h" '$1 == h { print $2; exit }' "$lld_provenance" 2>/dev/null || true)
+	if [ -z "$_lck_l" ]; then
+		die "$_lck_f was not linked by LLD: the build recorded no linker for it. $(lld_fix)"
 	fi
-	die "$1 was not linked by LLD"
+	if [ ! -x "$_lck_l" ]; then
+		die "$_lck_f was not linked by LLD: the recorded linker $_lck_l is not there. $(lld_fix)"
+	fi
+	if ! "$_lck_l" --version 2>/dev/null | head -n 1 | grep -q LLD; then
+		die "$_lck_f was not linked by LLD: the recorded linker $_lck_l does not report LLD. $(lld_fix)"
+	fi
+	return 0
 }
 
 do_build() {
@@ -1666,6 +1761,7 @@ EOF
 	build_libnvrm
 	for _ko in $(module_list); do
 		[ -f "$TREE/$_ko" ] || die "missing after the build: $TREE/$_ko"
+		lld_record "$TREE/$_ko"
 		lld_check "$TREE/$_ko"
 	done
 	build_stamp > "$WORK/build/stamp"
@@ -1690,6 +1786,7 @@ build_drm() {
 	for _k in drm dmabuf; do
 		_f=$(find "$DRMOBJ" -name "$_k.ko" -type f | sed -n 1p)
 		[ -n "$_f" ] || die "build: $_k.ko not found under $DRMOBJ"
+		lld_record "$_f"
 		lld_check "$_f"
 		cp -- "$_f" "$WORK/build/$_k.ko"
 	done
@@ -1719,6 +1816,27 @@ build_stamp() {
 
 # --- test -----------------------------------------------------------------
 
+# test_skips: the tests that may skip themselves.  77 is the conventional
+# skip status, but only a test that says it skipped may use it, and only
+# one that is on this list: a test that exits 77 without saying why never
+# ran its assertions, and that is a failure, not a skip.  A test that
+# needs to skip is put on this list on purpose, so a new test cannot
+# start hiding a failure behind a skip.
+test_skips='abi_layout_test
+cuda_native_fatbin_test
+cuda_native_toolchain_test'
+
+# test_skip_ok NAME LOG: 0 when the test NAME may skip and its log says
+# that it did.  The skip line is the test's own: "skip" or "skip:" at the
+# start of a line, with the reason after it.
+test_skip_ok() {
+	_tso_n=$1
+	_tso_l=$2
+	printf '%s\n' "$test_skips" | grep -qx "$_tso_n" || return 1
+	grep -qE '^skip([:[:space:]]|$)' "$_tso_l" 2>/dev/null || return 1
+	return 0
+}
+
 do_test() {
 	setup
 	ensure_work
@@ -1730,10 +1848,12 @@ do_test() {
 	for _t in "$repo"/tests/*_test.sh; do
 		_b=$(basename "$_t" .sh)
 		_n=$((_n + 1))
-		# The exit status is what counts: 77 is the conventional skip
-		# status (autotools), so a test that skipped itself is not a
-		# failure.  The status is captured with "|| _rc=$?" because
-		# set -e would stop the run at the first non-zero test.
+		# The exit status is what counts.  77 is the conventional skip
+		# status (autotools), and it is a skip only for a test that says
+		# so: a test that exits 77 without saying it skipped never ran
+		# its assertions, and that is a failure.  The status is captured
+		# with "|| _rc=$?" because set -e would stop the run at the first
+		# non-zero test.
 		_rc=0
 		(cd "$repo" && sh "$_t") > "$_d/$_b.log" 2>&1 || _rc=$?
 		case $_rc in
@@ -1741,7 +1861,12 @@ do_test() {
 			printf 'ok    %s\n' "$_b"
 			;;
 		77)
-			printf 'skip  %s\n' "$_b"
+			if test_skip_ok "$_b" "$_d/$_b.log"; then
+				printf 'skip  %s\n' "$_b"
+			else
+				printf 'FAIL  %s (exit 77 without an approved skip; log %s)\n' "$_b" "$_d/$_b.log"
+				_fail=$((_fail + 1))
+			fi
 			;;
 		*)
 			printf 'FAIL  %s (log %s)\n' "$_b" "$_d/$_b.log"
@@ -2180,41 +2305,68 @@ install_next_list() {
 # a root shell and the prose of the boot-load note, all from the records.
 # The index of a step is its place in the list, so a step that comes before
 # the privileged ones moves them.
+# The records are read as data: they are printed into a pipe and read back
+# from it, never expanded by the shell.  A record holds a path the user
+# typed (a PREFIX), and a path is not a command: a substitution in it has
+# to reach the output as text, never to run.
 install_next_render() {
-	install_next_cmds=
-	install_next_root=
-	install_next_load=
-	_inr_i=0
-	_inr_lbls=
-	while IFS='|' read -r _inr_lbl _inr_cmd _inr_rs _inr_load; do
-		[ -n "$_inr_lbl" ] || continue
-		_inr_cmd=$(blk_unesc "$_inr_cmd")
-		if [ -z "$install_next_cmds" ]; then
-			install_next_cmds=$_inr_cmd
-		else
-			install_next_cmds="$install_next_cmds
-$_inr_cmd"
-		fi
-		if [ "$_inr_rs" = root ]; then
-			if [ -z "$install_next_root" ]; then
-				install_next_root=$_inr_i
-			else
-				install_next_root="$install_next_root
-$_inr_i"
-			fi
-		fi
-		if [ "$_inr_load" = load ]; then
-			if [ -z "$_inr_lbls" ]; then
-				_inr_lbls=$_inr_lbl
-			else
-				_inr_lbls="$_inr_lbls and $_inr_lbl"
-			fi
-		fi
-		_inr_i=$((_inr_i + 1))
-	done <<EOF
-$install_next_records
-EOF
-	install_next_load=$_inr_lbls
+	install_next_cmds=$(install_next_parse cmds)
+	install_next_root=$(install_next_parse root)
+	install_next_load=$(install_next_parse load)
+}
+
+# install_next_parse WHAT: one part of the next steps, read from the
+# records: the commands (cmds), the indexes of the steps that need a root
+# shell (root) or the labels of the steps the boot-time load replaces
+# (load).  The records are printed into a pipe and read from it, so the
+# shell never expands what they hold; the group after the pipe is the
+# subshell that reads them, and it prints what it read.
+install_next_parse() {
+	printf '%s\n' "$install_next_records" | {
+		_inp_cmds=
+		_inp_root=
+		_inp_lbls=
+		_inp_i=0
+		while IFS='|' read -r _inp_lbl _inp_cmd _inp_rs _inp_load; do
+			[ -n "$_inp_lbl" ] || continue
+			_inp_cmd=$(blk_unesc "$_inp_cmd")
+			case $1 in
+			cmds)
+				if [ -z "$_inp_cmds" ]; then
+					_inp_cmds=$_inp_cmd
+				else
+					_inp_cmds="$_inp_cmds
+$_inp_cmd"
+				fi
+				;;
+			root)
+				if [ "$_inp_rs" = root ]; then
+					if [ -z "$_inp_root" ]; then
+						_inp_root=$_inp_i
+					else
+						_inp_root="$_inp_root
+$_inp_i"
+					fi
+				fi
+				;;
+			load)
+				if [ "$_inp_load" = load ]; then
+					if [ -z "$_inp_lbls" ]; then
+						_inp_lbls=$_inp_lbl
+					else
+						_inp_lbls="$_inp_lbls and $_inp_lbl"
+					fi
+				fi
+				;;
+			esac
+			_inp_i=$((_inp_i + 1))
+		done
+		case $1 in
+		cmds) printf '%s' "$_inp_cmds" ;;
+		root) printf '%s' "$_inp_root" ;;
+		load) printf '%s' "$_inp_lbls" ;;
+		esac
+	}
 }
 
 # install_next_steps: the next steps, one command per line.

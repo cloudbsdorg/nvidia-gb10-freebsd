@@ -753,6 +753,186 @@ fi
 [ -s "$S/q.got" ] && cmp -s "$S/q.got" "$S/q.want" && ok "tests/install-e2e/expected.manifest matches what install writes" \
     || bad "expected.manifest differs: $(diff "$S/q.want" "$S/q.got" | head -4 | tr '\n' ' ')"
 
+# ---- the linker that linked a module, and the status a test may report --
+
+# fn_extract FILE NAME...: the named top-level shell functions of FILE, so
+# a check can be called on its own, without running the whole script.
+fn_extract() {
+	_fe_file=$1
+	shift
+	for _fe_n in "$@"; do
+		awk -v n="$_fe_n" '$0 ~ "^" n "\\(\\) \\{" { copy = 1 } copy { print } copy && /^}/ { copy = 0 }' "$_fe_file"
+	done
+}
+
+# lld_check: the build refuses a module that LLD did not link.  The check
+# reads the artifact and the build's own record of what linked it: the
+# host's linker is not evidence about one file, so a module with no
+# linker identity of its own has to be one the build recorded.
+fn_extract "$repo/scripts/make.sh" die lld_fix lld_linker lld_record lld_check > "$S/lld-fns.sh"
+for _fn in die lld_fix lld_linker lld_record lld_check; do
+	( . "$S/lld-fns.sh"; command -v "$_fn" > /dev/null ) \
+	    || bad "the function $_fn is missing from make.sh"
+done
+
+# lld_refuses FILE: 0 when lld_check refuses FILE.  The check dies when it
+# refuses, so it runs in a subshell of its own, and the record it reads is
+# the planted one.
+LLD_PROV=$S/lld-provenance
+lld_refuses() {
+	( . "$S/lld-fns.sh"; lld_provenance=$LLD_PROV; lld_check "$1" ) >/dev/null 2>&1
+	[ $? -ne 0 ]
+}
+
+# lld_refuse_msg FILE: the message lld_check refuses FILE with.  The
+# message is what the person who runs the build reads, so it has to name
+# the fix and not only the verdict.
+lld_refuse_msg() {
+	( . "$S/lld-fns.sh"; lld_provenance=$LLD_PROV; lld_check "$1" ) 2>&1 >/dev/null
+}
+
+LLD=$S/lld
+mkdir -p "$LLD"
+printf 'int lld_probe(void) { return 0; }\n' > "$LLD/probe.c"
+: > "$LLD/provenance"
+if ! cc -c -o "$LLD/probe.o" "$LLD/probe.c" > "$LLD/cc.log" 2>&1; then
+	bad "the fixture object did not compile: $(tail -n 2 "$LLD/cc.log" | tr '\n' ' ')"
+else
+	OBJCOPY=$(command -v llvm-objcopy 2>/dev/null || command -v objcopy 2>/dev/null || true)
+	LLD_BIN=$(command -v ld.lld 2>/dev/null || true)
+	[ -n "$LLD_BIN" ] || LLD_BIN=/usr/bin/ld.lld
+	: > "$LLD/empty.ko"
+	printf 'Linker: GNU gold\n' > "$LLD/gold.txt"
+	printf 'Linker: LLD\n' > "$LLD/lld.txt"
+	if [ -n "$OBJCOPY" ]; then
+		"$OBJCOPY" --update-section ".comment=$LLD/gold.txt" "$LLD/probe.o" "$LLD/gold.o" >> "$LLD/cc.log" 2>&1
+		"$OBJCOPY" --update-section ".comment=$LLD/lld.txt" "$LLD/probe.o" "$LLD/lld.o" >> "$LLD/cc.log" 2>&1
+		"$OBJCOPY" --remove-section .comment "$LLD/probe.o" "$LLD/plain.o" >> "$LLD/cc.log" 2>&1
+	fi
+	if lld_refuses "$LLD/empty.ko"; then
+		ok "lld_check refuses a module that cannot be read as an ELF module"
+	else
+		bad "lld_check accepted an empty file"
+	fi
+	if lld_refuses "$LLD/probe.o"; then
+		ok "lld_check refuses a module with no linker identity and no record"
+	else
+		bad "lld_check accepted a module nothing recorded and no comment identifies"
+	fi
+	if [ -f "$LLD/gold.o" ] && lld_refuses "$LLD/gold.o"; then
+		ok "lld_check refuses a module whose comment names another linker"
+	else
+		bad "lld_check accepted a module linked by another linker"
+	fi
+	if [ -f "$LLD/lld.o" ] && ! lld_refuses "$LLD/lld.o"; then
+		ok "lld_check accepts a module whose comment says LLD linked it"
+	else
+		bad "lld_check refused a module linked by LLD"
+	fi
+	# The record ties a linker to one exact file: the same bytes under
+	# another name are not covered by it.
+	_h=$(sha256 -q "$LLD/probe.o")
+	printf '%s %s\n' "$_h" "$LLD_BIN" > "$LLD_PROV"
+	if ! lld_refuses "$LLD/probe.o"; then
+		ok "lld_check accepts a module the build recorded as LLD-linked"
+	else
+		bad "lld_check refused a module the build recorded as LLD-linked"
+	fi
+	if [ -f "$LLD/plain.o" ] && lld_refuses "$LLD/plain.o"; then
+		ok "lld_check refuses a file the record does not cover"
+	else
+		bad "lld_check accepted a file the record does not cover"
+	fi
+	if [ -x "$LLD_BIN" ]; then
+		printf '%s %s\n' "$_h" "$LLD/not-a-linker" > "$LLD_PROV"
+		if lld_refuses "$LLD/probe.o"; then
+			ok "lld_check refuses a module whose recorded linker is not LLD"
+		else
+			bad "lld_check accepted a module whose recorded linker is not LLD"
+		fi
+	else
+		bad "no LLD on this host ($LLD_BIN): the linker check cannot be proved"
+	fi
+	# The linker the build links with has to be LLD, and the record has to
+	# name it by its absolute path.
+	_ll=$(. "$S/lld-fns.sh"; lld_linker 2>/dev/null)
+	case $_ll in
+	/*) ;;
+	*) _ll= ;;
+	esac
+	if [ -n "$_ll" ]; then
+		ok "the linker the build links with is LLD, named by an absolute path"
+	else
+		bad "the linker the build links with is not LLD on this host"
+	fi
+	mkdir -p "$LLD/fakebin"
+	printf '#!/bin/sh\necho "GNU ld (GNU Binutils) 2.40"\n' > "$LLD/fakebin/ld"
+	chmod 755 "$LLD/fakebin/ld"
+	if ( PATH="$LLD/fakebin:$PATH"; . "$S/lld-fns.sh"; lld_linker ) >/dev/null 2>&1; then
+		bad "the build would link with a linker that is not LLD"
+	else
+		ok "the build refuses a linker that is not LLD"
+	fi
+	# A refusal names the fix: the message the build stops with is the
+	# only thing the person who runs it has, so it has to say what to do
+	# and not only what is wrong.
+	: > "$LLD_PROV"
+	_msg=$(lld_refuse_msg "$LLD/probe.o")
+	case $_msg in
+	*"PATH"*"make build"*) ok "a refusal names the fix: PATH and the command to run" ;;
+	*) bad "a refusal does not name the fix: [$_msg]" ;;
+	esac
+	if [ -f "$LLD/gold.o" ]; then
+		_msg=$(lld_refuse_msg "$LLD/gold.o")
+		case $_msg in
+		*"GNU gold"*) ok "a refusal names the linker that linked the module" ;;
+		*) bad "a refusal does not name the other linker: [$_msg]" ;;
+		esac
+	fi
+	_msg=$( PATH="$LLD/fakebin:$PATH"; . "$S/lld-fns.sh"; lld_linker 2>&1 )
+	case $_msg in
+	*"PATH"*"make build"*) ok "the refusal of a linker that is not LLD names the fix" ;;
+	*) bad "the refusal of a linker that is not LLD does not name the fix: [$_msg]" ;;
+	esac
+fi
+
+# 77 is the conventional skip status, but only a test that says it skipped
+# may use it: a test that exits 77 without saying so never ran its
+# assertions, and that is a failure, not a skip.  The rule is checked on a
+# planted tree, so the real tests are not touched.
+FK=$S/fake-repo
+mkdir -p "$FK/scripts" "$FK/tests"
+cp "$repo/scripts/make.sh" "$repo/scripts/lib.sh" "$FK/scripts/"
+cp "$repo/SOURCES" "$FK/SOURCES"
+
+# a test that exits 77 and says nothing: a failure, not a skip
+printf '#!/bin/sh\nexit 77\n' > "$FK/tests/zz_quiet_test.sh"
+_out=$(env MK_WORK="$S/fake-work-quiet" sh "$FK/scripts/make.sh" test 2>&1); _rc=$?
+if [ "$_rc" != 0 ] && printf '%s\n' "$_out" | grep -q 'FAIL  zz_quiet_test'; then
+	ok "a test that exits 77 without saying it skipped fails the run"
+else
+	bad "a test that exits 77 without a skip reason (rc $_rc): $(printf '%s\n' "$_out" | tr '\n' ' ')"
+fi
+
+# a test that is allowed to skip and says so: a skip
+rm -f "$FK/tests/zz_quiet_test.sh"
+printf '#!/bin/sh\necho "skip: no such tool on this host"\nexit 77\n' > "$FK/tests/abi_layout_test.sh"
+_out=$(env MK_WORK="$S/fake-work-skip" sh "$FK/scripts/make.sh" test 2>&1); _rc=$?
+if [ "$_rc" = 0 ] && printf '%s\n' "$_out" | grep -q 'skip  abi_layout_test'; then
+	ok "a test that says it skipped is a skip, not a failure"
+else
+	bad "a test that says it skipped (rc $_rc): $(printf '%s\n' "$_out" | tr '\n' ' ')"
+fi
+
+# a test that is allowed to skip but does not say so: a failure
+printf '#!/bin/sh\nexit 77\n' > "$FK/tests/abi_layout_test.sh"
+_out=$(env MK_WORK="$S/fake-work-unsaid" sh "$FK/scripts/make.sh" test 2>&1); _rc=$?
+if [ "$_rc" != 0 ] && printf '%s\n' "$_out" | grep -q 'FAIL  abi_layout_test'; then
+	ok "a test that exits 77 without saying so fails, even when it may skip"
+else
+	bad "a test that exits 77 without saying so (rc $_rc): $(printf '%s\n' "$_out" | tr '\n' ' ')"
+fi
+
 if [ "$fail" = 0 ]; then
 	echo "make_contract_test: PASS"
 	exit 0

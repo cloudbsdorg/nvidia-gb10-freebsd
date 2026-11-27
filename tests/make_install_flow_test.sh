@@ -1731,12 +1731,12 @@ fi
 fn_extract "$repo/scripts/make.sh" install_summary install_next_list install_next_steps \
     install_next_note install_next_root_note install_next_staged_note install_next_notes \
     install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
-    install_next_add install_next_render install_resume_command \
+    install_next_add install_next_render install_next_parse install_resume_command \
     >> "$S/hook-fns.sh"
 for _fn in install_summary install_next_list install_next_steps install_next_note \
     install_next_root_note install_next_staged_note install_next_notes \
     install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
-    install_next_add install_next_render install_resume_command; do
+    install_next_add install_next_render install_next_parse install_resume_command; do
 	( . "$S/hook-fns.sh"; command -v "$_fn" > /dev/null ) \
 	    || bad "the function $_fn is missing from make.sh"
 done
@@ -1937,6 +1937,45 @@ if [ ! -e "$SENT" ]; then
 else
 	bad "the command for a PREFIX with a metacharacter ran it: [$_inj_last]"
 fi
+# A PREFIX with a command substitution in it is data: the substitution is
+# never run, and the rendered command holds it as text.
+SENT2=$INJ/sentinel-substitution
+_sub=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= \
+    MK_PREFIX="$INJ/pfx\$(touch $SENT2)" \
+    sh "$repo/scripts/make.sh" _next-steps 2>/dev/null)
+if [ ! -e "$SENT2" ] && printf '%s\n' "$_sub" | grep -qF '$(touch '; then
+	ok "a PREFIX with a command substitution in it is data: it is not run"
+else
+	bad "a PREFIX with a command substitution ran it: [$_sub]"
+fi
+# The same with a backtick: the record holds it as text as well.
+SENT3=$INJ/sentinel-backtick
+_sub2=$(env GB10_TEST_HOOKS=1 GB10_TEST_ROOT_METHOD=doas MK_DESTDIR= \
+    MK_PREFIX="$INJ/pfx\`touch $SENT3\`" \
+    sh "$repo/scripts/make.sh" _next-steps 2>/dev/null)
+if [ ! -e "$SENT3" ] && printf '%s\n' "$_sub2" | grep -qF '`touch '; then
+	ok "a PREFIX with a backtick in it is data: it is not run"
+else
+	bad "a PREFIX with a backtick ran it: [$_sub2]"
+fi
+# A record never carries a raw dollar sign or a raw backtick: every one of
+# them is escaped, so no shell that reads a record can expand what the
+# user typed, and the bytes round-trip.
+_rec_in='a$(touch x)b`touch y`c'
+_rec_enc=$(. "$S/hook-fns.sh"; blk_esc "$_rec_in")
+_rec_rt=$(. "$S/hook-fns.sh"; blk_unesc "$_rec_enc")
+_rec_raw=$(printf '%s' "$_rec_enc" | LC_ALL=C awk '{
+	n = length($0)
+	for (i = 1; i <= n; i++) {
+		c = substr($0, i, 1)
+		if ((c == "$" || c == "`") && (i == 1 || substr($0, i - 1, 1) != "\\")) bad = 1
+	}
+} END { print bad + 0 }')
+if [ "$_rec_raw" = 0 ] && [ "$_rec_rt" = "$_rec_in" ]; then
+	ok "a record escapes every dollar sign and backtick, and gives the bytes back"
+else
+	bad "a record carries a raw dollar sign or backtick: [$_rec_enc]"
+fi
 # A PREFIX with a newline in it is refused: the next steps travel one
 # command per line, and a newline in a path would make two of them.
 _nl=$(env GB10_TEST_HOOKS=1 MK_DESTDIR= MK_PREFIX="$INJ/pfx
@@ -1994,7 +2033,7 @@ fi
 cp "$repo/scripts/make.sh" "$S/make-extra-step.sh"
 sed "s|^\tinstall_next_add 'the firmware setting'|\tinstall_next_add 'a first check' 'true' '' ''\n&|" \
     "$S/make-extra-step.sh" > "$S/make-extra-step.patched.sh"
-fn_extract "$S/make-extra-step.patched.sh" install_next_list install_next_add install_next_render \
+fn_extract "$S/make-extra-step.patched.sh" install_next_list install_next_add install_next_render install_next_parse \
     >> "$S/hook-fns.sh"
 _extra=$( . "$S/hook-fns.sh"; root_method() { printf 'none\n'; }; DESTDIR=; PREFIX=/usr/local; \
     install_next_list installed; printf '%s' "$install_next_root" )
@@ -2077,7 +2116,7 @@ else bad "the blocked summary: $(head -c 200 "$S/blocked-live.json")"; fi
 fn_extract "$repo/scripts/make.sh" install_summary install_next_list install_next_steps \
     install_next_note install_next_root_note install_next_staged_note install_next_notes \
     install_root_method install_nvrm_command install_schema_fields root_cmd su_quote \
-    install_next_add install_next_render install_resume_command \
+    install_next_add install_next_render install_next_parse install_resume_command \
     > "$S/summary-fns.sh"
 summary_outcome() {
 	(

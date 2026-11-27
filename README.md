@@ -8,7 +8,9 @@ amd64**: NVIDIA's FreeBSD OS layer, linked to NVIDIA's open GPU kernel module co
 `nv-kernel-aarch64.o` and `nv-kernel-amd64.o`. On amd64 we still rebuild that open
 core rather than linking NVIDIA's prebuilt `nv-kernel.o`, so both architectures take
 the same path, from the same pinned source, and the kernel modules are linked with
-the base system's `ld.lld` (the build refuses a module that LLD did not link).
+the base system's `ld.lld` (the build refuses a module that LLD did not link: the
+module's own comment or the build's record of the linker that linked that exact file
+has to name LLD, and a module that is not a readable ELF module fails the build).
 Driver version **580.178.04**.
 
 NVIDIA's sources and binaries are not stored here. The scripts fetch them and check them
@@ -133,7 +135,8 @@ nvrm-info --json
 
 With a PREFIX of your own, the last line names the installed tool
 (`'/opt/gb10/sbin/nvrm-info' --json`), because it is not on your PATH. The path is quoted,
-so a prefix with a space in it is still one command.
+so a prefix with a space in it is still one command. A prefix is data: a command
+substitution or a backtick in it is never run, and it reaches the command as text.
 
 ### Blocked
 
@@ -188,7 +191,9 @@ The prerequisite phase does all of this without separate manual steps:
 - installs the packages the build needs with `pkg` (`git` and `gmake`; on a system
   where pkg is not set up yet it bootstraps pkg first). The compiler and linker are the base
   system's `cc` and `ld.lld`; `/usr/bin` comes first on `PATH`, so a GNU `ld` from ports is never
-  used, and the build refuses a module that LLD did not link.
+  used, and the build refuses a module that LLD did not link (the linker that linked that
+  exact file has to be in the build's record; the host's own linker is no evidence about
+  one file).
 - fetches NVIDIA's FreeBSD driver tarball and `open-gpu-kernel-modules` 580.178.04, checked
   against the pins in `SOURCES`. The GSP firmware comes from that tarball; it is not shipped
   in this repository (its licence limits it to NVIDIA hardware), it is fetched on your machine.
@@ -729,7 +734,7 @@ comparison tables): [`docs/llm.md`](docs/llm.md).
 | `src/nvidia-drm-render/` | `nvidia-drm-render.h`, the render uAPI of nvidia-drm: layouts and ioctl numbers for the kernel work packages and the Mesa `nvdrm` backend; MIT |
 | `man/` | `nvidia_drm_render(4)`, the manual page of that interface; `nvidia(4)` and `nvidia_linux(4)`, the native driver and its Linux providers |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
-| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
+| `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh`. A test that skips prints a `skip` line of its own (the reason after it) and exits 77; a test that exits 77 without saying so fails the run, so a check that never ran can never look like an approved skip |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |

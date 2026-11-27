@@ -89,8 +89,12 @@ build: FAILED (make rc 1)
 On amd64 that prebuilt object is an amd64 object, so pass 1 may link it and exit 0.
 That is only a compile check: `build-stubs.sh` and the second `build-shim.sh` pass
 still replace it with the open core (`nv-kernel-gb10.o`) before `nvidia.ko` is the
-finished module. The second pass must print `build: OK`, and `readelf -p .comment`
-on the module must name LLD.
+finished module. The second pass must print `build: OK`, and the module must be one
+LLD linked. `make.sh` proves that from the module itself and from the record the
+build writes (`work/build/lld-provenance`): the module has to be a readable ELF
+module, and either its `.comment` names LLD or the record names the linker that
+linked that exact file. On FreeBSD 16 with LLD 21.1.8 the `.comment` names only the
+compiler, so the record is what the check reads there.
 
 Any other error, or a failure at any other step, means stop and investigate. The second pass
 links `nvidia.ko`. `build-stubs.sh` checks the core against the compiled OS layer between the
