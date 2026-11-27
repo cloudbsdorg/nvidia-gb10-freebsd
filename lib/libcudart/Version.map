@@ -1,0 +1,67 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * PROVISIONAL: CUDART_1.0 is frozen at the first package release, not
+ * before.
+ */
+CUDART_1.0 {
+	global:
+		cudaGetDeviceCount;
+		cudaGetDevice;
+		cudaSetDevice;
+		cudaGetDeviceProperties;
+		cudaDeviceReset;
+		cudaDeviceSynchronize;
+		cudaMalloc;
+		cudaFree;
+		cudaMallocHost;
+		cudaFreeHost;
+		cudaMemcpy;
+		cudaMemcpyAsync;
+		cudaMemset;
+		cudaMemsetAsync;
+		cudaStreamCreate;
+		cudaStreamCreateWithFlags;
+		cudaStreamDestroy;
+		cudaStreamSynchronize;
+		cudaStreamQuery;
+		cudaEventCreate;
+		cudaEventCreateWithFlags;
+		cudaEventDestroy;
+		cudaEventRecord;
+		cudaEventSynchronize;
+		cudaEventQuery;
+		cudaEventElapsedTime;
+		cudaLaunchKernel;
+		cudaFuncGetAttributes;
+		cudaFuncSetAttribute;
+		cudaOccupancyMaxActiveBlocksPerMultiprocessor;
+		cudaOccupancyMaxPotentialBlockSize;
+		cudaGetLastError;
+		cudaPeekAtLastError;
+		cudaGetErrorName;
+		cudaGetErrorString;
+		cudaRuntimeGetVersion;
+		cudaDriverGetVersion;
+		__cudaRegisterFatBinary;
+		__cudaRegisterFatBinaryEnd;
+		__cudaUnregisterFatBinary;
+		__cudaRegisterFunction;
+		__cudaRegisterVar;
+		__cudaRegisterManagedVar;
+		__cudaRegisterSurface;
+		__cudaRegisterTexture;
+		__cudaPushCallConfiguration;
+		__cudaPopCallConfiguration;
+		cudaNativeLastFailureReason;
+		cudaNativeKernelCount;
+		cudaNativeKernelName;
+		cudaNativeKernelHostStub;
+		cudaNativeFatBinaryCount;
+		cudaNativeFatBinaryMembers;
+		cudaNativeRuntimeVersion;
+		cudaNativeRuntimeVersionString;
+	local:
+		*;
+};

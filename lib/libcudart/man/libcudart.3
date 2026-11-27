@@ -1,0 +1,312 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.Dd November 27, 2026
+.Dt LIBCUDART 3
+.Os
+.Sh NAME
+.Nm libcudart
+.Nd native CUDA runtime, the Runtime API on our own libcuda
+.Sh LIBRARY
+libcudart-native
+.Sh SYNOPSIS
+.In cuda_runtime_api.h
+.Ft cudaError_t
+.Fn cudaGetDeviceCount "int *count"
+.Ft cudaError_t
+.Fn cudaGetDevice "int *device"
+.Ft cudaError_t
+.Fn cudaSetDevice "int device"
+.Ft cudaError_t
+.Fn cudaGetDeviceProperties "struct cudaDeviceProp *prop" "int device"
+.Ft cudaError_t
+.Fn cudaDeviceReset void
+.Ft cudaError_t
+.Fn cudaDeviceSynchronize void
+.Ft cudaError_t
+.Fn cudaMalloc "void **ptr" "size_t size"
+.Ft cudaError_t
+.Fn cudaFree "void *ptr"
+.Ft cudaError_t
+.Fn cudaMallocHost "void **ptr" "size_t size"
+.Ft cudaError_t
+.Fn cudaFreeHost "void *ptr"
+.Ft cudaError_t
+.Fn cudaMemcpy "void *dst" "const void *src" "size_t count" "cudaMemcpyKind kind"
+.Ft cudaError_t
+.Fn cudaMemcpyAsync "void *dst" "const void *src" "size_t count" "cudaMemcpyKind kind" "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaMemset "void *dst" "int value" "size_t count"
+.Ft cudaError_t
+.Fn cudaMemsetAsync "void *dst" "int value" "size_t count" "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaStreamCreate "cudaStream_t *stream"
+.Ft cudaError_t
+.Fn cudaStreamCreateWithFlags "cudaStream_t *stream" "unsigned int flags"
+.Ft cudaError_t
+.Fn cudaStreamDestroy "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaStreamSynchronize "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaStreamQuery "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaEventCreate "cudaEvent_t *event"
+.Ft cudaError_t
+.Fn cudaEventCreateWithFlags "cudaEvent_t *event" "unsigned int flags"
+.Ft cudaError_t
+.Fn cudaEventDestroy "cudaEvent_t event"
+.Ft cudaError_t
+.Fn cudaEventRecord "cudaEvent_t event" "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaEventSynchronize "cudaEvent_t event"
+.Ft cudaError_t
+.Fn cudaEventQuery "cudaEvent_t event"
+.Ft cudaError_t
+.Fn cudaEventElapsedTime "float *ms" "cudaEvent_t start" "cudaEvent_t end"
+.Ft cudaError_t
+.Fn cudaLaunchKernel "const void *func" "dim3 gridDim" "dim3 blockDim" "void **args" "size_t sharedMem" "cudaStream_t stream"
+.Ft cudaError_t
+.Fn cudaFuncGetAttributes "struct cudaFuncAttributes *attr" "const void *func"
+.Ft cudaError_t
+.Fn cudaFuncSetAttribute "const void *func" "enum cudaFuncAttribute attr" "int value"
+.Ft cudaError_t
+.Fn cudaOccupancyMaxActiveBlocksPerMultiprocessor "int *numBlocks" "const void *func" "int blockSize" "size_t dynamicSMemSize"
+.Ft cudaError_t
+.Fn cudaOccupancyMaxPotentialBlockSize "int *minGridSize" "int *blockSize" "const void *func" "size_t dynamicSMemSize"
+.Ft cudaError_t
+.Fn cudaGetLastError void
+.Ft cudaError_t
+.Fn cudaPeekAtLastError void
+.Ft cudaError_t
+.Fn cudaGetErrorName "cudaError_t error" "const char **name"
+.Ft cudaError_t
+.Fn cudaGetErrorString "cudaError_t error" "const char **string"
+.Ft cudaError_t
+.Fn cudaRuntimeGetVersion "int *version"
+.Ft cudaError_t
+.Fn cudaDriverGetVersion "int *version"
+.Ft void **
+.Fn __cudaRegisterFatBinary "void *wrapper"
+.Ft void
+.Fn __cudaRegisterFatBinaryEnd "void **handle"
+.Ft void
+.Fn __cudaUnregisterFatBinary "void **handle"
+.Ft int
+.Fn __cudaRegisterFunction "void **handle" "const void *hostFunc" "const char *deviceFunc" "const char *deviceName" "int threadLimit" "void *tid" "void *bid" "void *blockDim" "void *gridDim" "void *wordSize"
+.Ft unsigned int
+.Fn __cudaPushCallConfiguration "dim3 gridDim" "dim3 blockDim" "size_t sharedMem" "void *stream"
+.Ft int
+.Fn __cudaPopCallConfiguration "dim3 *gridDim" "dim3 *blockDim" "size_t *sharedMem" "void **stream"
+.Ft const char *
+.Fn cudaNativeLastFailureReason void
+.Ft unsigned
+.Fn cudaNativeKernelCount void
+.Ft int
+.Fn cudaNativeKernelName "unsigned index" "char *buffer" "size_t size"
+.Ft int
+.Fn cudaNativeKernelHostStub "const void *hostStub" "char *buffer" "size_t size"
+.Ft unsigned
+.Fn cudaNativeFatBinaryCount void
+.Ft int
+.Fn cudaNativeFatBinaryMembers "unsigned index" "unsigned *members"
+.Ft int
+.Fn cudaNativeRuntimeVersion void
+.Ft const char *
+.Fn cudaNativeRuntimeVersionString void
+.Sh DESCRIPTION
+The
+.Nm
+library is the CUDA Runtime API of this project: the entry points a CUDA
+program calls, answered from the Driver API of
+.Xr libcuda 3 .
+It uses neither the Linux compatibility layer nor NVIDIA's CUDA libraries.
+The public header is
+.In cuda_runtime_api.h .
+The declarations carry no execution-space attribute: a function declared
+without one is a host function, which is what every entry point here is.
+All exported functions have the provisional symbol version
+.Dv CUDART_1.0 .
+.Pp
+The library is installed as
+.Dv libcudart-native.so.13
+with that soname.
+The soname is not
+.Dv libcudart.so.13 ,
+because the SDK tree ships a link-only stub under that name for the
+toolchain: a program that links against one of the two must never load the
+other.
+The directory that holds the runtime also holds a
+.Dv libcudart.so
+link, so that
+.Fl lcudart
+finds the runtime there; the soname of the library stays
+.Dv libcudart-native.so.13 .
+.Ss The driver underneath
+The runtime initializes the driver once per process, the first time a call
+needs it.
+The driver chooses its provider with
+.Ev CUDA_NATIVE_BACKEND ,
+and the synthetic provider takes the profiles of
+.Ev CUDA_NATIVE_FAKE_PROFILE ;
+see
+.Xr libcuda 3
+for the providers, the profiles and the visibility filter.
+When the driver does not start, every call that needs it reports the
+driver's failure and the reason of it.
+.Ss Devices and the primary context
+.Fn cudaGetDeviceCount
+reports the devices the driver exposes to this process.
+.Fn cudaGetDevice
+reports the device of the calling thread; the first device is the default
+of a thread that has not named one, and the primary context of that device
+is retained like the context of any other device.
+.Fn cudaSetDevice
+makes a device the device of the calling thread: the runtime retains the
+primary context of that device, the one the driver holds for it, and makes
+it the current context of the thread.
+The retained context belongs to the device and not to a thread, so two
+threads that use the same device share one context.
+.Fn cudaDeviceReset
+releases the primary context the runtime retained for the device of the
+calling thread.
+.Pp
+.Fn cudaGetDeviceProperties
+fills the properties of a device from the driver: the name, the total
+memory, the shared memory per block, the largest block, the warp size, the
+number of multiprocessors, the compute capability, whether the device is
+integrated and the PCI identity.
+A property the driver does not report stays at zero.
+The structure is this SDK's: a program built against another SDK must not
+exchange one with a program built against this one.
+.Ss Streams and events
+The default stream is the stream of handle zero, and it is the only stream
+a caller may name: the runtime holds no stream of its own, so any other
+handle is
+.Dv cudaErrorInvalidResourceHandle .
+The runtime holds no event at all, so every event handle is
+.Dv cudaErrorInvalidResourceHandle .
+Creating a stream or an event is refused with
+.Dv cudaErrorNotSupported ,
+because the driver cannot create one yet.
+.Ss What the driver cannot do yet
+A call that needs a driver entry point the driver does not have reports
+.Dv cudaErrorNotSupported
+and names the driver call that is missing.
+It never reports a success it did not achieve.
+The reason is readable with
+.Fn cudaNativeLastFailureReason ,
+and it names the driver call, for example
+.Dq cuMemAlloc
+for
+.Fn cudaMalloc .
+An argument the runtime can reject on its own is rejected before the
+driver is asked: a null output pointer is
+.Dv cudaErrorInvalidValue ,
+and an output the runtime does not change on failure keeps what it had.
+Releasing a null pointer is the one operation that succeeds without the
+driver:
+.Fn cudaFree
+and
+.Fn cudaFreeHost
+answer
+.Dv cudaSuccess
+for a null pointer, because there is nothing to release.
+.Pp
+A copy between two host addresses is the runtime's own work:
+.Fn cudaMemcpy
+with
+.Dv cudaMemcpyHostToHost
+copies the bytes and reports
+.Dv cudaSuccess .
+Every other direction needs the driver and is refused.
+.Ss The error of a thread
+The error state of the runtime is per thread.
+A call that fails records its error and the reason of it in the calling
+thread.
+.Fn cudaGetLastError
+reports that error and clears it;
+.Fn cudaPeekAtLastError
+reports it and keeps it.
+A successful call does not clear the error of the thread.
+The reason of the failure goes with the error: reading the error with
+.Fn cudaGetLastError
+takes the reason away as well.
+The two error queries,
+.Fn cudaGetErrorName
+and
+.Fn cudaGetErrorString ,
+answer about a code and leave the error state of the thread alone.
+An unknown code is
+.Dv cudaErrorInvalidValue
+and the output is set to null.
+.Ss The registration contract of clang's CUDA mode
+The generated code of a CUDA module registers its fat binary with
+.Fn __cudaRegisterFatBinary ,
+registers every kernel of it with
+.Fn __cudaRegisterFunction ,
+and ends the registration with
+.Fn __cudaRegisterFatBinaryEnd .
+The runtime keeps the registrations: the host stub of a kernel, the
+pointer a launch names, and the device name the fat binary gives the
+kernel.
+A launch is answered by looking its host stub up in that table.
+The configuration of a launch is pushed with
+.Fn __cudaPushCallConfiguration
+and popped with
+.Fn __cudaPopCallConfiguration ;
+it is per thread, so two threads that launch at the same time have their
+own configuration.
+.Pp
+The runtime does not load the images of a fat binary: the driver cannot
+load a module yet.
+A launch of a registered kernel therefore stops at that limit, reports
+.Dv cudaErrorNotSupported ,
+and names the driver call that is missing.
+A launch of a host stub that names no registered kernel is
+.Dv cudaErrorInvalidResourceHandle .
+.Ss The cuda-native extensions
+.Fn cudaNativeLastFailureReason
+returns the reason of the last failure of the calling thread, or null when
+the thread has no failure to report.
+.Fn cudaNativeKernelCount
+returns the number of kernels the registration contract registered.
+.Fn cudaNativeKernelName
+writes the device name of the registered kernel at the given index into
+the caller's buffer, whole or not at all, and returns nonzero when it
+wrote the whole of it.
+.Fn cudaNativeKernelHostStub
+writes the device name of the kernel the given host stub belongs to, whole
+or not at all.
+.Fn cudaNativeFatBinaryCount
+returns the number of fat binaries the registration contract registered.
+.Fn cudaNativeFatBinaryMembers
+writes the number of members of the fat binary at the given index and
+returns nonzero when it wrote it.
+.Fn cudaNativeRuntimeVersion
+returns the release of the runtime as major * 10000 + minor * 100 + patch,
+and
+.Fn cudaNativeRuntimeVersionString
+returns the same release as text.
+The two come from the one macro of the driver header, so the number and
+the text cannot disagree.
+.Sh RETURN VALUES
+Functions return
+.Dv cudaSuccess
+on success or a
+.Vt cudaError_t
+error value.
+Unless documented otherwise, output pointers must not be null and are not
+changed on failure.
+.Sh ENVIRONMENT
+The runtime reads no environment variable of its own.
+The provider, the profiles and the visibility filter are the driver's, and
+they are described in
+.Xr libcuda 3 .
+.Sh SEE ALSO
+.In cuda.h ,
+.In cuda_runtime_api.h ,
+.Xr libcuda 3 ,
+.Xr cuda-native-info 1
+.Sh HISTORY
+This clean-room runtime first appeared in cuda-native 0.1.0.
+Its provider ABI and symbol version remain provisional until the first
+package release.

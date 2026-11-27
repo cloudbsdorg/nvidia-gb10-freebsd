@@ -109,3 +109,34 @@ no comments; `mksdk.sh` generates it from `cuda.h`.
 The test checks this. It fails if any file under `lib/cuda-native` or `tests/cuda-native` lacks
 the header, names NVIDIA Corporation, or carries another copyright line in any spelling. Two
 planted mutants prove that the check works.
+
+# Provenance: the native CUDA runtime, libcudart (Track #2430)
+
+## Consulted (read)
+
+- The CUDA headers of clang 23 in `/usr/local/llvm23/lib/clang/23/include/`
+  (`__clang_cuda_runtime_wrapper.h`; Apache-2.0 with LLVM exception), for the header names the
+  wrapper includes by name and the order in which it includes them.
+- The behaviour of the clang 23 CUDA mode, by experiment: the LLVM IR of a CUDA module
+  (`-S -emit-llvm` of a `.cu` compiled against our SDK), which shows the shape of the registration
+  contract — the wrapper the generated code hands to `__cudaRegisterFatBinary`, the host stub and
+  the device name it hands to `__cudaRegisterFunction`, and the pointer a launch names.
+- The public CUDA documentation, for the API names, the signatures, the documented values and the
+  documented behaviour: the Runtime API reference (the `cudaError_t` values, the copy kinds, the
+  stream and event flags, the device properties, the function attributes, the registration
+  functions) and the CUDA C++ Programming Guide (a function declared without an execution space is
+  a host function).
+- This repository's `lib/libcuda` (BSD-2-Clause): the Driver API the runtime answers from.
+
+## Not consulted
+
+No file of NVIDIA's CUDA toolkit was opened, copied or diffed: no `cudart` source of any kind, no
+header of the CUDA toolkit, no `libdevice.bc`, no binary. The runtime of this work package is our
+own implementation over our own `libcuda`; it is not a port, a wrapper or a reimplementation of
+NVIDIA's `libcudart`. The Linux CUDA tree was not read. No GPL source.
+
+## Licence of the files
+
+Everything under `lib/libcudart/` is ours, and so are `tests/libcudart/` and the CUDA program
+`tests/cuda-native/launch_libcudart.cu`. All of it is BSD-2-Clause, like `lib/libcuda` and
+`lib/cuda-native`, and every file carries the licence header.

@@ -634,6 +634,7 @@ comparison tables): [`docs/llm.md`](docs/llm.md).
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |
+| `lib/libcudart/` | the native CUDA Runtime API on our own `libcuda`: `libcudart-native.so.13`; see [libcudart](#libcudart-native-cuda-runtime-api) |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`PRIME-IMPORT.md`](docs/PRIME-IMPORT.md), cross-GPU buffer import |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; run each with `sh` |
 | `tests/cuda/` | Linux aarch64 CUDA test programs and the LD_PRELOAD shim ([`docs/llm.md`](docs/llm.md#cuda-linux-libcuda-through-the-linuxulator-linux-only-last-resort)); built by `scripts/build-linux-cuda.sh`, run by `scripts/run-linux-cuda.sh` |
@@ -867,3 +868,28 @@ The default `nvrm` provider is a stub; `CUDA_NATIVE_BACKEND=fake` selects synthe
 The C/C++ header is `lib/cuda-native/sdk/include/cuda.h`; manuals are `libcuda(3)` and `cuda-native-info(1)`.
 Tests run against the git index, not the working tree: run `git add` first.
 Run `TMPDIR=/path/to/existing/scratch sh tests/libcuda_test.sh`; the directory must already exist.
+
+## libcudart (native CUDA Runtime API)
+
+`lib/libcudart/` builds `libcudart-native.so.13`: the CUDA Runtime API surface a CUDA program
+calls, answered from `libcuda.so.1`. The header is
+`lib/cuda-native/sdk/include/cuda_runtime_api.h`; the manual is `libcudart(3)`.
+
+What the driver can do, the runtime does: the device count, the device of the thread, the primary
+context of a device, the properties of a device, the versions, and the error state of the thread.
+What the driver cannot do yet — memory on the device, copies to and from it, streams, events,
+occupancy and the launch of a kernel — is refused with `cudaErrorNotSupported`, and
+`cudaNativeLastFailureReason()` names the driver call that is missing. The runtime never reports a
+success it did not achieve. A copy between two host addresses is the runtime's own work.
+
+The soname of the runtime is `libcudart-native.so.13`, not `libcudart.so.13`: the SDK tree ships a
+link-only stub under that name for the toolchain, and a program that links against one of the two
+must never load the other. The directory that holds the runtime also holds a `libcudart.so` link,
+so `-lcudart` finds the runtime there.
+
+The registration contract of clang's CUDA mode is implemented: the fat binary, its kernels and the
+host stub a launch names are kept, and `cudaNativeKernelHostStub()` looks a kernel up by its host
+stub. A launch of a registered kernel stops at the limit of the driver and says so.
+
+Tests run against the git index, not the working tree: run `git add` first.
+Run `TMPDIR=/path/to/existing/scratch sh tests/libcudart_test.sh`; the directory must already exist.

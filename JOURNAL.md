@@ -819,3 +819,29 @@ The twenty findings of the gate round 1 review of the round-3 change are closed,
 Every check was red first: the pre-fix state of the finding was applied to the tree, the check failed for the reviewed reason, and the tree was put back.
 Suite: `sh tests/libcuda_test.sh` -> 261 checks passed, 0 failed (207 at the round-3 entry of 05:25Z).
 Next: gate round 2 with answers to the review, commit, push, PR.
+
+## 2026-11-27 native CUDA C1.5 (Track #2430): libcudart, the Runtime API on our own libcuda
+Worktree wt-cudart-2430, branch agent/2430-libcudart from agent/2428-libcuda-api (3292ecc).
+lib/libcudart is a new library: libcudart-native.so.13, the CUDA Runtime API surface a CUDA
+program calls, answered from libcuda.so.1. The soname is libcudart-native.so.13 and not
+libcudart.so.13, because the SDK tree ships a link-only stub under that name for the toolchain and
+a program that links against one of the two must never load the other; the directory that holds the
+runtime also holds a libcudart.so link, so -lcudart finds the runtime there.
+What the driver can do, the runtime does: the device count, the device of the thread, the primary
+context of a device, the properties of a device, the versions, the error state of the thread. What
+the driver cannot do yet - memory on the device, copies to and from it, streams, events, occupancy
+and the launch of a kernel - is refused with cudaErrorNotSupported, and cudaNativeLastFailureReason
+names the driver call that is missing. A copy between two host addresses is the runtime's own work.
+The registration contract of clang's CUDA mode is implemented: the fat binary, its kernels and the
+host stub a launch names are kept, and cudaNativeKernelHostStub looks a kernel up by its host stub.
+Headers: lib/cuda-native/sdk/include/cuda_runtime_api.h gains the whole Runtime API surface, and
+driver_types.h gains the error codes, the copy kinds, the flags, the device properties and the
+function attributes. The declarations carry no execution-space attribute: a function declared
+without one is a host function, and the runtime that implements them is plain C, where clang ignores
+the host attribute with a warning.
+Tests: tests/libcudart_test.sh (47 checks) on the fake backend, with the end-to-end clang -x cuda
+program (tests/cuda-native/launch_libcudart.cu) linked against the runtime, and three mutants that
+the suite catches: a runtime that claims a fake success, a runtime whose error state is shared by
+every thread, and a runtime that looks no launch up.
+Red first: the suite was run against a tree without the implementation and against a runtime that
+claims a fake success; both were red for the reviewed reason.
