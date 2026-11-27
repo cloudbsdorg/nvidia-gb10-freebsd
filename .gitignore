@@ -6,3 +6,14 @@ tmp/
 work/
 tests/install-e2e/results/*/checkout/
 __pycache__/
+# objects, libraries and compressed man pages from make run inside lib/
+lib/**/.depend
+lib/**/*.pico
+lib/**/*.pieo
+lib/**/*.a
+lib/**/*.so
+lib/**/*.so.[0-9]*
+lib/**/*.debug
+lib/**/*.full
+lib/**/*.[0-9].gz
+lib/libnvrm/nvrm-info/nvrm-info
