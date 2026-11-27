@@ -16,9 +16,9 @@
 + * memory peak).  Asking for more runs costs the same scan; unlike a larger
 + * nv_gb10_reclaim_run (BOOT 131) the runs need not be adjacent, so they
 + * still exist on fragmented memory.  A partial result counts as success.
-+ * Run-time sysctl; 1 = old behaviour, capped at 1024.
++ * Run-time sysctl, default 1 (16 measured slower, BOOT 135); max 1024.
 + */
-+static int nv_gb10_reclaim_runs = 16;
++static int nv_gb10_reclaim_runs = 1;
 +SYSCTL_INT(_hw, OID_AUTO, nvidia_gb10_reclaim_runs, CTLFLAG_RWTUN,
 +    &nv_gb10_reclaim_runs, 0,
 +    "GB10: runs freed per direct-map reclaim scan (1 = old behaviour)");
