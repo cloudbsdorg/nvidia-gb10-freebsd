@@ -935,6 +935,10 @@ toolkit is used. The compiler is clang from the ports `llvm23` package (`pkg ins
 `/usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native --cuda-gpu-arch=sm_121 --cuda-device-only -S -o x.ptx x.cu`
 emits PTX for the GB10, and `sm_120` emits it for the RTX 50 series (`sm_120a` and `sm_121a` work too).
 The stub `ptxas`/`fatbinary` tools and `libcudart` let clang fully compile and link, but every launch returns `cudaErrorNotSupported` (801); the libdevice math library, real compiler and runtime, device execution and `libcuda` are not there yet.
+The SDK headers declare the device atomic family of the CUDA C++ Programming Guide: `atomicAdd`, `atomicSub`, `atomicExch`, `atomicMin`, `atomicMax`, `atomicInc`, `atomicDec`, `atomicCAS`, `atomicAnd`, `atomicOr` and `atomicXor`, each in the types the guide gives it and in three scopes (the device scope, `_block` and `_system`).
+Their bodies are clang's own NVVM atomic builtins, so the device scope lowers to a system-scope PTX instruction: the results are correct, but an atomic may be slower than in CUDA.
+The float and the double minimum and maximum are a compare-and-swap loop, as in CUDA, because the PTX ISA has no float minimum and no float maximum; the subtraction is the addition of the negated value, as in CUDA.
+`cuda-native-toolchain(7)` has the whole family and what each of them lowers to.
 `fatbinary` is now a C program that collects the device images into one container of our own: LLVM's OffloadBinary layout, version 2, documented in `nvfatbin(5)`.
 It bundles only our own cubins, so the device image of a `-emit-llvm` compile (an LLVM IR file) is refused with `not a cuda-native cubin`; use `-c` or `-o` to build an object or an executable.
 Each member records its triple, its architecture, its format and the SHA-256 of its image, and a reader refuses any container that fails one of the checks `nvfatbin(5)` lists.

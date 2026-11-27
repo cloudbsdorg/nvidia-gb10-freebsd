@@ -201,6 +201,115 @@ sh lib/cuda-native/mksdk.sh obj/cuda-native
 /usr/local/llvm23/bin/clang++ -x cuda --cuda-path=obj/cuda-native \e
     --cuda-gpu-arch=sm_121 --cuda-device-only -S -o vadd.ptx vadd.cu
 .Ed
+.Sh DEVICE ATOMICS
+The SDK headers declare the device atomic family of the CUDA C++ Programming
+Guide:
+.Fn atomicAdd ,
+.Fn atomicSub ,
+.Fn atomicExch ,
+.Fn atomicMin ,
+.Fn atomicMax ,
+.Fn atomicInc ,
+.Fn atomicDec ,
+.Fn atomicCAS ,
+.Fn atomicAnd ,
+.Fn atomicOr
+and
+.Fn atomicXor .
+.Pp
+.Fn atomicAdd
+and
+.Fn atomicSub
+take an
+.Va int ,
+.Va unsigned int ,
+.Va unsigned long long ,
+.Va float
+or a
+.Va double .
+.Fn atomicExch
+takes an
+.Va int ,
+.Va unsigned int ,
+.Va unsigned long long
+or a
+.Va float .
+.Fn atomicMin
+and
+.Fn atomicMax
+take an
+.Va int ,
+.Va unsigned int ,
+.Va long long ,
+.Va unsigned long long ,
+.Va float
+or a
+.Va double .
+.Fn atomicInc
+and
+.Fn atomicDec
+take an
+.Va unsigned int .
+.Fn atomicCAS
+takes an
+.Va int ,
+.Va unsigned int ,
+.Va unsigned long long
+or an
+.Va unsigned short .
+.Fn atomicAnd ,
+.Fn atomicOr
+and
+.Fn atomicXor
+take an
+.Va int ,
+.Va unsigned int
+or an
+.Va unsigned long long .
+.Pp
+Each of them exists in three scopes: the device scope (the name without a
+suffix), the block scope (the name with
+.Ql _block
+appended) and the system scope (the name with
+.Ql _system
+appended).
+The bodies are clang's own NVVM atomic builtins, which the NVPTX backend
+lowers to the
+.Ql atom
+instructions of the PTX ISA.
+The device scope and the system scope both lower to a system-scope
+instruction and the block scope to a block-scope one, so the device scope is
+stronger than the scope CUDA defines: the results are correct, but the
+atomic may be slower.
+.Pp
+Three of them have no instruction of their own in the PTX ISA and are built
+from the ones there are, as CUDA builds them: the subtraction is the
+addition of the negated value, the exchange of a float is the exchange of
+its bit pattern, and the minimum and the maximum of a float and of a double
+are a compare-and-swap loop.
+The compare and swap of an unsigned short is a masked 32 bit one, because
+the PTX ISA has no 16 bit compare and swap.
+.Pp
+.Fn atomicInc
+and
+.Fn atomicDec
+are the compiler's own increment and decrement instructions,
+.Ql atom.inc.u32
+and
+.Ql atom.dec.u32 .
+The CUDA C++ Programming Guide describes these two with a formula that
+counts a counter down to zero instead, which the compiler's instructions do
+not compute: a counter that counts down must be written with
+.Fn atomicAdd
+or with a compare and swap.
+.Pp
+The half precision forms are not there: clang has no atomic of a 16 bit
+float, and the SDK has no
+.Va __half
+type yet.
+The float2 and float4 forms of
+.Fn atomicAdd
+are clang's own.
 .Sh SEE ALSO
 .Xr clang 1 ,
 .Xr cuda-objdump 1 ,
@@ -245,8 +354,11 @@ There is no general CUDA runtime implementation and no
 yet.
 .El
 .Pp
-The headers declare only what clang's wrapper and the test kernels need.
+The headers declare the atomic family of the
+.Sx DEVICE ATOMICS
+section and what clang's wrapper and the test kernels need.
+The
 .Fn atomicAdd
-lowers to a system-scope atomic.
+of that section lowers to a system-scope atomic.
 That is stronger than the device scope CUDA defines, so the results are
 correct but it may be slower; a later release changes it.
