@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "model": "fault-device-lost",
+  "description": "One card: the GeForce RTX 5060 Ti, with the device lost. The RM refuses the card: it is not in the card list, no GPU is attached, and the controls that need it answer that the object is not found. This is the fault a driver must survive.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": ["rtx5060ti.json"],
+  "faults": [
+    {
+      "kind": "device_lost",
+      "card": "nvidia0"
+    }
+  ]
+}

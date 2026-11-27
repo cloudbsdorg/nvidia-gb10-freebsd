@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "model": "fault-alloc-refused",
+  "description": "One card: the GeForce RTX 5060 Ti, with the allocations refused. The RM answers NV_ERR_INSUFFICIENT_RESOURCES to every allocation: a client that cannot get its memory must fail, not hang.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": ["rtx5060ti.json"],
+  "faults": [
+    {
+      "kind": "alloc_refused",
+      "card": "nvidia0"
+    }
+  ]
+}

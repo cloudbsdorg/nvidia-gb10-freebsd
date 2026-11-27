@@ -499,11 +499,33 @@ json_str() {
 	printf '%s' "$1" | esc_bytes json
 }
 
+# gpu_seam_pciconf: the pciconf(8) output of the GPU mock when GPU_MOCK names
+# a model, else the output of the real pciconf(8).  It is the one seam: the
+# decision code, the preflight, the card check and nvrm-info read the
+# hardware of the model through it.  With GPU_MOCK unset there is no mock and
+# nothing changes.
+gpu_seam_pciconf() {
+	if [ -n "${GPU_MOCK:-}" ]; then
+		_bin=${GPU_MOCK_BIN:-}
+		if [ -z "$_bin" ]; then
+			for _c in /usr/local/bin/gpu-mock \
+			    "$repo/src/gb10-gpu-mock/build/gpu-mock"; do
+				[ -x "$_c" ] && { _bin=$_c; break; }
+			done
+		fi
+		if [ -n "$_bin" ]; then
+			"$_bin" pciconf "$@"
+			return $?
+		fi
+	fi
+	pciconf "$@"
+}
+
 # nvidia_devices: one line "selector vendor device class" per NVIDIA display
 # device pciconf(8) reports (vendor 0x10de, class 0x03); never a guessed
 # device node.  Fails when pciconf itself fails.
 nvidia_devices() {
-	_pci=$(pciconf -l 2>/dev/null) || return 1
+	_pci=$(gpu_seam_pciconf -l 2>/dev/null) || return 1
 	printf '%s\n' "$_pci" | awk '
 		{
 			sel = $1; sub(/:$/, "", sel); v = ""; d = ""; c = ""

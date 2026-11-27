@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "model": "rx7600",
+  "description": "One card: the AMD Radeon RX 7600 (Navi 33) of the boot capture of 2026-11-22. No provider of ours claims vendor 0x1002, so the decision on this card is not_claimed: the mock publishes no node for it and the RM never attaches it.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "cards": [
+    {
+      "name": "amd0",
+      "vendor_id": "0x1002",
+      "device_id": "0x7480",
+      "subsystem_vendor_id": "0x1849",
+      "subsystem_device_id": "0x5313",
+      "revision": "0xcf",
+      "pci": {
+        "domain": 12,
+        "bus": 3,
+        "slot": 0,
+        "function": 0,
+        "class": "0x030000"
+      },
+      "selector": "vgapci0",
+      "vendor_name": "Advanced Micro Devices, Inc. [AMD/ATI]",
+      "device_name": "Navi 33 [Radeon RX 7600/7600 XT/7600M XT/7600S / PRO W7600]",
+      "class_name": "display",
+      "subclass_name": "VGA",
+      "rm_gpu_id": 0,
+      "uuid": "GPU-00000000-0000-4000-8000-0000000000a0",
+      "unit": 0,
+      "bars": [
+        {
+          "index": 16,
+          "type": "Prefetchable Memory",
+          "range": 64,
+          "base": "0x300000000000",
+          "size": 268435456,
+          "enabled": true
+        },
+        {
+          "index": 24,
+          "type": "Prefetchable Memory",
+          "range": 64,
+          "base": "0x300010000000",
+          "size": 2097152,
+          "enabled": true
+        },
+        {
+          "index": 32,
+          "type": "I/O Port",
+          "range": 32,
+          "base": "0x4fffe000",
+          "size": 256,
+          "enabled": false
+        },
+        {
+          "index": 36,
+          "type": "Memory",
+          "range": 32,
+          "base": "0x40000000",
+          "size": 1048576,
+          "enabled": true
+        }
+      ]
+    }
+  ],
+  "faults": []
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "model": "gb10",
+  "description": "One card: the GB10 SoC of the DGX Spark (device id 0x2e12, GB20B). The values are the ones the repository's own fake backend states for its unified profile (lib/libnvrm/nvrm_fake.c) and the ones docs/RENDER-UAPI.md gives for the GB20B family (architecture 0x1b0 with implementation 0x0b, SM 12.1, unified memory: no VRAM, coherent). The UUID and the VBIOS are the synthetic ones of that profile: no real GB10 has been read.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": [
+    "nvidia-provider.json"
+  ],
+  "bases": [
+    {
+      "name": "blackwell-gb20b",
+      "generation": "blackwell",
+      "architecture": 432,
+      "implementation": 11,
+      "chip_id": 0,
+      "sm_version": {
+        "string": "12.1",
+        "major": 12,
+        "minor": 1,
+        "patch": 0
+      },
+      "gpc_count": 2,
+      "tpc_count": 14,
+      "gpc_mask": "0x3",
+      "tpc_masks": [
+        "0x1ff",
+        "0xff"
+      ],
+      "sm_per_tpc": 2,
+      "bios_revision": 2533760512,
+      "bios_oem_revision": 74,
+      "firmware_version": "580.178.04",
+      "classes": [
+        128,
+        8320,
+        52928,
+        52887,
+        51893,
+        51823
+      ],
+      "page_sizes": [
+        4096,
+        65536,
+        2097152
+      ],
+      "max_page_size": 2097152,
+      "capabilities": {
+        "soc": true,
+        "coherent_gpu_memory": true
+      }
+    }
+  ],
+  "boards": [
+    {
+      "name": "gb10-gb20b",
+      "base": "blackwell-gb20b",
+      "model_name": "NVIDIA GB10",
+      "vbios": "97.06.1e.00.4a",
+      "subsystem_vendor_id": "0x10de",
+      "subsystem_device_id": "0x0000",
+      "vram_bytes": 0,
+      "bar1_bytes": 0
+    }
+  ],
+  "cards": [
+    {
+      "name": "nvidia0",
+      "board": "gb10-gb20b",
+      "provider": "nvidia",
+      "vendor_id": "0x10de",
+      "device_id": "0x2e12",
+      "subsystem_vendor_id": "0x10de",
+      "subsystem_device_id": "0x0000",
+      "revision": "0xa1",
+      "pci": {
+        "domain": 0,
+        "bus": 1,
+        "slot": 0,
+        "function": 0,
+        "class": "0x030000"
+      },
+      "selector": "vgapci0",
+      "vendor_name": "NVIDIA Corporation",
+      "device_name": "GB20B [NVIDIA GB10]",
+      "class_name": "display",
+      "subclass_name": "VGA",
+      "rm_gpu_id": 131072,
+      "uuid": "GPU-00000000-0000-4000-8000-0000000000b2",
+      "unit": 0
+    }
+  ],
+  "faults": []
+}

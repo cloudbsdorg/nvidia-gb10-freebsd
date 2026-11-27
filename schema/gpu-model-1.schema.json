@@ -1,0 +1,535 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia:schema:gpu-model/1",
+  "title": "gpu-model file, major version 1, minor 0",
+  "description": "One model file of the GPU mock: the cards of one box, the providers that claim them, the generation each card belongs to and the faults the model scripts. The schema name is gpu-model.v1; the version below is the schema_version member of the file. Every version is a string plus integer major, minor and patch parts, so no consumer parses a version string to compare it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model",
+    "driver_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "model": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "driver_version": {
+      "$ref": "#/$defs/version"
+    },
+    "include": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "bases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/base"
+      }
+    },
+    "boards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/board"
+      }
+    },
+    "cards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/card"
+      }
+    },
+    "faults": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fault"
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch"
+      ],
+      "properties": {
+        "string": {
+          "type": "string"
+        },
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "patch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "generation": {
+      "enum": [
+        "maxwell",
+        "pascal",
+        "volta",
+        "turing",
+        "ampere",
+        "hopper",
+        "ada",
+        "blackwell"
+      ]
+    },
+    "capability": {
+      "enum": [
+        "dmabuf_export",
+        "ats",
+        "self_hosted",
+        "display_enabled",
+        "soc",
+        "coherent_gpu_memory",
+        "os_device_wc"
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "score",
+        "vendor_ids"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "score": {
+          "type": "integer"
+        },
+        "vendor_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "device_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "min_generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "generations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "firmware_available"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/generation"
+              },
+              "firmware": {
+                "type": "string"
+              },
+              "firmware_available": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "generation",
+        "architecture",
+        "implementation",
+        "classes",
+        "max_page_size"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "architecture": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "implementation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "chip_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "sm_version": {
+          "$ref": "#/$defs/version"
+        },
+        "gpc_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tpc_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gpc_mask": {
+          "$ref": "#/$defs/id"
+        },
+        "tpc_masks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "sm_per_tpc": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bios_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bios_oem_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "firmware_version": {
+          "type": "string"
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "page_sizes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "max_page_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dmabuf_export": {
+              "type": "boolean"
+            },
+            "ats": {
+              "type": "boolean"
+            },
+            "self_hosted": {
+              "type": "boolean"
+            },
+            "display_enabled": {
+              "type": "boolean"
+            },
+            "soc": {
+              "type": "boolean"
+            },
+            "coherent_gpu_memory": {
+              "type": "boolean"
+            },
+            "os_device_wc": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "base"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "base": {
+          "type": "string"
+        },
+        "model_name": {
+          "type": "string"
+        },
+        "vbios": {
+          "type": "string"
+        },
+        "subsystem_vendor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "subsystem_device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "vram_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bar1_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dmabuf_export": {
+              "type": "boolean"
+            },
+            "ats": {
+              "type": "boolean"
+            },
+            "self_hosted": {
+              "type": "boolean"
+            },
+            "display_enabled": {
+              "type": "boolean"
+            },
+            "soc": {
+              "type": "boolean"
+            },
+            "coherent_gpu_memory": {
+              "type": "boolean"
+            },
+            "os_device_wc": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "bar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "type",
+        "range",
+        "base",
+        "size"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string"
+        },
+        "range": {
+          "type": "integer",
+          "enum": [
+            32,
+            64
+          ]
+        },
+        "base": {
+          "$ref": "#/$defs/id"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vendor_id",
+        "device_id",
+        "pci",
+        "rm_gpu_id",
+        "uuid"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "board": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "vendor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "subsystem_vendor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "subsystem_device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "$ref": "#/$defs/id"
+        },
+        "pci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "domain",
+            "bus",
+            "slot",
+            "function",
+            "class"
+          ],
+          "properties": {
+            "domain": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "bus": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "slot": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "function": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "class": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        "selector": {
+          "type": "string"
+        },
+        "vendor_name": {
+          "type": "string"
+        },
+        "device_name": {
+          "type": "string"
+        },
+        "class_name": {
+          "type": "string"
+        },
+        "subclass_name": {
+          "type": "string"
+        },
+        "rm_gpu_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "irq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bars": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/bar"
+          }
+        }
+      }
+    },
+    "fault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "device_lost",
+            "alloc_refused",
+            "ioctl_failed"
+          ]
+        },
+        "card": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "nth": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "schema_version": "1.0",
+  "model": "turing",
+  "description": "One card: a GeForce RTX 2080 Ti (device id 0x1e04, TU10x). The device id and the name are from NVIDIA's own supported-gpus.json; the architecture value (TU100, 22) and the SM version (TU10x is 7.5) are the ones docs/DEVICE-DECISION.md and the repository's tables give. The VRAM, the revision and the PCI address of this board are not in our checked data: they are left out. The decision on this card is unsupported_firmware: the gsp_tu10x firmware is not built on this platform.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": [
+    "nvidia-provider.json"
+  ],
+  "bases": [
+    {
+      "name": "turing-tu10x",
+      "generation": "turing",
+      "architecture": 22,
+      "implementation": 0,
+      "chip_id": 0,
+      "sm_version": {
+        "string": "7.5",
+        "major": 7,
+        "minor": 5,
+        "patch": 0
+      },
+      "gpc_count": 1,
+      "tpc_count": 0,
+      "gpc_mask": "0x1",
+      "tpc_masks": [
+        "0x1"
+      ],
+      "sm_per_tpc": 0,
+      "firmware_version": "580.178.04",
+      "classes": [
+        128,
+        8320,
+        52928,
+        52887,
+        51893,
+        51823
+      ],
+      "page_sizes": [
+        4096,
+        65536,
+        2097152
+      ],
+      "max_page_size": 2097152
+    }
+  ],
+  "boards": [
+    {
+      "name": "rtx2080ti-tu10x",
+      "base": "turing-tu10x",
+      "model_name": "NVIDIA GeForce RTX 2080 Ti",
+      "vbios": "??.??.??.??.??"
+    }
+  ],
+  "cards": [
+    {
+      "name": "nvidia0",
+      "board": "rtx2080ti-tu10x",
+      "provider": "nvidia",
+      "vendor_id": "0x10de",
+      "device_id": "0x1e04",
+      "pci": {
+        "domain": 0,
+        "bus": 2,
+        "slot": 0,
+        "function": 0,
+        "class": "0x030000"
+      },
+      "selector": "vgapci0",
+      "vendor_name": "NVIDIA Corporation",
+      "device_name": "TU104 [GeForce RTX 2080 Ti]",
+      "class_name": "display",
+      "subclass_name": "VGA",
+      "rm_gpu_id": 131072,
+      "uuid": "GPU-00000000-0000-4000-8000-0000000208a1",
+      "unit": 0
+    }
+  ],
+  "faults": []
+}

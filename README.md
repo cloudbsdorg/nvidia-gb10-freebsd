@@ -672,6 +672,7 @@ comparison tables): [`docs/llm.md`](docs/llm.md).
 | `man/` | `nvidia_drm_render(4)`, the manual page of that interface; `nvidia(4)` and `nvidia_linux(4)`, the native driver and its Linux providers |
 | `docs/` | how-tos: [`llm.md`](docs/llm.md), running LLMs; [`RENDER-UAPI.md`](docs/RENDER-UAPI.md), the full semantics of the render uAPI |
 | `tests/` | one `*_test.sh` per script, plus the ABI layout and symbol checks; `render_uapi_layout_test.sh` and `render_uapi_docs_test.sh` check the render uAPI header and its documents (`render_uapi_layout_test.sh` reads `SYSDIR`, a FreeBSD `src/sys` checkout for the kernel compile, and `RENDER_UAPI_ALLOW_SKIP=1` to accept a skipped check; both read `GB10_WORK` and `TMPDIR`); run each with `sh` |
+| `src/gb10-gpu-mock/` | the GPU mock: the model loader, the seam, the RM engine, the CUSE daemon and the seam shim (`gpu-mock`, `libgpubmockshim.so`); the models are in `data/models/` |
 | `src/gb10-pageimport/` | the pure core of the cross-GPU buffer import: scatter list to page array, wiring, the SGT entry points |
 | `src/gb10-uvm/` | the UVM interface of the OS layer: `nvUvmInterface*` exports, callback table, ISR hook |
 | `lib/cuda-native/` | the native CUDA SDK tree for clang (`--cuda-path`): our headers, the libdevice source, `mksdk.sh`; see [Native CUDA toolchain](#native-cuda-toolchain-cuda-native) |
@@ -833,6 +834,43 @@ API is tested without hardware; the RM backend is tested against a scripted kern
 (`tests/libnvrm/rm_mem_test.c`). The RM backend's channels are real RM objects: a channel
 group, a GPFIFO channel, the engine objects, a userd page and an error notifier in system
 memory, and a usermode page the doorbell is written in.
+
+## The GPU mock (no hardware, no driver)
+
+The mock stands in for an NVIDIA card when there is none: in a jail, in a CI run, and in the
+tests of the tools that read the hardware. It is a device, a set of answers and a set of ioctls,
+all made of one model file, and it loads no kernel module.
+
+- **the model** (`data/models/`) is data: one JSON file per card, in the schema `gpu-model.v1`. A
+  base is a generation, a board is a decorator over a base, a card is a board at a PCI address, and
+  a provider claims the cards of a vendor. The files and where every value comes from are in
+  [`data/models/README.md`](data/models/README.md).
+- **the daemon** (`gpu-mock daemon`) publishes `/dev/nvidiactl`, one node per card of the model,
+  `/dev/nvidia_modeset` and `/dev/nvidia_uvm` with `cuse(3)`, so a jail that is given the nodes
+  sees what a client of the driver sees. The two last nodes carry an underscore where the driver
+  has a dash: `cuse(3)` replaces a character it does not know in a device name with an
+  underscore, and the ruleset of the nodes must name the nodes that exist. The nodes go away with
+  the daemon: it destroys them before it leaves, so the next mock finds the names free.
+  `GPU_MOCK_PREFIX` names the nodes instead, for a host where the driver's names are taken or for
+  two mocks side by side.
+- **the seam** is one set of answers for the `pciconf(8)`, `devinfo(8)` and `hw.nvidia` /
+  `dev.nvidia` values, made of the same model. The seam shim (`libgpubmockshim.so`) gives them to
+  a program that reads the hardware through the system calls, so `nvrm-info --json` answers from
+  the model with no device and no right.
+- **the RM engine** answers the RM escape ioctls (`alloc`, `control`, `map`, `free`, the channel
+  calls) from the model, with the recorded replies of the boot capture of 2026-11-22 as the
+  values of the RTX 5060 Ti.
+
+Every answer of the mock says it is a mock, and no answer of the mock counts as a hardware
+result. `man/gpu-mock.1` has the details; `sh scripts/gpu-mock-up.sh up` is the one switch:
+`GPU_MOCK=<model>` starts the daemon, writes the devfs ruleset of the nodes and points the seam
+at the model. The switch needs the right to open `/dev/cuse` and the right to change the rules of
+the kernel, so it runs the daemon and the rules through `doas(1)` or `sudo(8)` when the user is
+not root. The ruleset is named `gpumock` (number 63): a jail takes it with `devfs_ruleset=63`,
+and the machine of the operator with `devfs_system_ruleset="gpumock"` in `rc.conf`. The pid file
+(`/var/run/gpu-mock.pid`) holds every mock that runs on the machine: its pid, the names of its
+nodes and the token of the run that started it, so two mocks live side by side and the switch
+stops the one with the names it was given.
 
 ## Native test boot (no Linux layer)
 

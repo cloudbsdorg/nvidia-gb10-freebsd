@@ -852,3 +852,50 @@ Next: the gate round 1 review is answered in full (ROUND-REPORT-3C.md carries th
 ## 2026-11-23 02:20Z follow-up merged with main again, PR 43 (#2378)
 - The 01:30Z checkpoint is over: the cbe6ca3 merge is committed as 25c145d (overlap gate a870276a), and main
   b1f8736 is merged in on top (only this journal conflicted). PR https://github.com/cloudbsdorg/nvidia-gb10-freebsd/pull/43.
+
+## 2026-11-26 GPU mock for jails and CI (#2461, agent/2461-gpu-mock)
+- The mock is user space only: the model files under data/models/ (one JSON per card, schema
+  gpu-model.v1), the seam (pciconf, devinfo, hw.nvidia / dev.nvidia answers from the model), the RM
+  engine (the RM escape ioctls from the model), the CUSE daemon (the nodes a jail sees) and the
+  seam shim (the answers to a program that reads the hardware through the system calls).
+- Fixed in this round, each with a test that fails without the fix:
+  - the RM engine wrote the attached GPU ids past the end of its list when a client asked for more
+    GPUs than the RM can hold (the attach ioctl's size is the number of ids): it refuses them now.
+  - the daemon left the errno of the engine behind: a refusal reached the client as ENXIO. The
+    daemon carries the errno in the CUSE error that holds it now (EINVAL, ENOMEM, EFAULT).
+  - the daemon read past what the client sent: the length of the argument is checked now.
+  - the seam shim did not answer access(2), so a program that looks for the node before it uses it
+    (libnvrm's rm backend does) found no driver and stopped: the shim answers it now.
+  - the daemon left its nodes in the kernel when it died: the mechanism does not take them away,
+    so the daemon destroys them before it leaves.
+- Fixed in the second part of the round, each with a test that fails without the fix:
+  - the ruleset of the nodes named the modeset node and the uvm node with a dash, but the
+    mechanism of cuse(3) replaces every character of a device name it does not know with an
+    underscore (cuse_str_filter() in the kernel): the rule never matched a node that exists.
+    The names of the nodes are the ones that exist now, and the ruleset names them.
+  - the one switch could not find the model in a checkout: the daemon looked for it in the
+    installed directory only. The tool finds the models of the checkout it was built in now
+    (the build script names the directory in a generated header).
+  - the switch applied the rules of the nodes with a command devfs(8) does not have, and it
+    applied them after the daemon had made the nodes. The rules are in force before the nodes
+    are made now, and the switch takes them away with the nodes.
+  - doas(1) and sudo(8) reset the environment of the command they run: the names of the nodes
+    and the model did not reach the daemon, which published the nodes of the driver instead of
+    the ones the switch asked for. The names travel with the command now.
+  - the daemon writes its own pid in a pid file: the helper that starts it is another process,
+    and its pid is not the pid of the daemon.
+  - a backgrounded shell function keeps the shell of the script waiting for it, and a caller
+    that reads the output of the switch waited for the daemon to leave. The daemon is started
+    with a plain command now.
+  - the pid file was the pid of one daemon, so a second mock could not run beside the first
+    (the daemon refuses to start when the file holds a live pid) and the switch killed the
+    wrong daemon when it stopped the wrong one. The file is a registry now: every line is a
+    pid, the names of the nodes of that mock and the token of the run that started it. The
+    daemon refuses to start only when a live mock holds the same names, two mocks with other
+    names live side by side, and the switch stops the mock with the names it was given.
+- The ruleset of the nodes is named gpumock and its number is 63 (the jail rules are 4, the
+  common rules 7 and the local rules 10): a jail takes it with devfs_ruleset=63.
+- The names of the nodes come from GPU_MOCK_PREFIX (the driver's names by default): a host whose
+  kernel still holds the nodes of a mock that was killed cannot use the names again.
+- The device index scan gate is a rule of this repository: no hard-coded /dev/nvidiaN in the
+  README, the man pages or the scripts. The mock's pages say "one node per card" instead.

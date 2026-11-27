@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "model": "pascal",
+  "description": "One card: a GeForce GTX 1080 (device id 0x1b80, GP100). The device id and the name are from NVIDIA's own supported-gpus.json; the architecture value (GP100, 19) is the one docs/DEVICE-DECISION.md gives. This card is refused: it is below the floor of the provider, and the Pascal generation has no GSP firmware at all.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": [
+    "nvidia-provider.json"
+  ],
+  "bases": [
+    {
+      "name": "pascal-gp100",
+      "generation": "pascal",
+      "architecture": 19,
+      "implementation": 0,
+      "chip_id": 0,
+      "gpc_count": 1,
+      "tpc_count": 0,
+      "gpc_mask": "0x1",
+      "tpc_masks": [
+        "0x1"
+      ],
+      "sm_per_tpc": 0,
+      "classes": [
+        128,
+        8320,
+        52928,
+        52887,
+        51893,
+        51823
+      ],
+      "page_sizes": [
+        4096,
+        65536,
+        2097152
+      ],
+      "max_page_size": 2097152
+    }
+  ],
+  "boards": [
+    {
+      "name": "gtx1080-gp100",
+      "base": "pascal-gp100",
+      "model_name": "NVIDIA GeForce GTX 1080",
+      "vbios": "??.??.??.??.??"
+    }
+  ],
+  "cards": [
+    {
+      "name": "nvidia0",
+      "board": "gtx1080-gp100",
+      "provider": "nvidia",
+      "vendor_id": "0x10de",
+      "device_id": "0x1b80",
+      "pci": {
+        "domain": 0,
+        "bus": 3,
+        "slot": 0,
+        "function": 0,
+        "class": "0x030000"
+      },
+      "selector": "vgapci0",
+      "vendor_name": "NVIDIA Corporation",
+      "device_name": "GP104 [GeForce GTX 1080]",
+      "class_name": "display",
+      "subclass_name": "VGA",
+      "rm_gpu_id": 131072,
+      "uuid": "GPU-00000000-0000-4000-8000-0000000108a1",
+      "unit": 0
+    }
+  ],
+  "faults": []
+}

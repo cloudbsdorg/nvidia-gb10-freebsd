@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "model": "nvidia-provider",
+  "description": "The provider record of NVIDIA: the cards it claims, the generations it drives and the firmware each of them needs. The floor and the firmware per generation are data, never a branch in the code. The provider claims vendor 0x10de only; no card of another vendor is claimed by it.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "providers": [
+    {
+      "name": "nvidia",
+      "score": 100,
+      "vendor_ids": ["0x10de"],
+      "min_generation": "turing",
+      "backends": ["rm-open-580"],
+      "generations": [
+        {"name": "turing", "firmware": "gsp_tu10x", "firmware_available": false},
+        {"name": "ampere", "firmware": "gsp_ga10x", "firmware_available": true},
+        {"name": "hopper", "firmware": "gsp_ga10x", "firmware_available": true},
+        {"name": "ada", "firmware": "gsp_ga10x", "firmware_available": true},
+        {"name": "blackwell", "firmware": "gsp_ga10x", "firmware_available": true}
+      ]
+    }
+  ]
+}

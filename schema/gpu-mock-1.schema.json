@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cloudbsd:nvidia:schema:gpu-mock/1",
+  "title": "gpu-mock output, major version 1, minor 0",
+  "description": "The document of the gpu-mock tool: the model it was given, the providers, the cards and the decision on each card. Every version is a string plus integer major, minor and patch parts. The document says it is a mock: \"mock\" is true and never false.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool",
+    "mock",
+    "model",
+    "driver_version",
+    "providers",
+    "cards",
+    "faults"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch",
+        "available"
+      ],
+      "properties": {
+        "string": {
+          "type": "string"
+        },
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "patch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tool": {
+      "const": "gpu-mock"
+    },
+    "mock": {
+      "const": true
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "file"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        }
+      }
+    },
+    "driver_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "string",
+        "major",
+        "minor",
+        "patch",
+        "available"
+      ],
+      "properties": {
+        "string": {
+          "type": "string"
+        },
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "patch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "score",
+          "vendor_ids",
+          "min_generation"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer"
+          },
+          "vendor_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "min_generation": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "name",
+          "provider",
+          "vendor_id",
+          "device_id",
+          "generation",
+          "architecture",
+          "implementation",
+          "vram_bytes",
+          "bar1_bytes",
+          "uuid",
+          "decision",
+          "reason"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "vendor_id": {
+            "type": "string"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "architecture": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "implementation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "vram_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bar1_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sm_version": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "string",
+              "major",
+              "minor",
+              "patch",
+              "available"
+            ],
+            "properties": {
+              "string": {
+                "type": "string"
+              },
+              "major": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minor": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "patch": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "available": {
+                "type": "boolean"
+              }
+            }
+          },
+          "uuid": {
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "supported",
+              "unsupported_generation",
+              "unsupported_firmware",
+              "not_claimed",
+              "unknown"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "faults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "card"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "device_lost",
+              "alloc_refused",
+              "ioctl_failed"
+            ]
+          },
+          "card": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

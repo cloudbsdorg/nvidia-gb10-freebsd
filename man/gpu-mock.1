@@ -1,0 +1,357 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-3-Clause
+.\"
+.\" gpu-mock - the GPU mock: the device nodes, the fake pciconf, devinfo and
+.\" sysctl answers, and the RM escape ioctls, all made of one model file.
+.\"
+.Dd November 26, 2026
+.Dt GPU-MOCK 1
+.Os
+.Sh NAME
+.Nm gpu-mock
+.Nd the GPU mock of the NVIDIA FreeBSD driver
+.Sh SYNOPSIS
+.Nm gpu-mock
+.Nm daemon
+.Op Ar model
+.Nm gpu-mock
+.Nm pciconf
+.Op Fl l | lv | lvb
+.Op Ar model
+.Nm gpu-mock
+.Nm devinfo
+.Op Ar selector
+.Op Ar model
+.Nm gpu-mock
+.Nm sysctl
+.Ar name
+.Op Ar model
+.Nm gpu-mock
+.Nm decide
+.Op Ar model
+.Nm gpu-mock
+.Nm nodes
+.Op Ar model
+.Nm gpu-mock
+.Nm model
+.Op Ar model
+.Nm gpu-mock
+.Fl -help
+.Sh DESCRIPTION
+The GPU mock is a device, a set of answers and a set of ioctls that stand
+for an NVIDIA card without one.
+.Pp
+It has three parts and no kernel module:
+.Bl -tag -width "the seam" -compact
+.It the model
+One JSON file per card, in the schema
+.Pa gpu-model.v1 :
+the cards of one box, the provider that claims them, the generation each
+card belongs to, the firmware that generation needs and the faults the model
+scripts.
+.It the seam
+The fake
+.Xr pciconf 8 ,
+.Xr devinfo 8
+and
+.Xr sysctl 8
+answers, made of the same model.
+.It the RM engine
+The RM escape ioctls of
+.Xr libnvrm 3 ,
+answered from the same model.
+.El
+.Pp
+The daemon publishes the nodes the real driver publishes,
+.Pa /dev/nvidiactl ,
+one node per card of the model,
+.Pa /dev/nvidia_modeset
+and
+.Pa /dev/nvidia_uvm ,
+with
+.Xr cuse 3 ,
+so a jail that is given the nodes sees what a client of the driver sees.
+The two last nodes carry an underscore where the driver has a dash: the
+mechanism of
+.Xr cuse 3
+replaces a character it does not know in a device name with an underscore.
+The nodes go away with the daemon: it destroys them before it leaves.
+The environment variable
+.Ev GPU_MOCK_PREFIX
+names the nodes instead, for a host where the driver's names are taken or
+for two mocks side by side.
+.Pp
+Every answer of the mock is a mock.
+It never counts as a hardware result, and every answer says so.
+.Sh THE SWITCH
+.Sy scripts/gpu-mock-up.sh
+is the one switch: it starts the daemon, it writes the ruleset of the nodes
+and it prints the environment of the seam.
+.Bd -literal -offset indent
+sh scripts/gpu-mock-up.sh up rtx5060ti
+sh scripts/gpu-mock-up.sh down
+.Ed
+.Pp
+The model is the value of
+.Ev GPU_MOCK ,
+else the argument.
+.Cm down
+stops the mock with the names of
+.Ev GPU_MOCK_PREFIX ,
+so the prefix of the mock that runs is the one it is given.
+The switch needs the right to open
+.Pa /dev/cuse
+and the right to change the rules of the kernel: it runs the daemon and the
+rules through
+.Xr doas 1
+or
+.Xr sudo 8
+when this user is not root, and it says so when neither is set up.
+.Pp
+The switch puts the rules of the nodes in force before the daemon makes
+the nodes, so the nodes are created with the mode and the group of the
+rules.
+The rules it puts in force are taken away by
+.Cm down ,
+the nodes and the rules with them.
+.Pp
+The ruleset of the nodes is a fragment of
+.Pa /etc/devfs.rules :
+the ruleset is named
+.Ql gpumock
+and its number is 63.
+A jail takes the rules with
+.Ql devfs_ruleset=63
+in its
+.Xr jail 8
+parameters, and the nodes themselves are given to the jail by binding them
+into it.
+The machine of the operator takes the rules at boot with
+.Ql devfs_system_ruleset="gpumock"
+in
+.Pa rc.conf .
+.Sh THE MODEL
+A model file names its schema, the model, the driver version, the providers,
+the bases, the boards, the cards and the faults.
+A base is a generation: its architecture, its implementation, its SM count,
+its class list and its page sizes.
+A board is a decorator over a base: it adds or overrides, and never decides.
+A card is a board at a PCI address, with the identity the RM gives it.
+.Pp
+A model file may name other model files in its
+.Pa include
+member; the box of a mixed machine is made of the cards of one file each.
+The provider, the base and the board of an included file are taken once, by
+name.
+.Pp
+The files of the repository are in
+.Pa data/models :
+one JSON per card, the provider record they share, a box that composes
+them, and two models that script a fault.
+.Sh THE SEAM
+The seam answers the hardware of the operating system layer:
+the
+.Xr pciconf 8
+and
+.Xr devinfo 8
+output, and the
+.Pa hw.nvidia *
+and
+.Pa dev.nvidia *
+system controls.
+.Pp
+The answers of the seam come from the model.
+The
+.Xr pciconf 8
+and
+.Xr devinfo 8
+answers open with a marker line that no real tool prints, and the version
+banner of the mock says
+.Dq GPU MOCK .
+.Pp
+The seam shim is the seam for a program that reads the hardware through the
+system calls:
+.Xr libnvrm 3
+and
+.Xr nvrm-info 8
+read the model when the shim is loaded.
+It answers the system controls of the model and the RM escape ioctls in the
+program's own process, so a CI run needs no device and no right.
+.Sh THE FAULTS
+A model scripts the faults it wants:
+.Bl -tag -width "device_lost" -compact
+.It device_lost
+The card is gone: the RM does not list it, and the controls that need it
+answer that the object is not found.
+.It alloc_refused
+Every allocation is refused with
+.Dv NV_ERR_INSUFFICIENT_RESOURCES .
+.It ioctl_failed
+The call itself fails.
+.El
+.Sh THE COMMANDS
+.Bl -tag -width "gpu-mock model" -compact
+.It Nm daemon
+Op Ar model
+Publish the nodes of the model and serve them.
+Needs the
+.Xr cuse 3
+module and the right to open
+.Pa /dev/cuse .
+.It Nm pciconf
+Op Fl l | lv | lvb
+Op Ar model
+The mock's
+.Xr pciconf 8
+answer.
+The flags are the ones of
+.Xr pciconf 8 .
+.It Nm devinfo
+Op Ar selector
+Op Ar model
+The mock's
+.Xr devinfo 8
+answer.
+.It Nm sysctl
+.Ar name
+Op Ar model
+The mock's
+.Xr sysctl 8
+answer.
+.It Nm decide
+Op Ar model
+The decision on every card of the model: whether a provider claims it,
+whether its generation is above the floor of the provider, and whether the
+firmware of that generation is built.
+.It Nm nodes
+Op Ar model
+The
+.Xr devfs.rules 5
+ruleset of the nodes of the model, the rules a jail that runs the mock's
+clients needs.
+.It Nm model
+Op Ar model
+The model as one JSON document.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width "GPU_MOCK_DIR" -compact
+.It Ev GPU_MOCK
+The model: a file, or a name under the model directory.
+Every command that takes a model uses it when no model is given.
+.It Ev GPU_MOCK_DIR
+The directory of the model files.
+The default is
+.Pa /usr/local/share/nvidia-gb10-freebsd/models ;
+a mock that is run from a checkout finds the models of the checkout
+(
+.Pa data/models )
+when the installed directory holds no model of that name.
+.It Ev GPU_MOCK_PREFIX
+The names of the nodes the daemon publishes.
+The default is
+.Dq nvidia ,
+so the nodes are the ones the driver publishes.
+Name them when those names are taken, or when two mocks live side by side.
+.It Ev GPU_MOCK_PIDFILE
+The file the daemon writes its own line in.
+The default is
+.Pa /var/run/gpu-mock.pid ;
+the file holds a line for every mock that runs on this machine.
+.El
+.Sh FILES
+.Bl -tag -width ".Pa" -compact
+.It Pa data/models
+The model files: one JSON per card, the provider record they share, a box
+that composes them and two models that script a fault.
+.It Pa schema/gpu-model-1.schema.json
+The schema of a model file.
+.It Pa schema/gpu-mock-1.schema.json
+The schema of the document of the
+.Nm model
+command.
+.It Pa /var/run/gpu-mock.pid
+The registry of the mocks that run on this machine: every line is a pid, the
+names of the nodes of that mock and the token of the run that started it.
+.It Pa /var/run/gpu-mock-nvidia.rules
+The ruleset of the nodes that the switch writes: a fragment of
+.Pa /etc/devfs.rules .
+The name carries the names of the nodes, so two mocks side by side do not
+write over each other.
+.El
+.Sh EXIT STATUS
+.Nm gpu-mock
+exits 0 when the command succeeded, 1 when it failed, and 2 when the
+arguments were wrong.
+.Sh EXAMPLES
+The decision on the card of a model:
+.Bd -literal -offset indent
+gpu-mock decide rtx5060ti
+.Ed
+.Pp
+The answers of the seam for a CI run:
+.Bd -literal -offset indent
+export GPU_MOCK=rtx5060ti
+export GPU_MOCK_DIR=data/models
+export LD_PRELOAD=src/gb10-gpu-mock/build/libgpubmockshim.so
+nvrm-info --json
+.Ed
+.Pp
+The nodes of the model, and the rules that give them to a jail:
+.Bd -literal -offset indent
+gpu-mock nodes rtx5060ti
+.Ed
+.Pp
+The one switch: the daemon, the rules of the nodes and the seam:
+.Bd -literal -offset indent
+sh scripts/gpu-mock-up.sh up rtx5060ti
+.Ed
+.Sh SEE ALSO
+.Xr cuse 3 ,
+.Xr libnvrm 3 ,
+.Xr devfs.rules 5 ,
+.Xr nvrm-info 8 ,
+.Xr pciconf 8 ,
+.Xr sysctl 8
+.Sh CAVEATS
+The CUSE mechanism copies the argument of an ioctl into the window it shares
+with the daemon, and the pointers inside that argument name the address
+space of the client.
+CUSE cannot carry them.
+The ioctls of the RM whose argument holds such a pointer, the card list and
+the control parameters among them, are therefore refused over a node with
+.Er EINVAL ,
+and the daemon says why.
+The seam shim answers them in the client's own process, where the pointers
+are the client's own.
+.Pp
+The name of a node that CUSE creates holds no dash:
+the daemon publishes
+.Pa /dev/nvidia_modeset
+and
+.Pa /dev/nvidia_uvm ,
+where the driver publishes
+.Pa /dev/nvidia-modeset
+and
+.Pa /dev/nvidia-uvm .
+The ruleset of the nodes names the nodes that exist, so a rule of the
+ruleset matches them.
+.Pp
+Over a node the errno of the engine reaches the client in the CUSE error
+that carries it:
+.Er EINVAL ,
+.Er ENOMEM
+and
+.Er EFAULT
+keep their meaning.
+The mechanism has no
+.Er ENOTTY ,
+so a command the RM does not know reaches the client as
+.Er ENXIO .
+.Pp
+The nodes of a daemon that was killed stay in the kernel:
+the mechanism does not take them away by itself.
+The daemon destroys them when it is stopped, but a daemon that was killed
+leaves its names behind, and they cannot be freed without a reboot.
+Use
+.Ev GPU_MOCK_PREFIX
+on such a host.

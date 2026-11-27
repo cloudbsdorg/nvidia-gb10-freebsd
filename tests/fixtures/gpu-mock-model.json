@@ -1,0 +1,15 @@
+{
+  "schema_version": {"string": "1.0", "major": 1, "minor": 0, "patch": 0, "available": true},
+  "tool": "gpu-mock",
+  "mock": true,
+  "model": {"name": "rtx5060ti", "description": "One card: the GeForce RTX 5060 Ti (GB206) of the boot capture of 2026-11-22 (tests/data/nvrm-info-boot-20261122T095018Z). Every value is the value that capture reports; nothing here is invented.", "file": "data/models/rtx5060ti.json"},
+  "driver_version": {"string": "580.178.04", "major": 580, "minor": 178, "patch": 4, "available": true},
+  "providers": [
+    {"name": "nvidia", "score": 100, "vendor_ids": ["0x10de"], "min_generation": "turing"}
+  ],
+  "cards": [
+    {"index": 0, "name": "nvidia0", "provider": "nvidia", "vendor_id": "0x10de", "device_id": "0x2d04", "generation": "blackwell", "architecture": 432, "implementation": 6, "vram_bytes": 17103323136, "bar1_bytes": 268435456, "sm_version": {"string": "10.4", "major": 10, "minor": 4, "patch": 0, "available": true}, "uuid": "GPU-17743da2-61b3-ef41-e46e-5679f4ed15ec", "decision": "supported", "reason": "the provider \"nvidia\" drives it with rm-open-580"}
+  ],
+  "faults": [
+  ]
+}

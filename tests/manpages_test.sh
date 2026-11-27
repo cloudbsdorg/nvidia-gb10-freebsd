@@ -9,6 +9,7 @@
 #   man/run-nv-vulkan.sh.1   the Vulkan launcher
 #   man/pd_split.py.1        the prefill/decode split client
 #   man/bench_compare.py.1   the llama-bench comparison tables
+#   man/gpu-mock.1           the GPU mock of the driver
 #
 # Cases:
 #   (a) mandoc is installed:      the lint tool is there
@@ -65,7 +66,7 @@ else
 	exit 1
 fi
 
-PAGES="man/run-nv-vulkan.sh.1 man/pd_split.py.1 man/bench_compare.py.1"
+PAGES="man/run-nv-vulkan.sh.1 man/pd_split.py.1 man/bench_compare.py.1 man/gpu-mock.1"
 
 # (b) the pages exist.
 missing=
@@ -73,7 +74,7 @@ for page in $PAGES; do
 	[ -f "$REPO/$page" ] || missing="$missing $page"
 done
 if [ -z "$missing" ]; then
-	ok "(b) the three man pages are in the tree"
+	ok "(b) the man pages are in the tree"
 else
 	fail "(b) these man pages are missing:$missing"
 fi
@@ -113,6 +114,7 @@ check_words() {
 check_words man/run-nv-vulkan.sh.1 vulkaninfo list bench server llama-bench rpc
 check_words man/bench_compare.py.1 published delta format label-a label-b
 check_words man/pd_split.py.1 slot-file json label-prefill label-decode
+check_words man/gpu-mock.1 daemon pciconf devinfo sysctl decide nodes model
 
 printf 'passed: %s failed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -gt 0 ]; then

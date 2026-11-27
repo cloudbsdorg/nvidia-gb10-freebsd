@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "model": "mixed-box",
+  "description": "One box: the amp001 test box, with an AMD Radeon RX 7600, an NVIDIA GeForce RTX 5060 Ti and the BMC display adapter. The two cards are the model files they are (one JSON per card) and the BMC adapter is written here. The decision is made per card: the AMD card and the BMC adapter are claimed by no provider of ours, the NVIDIA card is the one the driver drives.",
+  "driver_version": {
+    "string": "580.178.04",
+    "major": 580,
+    "minor": 178,
+    "patch": 4
+  },
+  "include": ["rx7600.json", "rtx5060ti.json"],
+  "cards": [
+    {
+      "name": "bmc0",
+      "vendor_id": "0x1a03",
+      "device_id": "0x2000",
+      "subsystem_vendor_id": "0x1a03",
+      "subsystem_device_id": "0x1a03",
+      "revision": "0x41",
+      "pci": {
+        "domain": 4,
+        "bus": 2,
+        "slot": 0,
+        "function": 0,
+        "class": "0x030000"
+      },
+      "selector": "vgapci2",
+      "vendor_name": "ASPEED Technology, Inc.",
+      "device_name": "ASPEED Graphics Family",
+      "class_name": "display",
+      "subclass_name": "VGA",
+      "rm_gpu_id": 0,
+      "uuid": "GPU-00000000-0000-4000-8000-0000000000b0",
+      "unit": 2,
+      "bars": [
+        {
+          "index": 16,
+          "type": "Memory",
+          "range": 32,
+          "base": "0x20000000",
+          "size": 16777216,
+          "enabled": true
+        },
+        {
+          "index": 20,
+          "type": "Memory",
+          "range": 32,
+          "base": "0x21000000",
+          "size": 131072,
+          "enabled": true
+        },
+        {
+          "index": 24,
+          "type": "I/O Port",
+          "range": 32,
+          "base": "0x2fffe000",
+          "size": 128,
+          "enabled": false
+        }
+      ]
+    }
+  ],
+  "faults": []
+}
