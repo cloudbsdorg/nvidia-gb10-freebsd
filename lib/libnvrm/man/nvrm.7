@@ -48,8 +48,9 @@ is the number of multiprocessors of a TPC,
 the number of warps a multiprocessor holds, and
 .Li max_blocks_per_mp
 the number of thread blocks it holds.
-.Li nc_atom_size
-is the granularity a flush to the GPU must use, in bytes.
+.Li nc_flush_granularity
+is the granularity a flush to the GPU must use, in bytes: the host's cache
+line size, or the host page size when the cache line size is not reported.
 The zcull members hold what the graphics engine needs to place a surface:
 the width and height alignment in pixels, the number of aliquots the GPU has,
 the bytes one aliquot takes, and the sizes of the region and the subregion

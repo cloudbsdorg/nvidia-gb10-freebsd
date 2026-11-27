@@ -152,6 +152,10 @@ value is refused with
 .Fn nvrm_client_errmsg
 returns one line about the most recent call on the client: the empty string
 when it succeeded.
+The message belongs to the client, so the calls of several threads of one
+client write over one another; the string the call returns is the calling
+thread's own copy, read under the client's lock, and the next call of that
+thread replaces it.
 .Fn nvrm_client_stats_get
 reports what the client holds and has done (objects, bytes, reservations, GPU
 and CPU mappings, unused spare descriptors, and
@@ -247,11 +251,32 @@ unmaps the object everywhere and frees it.
 reports its kind, place
 .Pq Dv NVRM_PLACE_VIDMEM or Dv NVRM_PLACE_SYSMEM ,
 CPU attribute, size, page size and mappings.
+A caller built against NVRM_1.3 passes the size of the structure of that
+version (the offset of
+.Va handle )
+and receives only the members before it; the structure is never written past
+the size the caller asked for.
 It also reports the driver's handle of the object in
 .Va handle ,
 the number of CPU mappings in
 .Va cpu_mappings ,
-and the page kind and the compression the object was made with.
+the page kind the object has in
+.Va pte_kind
+and the compression policy it was made with in
+.Va compress_policy .
+A request of
+.Dv NVRM_PTE_KIND_DEFAULT
+is resolved to the pitch layout, so the page kind reported is never
+.Dv NVRM_PTE_KIND_DEFAULT ;
+an object this client did not allocate (registered user pages, an imported
+object) reports
+.Dv NVRM_PTE_KIND_DEFAULT
+and
+.Dv NVRM_COMPRESS_NONE ,
+because this client made no request for it.
+The driver decides whether an object is compressed, so
+.Va compress_policy
+is what was asked for, not what the driver did.
 .Ss GPU mappings
 .Fn nvrm_mem_map_gpu
 maps
@@ -303,8 +328,17 @@ An object may have more than one CPU mapping, and
 .Fn nvrm_mem_map_cpu_at
 makes one at an address the caller chooses:
 .Va fixed
-is that address, which must be a multiple of the host page size and must not
-cover a mapped range, or 0 for an address the library picks.
+is that address, which must be a multiple of the host page size, or 0 for an
+address the library picks.
+The range that begins at
+.Va fixed
+must not overlap a mapping that is not the caller's: the mapping is made
+atomically, so an occupied range is refused with
+.Dv NVRM_E_BUSY
+and never replaces what is there.
+Choose a fixed range that overlaps no mapping, or set
+.Va fixed
+to 0 for an address the library picks.
 .Va prot
 is the protection, as above, and
 .Va size
@@ -325,6 +359,13 @@ free and no other thread can take the address in between; the range is not
 unmapped, because the caller now owns it.
 .Fa length
 is the length of the range, or 0 for the length of the mapping.
+.Pp
+If the driver refuses to forget the mapping, the original mapping is put back
+over the anonymous memory, the range is what it was, and the call returns the
+error.
+If it cannot be put back, the range holds memory that is not the object's any
+more: the record of the mapping is dropped, so that a later unmap does not
+take the caller's memory away.
 .Pp
 The memory attribute of the mapping is
 .Va cpu_attr
@@ -348,6 +389,11 @@ and
 .Fn nvrm_mem_write
 copy between the mapping and a buffer and obey the rule; code that reads or
 writes the mapping itself must follow it.
+An object may have several CPU mappings, and they may have different
+protections: a read goes through the first mapping that allows a read, and a
+write through the first mapping that allows a write.
+When no mapping allows the access, the call fails with
+.Dv NVRM_E_DENIED .
 .Ss Sharing
 .Fn nvrm_mem_export_fd
 returns a descriptor that names the object; it consumes one export
@@ -470,15 +516,18 @@ not allowed.
 No free VA range of that size or at that address; a GPU mapping outside one
 reservation or over another mapping; an offset or access outside the object.
 .It Bq Er NVRM_E_BUSY
-The reservation still has mappings, or the object is mapped already.
+The reservation still has mappings, or the fixed range of a CPU mapping
+overlaps a mapping that is not the caller's.
 .It Bq Er NVRM_E_DENIED
 The client was not opened with
 .Dv NVRM_OPEN_ALLOW_MAP ,
-the CPU mapping does not allow the access, or this process did not open the
+no mapping of the object allows the access, or this process did not open the
 client: in a
 .Xr fork 2
 child, a call that would allocate, register, map, export or import memory or
-reserve VA is refused.
+reserve VA is refused, and so is
+.Fn nvrm_mem_overmap_cpu ,
+which would tell the driver to forget a mapping the parent made.
 Releases succeed and release only what the child holds; in particular,
 .Fn nvrm_mem_unmap_cpu
 still removes the child's own mapping.
@@ -531,6 +580,6 @@ before.
 .Sh HISTORY
 These calls first appeared with API minor 1 of the library.
 .Sh CAVEATS
-A client is not safe for concurrent use: use one thread per client, or a lock
-of your own.
+The calls of one client take the client's own lock, so several threads may use
+one client at the same time.
 The fake backend keeps process-wide test state: use it from one thread.

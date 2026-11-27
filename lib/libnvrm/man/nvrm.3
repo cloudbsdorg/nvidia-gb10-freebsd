@@ -247,11 +247,14 @@ are the 2D, the memory-to-memory and the video decode classes, with source
 .Li family ;
 a class the GPU does not list is unavailable with reason
 .Li class_absent ,
-and a family that has no class of that kind is unavailable with reason
-.Li family_has_no_class ;
-.Fn nc_atom_size
+and the class is unavailable with reason
+.Li family_has_no_class
+when the matched family has no class of that kind;
+.Fn nc_flush_granularity
 is the granularity a flush to the GPU must use, in bytes, with source
 .Li os ;
+it is the host's cache line size, or the host page size when the cache line
+size is not reported;
 .Fn max_smem_per_wg
 and
 .Fn sm_smem_sizes

@@ -494,6 +494,11 @@ fk_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	out->page_size = ps;
 	out->place = a->place;
 	out->handle = o->serial;
+	/* The page kind the object has: a request of DEFAULT is the pitch
+	 * layout, which is what the fake lays the object out in. */
+	out->pte_kind = a->pte_kind == NVRM_PTE_KIND_DEFAULT ?
+	    NVRM_PTE_KIND_PITCH : a->pte_kind;
+	out->compress = a->compress;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -518,6 +523,10 @@ fk_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	out->page_size = 4096;
 	out->place = NVRM_PLACE_SYSMEM;
 	out->handle = m->serial;
+	/* Registered pages are the caller's own: they have no page kind
+	 * and no compression policy of their own. */
+	out->pte_kind = NVRM_PTE_KIND_DEFAULT;
+	out->compress = NVRM_COMPRESS_NONE;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -626,11 +635,22 @@ fk_map_cpu(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed, void **addr,
 	int flags = MAP_SHARED;
 
 	INJECT(NVRM_FAKE_OP_MAP_CPU, err, errlen);
+	/* MAP_EXCL with MAP_FIXED: the kernel refuses an occupied range
+	 * instead of replacing what is there.  A fixed mapping must never
+	 * replace another mapping, and the check and the map are one step. */
 	if (fixed != 0)
-		flags |= MAP_FIXED;
+		flags |= MAP_FIXED | MAP_EXCL;
 	p = mmap(fixed != 0 ? (void *)(uintptr_t)fixed : NULL, m->o->bytes, pr,
 	    flags, fd, (off_t)m->o->off);
 	if (p == MAP_FAILED) {
+		if (fixed != 0) {
+			/* The kernel refuses an occupied range with
+			 * ENOMEM (MAP_FIXED|MAP_EXCL): the range is
+			 * taken, and the mapping that is there stays. */
+			snprintf(err, errlen, "fake backend: the range at "
+			    "0x%jx is already mapped", (uintmax_t)fixed);
+			return (NVRM_E_BUSY);
+		}
 		snprintf(err, errlen, "fake backend: mmap failed: %s",
 		    strerror(errno));
 		return (NVRM_E_IO);
@@ -653,23 +673,29 @@ fk_unmap_cpu(nvrm_bmem *m, void *addr, uint64_t cookie, int owner, char *err,
 }
 
 /* Replace the mapping with anonymous memory, in place: the range stays
- * mapped and reads as zeros. */
+ * mapped and reads as zeros.  The fake has no driver to tell, so the
+ * replacement is the whole of it: the range holds anonymous memory when the
+ * call succeeds, and still holds the mapping when it does not. */
 static int
-fk_overmap_cpu(nvrm_bmem *m, void *addr, uint64_t length, uint64_t cookie,
-    char *err, size_t errlen)
+fk_overmap_cpu(nvrm_bmem *m, const nvrm_cmap_info *cm, void *addr,
+    int *replaced, char *err, size_t errlen)
 {
 	void *p;
 
 	(void)m;
-	(void)cookie;
+	*replaced = 0;
 	INJECT(NVRM_FAKE_OP_OVERMAP_CPU, err, errlen);
-	p = mmap(addr, length, PROT_READ | PROT_WRITE,
+	p = mmap(addr, cm->length, PROT_READ | PROT_WRITE,
 	    MAP_FIXED | MAP_ANON, -1, 0);
 	if (p == MAP_FAILED) {
 		snprintf(err, errlen, "fake backend: the anonymous mapping "
 		    "failed: %s", strerror(errno));
 		return (NVRM_E_IO);
 	}
+	*replaced = 1;
+	/* The driver refuses to forget the mapping: the range is replaced
+	 * and the call fails. */
+	INJECT(NVRM_FAKE_OP_OVERMAP_CPU_REFUSED, err, errlen);
 	return (NVRM_OK);
 }
 
@@ -760,6 +786,11 @@ fk_import_fd(nvrm_bclient *c, int fd, nvrm_bmem **mp, nvrm_bmem_info *out,
 	out->page_size = o->page_size;
 	out->place = o->place;
 	out->handle = o->serial;
+	/* An imported object was made elsewhere: this client made no
+	 * request for it, so it reports no page kind and no compression
+	 * policy of its own. */
+	out->pte_kind = NVRM_PTE_KIND_DEFAULT;
+	out->compress = NVRM_COMPRESS_NONE;
 	*mp = m;
 	return (NVRM_OK);
 }

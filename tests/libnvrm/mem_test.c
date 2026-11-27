@@ -2202,6 +2202,8 @@ test_fork_child(void)
 	CHILD_DENIED(nvrm_mem_import_fd(cl, fd, &x));
 	CHECK_EQ(stats_get(cl, &st), NVRM_OK);
 	CHECK_EQ(st.spare_descriptors, spare);
+	/* the overmap would tell the driver to forget the parent's mapping */
+	CHILD_DENIED(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)p, 0));
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
 	CHILD_DENIED(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &p));
 	{
@@ -2516,6 +2518,13 @@ test_map_cpu_at_params(nvrm_client *cl, nvrm_mem *m)
 	    NVRM_OK);
 	mp.fixed = (uint64_t)(uintptr_t)addr & ~(uint64_t)4095;
 	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &fixed), NVRM_E_BUSY);
+	/* the message says what the caller can do about it */
+	CHECK(strstr(nvrm_client_errmsg(cl), "overlaps") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "choose") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "fixed = 0") != NULL);
+	/* the mapping that is there is untouched */
+	memset(addr, 0x5a, 4096);
+	CHECK_EQ(((unsigned char *)addr)[0], 0x5a);
 
 	/* a mapping at a fixed address of its own */
 	area = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
@@ -2541,6 +2550,87 @@ test_map_cpu_at_params(nvrm_client *cl, nvrm_mem *m)
 	return (fixed);
 }
 
+/*
+ * A fixed address never replaces another mapping.  The range is refused
+ * with NVRM_E_BUSY, the mapping that is there keeps its bytes, and the
+ * message says what the caller can do about it.
+ */
+static void
+test_fixed_busy(nvrm_client *cl)
+{
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	nvrm_mem *m;
+	uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+	void *area, *addr;
+
+	/* two pages of the caller's own */
+	area = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 2 * page);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 2 * page, 0);
+
+	/* only the second page of the range is taken */
+	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK(mmap((void *)(uintptr_t)((char *)area + page), page,
+	    PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANONYMOUS, -1, 0) !=
+	    MAP_FAILED);
+	memset((void *)(uintptr_t)((char *)area + page), 0x5a, page);
+
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &addr), NVRM_E_BUSY);
+	CHECK(strstr(nvrm_client_errmsg(cl), "overlaps") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "choose") != NULL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "fixed = 0") != NULL);
+	/* the page that was there is untouched */
+	CHECK_EQ(((unsigned char *)(uintptr_t)((char *)area + page))[0], 0x5a);
+	munmap((void *)(uintptr_t)((char *)area + page), page);
+	nvrm_mem_free(m);
+}
+
+/*
+ * The backend maps a fixed address atomically: the kernel refuses an
+ * occupied range instead of replacing what is there.  This is what keeps
+ * two clients from taking the same address.
+ */
+static void
+test_fixed_atomic(nvrm_client *cl)
+{
+	nvrm_client *cl2;
+	nvrm_mem *m, *m2;
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	uint64_t cookie = 0;
+	char err[160];
+	void *area, *addr, *addr2;
+	int fd;
+
+	area = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 8192);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 8192, 0);
+	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	mp.fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &addr), NVRM_OK);
+	memset(addr, 0x5a, 8192);
+
+	/* the backend itself refuses an occupied range */
+	cl2 = open_client(NVRM_OPEN_ALLOW_MAP, 1, 1);
+	m2 = alloc_mem(cl2, NVRM_MEM_SYSMEM, 8192, 0);
+	CHECK_EQ(cl2->mops->desc_open(cl2->bc, NVRM_DESC_MAP, &fd, err,
+	    sizeof(err)), NVRM_OK);
+	CHECK_EQ(cl2->mops->map_cpu(m2->b, fd,
+	    NVRM_CPU_READ | NVRM_CPU_WRITE, mp.fixed, &addr2, &cookie, err,
+	    sizeof(err)), NVRM_E_BUSY);
+	close(fd);
+	/* the mapping that is there keeps its bytes */
+	CHECK_EQ(((unsigned char *)addr)[0], 0x5a);
+	CHECK_EQ(((unsigned char *)addr)[8191], 0x5a);
+	nvrm_mem_free(m2);
+	nvrm_client_close(cl2);
+	nvrm_mem_free(m);
+}
+
 /* The overmap of a client mapping: the range stays mapped and reads as
  * zeros. */
 static void
@@ -2550,14 +2640,24 @@ test_overmap_cpu(nvrm_client *cl, nvrm_mem *m, void *fixed)
 	nvrm_client_stats st = { sizeof(st) };
 	uint8_t buf[4096];
 	char vec[64];
+	size_t i;
 
 	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)fixed, 1),
 	    NVRM_E_INVAL);		/* not the range of the mapping */
 	CHECK_EQ(nvrm_mem_overmap_cpu(m, 0x1234, 0), NVRM_E_INVAL);
+	/* the range holds a pattern before the overmap */
+	memset(fixed, 0x5a, sizeof(buf));
 	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)fixed, 0),
 	    NVRM_OK);
-	memset(fixed, 0x5a, sizeof(buf));
-	CHECK(memcmp((char *)fixed, (char *)fixed, sizeof(buf)) == 0);
+	/* and zeros after it: the range was replaced, not left alone */
+	for (i = 0; i < sizeof(buf); i++)
+		if (((uint8_t *)fixed)[i] != 0)
+			break;
+	CHECK_EQ(i, sizeof(buf));
+	/* and the range is usable */
+	memset(fixed, 0x3c, sizeof(buf));
+	CHECK_EQ(((uint8_t *)fixed)[0], 0x3c);
+	CHECK_EQ(((uint8_t *)fixed)[sizeof(buf) - 1], 0x3c);
 	nvrm_mem_info_get(m, &mi);
 	CHECK_EQ(mi.cpu_mappings, 0);
 	stats_get(cl, &st);
@@ -2584,11 +2684,43 @@ test_overmap_cpu_fail(nvrm_client *cl, nvrm_mem *m)
 	/* the fake refuses an overmap it cannot make */
 	{
 		char err[128];
+		int replaced = 0;
 
-		CHECK_EQ(cl->mops->overmap_cpu(m->b, (void *)0x1001, 4096, 0,
-		    err, sizeof(err)), NVRM_E_IO);
+		nvrm_cmap_info ci = { .fd = -1, .prot = NVRM_CPU_READ,
+		    .length = 4096 };
+
+		CHECK_EQ(cl->mops->overmap_cpu(m->b, &ci, (void *)0x1001,
+		    &replaced, err, sizeof(err)), NVRM_E_IO);
+		CHECK_EQ(replaced, 0);
 	}
 	CHECK_EQ(nvrm_mem_unmap_cpu(m), NVRM_OK);
+}
+
+/*
+ * An overmap that replaces the range and then fails: the range is not the
+ * object's any more, so the record of the mapping goes with it.  A later
+ * unmap must not take the caller's memory away.
+ */
+static void
+test_overmap_cpu_replaced(nvrm_client *cl, nvrm_mem *m)
+{
+	nvrm_mem_info mi = { sizeof(mi) };
+	char vec[64];
+	void *addr;
+
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &addr),
+	    NVRM_OK);
+	nvrm_fake_mem_fail(NVRM_FAKE_OP_OVERMAP_CPU_REFUSED, 1);
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, (uint64_t)(uintptr_t)addr, 0),
+	    NVRM_E_RM);
+	nvrm_fake_mem_fail_clear();
+	/* the record of the mapping is gone: the range is the caller's */
+	nvrm_mem_info_get(m, &mi);
+	CHECK_EQ(mi.cpu_mappings, 0);
+	/* and the range is still mapped, with anonymous memory in it */
+	CHECK(mincore(addr, 4096, vec) == 0);
+	CHECK_EQ(((unsigned char *)addr)[0], 0);
+	munmap(addr, 4096);
 }
 
 /* The unmap of a range of GPU addresses. */
@@ -2633,6 +2765,30 @@ test_unmap_gpu_range(nvrm_client *cl)
 	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va2, 4096), NVRM_OK);
 	stats_get(cl, &st);
 	CHECK_EQ(st.live_gpu_maps, 0);
+}
+
+/*
+ * A mapping that only partly overlaps the range is removed in full: the
+ * driver maps whole objects.  A range of one byte inside the mapping is
+ * enough.
+ */
+static void
+test_unmap_gpu_range_partial(nvrm_client *cl)
+{
+	nvrm_client_stats st = { sizeof(st) };
+	nvrm_mem *m;
+	uint64_t va;
+
+	va = reserve(cl, 1 * MiB, 0, 0);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 8192, 0);
+	CHECK_EQ(map_gpu(m, va, 0, 0, 0), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 1);
+	/* one byte, one byte into the mapping */
+	CHECK_EQ(nvrm_mem_unmap_gpu_range(cl, va + 1, 1), NVRM_OK);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_gpu_maps, 0);
+	nvrm_mem_free(m);
 }
 
 /* More mappings: the list of the mappings is walked. */
@@ -2694,15 +2850,265 @@ test_alloc_page_kind(nvrm_client *cl)
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_OK);
 	nvrm_mem_info_get(m2, &mi);
 	CHECK_EQ(mi.pte_kind, NVRM_PTE_KIND_BLOCK_LINEAR);
-	CHECK_EQ(mi.compress, NVRM_COMPRESS_ANY);
+	CHECK_EQ(mi.compress_policy, NVRM_COMPRESS_ANY);
 	CHECK(mi.handle != 0);
 	nvrm_mem_free(m2);
+	/* the default page kind is the pitch layout the object really has */
+	p.pte_kind = NVRM_PTE_KIND_DEFAULT;
+	p.compress = NVRM_COMPRESS_NONE;
+	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_OK);
+	nvrm_mem_info_get(m2, &mi);
+	CHECK_EQ(mi.pte_kind, NVRM_PTE_KIND_PITCH);
+	CHECK_EQ(mi.compress_policy, NVRM_COMPRESS_NONE);
+	nvrm_mem_free(m2);
+	/* registered pages have no page kind and no compression of their own */
+	{
+		static char pages[65536] __attribute__((aligned(65536)));
+
+		CHECK_EQ(nvrm_mem_register_user(cl, pages, sizeof(pages), &m2),
+		    NVRM_OK);
+		nvrm_mem_info_get(m2, &mi);
+		CHECK_EQ(mi.pte_kind, NVRM_PTE_KIND_DEFAULT);
+		CHECK_EQ(mi.compress_policy, NVRM_COMPRESS_NONE);
+		nvrm_mem_free(m2);
+	}
 	/* a value this version does not know is refused */
 	p.pte_kind = NVRM_PTE_KIND_SWIZZLED + 1;
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_E_INVAL);
 	p.pte_kind = 0;
 	p.compress = NVRM_COMPRESS_ANY + 1;
 	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m2), NVRM_E_INVAL);
+}
+
+/*
+ * The information structure grew after NVRM_1.3: a caller built against
+ * NVRM_1.3 passes the old size and gets only that much back, and nothing
+ * is written past it.
+ */
+static void
+test_mem_info_size(nvrm_client *cl, nvrm_mem *m)
+{
+	struct {
+		nvrm_mem_info	info;
+		uint8_t		guard[64];
+	} buf;
+	nvrm_mem_info mi = { sizeof(mi) };
+	size_t v13 = offsetof(nvrm_mem_info, handle);
+	size_t i;
+
+	/* the old size is accepted, and only the old prefix is written */
+	memset(&buf, 0xa5, sizeof(buf));
+	buf.info.size = (uint32_t)v13;
+	CHECK_EQ(nvrm_mem_info_get(m, &buf.info), NVRM_OK);
+	CHECK_EQ(buf.info.size, v13);
+	CHECK(buf.info.bytes != 0);
+	for (i = 0; i < sizeof(buf.guard); i++)
+		if (buf.guard[i] != 0xa5)
+			break;
+	CHECK_EQ(i, sizeof(buf.guard));
+	/* the whole size, and the size that means the whole size */
+	CHECK_EQ(nvrm_mem_info_get(m, &mi), NVRM_OK);
+	CHECK_EQ(mi.size, sizeof(mi));
+	mi.size = 0;
+	CHECK_EQ(nvrm_mem_info_get(m, &mi), NVRM_OK);
+	CHECK_EQ(mi.size, sizeof(mi));
+	/* a size that is neither is refused */
+	mi.size = 3;
+	CHECK_EQ(nvrm_mem_info_get(m, &mi), NVRM_E_INVAL);
+	CHECK(strstr(nvrm_client_errmsg(cl), "nvrm_mem_info.size") != NULL);
+}
+
+/*
+ * An access goes through a mapping that allows it: an object with a
+ * read-only mapping and a read/write one can be written to.
+ */
+static void
+test_cpu_rw_mapping(void)
+{
+	nvrm_client *cl;
+	nvrm_mem *m;
+	uint32_t v = 0x1234, back = 0;
+	void *ro, *rw;
+
+	setup("discrete", "amd64");
+	cl = open_client(NVRM_OPEN_ALLOW_MAP, 8, 1);
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
+	/* the read-only mapping is the first one */
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &ro), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ | NVRM_CPU_WRITE, &rw),
+	    NVRM_OK);
+	CHECK_EQ(nvrm_mem_write(m, 0, &v, sizeof(v)), NVRM_OK);
+	CHECK_EQ(nvrm_mem_read(m, 0, &back, sizeof(back)), NVRM_OK);
+	CHECK_EQ(back, v);
+	nvrm_mem_free(m);
+
+	/* a mapping that allows nothing is no mapping at all */
+	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 4096, 0);
+	CHECK_EQ(nvrm_mem_map_cpu(m, NVRM_CPU_READ, &ro), NVRM_OK);
+	CHECK_EQ(nvrm_mem_write(m, 0, &v, sizeof(v)), NVRM_E_DENIED);
+	CHECK(strstr(nvrm_client_errmsg(cl), "no mapping") != NULL);
+	CHECK_EQ(nvrm_mem_read(m, 0, &back, sizeof(back)), NVRM_OK);
+	nvrm_mem_free(m);
+	nvrm_client_close(cl);
+	teardown();
+}
+
+/*
+ * The client's lock covers the adoption of a new object: two threads that
+ * allocate at the same time both get their object into the client's list,
+ * and the counters count each of them once.
+ */
+struct alloc_arg {
+	nvrm_client	*cl;
+	nvrm_mem	*m;
+	int		rc;
+};
+
+static pthread_mutex_t adopt_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned adopt_inside;
+static unsigned adopt_max;
+
+/*
+ * The test seam at the start of the adoption.  The thread stays here a
+ * little while, so that the other threads reach the same place: the
+ * client's lock must keep them out, one at a time.  A second thread inside
+ * the seam at the same time means the lock does not cover the adoption.
+ */
+static void
+adopt_hook(void)
+{
+	struct timespec ts = { 0, 50000000 };	/* 50 ms */
+
+	pthread_mutex_lock(&adopt_lock);
+	adopt_inside++;
+	if (adopt_inside > adopt_max)
+		adopt_max = adopt_inside;
+	pthread_mutex_unlock(&adopt_lock);
+	(void)nanosleep(&ts, NULL);
+	pthread_mutex_lock(&adopt_lock);
+	adopt_inside--;
+	pthread_mutex_unlock(&adopt_lock);
+}
+
+static void *
+alloc_thread(void *arg)
+{
+	struct alloc_arg *a = arg;
+	nvrm_mem_params p = { sizeof(p) };
+
+	p.kind = NVRM_MEM_SYSMEM;
+	p.bytes = 4096;
+	a->rc = nvrm_mem_alloc(a->cl, &p, &a->m);
+	return (NULL);
+}
+
+/* The objects the client holds: the list the core keeps. */
+static unsigned
+client_mems(nvrm_client *cl)
+{
+	const nvrm_mem *m;
+	unsigned n = 0;
+
+	for (m = cl->mems; m != NULL; m = m->next)
+		n++;
+	return (n);
+}
+
+static void
+test_concurrent_alloc(nvrm_client *cl)
+{
+	nvrm_client_stats st = { sizeof(st) };
+	struct alloc_arg args[4];
+	pthread_t th[4];
+	unsigned i, base, base_mem;
+
+	stats_get(cl, &st);
+	base_mem = st.live_mem;
+	base = client_mems(cl);
+	adopt_inside = 0;
+	adopt_max = 0;
+	nvrm_mem_adopt_hook = adopt_hook;
+	for (i = 0; i < 4; i++) {
+		args[i].cl = cl;
+		args[i].m = NULL;
+		args[i].rc = -1;
+		CHECK_EQ(pthread_create(&th[i], NULL, alloc_thread, &args[i]),
+		    0);
+	}
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(pthread_join(th[i], NULL), 0);
+	nvrm_mem_adopt_hook = NULL;
+	/* the client's lock kept the threads apart: one at a time in the
+	 * adoption, and every object in the list */
+	CHECK_EQ(adopt_max, 1);
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(args[i].rc, NVRM_OK);
+	/* every object is in the client's list, and counted once */
+	CHECK_EQ(client_mems(cl), base + 4);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_mem, base_mem + 4);
+	for (i = 0; i < 4; i++)
+		nvrm_mem_free(args[i].m);
+	CHECK_EQ(client_mems(cl), base);
+	stats_get(cl, &st);
+	CHECK_EQ(st.live_mem, base_mem);
+}
+
+/*
+ * The message of a call is written and read under the client's error lock:
+ * a thread that reads it never sees half a message, and the calls of the
+ * threads do not disturb one another.
+ */
+struct msg_arg {
+	nvrm_mem	*m;
+	int		which;
+	int		rc;
+	char		msg[160];
+};
+
+static void *
+msg_thread(void *arg)
+{
+	struct msg_arg *a = arg;
+	nvrm_cpu_map_params mp = { sizeof(mp) };
+	void *addr;
+
+	mp.prot = NVRM_CPU_READ;
+	if (a->which == 0)
+		mp.size = 1;		/* the size is wrong */
+	else
+		mp.fixed = 0x1001;	/* the address is not page aligned */
+	a->rc = nvrm_mem_map_cpu_at(a->m, &mp, &addr);
+	strlcpy(a->msg, nvrm_client_errmsg(a->m->cl), sizeof(a->msg));
+	return (NULL);
+}
+
+static void
+test_thread_messages(nvrm_client *cl, nvrm_mem *m)
+{
+	struct msg_arg args[4];
+	pthread_t th[4];
+	unsigned i;
+
+	for (i = 0; i < 4; i++) {
+		args[i].m = m;
+		args[i].which = (int)(i % 2);
+		args[i].rc = -1;
+		args[i].msg[0] = '\0';
+		CHECK_EQ(pthread_create(&th[i], NULL, msg_thread, &args[i]), 0);
+	}
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(pthread_join(th[i], NULL), 0);
+	for (i = 0; i < 4; i++) {
+		CHECK_EQ(args[i].rc, NVRM_E_INVAL);
+		/* the message is one whole message, never half of one; it may
+		 * be empty, because another thread's call clears it */
+		if (strcmp(args[i].msg, "") == 0)
+			continue;
+		CHECK(strstr(args[i].msg, "nvrm_cpu_map_params.size") != NULL ||
+		    strstr(args[i].msg,
+		    "not a multiple of the host page size") != NULL);
+	}
 }
 
 static void
@@ -2717,16 +3123,24 @@ test_extended_maps(void)
 	m = alloc_mem(cl, NVRM_MEM_SYSMEM, 8192, 0);
 
 	fixed = test_map_cpu_at_params(cl, m);
+	test_fixed_busy(cl);
+	test_fixed_atomic(cl);
 	test_overmap_cpu(cl, m, fixed);
 	test_overmap_cpu_fail(cl, m);
+	test_overmap_cpu_replaced(cl, m);
 	test_unmap_gpu_range(cl);
+	test_unmap_gpu_range_partial(cl);
 	test_map_list(m);
 	test_map_cpu_refused(cl, m);
 	test_alloc_page_kind(cl);
+	test_mem_info_size(cl, m);
+	test_concurrent_alloc(cl);
+	test_thread_messages(cl, m);
 
 	nvrm_mem_free(m);
 	nvrm_client_close(cl);
 	teardown();
+	test_cpu_rw_mapping();
 }
 
 #define MEM_TESTS(X, N)						\

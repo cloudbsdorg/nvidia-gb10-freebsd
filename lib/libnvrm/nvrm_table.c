@@ -12,7 +12,9 @@
  * A row is named after the chip family, never after an architecture: the
  * family names are the ones the RM's own header uses for the architectures
  * (ctrl2080mc.h: "valid ARCHITECTURE_... implementation values" names the
- * families TU10x, GA10x, GH10x, AD10x, GB10x and GB20x).
+ * families TU10x, GA10x, GH10x, AD10x, GB10x and GB20x).  A row that matches
+ * one chip exactly is named after that chip (GA100), so that every name in
+ * the table says which chip it is.
  *
  * The classes of a row: the GPFIFO, the compute, the 3D and the copy class
  * are the ones the chip uses.  The 2D class (FERMI_TWOD_A, 0x902d) is the
@@ -62,7 +64,7 @@ const nvrm_family nvrm_family_table[] = {
 	  0x902D, 0, 0xC7B0,
 	  24, KiB(99), { KiB(8), KiB(16), KiB(32), KiB(64), KiB(100) },
 	  { KiB(4), KiB(64), MiB(2) } },
-	{ "GA10x", 0xC56F, 0xC6C0, 0xC697, 0xC6B5,
+	{ "GA100", 0xC56F, 0xC6C0, 0xC697, 0xC6B5,
 	  0x902D, 0, 0xC6B0,
 	  32, KiB(163),
 	  { KiB(8), KiB(16), KiB(32), KiB(64), KiB(128), KiB(164) },
@@ -129,6 +131,14 @@ nvrm_compute_capability_for(uint64_t architecture, uint64_t implementation,
  * architectures and their implementations.  The chips of one architecture
  * are one array, and the table below says which array belongs to which
  * architecture: a chipset is always one of the chips of its architecture.
+ *
+ * The compute capability table above is keyed by the same pair.  The two
+ * tables are not the same list: the chipset table names every chip the RM
+ * header names, and the compute capability table gives the capability of
+ * the chips whose capability is known.  A chip whose capability is not
+ * known is reported without one; core_test names the chips that are in
+ * that state, so that a chip added to one table and not the other is
+ * caught.
  */
 typedef struct nvrm_chipset_chip {
 	uint64_t	implementation;
@@ -205,6 +215,46 @@ static const nvrm_chipset_arch chipset_archs[] = {
 	{ 0x1a0, chipset_gb100, NVRM_CHIPSET_COUNT(chipset_gb100) },
 	{ 0x1b0, chipset_gb200, NVRM_CHIPSET_COUNT(chipset_gb200) },
 };
+
+/*
+ * The (architecture, implementation) pairs the chipset table knows, two
+ * numbers per pair.  The test walks them with the compute capability table:
+ * the two tables must agree on the chips they name.
+ */
+unsigned
+nvrm_chipset_pairs(uint64_t *pairs, unsigned max)
+{
+	unsigned a, i, n = 0;
+
+	for (a = 0; a < sizeof(chipset_archs) / sizeof(chipset_archs[0]); a++) {
+		for (i = 0; i < chipset_archs[a].count; i++) {
+			if (n + 2 > max)
+				return (n);
+			pairs[n++] = chipset_archs[a].architecture;
+			pairs[n++] = chipset_archs[a].chips[i].implementation;
+		}
+	}
+	return (n);
+}
+
+/*
+ * The (architecture, implementation) pairs the compute capability table
+ * knows, two numbers per pair.  A pair whose implementation is UINT64_MAX
+ * covers every implementation of that architecture.
+ */
+unsigned
+nvrm_compute_pairs(uint64_t *pairs, unsigned max)
+{
+	unsigned i, n = 0;
+
+	for (i = 0; i < sizeof(compute_table) / sizeof(compute_table[0]); i++) {
+		if (n + 2 > max)
+			return (n);
+		pairs[n++] = compute_table[i].architecture;
+		pairs[n++] = compute_table[i].implementation;
+	}
+	return (n);
+}
 
 const char *
 nvrm_chipset_name_for(uint64_t architecture, uint64_t implementation)

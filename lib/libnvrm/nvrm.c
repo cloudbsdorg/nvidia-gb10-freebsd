@@ -419,9 +419,9 @@ query_engine(const nvrm_backend_ops *ops, nvrm_gpu *g,
 
 	r = ops->host_atom_size(g, &v);
 	if (r != 0)
-		unavail(&info->nc_atom_size, r, NVRM_S_OS);
+		unavail(&info->nc_flush_granularity, r, NVRM_S_OS);
 	else
-		avail(&info->nc_atom_size, v, NVRM_S_OS);
+		avail(&info->nc_flush_granularity, v, NVRM_S_OS);
 
 	get_u64(ops, g, &info->vram_free, NVRM_P_VRAM_FREE, 0, 1);
 	get_u64(ops, g, &heap, NVRM_P_VRAM_HEAP, 0, 1);
@@ -510,6 +510,7 @@ nvrm_apply_family(nvrm_device_info *info, const nvrm_family *table,
 		unavail(&info->cls_vdec, reason, NVRM_S_FAMILY);
 		unavail(&info->max_blocks_per_mp, reason, NVRM_S_FAMILY);
 		unavail(&info->max_smem_per_wg, reason, NVRM_S_FAMILY);
+		info->sm_smem_sizes.source = NVRM_S_FAMILY;
 		info->sm_smem_sizes.reason = reason;
 		info->sm_smem_sizes.count = 0;
 		info->page_sizes.reason = reason;

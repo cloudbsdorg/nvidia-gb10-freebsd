@@ -1512,125 +1512,254 @@ test_fork_child(void)
 	down("fork child");
 }
 
-/* The page kind, the compression, the handle of the object, a CPU
- * mapping at a fixed address and the overmap of a client mapping. */
+/* The page kind of the object reaches the RM. */
+static void
+test_extended_mem_page_kind(nvrm_client *cl, nvrm_mem_params *p)
+{
+	static const struct {
+		uint32_t	pte_kind;
+		uint32_t	format;
+	} kinds[] = {
+		{ NVRM_PTE_KIND_DEFAULT, NVOS32_ATTR_FORMAT_PITCH },
+		{ NVRM_PTE_KIND_PITCH, NVOS32_ATTR_FORMAT_PITCH },
+		{ NVRM_PTE_KIND_BLOCK_LINEAR, NVOS32_ATTR_FORMAT_BLOCK_LINEAR },
+		{ NVRM_PTE_KIND_SWIZZLED, NVOS32_ATTR_FORMAT_SWIZZLED },
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		nvrm_mem *m;
+
+		p->pte_kind = kinds[i].pte_kind;
+		CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+		CHECK_EQ(DRF_VAL(OS32, _ATTR, _FORMAT, M.last_alloc.attr),
+		    kinds[i].format);
+		nvrm_mem_free(m);
+	}
+	p->pte_kind = NVRM_PTE_KIND_DEFAULT;
+}
+
+/* The compression of the object reaches the RM.  The last object stays: the
+ * handle of it is checked by the caller. */
+static void
+test_extended_mem_compress(nvrm_client *cl, nvrm_mem_params *p, nvrm_mem **last)
+{
+	static const struct {
+		uint32_t	compress;
+		uint32_t	compr;
+	} compressions[] = {
+		{ NVRM_COMPRESS_NONE, NVOS32_ATTR_COMPR_NONE },
+		{ NVRM_COMPRESS_REQUIRED, NVOS32_ATTR_COMPR_REQUIRED },
+		{ NVRM_COMPRESS_ANY, NVOS32_ATTR_COMPR_ANY },
+	};
+	unsigned i, n = sizeof(compressions) / sizeof(compressions[0]);
+
+	for (i = 0; i < n; i++) {
+		nvrm_mem *m;
+
+		p->compress = compressions[i].compress;
+		CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+		CHECK_EQ(DRF_VAL(OS32, _ATTR, _COMPR, M.last_alloc.attr),
+		    compressions[i].compr);
+		if (i + 1 < n)
+			nvrm_mem_free(m);
+		else
+			*last = m;
+	}
+}
+
+/* A CPU mapping at a fixed address, and the overmap of a client mapping. */
+static void
+test_extended_mem_overmap(nvrm_client *cl, nvrm_mem_params *p,
+    nvrm_cpu_map_params *mp)
+{
+	nvrm_mem *m;
+	void *area, *a;
+
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp->prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+	mp->fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, mp, &a), NVRM_OK);
+	CHECK_EQ((uint64_t)(uintptr_t)a, mp->fixed);
+	CHECK_EQ(M.nmapmem, 1);
+
+	/* the overmap: the range stays mapped and the RM forgets the mapping */
+	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp->fixed, 0), NVRM_OK);
+	CHECK_EQ(M.nunmapmem, 1);
+	memset(a, 0x5a, 16);
+	CHECK_EQ(((unsigned char *)a)[0], 0x5a);
+	nvrm_mem_free(m);
+}
+
+/*
+ * The overmap the driver refuses: the range is what it was, and the record
+ * of the mapping stays.  The refusal is an ioctl that fails, or an ioctl
+ * that answers with a status.
+ */
+static void
+test_extended_mem_overmap_refused(nvrm_client *cl, nvrm_mem_params *p,
+    nvrm_cpu_map_params *mp, int by_status)
+{
+	nvrm_mem *m;
+	void *area, *a;
+
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp->fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, mp, &a), NVRM_OK);
+	memset(a, 0x5a, 16);
+	if (by_status) {
+		M.status_nr = NV_ESC_RM_UNMAP_MEMORY;
+		M.status_val = NV_ERR_INVALID_OBJECT;
+		CHECK_EQ(nvrm_mem_overmap_cpu(m, mp->fixed, 0), NVRM_E_RM);
+		M.status_nr = 0;
+	} else {
+		M.fail_nr = NV_ESC_RM_UNMAP_MEMORY;
+		CHECK_EQ(nvrm_mem_overmap_cpu(m, mp->fixed, 0), NVRM_E_IO);
+		M.fail_nr = 0;
+	}
+	/* the original mapping is back: the bytes of the object are there */
+	CHECK_EQ(((unsigned char *)a)[0], 0x5a);
+	/* and the record of the mapping stays: the range is the object's */
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp->fixed), NVRM_OK);
+	nvrm_mem_free(m);
+}
+
+/* The overmap the backend cannot make, and the one it cannot undo. */
+static void
+test_extended_mem_overmap_backend(nvrm_client *cl, nvrm_mem_params *p)
+{
+	char err[160];
+	int replaced = 0;
+	void *scratch;
+	nvrm_mem *m;
+
+	/* the anonymous mapping cannot be made */
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+	{
+		nvrm_cmap_info ci = { .fd = -1, .prot = NVRM_CPU_READ,
+		    .length = 4096 };
+
+		CHECK_EQ(cl->mops->overmap_cpu(m->b, &ci, (void *)0x1001,
+		    &replaced, err, sizeof(err)), NVRM_E_IO);
+	}
+	CHECK_EQ(replaced, 0);
+	nvrm_mem_free(m);
+
+	/* the driver refuses and the original mapping cannot be put back:
+	 * the range holds memory that is not the object's any more */
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+	scratch = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(scratch != MAP_FAILED);
+	munmap(scratch, 4096);
+	{
+		nvrm_cmap_info ci = { .fd = 999, .prot = NVRM_CPU_READ,
+		    .length = 4096 };
+
+		M.fail_nr = NV_ESC_RM_UNMAP_MEMORY;
+		CHECK_EQ(cl->mops->overmap_cpu(m->b, &ci, scratch,
+		    &replaced, err, sizeof(err)), NVRM_E_IO);
+		M.fail_nr = 0;
+	}
+	CHECK_EQ(replaced, 1);
+	munmap(scratch, 4096);
+	nvrm_mem_free(m);
+}
+
+/* A mapping that may only be read, and one that may only be written: the
+ * original mapping that is put back has the same protection. */
+static void
+test_extended_mem_protection(nvrm_client *cl, nvrm_mem_params *p,
+    nvrm_cpu_map_params *mp)
+{
+	static const unsigned prots[] = { NVRM_CPU_READ, NVRM_CPU_WRITE };
+	unsigned i;
+
+	for (i = 0; i < 2; i++) {
+		nvrm_mem *m;
+		void *area, *a;
+
+		area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		CHECK(area != MAP_FAILED);
+		munmap(area, 64 * 1024);
+		mp->fixed = (uint64_t)(uintptr_t)area;
+		mp->prot = prots[i];
+		CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+		CHECK_EQ(nvrm_mem_map_cpu_at(m, mp, &a), NVRM_OK);
+		M.fail_nr = NV_ESC_RM_UNMAP_MEMORY;
+		CHECK_EQ(nvrm_mem_overmap_cpu(m, mp->fixed, 0), NVRM_E_IO);
+		M.fail_nr = 0;
+		CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp->fixed), NVRM_OK);
+		nvrm_mem_free(m);
+	}
+	mp->prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
+}
+
+/* A fixed address that is taken is refused: the mapping that is there is
+ * not replaced. */
+static void
+test_extended_mem_fixed_taken(nvrm_client *cl, nvrm_mem_params *p,
+    nvrm_cpu_map_params *mp)
+{
+	nvrm_mem *m, *m3;
+	void *area, *a, *a2;
+
+	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(area != MAP_FAILED);
+	munmap(area, 64 * 1024);
+	mp->fixed = (uint64_t)(uintptr_t)area;
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m, mp, &a), NVRM_OK);
+	memset(a, 0x5a, 16);
+	/* another object asks for the same address */
+	CHECK_EQ(nvrm_mem_alloc(cl, p, &m3), NVRM_OK);
+	CHECK_EQ(nvrm_mem_map_cpu_at(m3, mp, &a2), NVRM_E_BUSY);
+	/* the mapping that is there keeps its bytes */
+	CHECK_EQ(((unsigned char *)a)[0], 0x5a);
+	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp->fixed), NVRM_OK);
+	nvrm_mem_free(m3);
+	nvrm_mem_free(m);
+}
+
+/* The page kind, the compression, the handle of the object, a CPU mapping
+ * at a fixed address and the overmap of a client mapping. */
 static void
 test_extended_mem(void)
 {
 	nvrm_client *cl;
-	nvrm_mem *m;
+	nvrm_mem *m = NULL;
 	nvrm_mem_params p = { 0, NVRM_MEM_SYSMEM, 0, 0, 64 * 1024, 0, 0 };
 	nvrm_cpu_map_params mp = { sizeof(mp) };
-	void *area, *a;
 
 	up();
 	cl = client(NVRM_OPEN_ALLOW_MAP);
 
-	/* the page kind of the object reaches the RM */
-	{
-		static const struct {
-			uint32_t	pte_kind;
-			uint32_t	format;
-		} kinds[] = {
-			{ NVRM_PTE_KIND_DEFAULT, NVOS32_ATTR_FORMAT_PITCH },
-			{ NVRM_PTE_KIND_PITCH, NVOS32_ATTR_FORMAT_PITCH },
-			{ NVRM_PTE_KIND_BLOCK_LINEAR,
-			    NVOS32_ATTR_FORMAT_BLOCK_LINEAR },
-			{ NVRM_PTE_KIND_SWIZZLED, NVOS32_ATTR_FORMAT_SWIZZLED },
-		};
-		unsigned i;
-
-		for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-			p.pte_kind = kinds[i].pte_kind;
-			CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
-			CHECK_EQ(DRF_VAL(OS32, _ATTR, _FORMAT, M.last_alloc.attr),
-			    kinds[i].format);
-			nvrm_mem_free(m);
-		}
-	}
-
-	/* the compression of the object reaches the RM */
-	p.pte_kind = NVRM_PTE_KIND_DEFAULT;
-	{
-		static const struct {
-			uint32_t	compress;
-			uint32_t	compr;
-		} compressions[] = {
-			{ NVRM_COMPRESS_NONE, NVOS32_ATTR_COMPR_NONE },
-			{ NVRM_COMPRESS_REQUIRED, NVOS32_ATTR_COMPR_REQUIRED },
-			{ NVRM_COMPRESS_ANY, NVOS32_ATTR_COMPR_ANY },
-		};
-		unsigned i, n = sizeof(compressions) / sizeof(compressions[0]);
-
-		for (i = 0; i < n; i++) {
-			p.compress = compressions[i].compress;
-			CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
-			CHECK_EQ(DRF_VAL(OS32, _ATTR, _COMPR, M.last_alloc.attr),
-			    compressions[i].compr);
-			/* the last object stays: the handle of it is checked below */
-			if (i + 1 < n)
-				nvrm_mem_free(m);
-		}
-	}
-	/* the handle of the object is the one the RM gave it */
+	test_extended_mem_page_kind(cl, &p);
+	test_extended_mem_compress(cl, &p, &m);
+	/* the handle of the object is the one the RM gave it, and the page
+	 * kind reported is the layout the object has: the default is the
+	 * pitch layout */
 	CHECK(info_of(m).handle != 0);
-	CHECK_EQ(info_of(m).pte_kind, NVRM_PTE_KIND_DEFAULT);
-	CHECK_EQ(info_of(m).compress, NVRM_COMPRESS_ANY);
+	CHECK_EQ(info_of(m).pte_kind, NVRM_PTE_KIND_PITCH);
+	CHECK_EQ(info_of(m).compress_policy, NVRM_COMPRESS_ANY);
 	nvrm_mem_free(m);
 
-	/* a CPU mapping at a fixed address */
-	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
-	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	CHECK(area != MAP_FAILED);
-	munmap(area, 64 * 1024);
-	mp.prot = NVRM_CPU_READ | NVRM_CPU_WRITE;
-	mp.fixed = (uint64_t)(uintptr_t)area;
-	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
-	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
-	CHECK_EQ((uint64_t)(uintptr_t)a, mp.fixed);
-	CHECK_EQ(M.nmapmem, 1);
-
-	/* the overmap: the range stays mapped and the RM forgets the mapping */
-	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_OK);
-	CHECK_EQ(M.nunmapmem, 1);
-	memset(a, 0x5a, 16);
-	CHECK_EQ(((unsigned char *)a)[0], 0x5a);
-	/* the call to the driver fails */
-	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
-	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	CHECK(area != MAP_FAILED);
-	munmap(area, 64 * 1024);
-	mp.fixed = (uint64_t)(uintptr_t)area;
-	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
-	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
-	M.fail_nr = NV_ESC_RM_UNMAP_MEMORY;
-	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_E_IO);
-	M.fail_nr = 0;
-	/* the anonymous mapping cannot be made */
-	{
-		char err[160];
-
-		CHECK_EQ(cl->mops->overmap_cpu(m->b, (void *)0x1001, 4096, 0,
-		    err, sizeof(err)), NVRM_E_IO);
-	}
-	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp.fixed), NVRM_OK);
-	nvrm_mem_free(m);
-
-	/* the RM refuses the unmap of the overmap: the range stays as it is */
-	area = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
-	    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	CHECK(area != MAP_FAILED);
-	munmap(area, 64 * 1024);
-	mp.fixed = (uint64_t)(uintptr_t)area;
-	CHECK_EQ(nvrm_mem_alloc(cl, &p, &m), NVRM_OK);
-	CHECK_EQ(nvrm_mem_map_cpu_at(m, &mp, &a), NVRM_OK);
-	M.status_nr = NV_ESC_RM_UNMAP_MEMORY;
-	M.status_val = NV_ERR_INVALID_OBJECT;
-	CHECK_EQ(nvrm_mem_overmap_cpu(m, mp.fixed, 0), NVRM_E_RM);
-	M.status_nr = 0;
-	/* the mapping is still there: the caller unmaps it */
-	CHECK_EQ(nvrm_mem_unmap_cpu_at(m, mp.fixed), NVRM_OK);
-	nvrm_mem_free(m);
+	test_extended_mem_overmap(cl, &p, &mp);
+	test_extended_mem_overmap_refused(cl, &p, &mp, 0);
+	test_extended_mem_overmap_refused(cl, &p, &mp, 1);
+	test_extended_mem_overmap_backend(cl, &p);
+	test_extended_mem_protection(cl, &p, &mp);
+	test_extended_mem_fixed_taken(cl, &p, &mp);
 
 	nvrm_client_close(cl);
 	down("extended mem");

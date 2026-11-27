@@ -37,6 +37,9 @@ enum {
 	/* releases the "RM" refuses: what they hold stays until client close */
 	NVRM_FAKE_OP_VA_RELEASE, NVRM_FAKE_OP_FREE, NVRM_FAKE_OP_UNMAP_GPU,
 	NVRM_FAKE_OP_UNMAP_CPU, NVRM_FAKE_OP_OVERMAP_CPU,
+	/* the overmap replaces the range and then fails: the range is not
+	 * the object's any more, but the call did not succeed */
+	NVRM_FAKE_OP_OVERMAP_CPU_REFUSED,
 	NVRM_FAKE_OP__COUNT
 };
 

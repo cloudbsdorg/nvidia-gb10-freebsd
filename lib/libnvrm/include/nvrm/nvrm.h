@@ -190,9 +190,10 @@ typedef struct nvrm_device_info {
 	nvrm_u64	max_blocks_per_mp;
 	/* The 2D, the memory-to-memory and the video decode classes. */
 	nvrm_u64	cls_eng2d, cls_m2mf, cls_vdec;
-	/* The host's cache line size: the granularity a flush to the GPU
-	 * needs. */
-	nvrm_u64	nc_atom_size;
+	/* The granularity a flush to the GPU must use, in bytes: the host's
+	 * cache line size, or the host page size when the cache line size
+	 * is not reported. */
+	nvrm_u64	nc_flush_granularity;
 	/* The shared memory a work group may use, and the sizes a
 	 * multiprocessor may be given. */
 	nvrm_u64	max_smem_per_wg;
@@ -271,7 +272,8 @@ typedef struct nvrm_enum_opts {
  * aligned accesses of 1, 2, 4 or 8 bytes are safe; use nvrm_mem_read() and
  * nvrm_mem_write(), which obey the rule, or follow it in your own code.
  *
- * A client is not safe for concurrent use; use one thread per client or a lock.
+ * The calls of one client take the client's own lock, so several threads may
+ * use one client at the same time.
  * After fork() the RM client still belongs to the parent.  In the child, a
  * call that would create or act on RM objects is refused with NVRM_E_DENIED;
  * a release (unmap, free, VA release, close) succeeds and drops only the
@@ -373,7 +375,10 @@ enum nvrm_pte_kind {
 	NVRM_PTE_KIND_BLOCK_LINEAR = 2,
 	NVRM_PTE_KIND_SWIZZLED = 3
 };
-#define NVRM_PTE_KNOWN_KINDS	NVRM_PTE_KIND_SWIZZLED
+/* The highest page kind this version knows: a request above it is refused.
+ * The value is an upper bound, not a bitmask: a caller tests a kind with
+ * "kind <= NVRM_PTE_KIND_MAX_KNOWN", never with a mask. */
+#define NVRM_PTE_KIND_MAX_KNOWN	NVRM_PTE_KIND_SWIZZLED
 
 /* Whether an allocation may be compressed.  NVRM_COMPRESS_NONE asks for no
  * compression, NVRM_COMPRESS_REQUIRED asks for it, NVRM_COMPRESS_ANY lets
@@ -383,7 +388,9 @@ enum nvrm_compress {
 	NVRM_COMPRESS_REQUIRED = 1,
 	NVRM_COMPRESS_ANY = 2
 };
-#define NVRM_COMPRESS_KNOWN	NVRM_COMPRESS_ANY
+/* The highest compression policy this version knows: a request above it is
+ * refused.  The value is an upper bound, not a bitmask. */
+#define NVRM_COMPRESS_MAX_KNOWN	NVRM_COMPRESS_ANY
 
 #define NVRM_MAP_READ_ONLY	0x1	/* the GPU may only read through this mapping */
 #define NVRM_MAP_KNOWN_FLAGS	NVRM_MAP_READ_ONLY
@@ -408,8 +415,17 @@ typedef struct nvrm_mem_info {
 	/* NVRM_1.4: appended, so an earlier member keeps its offset. */
 	uint64_t	handle;		/* the driver's handle of the object */
 	uint32_t	cpu_mappings;	/* how many CPU mappings the object has */
-	uint32_t	pte_kind;	/* enum nvrm_pte_kind the object got */
-	uint32_t	compress;	/* enum nvrm_compress the object got */
+	uint32_t	pte_kind;	/* enum nvrm_pte_kind: the page kind the
+				 * object has.  A request of
+				 * NVRM_PTE_KIND_DEFAULT is resolved to the
+				 * pitch layout; NVRM_PTE_KIND_DEFAULT in a
+				 * report means the object has no page kind
+				 * of its own (registered user pages, an
+				 * imported object). */
+	/* enum nvrm_compress: the compression policy the object was made
+	 * with.  The driver decides whether it is compressed; this is
+	 * what was asked for. */
+	uint32_t	compress_policy;
 } nvrm_mem_info;
 
 /* Where and how a CPU mapping is made.  NVRM_1.4. */
@@ -476,7 +492,10 @@ int		nvrm_client_open(const nvrm_device *dev,
 		    const nvrm_open_opts *opts, nvrm_client **clp, char *err,
 		    size_t errlen);
 void		nvrm_client_close(nvrm_client *cl);
-/* One line about the most recent call on the client: "" when it succeeded. */
+/* One line about the most recent call on the client: "" when it succeeded.
+ * The message belongs to the client, so the calls of several threads write
+ * over one another; the string this returns is the calling thread's own
+ * copy, and the next call of that thread replaces it. */
 const char	*nvrm_client_errmsg(const nvrm_client *cl);
 int		nvrm_client_stats_get(nvrm_client *cl,
 		    nvrm_client_stats *st);

@@ -536,6 +536,11 @@ surface_info(nvrm_bclient *c, NvHandle h, nvrm_bmem_info *out, char *err,
 		return (NVRM_E_NOTSUP);
 	}
 	out->coherency = import_coherency(raw.attr);
+	/* An imported object was made elsewhere: this client made no
+	 * request for it, so it reports no page kind and no compression
+	 * policy of its own. */
+	out->pte_kind = NVRM_PTE_KIND_DEFAULT;
+	out->compress = NVRM_COMPRESS_NONE;
 	/* ctrl0041.h, NV0041_CTRL_SURFACE_INFO_INDEX_ADDR_SPACE_TYPE: "Returned
 	 * values are described by NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE". */
 	if (raw.space == NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_VIDMEM)
@@ -639,6 +644,11 @@ rmm_mem_alloc(nvrm_bclient *c, const nvrm_balloc *a, nvrm_bmem **mp,
 	out->place = a->place;
 	out->coherency = NVRM_COH_CACHED;
 	out->handle = (uint64_t)m->h;
+	/* The page kind the object has: a request of DEFAULT is the pitch
+	 * layout, which is what the RM lays an allocation out in. */
+	out->pte_kind = a->pte_kind == NVRM_PTE_KIND_DEFAULT ?
+	    NVRM_PTE_KIND_PITCH : a->pte_kind;
+	out->compress = a->compress;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -680,6 +690,10 @@ rmm_mem_register(nvrm_bclient *c, void *addr, uint64_t bytes, nvrm_bmem **mp,
 	out->place = NVRM_PLACE_SYSMEM;
 	out->coherency = NVRM_COH_CACHED;
 	out->handle = (uint64_t)m->h;
+	/* Registered pages are the caller's own: they have no page kind
+	 * and no compression policy of their own. */
+	out->pte_kind = NVRM_PTE_KIND_DEFAULT;
+	out->compress = NVRM_COMPRESS_NONE;
 	*mp = m;
 	return (NVRM_OK);
 }
@@ -804,14 +818,33 @@ rmm_map_cpu(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed, void **addr,
 		    p.params.status));
 	/* The OS layer set the mapping context on this descriptor; the
 	 * offset is not used (nvidia_mmap_dev_single). */
+	/* MAP_EXCL with MAP_FIXED: the kernel refuses an occupied range
+	 * instead of replacing what is there.  A fixed mapping must never
+	 * replace another mapping, and the check and the map are one step:
+	 * two clients may ask for the same address at the same time. */
 	if (fixed != 0)
-		flags |= MAP_FIXED;
+		flags |= MAP_FIXED | MAP_EXCL;
 	a = mmap(fixed != 0 ? (void *)(uintptr_t)fixed : NULL, m->bytes,
 	    ((prot & NVRM_CPU_READ) ? PROT_READ : 0) |
 	    ((prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0), flags, fd, 0);
 	if (a == MAP_FAILED) {
+		int e = errno;
+
+		/* The driver made a mapping for this descriptor: it must not
+		 * keep it, the range is not ours. */
+		if (fixed != 0) {
+			/* The kernel refuses an occupied range with ENOMEM
+			 * (MAP_FIXED|MAP_EXCL): the range is taken, and
+			 * the mapping that is there stays. */
+			snprintf(err, errlen, "the range at 0x%jx is already "
+			    "mapped", (uintmax_t)fixed);
+			(void)rm_unmap_memory(m,
+			    (uint64_t)p.params.pLinearAddress, 1, scratch,
+			    sizeof(scratch));
+			return (NVRM_E_BUSY);
+		}
 		snprintf(err, errlen, "mmap of the device failed: %s",
-		    strerror(errno));
+		    strerror(e));
 		/* The mmap error is the one to report. */
 		(void)rm_unmap_memory(m, (uint64_t)p.params.pLinearAddress, 1,
 		    scratch, sizeof(scratch));
@@ -835,22 +868,54 @@ rmm_unmap_cpu(nvrm_bmem *m, void *addr, uint64_t cookie, int owner, char *err,
  * replaced first, so that it stays mapped and no other thread can take
  * the address in between; then the driver is told to forget the mapping
  * it made, without the range being unmapped.
+ *
+ * The driver may refuse to forget the mapping.  Then the original mapping
+ * is put back over the anonymous memory, so that the range is what it was
+ * (the documented behaviour of a refused overmap).  If that fails too, the
+ * range holds memory that is not the object's any more: *replaced says so,
+ * and the caller drops the record of the mapping.
  */
 static int
-rmm_overmap_cpu(nvrm_bmem *m, void *addr, uint64_t length, uint64_t cookie,
-    char *err, size_t errlen)
+rmm_overmap_cpu(nvrm_bmem *m, const nvrm_cmap_info *cm, void *addr,
+    int *replaced, char *err, size_t errlen)
 {
 	nvrm_bclient *c = m->c;
 	void *a;
+	int rc;
 
-	a = mmap(addr, length, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON, -1,
-	    0);
+	*replaced = 0;
+	a = mmap(addr, cm->length, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON,
+	    -1, 0);
 	if (a == MAP_FAILED) {
 		snprintf(err, errlen, "the anonymous mapping failed: %s",
 		    strerror(errno));
 		return (NVRM_E_IO);
 	}
-	return (rm_forget_mapping(c, m->h, cookie, err, errlen));
+	rc = rm_forget_mapping(c, m->h, cm->cookie, err, errlen);
+	if (rc == NVRM_OK) {
+		*replaced = 1;
+		return (NVRM_OK);
+	}
+	/* The driver refused: put the original mapping back.  The same
+	 * mapping as the one that was there: shared, as the mapping of the
+	 * object was. */
+	a = mmap(addr, cm->length,
+	    ((cm->prot & NVRM_CPU_READ) ? PROT_READ : 0) |
+	    ((cm->prot & NVRM_CPU_WRITE) ? PROT_WRITE : 0),
+	    MAP_SHARED | MAP_FIXED, cm->fd, 0);
+	if (a == MAP_FAILED) {
+		/* The range holds anonymous memory now: the caller must not
+		 * use it as the object's memory any more. */
+		*replaced = 1;
+		snprintf(err, errlen, "the driver refused to forget the "
+		    "mapping and the original mapping could not be put back: "
+		    "%s", strerror(errno));
+		return (rc);
+	}
+	/* The range is the object's again: the refusal is what the caller
+	 * is told about, and the record stays.  The driver still holds the
+	 * mapping it refused to forget, so nothing is told to it. */
+	return (rc);
 }
 
 /* ---- sharing ------------------------------------------------------------- */

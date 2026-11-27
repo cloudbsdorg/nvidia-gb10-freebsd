@@ -164,7 +164,7 @@
     "group_gpu": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["architecture", "implementation", "chip_id", "sm_version_major", "sm_version_minor", "gpc_count", "tpc_count", "sm_count", "cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "classes", "family", "rm_sm_version", "compute_capability_major", "compute_capability_minor", "device_name", "chipset_name", "mp_per_tpc", "max_warps_per_mp", "max_blocks_per_mp", "cls_eng2d", "cls_m2mf", "cls_vdec", "nc_atom_size", "max_smem_per_wg", "sm_smem_sizes", "zcull_width_align_pixels", "zcull_height_align_pixels", "zcull_aliquot_total", "zcull_region_bytes", "zcull_region_header_bytes", "zcull_subregion_header_bytes"],
+      "required": ["architecture", "implementation", "chip_id", "sm_version_major", "sm_version_minor", "gpc_count", "tpc_count", "sm_count", "cls_gpfifo", "cls_compute", "cls_eng3d", "cls_copy", "classes", "family", "rm_sm_version", "compute_capability_major", "compute_capability_minor", "device_name", "chipset_name", "mp_per_tpc", "max_warps_per_mp", "max_blocks_per_mp", "cls_eng2d", "cls_m2mf", "cls_vdec", "nc_flush_granularity", "max_smem_per_wg", "sm_smem_sizes", "zcull_width_align_pixels", "zcull_height_align_pixels", "zcull_aliquot_total", "zcull_region_bytes", "zcull_region_header_bytes", "zcull_subregion_header_bytes"],
       "properties": {
         "architecture": { "$ref": "#/$defs/u64", "description": "RM architecture id" },
         "implementation": { "$ref": "#/$defs/u64", "description": "RM implementation id" },
@@ -191,13 +191,13 @@
         "cls_eng2d": { "$ref": "#/$defs/u64", "description": "2D class" },
         "cls_m2mf": { "$ref": "#/$defs/u64", "description": "memory to memory class" },
         "cls_vdec": { "$ref": "#/$defs/u64", "description": "video decode class" },
-        "nc_atom_size": { "$ref": "#/$defs/u64", "description": "host cache line size in bytes" },
+        "nc_flush_granularity": { "$ref": "#/$defs/u64", "description": "flush granularity in bytes: the host cache line size, or the host page size when the cache line size is not reported" },
         "max_smem_per_wg": { "$ref": "#/$defs/u64", "description": "shared memory a work group may use, in bytes" },
         "sm_smem_sizes": { "$ref": "#/$defs/list", "description": "shared memory sizes a multiprocessor may be given, in bytes" },
         "zcull_width_align_pixels": { "$ref": "#/$defs/u64", "description": "zcull width alignment in pixels" },
         "zcull_height_align_pixels": { "$ref": "#/$defs/u64", "description": "zcull height alignment in pixels" },
         "zcull_aliquot_total": { "$ref": "#/$defs/u64", "description": "zcull aliquots the GPU has" },
-        "zcull_region_bytes": { "$ref": "#/$defs/u64", "description": "bytes to save one zcull aliquot" },
+        "zcull_region_bytes": { "$ref": "#/$defs/u64", "description": "bytes per zcull aliquot" },
         "zcull_region_header_bytes": { "$ref": "#/$defs/u64", "description": "zcull region header size in bytes" },
         "zcull_subregion_header_bytes": { "$ref": "#/$defs/u64", "description": "zcull subregion header size in bytes" }
       }

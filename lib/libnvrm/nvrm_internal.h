@@ -10,6 +10,7 @@
 #include <sys/types.h>
 
 #include <pthread.h>
+#include <stdarg.h>
 
 #include <nvrm/nvrm.h>
 #include <nvrm/nvrm_chan.h>
@@ -176,6 +177,10 @@ int	nvrm_compute_capability_for(uint64_t architecture,
  * when the table has no row for the pair. */
 const char *nvrm_chipset_name_for(uint64_t architecture,
 	    uint64_t implementation);
+/* The (architecture, implementation) pairs the chipset table and the compute
+ * capability table know, two numbers per pair (the test walks them). */
+unsigned nvrm_chipset_pairs(uint64_t *pairs, unsigned max);
+unsigned nvrm_compute_pairs(uint64_t *pairs, unsigned max);
 
 /* Board decorators: add or override options, never decide support. */
 typedef struct nvrm_decorator {
@@ -250,7 +255,25 @@ typedef struct nvrm_bmem_info {
 	int		place;
 	int		coherency;	/* NVRM_COH_*; system memory only */
 	uint64_t	handle;		/* the driver's handle of the object */
+	/* The page kind the object has, and the compression policy it was
+	 * made with.  A request of NVRM_PTE_KIND_DEFAULT is resolved by
+	 * the backend to the layout the object really has (the pitch
+	 * layout).  An object this client did not allocate (registered
+	 * user pages, an imported object) reports NVRM_PTE_KIND_DEFAULT
+	 * and NVRM_COMPRESS_NONE: this client made no request for it. */
+	uint32_t	pte_kind;	/* enum nvrm_pte_kind */
+	uint32_t	compress;	/* enum nvrm_compress */
 } nvrm_bmem_info;
+
+/* What the backend needs to know about a CPU mapping it replaces: the
+ * descriptor that carries it, the protection it was made with, its length
+ * and the cookie the backend needs to unmap it. */
+typedef struct nvrm_cmap_info {
+	int		fd;
+	unsigned	prot;
+	uint64_t	length;
+	uint64_t	cookie;
+} nvrm_cmap_info;
 
 /*
  * Every call that can fail returns an enum nvrm_error and, with a message of
@@ -286,16 +309,28 @@ typedef struct nvrm_mem_ops {
 	/* The descriptor is consumed, mapped or not (the OS layer lets one
 	 * descriptor carry one mapping); the core closes it on unmap.
 	 * A fixed address asks for the mapping to be made at that address;
-	 * 0 lets the backend pick one. */
+	 * 0 lets the backend pick one.
+	 *
+	 * A fixed address must never replace another mapping: the backend
+	 * maps it atomically, so that the kernel refuses an occupied range
+	 * (MAP_FIXED|MAP_EXCL) and answers NVRM_E_BUSY.  A backend that
+	 * checked the range first and mapped it afterwards would let two
+	 * clients take the same address. */
 	int	(*map_cpu)(nvrm_bmem *m, int fd, unsigned prot, uint64_t fixed,
 		    void **addr, uint64_t *cookie, char *err, size_t errlen);
 	int	(*unmap_cpu)(nvrm_bmem *m, void *addr, uint64_t cookie, int owner,
 		    char *err, size_t errlen);
 	/* Replace the mapping at addr with anonymous memory, in place, and
 	 * tell the driver to forget the mapping it made.  The range is not
-	 * unmapped: the caller may map over it again at once. */
-	int	(*overmap_cpu)(nvrm_bmem *m, void *addr, uint64_t length,
-		    uint64_t cookie, char *err, size_t errlen);
+	 * unmapped: the caller may map over it again at once.
+	 *
+	 * The backend restores the original mapping when the driver refuses
+	 * to forget it, so a refused overmap leaves the range as it was.
+	 * *replaced says whether the range holds anonymous memory now: a
+	 * backend that could not restore says 1, and the caller then drops
+	 * the record of the mapping (the range is no longer the object's). */
+	int	(*overmap_cpu)(nvrm_bmem *m, const nvrm_cmap_info *cm,
+		    void *addr, int *replaced, char *err, size_t errlen);
 	int	(*export_fd)(nvrm_bmem *m, int fd, char *err, size_t errlen);
 	int	(*import_fd)(nvrm_bclient *bc, int fd, nvrm_bmem **m,
 		    nvrm_bmem_info *out, char *err, size_t errlen);
@@ -498,11 +533,43 @@ struct nvrm_client {
 	char		errmsg[160];
 };
 
+/*
+ * The client's message.  Every clear and every write of it goes through the
+ * client's error lock, so that two threads of one client cannot write the
+ * buffer at the same time.  The lock is recursive (the channel calls hold
+ * it across the memory calls they make) and it is always the inner lock.
+ */
+static inline void
+nvrm_client_clear_err(nvrm_client *cl)
+{
+	(void)pthread_mutex_lock(&cl->errlock);
+	cl->errmsg[0] = '\0';
+	(void)pthread_mutex_unlock(&cl->errlock);
+}
+
+static inline int
+nvrm_client_fail(nvrm_client *cl, int rc, const char *fmt, ...)
+{
+	va_list ap;
+
+	(void)pthread_mutex_lock(&cl->errlock);
+	va_start(ap, fmt);
+	(void)vsnprintf(cl->errmsg, sizeof(cl->errmsg), fmt, ap);
+	va_end(ap);
+	(void)pthread_mutex_unlock(&cl->errlock);
+	return (rc);
+}
+
 /* Index of the os_device_wc_active flag in nvrm_device_info.caps[]. */
 #define NVRM_CAPIDX_OS_DEVICE_WC (NVRM_P_CAP_OS_DEVICE_WC - NVRM_P_CAP_DMABUF)
 
 /* Test seam: nonzero stands for "this process is in capability mode". */
 extern int (*nvrm_capmode_hook)(void);
+/* Test seam: runs at the start of the adoption of a new object, before the
+ * client's list of objects is changed.  The client lock is held there: the
+ * test uses the seam to hold the threads at the same point, and to see that
+ * the lock keeps them apart. */
+extern void (*nvrm_mem_adopt_hook)(void);
 
 /* The fake backend's software GPU: read or write through a GPU address, as
  * the GPU would (tests).  Returns 0, or NVRM_FAKE_FAULT_*. */

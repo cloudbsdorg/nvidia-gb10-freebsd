@@ -1071,8 +1071,8 @@ test_engine_info(void)
 	CHECK_EQ(i->zcull_region_header_bytes.value, 32);
 	CHECK_EQ(i->zcull_subregion_header_bytes.value, 16);
 	/* the cache line the OS layer reports */
-	CHECK_EQ(i->nc_atom_size.value, 64);
-	CHECK(i->nc_atom_size.source == NVRM_S_OS);
+	CHECK_EQ(i->nc_flush_granularity.value, 64);
+	CHECK(i->nc_flush_granularity.source == NVRM_S_OS);
 	/* the video memory */
 	CHECK_EQ(i->vram_free.value, 12ULL * 1024 * 1024);
 	CHECK_EQ(i->vram_used.value, 4ULL * 1024 * 1024);
@@ -1083,14 +1083,16 @@ test_engine_info(void)
 	reset_kernel();
 	K.fn_cache_line = 0;
 	ctx = enum_rm(&rc, err, sizeof(err));
-	CHECK_EQ(info0(ctx)->nc_atom_size.value, (uint64_t)getpagesize());
+	CHECK_EQ(info0(ctx)->nc_flush_granularity.value,
+	    (uint64_t)getpagesize());
 	nvrm_close(ctx);
 
 	/* no cache line at all: the page size is the safe answer */
 	reset_kernel();
 	K.fn_cache_line = -1;
 	ctx = enum_rm(&rc, err, sizeof(err));
-	CHECK_EQ(info0(ctx)->nc_atom_size.value, (uint64_t)getpagesize());
+	CHECK_EQ(info0(ctx)->nc_flush_granularity.value,
+	    (uint64_t)getpagesize());
 	nvrm_close(ctx);
 
 	/* the name control fails */

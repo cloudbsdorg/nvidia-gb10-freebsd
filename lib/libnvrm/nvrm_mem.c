@@ -38,16 +38,31 @@
 #define MIN_PAGE	4096ULL
 
 int (*nvrm_capmode_hook)(void);
+void (*nvrm_mem_adopt_hook)(void);
 
-static int
-fail(nvrm_client *cl, int rc, const char *fmt, ...)
+/*
+ * The client's message is written and cleared under the client's error lock
+ * (nvrm_client_fail() and nvrm_client_clear_err(), in nvrm_internal.h), so
+ * that two threads of one client cannot write the buffer at the same time.
+ * The lock is recursive, because the channel calls hold it across the memory
+ * calls they make.
+ *
+ * The order is always the error lock first, then the client lock: a memory
+ * call takes the error lock for the whole call and the client lock inside it,
+ * and the channel calls take the error lock before the memory calls they
+ * make.  Nothing takes the client lock first, so the two can never wait for
+ * one another.
+ */
+static void
+lock_err(nvrm_client *cl)
 {
-	va_list ap;
+	(void)pthread_mutex_lock(&cl->errlock);
+}
 
-	va_start(ap, fmt);
-	vsnprintf(cl->errmsg, sizeof(cl->errmsg), fmt, ap);
-	va_end(ap);
-	return (rc);
+static void
+unlock_err(nvrm_client *cl)
+{
+	(void)pthread_mutex_unlock(&cl->errlock);
 }
 
 /* Only the process that opened the client may create or act on its objects. */
@@ -56,17 +71,20 @@ owner_check(nvrm_client *cl)
 {
 	if (nvrm_owner_is_me(&cl->owner))
 		return (NVRM_OK);
-	return (fail(cl, NVRM_E_DENIED, "this process did not open the client "
+	return (nvrm_client_fail(cl, NVRM_E_DENIED,
+	    "this process did not open the client "
 	    "(it is a fork() child): it may only release what it holds and "
 	    "close the client"));
 }
 
 /* The client's own lock.  Every call of nvrm_mem(3) takes it: the calls
  * that make or drop an RM object must not run at the same time on one
- * client, and the caller may be several threads. */
+ * client, and the caller may be several threads.  The error lock comes
+ * first: see the note above nvrm_client_fail(). */
 static void
 lock_client(nvrm_client *cl)
 {
+	(void)pthread_mutex_lock(&cl->errlock);
 	(void)pthread_mutex_lock(&cl->lock);
 }
 
@@ -74,6 +92,7 @@ static void
 unlock_client(nvrm_client *cl)
 {
 	(void)pthread_mutex_unlock(&cl->lock);
+	(void)pthread_mutex_unlock(&cl->errlock);
 }
 
 /* A size member: 0 or the structure's size. */
@@ -163,7 +182,7 @@ pool_fill(nvrm_client *cl, int kind, unsigned count)
 		rc = pool_push(&cl->pool[kind], fd);
 		if (rc != NVRM_OK) {
 			close(fd);
-			return (fail(cl, rc, "out of memory"));
+			return (nvrm_client_fail(cl, rc, "out of memory"));
 		}
 	}
 	return (NVRM_OK);
@@ -184,7 +203,8 @@ pool_take(nvrm_client *cl, int kind, int *fd)
 		return (NVRM_OK);
 	}
 	if (in_capmode())
-		return (fail(cl, NVRM_E_NOSLOT, "no spare %s descriptor is "
+		return (nvrm_client_fail(cl, NVRM_E_NOSLOT,
+		    "no spare %s descriptor is "
 		    "left and none can be opened in capability mode (raise "
 		    "nvrm_open_opts.%s)", kind == NVRM_DESC_MAP ? "mapping" :
 		    "export", kind == NVRM_DESC_MAP ? "map_slots" :
@@ -285,7 +305,14 @@ nvrm_client_open(const nvrm_device *dev, const nvrm_open_opts *opts,
 		return (NVRM_E_NOMEM);
 	}
 	nvrm_owner_set(&cl->owner);
-	(void)pthread_mutex_init(&cl->errlock, NULL);
+	/* The error lock is recursive: the channel calls hold it across the
+	 * memory calls they make, and those take it again. */
+	pthread_mutexattr_t attr;
+
+	(void)pthread_mutexattr_init(&attr);
+	(void)pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	(void)pthread_mutex_init(&cl->errlock, &attr);
+	(void)pthread_mutexattr_destroy(&attr);
 	(void)pthread_mutex_init(&cl->lock, NULL);
 	info = &dev->info;
 	cl->ops = dev->ctx->ops;
@@ -340,6 +367,8 @@ nvrm_client_close(nvrm_client *cl)
 
 	if (cl == NULL)
 		return;
+	/* The message belongs to the client: the releases below write it. */
+	lock_err(cl);
 	while (cl->channels != NULL)
 		nvrm_chan_destroy(cl->channels);
 	nvrm_chan_release_held(cl);
@@ -361,13 +390,26 @@ nvrm_client_close(nvrm_client *cl)
 	free_pools(cl);
 	nvrm_va_destroy(cl->va);
 	cl->mops->client_close(cl->bc);
+	unlock_err(cl);
 	client_free(cl);
 }
 
+/*
+ * The message of the client's last call.  The buffer belongs to the client,
+ * so it is copied under the error lock into a buffer of the calling thread:
+ * two threads of one client each get the message they can read without
+ * racing with the other.
+ */
 const char *
 nvrm_client_errmsg(const nvrm_client *cl)
 {
-	return (cl->errmsg);
+	static __thread char copy[sizeof(cl->errmsg)];
+	nvrm_client *c = (nvrm_client *)(uintptr_t)cl;
+
+	(void)pthread_mutex_lock(&c->errlock);
+	memcpy(copy, cl->errmsg, sizeof(copy));
+	(void)pthread_mutex_unlock(&c->errlock);
+	return (copy);
 }
 
 /* The structure grew after NVRM_1.1 (live_channels, channels_created): a
@@ -383,10 +425,11 @@ nvrm_client_stats_get(nvrm_client *cl, nvrm_client_stats *st)
 	size_t want = st->size == 0 ? sizeof(full) : st->size;
 
 	if (want != sizeof(full) && want != v11)
-		return (fail(cl, NVRM_E_INVAL, "nvrm_client_stats.size must "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_client_stats.size must "
 		    "be 0 (the full size), sizeof(nvrm_client_stats) or the "
 		    "NVRM_1.1 size (offsetof live_channels)"));
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	full = cl->st;
 	full.size = (uint32_t)want;
@@ -401,9 +444,10 @@ int
 nvrm_vaspace_info_get(nvrm_client *cl, nvrm_vaspace_info *info)
 {
 	if (!size_ok(info->size, sizeof(*info)))
-		return (fail(cl, NVRM_E_INVAL, "nvrm_vaspace_info.size must "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_vaspace_info.size must "
 		    "be 0 or sizeof(nvrm_vaspace_info)"));
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	info->size = sizeof(*info);
 	info->base = cl->va_base;
@@ -419,19 +463,23 @@ static int
 check_va_params(nvrm_client *cl, const nvrm_va_params *p, uint64_t *align)
 {
 	if (!size_ok(p->size, sizeof(*p)))
-		return (fail(cl, NVRM_E_INVAL, "nvrm_va_params.size must be 0 or "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_va_params.size must be 0 or "
 		    "sizeof(nvrm_va_params)"));
 	if ((p->flags & ~NVRM_VA_KNOWN_FLAGS) != 0)
-		return (fail(cl, NVRM_E_INVAL, "unknown VA flags"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL, "unknown VA flags"));
 	*align = p->alignment != 0 ? p->alignment : MIN_PAGE;
 	if ((*align & (*align - 1)) != 0 || *align < MIN_PAGE)
-		return (fail(cl, NVRM_E_INVAL, "the alignment is not a power "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the alignment is not a power "
 		    "of two of at least 4 KiB"));
 	if (p->bytes == 0 || (p->bytes & (MIN_PAGE - 1)) != 0)
-		return (fail(cl, NVRM_E_INVAL, "the size is not a multiple of "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the size is not a multiple of "
 		    "4 KiB"));
 	if (p->fixed != 0 && (p->fixed & (*align - 1)) != 0)
-		return (fail(cl, NVRM_E_INVAL, "the fixed address is not "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the fixed address is not "
 		    "aligned"));
 	return (NVRM_OK);
 }
@@ -443,7 +491,7 @@ nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p, uint64_t *va)
 	uint64_t align, addr;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -459,16 +507,17 @@ nvrm_va_reserve(nvrm_client *cl, const nvrm_va_params *p, uint64_t *va)
 	    &addr);
 	if (rc != NVRM_OK) {
 		unlock_client(cl);
-		return (rc == NVRM_E_RANGE ? fail(cl, rc, "the VA space has no "
+		return (rc == NVRM_E_RANGE ? nvrm_client_fail(cl, rc,
+		    "the VA space has no "
 		    "free range of 0x%jx bytes%s", (uintmax_t)p->bytes,
 		    p->fixed != 0 ? " at the fixed address" : "") :
-		    fail(cl, rc, "out of memory"));
+		    nvrm_client_fail(cl, rc, "out of memory"));
 	}
 	r = NVRM_CALLOC(1, sizeof(*r));
 	if (r == NULL) {
 		nvrm_va_free(cl->va, addr, p->bytes);
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_NOMEM, "out of memory"));
+		return (nvrm_client_fail(cl, NVRM_E_NOMEM, "out of memory"));
 	}
 	rc = cl->mops->va_reserve(cl->bc, addr, p->bytes,
 	    (p->flags & NVRM_VA_SPARSE) != 0, &r->b, cl->errmsg,
@@ -496,7 +545,7 @@ nvrm_va_release(nvrm_client *cl, uint64_t va)
 	nvrm_reserve **pp, *r;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	for (pp = &cl->reserves; *pp != NULL && (*pp)->va != va;
 	    pp = &(*pp)->next)
@@ -504,12 +553,14 @@ nvrm_va_release(nvrm_client *cl, uint64_t va)
 	r = *pp;
 	if (r == NULL) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "no reservation starts at 0x%jx",
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "no reservation starts at 0x%jx",
 		    (uintmax_t)va));
 	}
 	if (r->nmaps != 0) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_BUSY, "the reservation still has "
+		return (nvrm_client_fail(cl, NVRM_E_BUSY,
+		    "the reservation still has "
 		    "mappings (or a mapping the RM would not unmap: see "
 		    "failed_releases)"));
 	}
@@ -536,7 +587,8 @@ nvrm_va_release(nvrm_client *cl, uint64_t va)
 	free(r);
 	unlock_client(cl);
 	if (rc != NVRM_OK)
-		return (fail(cl, rc, "the reservation is released, but its "
+		return (nvrm_client_fail(cl, rc,
+		    "the reservation is released, but its "
 		    "addresses are lost to the allocator (%s): they are never "
 		    "handed out again", nvrm_strerror(rc)));
 	return (NVRM_OK);
@@ -563,27 +615,34 @@ static int
 check_mem_params(nvrm_client *cl, const nvrm_mem_params *p)
 {
 	if (!size_ok(p->size, sizeof(*p)))
-		return (fail(cl, NVRM_E_INVAL, "nvrm_mem_params.size must be 0 or "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_mem_params.size must be 0 or "
 		    "sizeof(nvrm_mem_params)"));
 	if (p->kind != NVRM_MEM_VRAM && p->kind != NVRM_MEM_SYSMEM)
-		return (fail(cl, NVRM_E_INVAL, "the kind is not VRAM or "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the kind is not VRAM or "
 		    "SYSMEM"));
 	if (p->flags != 0 || p->reserved != 0)
-		return (fail(cl, NVRM_E_INVAL, "flags and reserved must be "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "flags and reserved must be "
 		    "zero in this version"));
-	if (p->pte_kind > NVRM_PTE_KNOWN_KINDS)
-		return (fail(cl, NVRM_E_INVAL, "the page kind is not one this "
+	if (p->pte_kind > NVRM_PTE_KIND_MAX_KNOWN)
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the page kind is not one this "
 		    "version knows"));
-	if (p->compress > NVRM_COMPRESS_KNOWN)
-		return (fail(cl, NVRM_E_INVAL, "the compression is not one this "
+	if (p->compress > NVRM_COMPRESS_MAX_KNOWN)
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the compression is not one this "
 		    "version knows"));
 	if (p->bytes == 0)
-		return (fail(cl, NVRM_E_INVAL, "the size is zero"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL, "the size is zero"));
 	if ((p->alignment & (p->alignment - 1)) != 0)
-		return (fail(cl, NVRM_E_INVAL, "the alignment is not a power "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the alignment is not a power "
 		    "of two"));
 	if (!page_size_ok(cl, p->page_size))
-		return (fail(cl, NVRM_E_INVAL, "the page size is not one this "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the page size is not one this "
 		    "GPU supports (nvrm_device_info.page_sizes)"));
 	return (NVRM_OK);
 }
@@ -632,6 +691,8 @@ mem_new(nvrm_client *cl, int kind, nvrm_bmem *b, const nvrm_bmem_info *bi)
 	m->cpu_attr = nvrm_cpu_attr_rule(bi->place, bi->coherency,
 	    cl->host_arm64, &cl->wc_cap);
 	m->handle = bi->handle;
+	m->pte_kind = bi->pte_kind;
+	m->compress = bi->compress;
 	m->next = cl->mems;
 	cl->mems = m;
 	cl->st.allocs++;
@@ -640,19 +701,26 @@ mem_new(nvrm_client *cl, int kind, nvrm_bmem *b, const nvrm_bmem_info *bi)
 	return (m);
 }
 
-/* Make the core's object for what the backend made, or give it back. */
+/*
+ * Make the core's object for what the backend made, or give it back.  The
+ * client lock is held: the object is published in the client's list and
+ * counted in its statistics here, and two threads of one client must not
+ * lose one another's object.
+ */
 static int
 adopt(nvrm_client *cl, int kind, nvrm_bmem *b, const nvrm_bmem_info *bi,
     nvrm_mem **memp)
 {
 	char scratch[sizeof(cl->errmsg)];
 
+	if (nvrm_mem_adopt_hook != NULL)
+		nvrm_mem_adopt_hook();
 	*memp = mem_new(cl, kind, b, bi);
 	if (*memp != NULL)
 		return (NVRM_OK);
 	count_failed(cl, cl->mops->mem_free(b, nvrm_owner_is_me(&cl->owner),
 	    scratch, sizeof(scratch)));
-	return (fail(cl, NVRM_E_NOMEM, "out of memory"));
+	return (nvrm_client_fail(cl, NVRM_E_NOMEM, "out of memory"));
 }
 
 int
@@ -664,7 +732,7 @@ nvrm_mem_alloc(nvrm_client *cl, const nvrm_mem_params *p, nvrm_mem **memp)
 	uint64_t unit;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -682,7 +750,8 @@ nvrm_mem_alloc(nvrm_client *cl, const nvrm_mem_params *p, nvrm_mem **memp)
 	    p->bytes);
 	if (p->bytes > UINT64_MAX - (unit - 1)) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "the size is too large"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the size is too large"));
 	}
 	a.bytes = (p->bytes + unit - 1) & ~(unit - 1);
 	a.alignment = p->alignment;
@@ -691,15 +760,10 @@ nvrm_mem_alloc(nvrm_client *cl, const nvrm_mem_params *p, nvrm_mem **memp)
 	a.compress = p->compress;
 	rc = cl->mops->mem_alloc(cl->bc, &a, &b, &bi, cl->errmsg,
 	    sizeof(cl->errmsg));
+	if (rc == NVRM_OK)
+		rc = adopt(cl, a.kind, b, &bi, memp);
 	unlock_client(cl);
-	if (rc != NVRM_OK)
-		return (rc);
-	rc = adopt(cl, a.kind, b, &bi, memp);
-	if (rc != NVRM_OK)
-		return (rc);
-	(*memp)->pte_kind = p->pte_kind;
-	(*memp)->compress = p->compress;
-	return (NVRM_OK);
+	return (rc);
 }
 
 int
@@ -711,7 +775,7 @@ nvrm_mem_register_user(nvrm_client *cl, void *addr, uint64_t bytes,
 	long page = sysconf(_SC_PAGESIZE);
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -721,15 +785,16 @@ nvrm_mem_register_user(nvrm_client *cl, void *addr, uint64_t bytes,
 	if (bytes == 0 || ((uintptr_t)addr & (page - 1)) != 0 ||
 	    (bytes & (page - 1)) != 0) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "the pages are not whole host "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the pages are not whole host "
 		    "pages"));
 	}
 	rc = cl->mops->mem_register(cl->bc, addr, bytes, &b, &bi, cl->errmsg,
 	    sizeof(cl->errmsg));
+	if (rc == NVRM_OK)
+		rc = adopt(cl, NVRM_MEM_USER, b, &bi, memp);
 	unlock_client(cl);
-	if (rc != NVRM_OK)
-		return (rc);
-	return (adopt(cl, NVRM_MEM_USER, b, &bi, memp));
+	return (rc);
 }
 
 /*
@@ -798,7 +863,7 @@ nvrm_mem_free(nvrm_mem *m)
 	nvrm_mem **pp;
 	nvrm_gmap **gp;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	cmap_drop_all(m);
 	for (gp = &cl->gmaps; *gp != NULL;) {
@@ -818,27 +883,43 @@ nvrm_mem_free(nvrm_mem *m)
 	free(m);
 }
 
+/*
+ * The information about an object.  The structure grew after NVRM_1.3 (the
+ * handle, the number of CPU mappings, the page kind and the compression
+ * policy): a caller built against NVRM_1.3 passes the size up to the handle
+ * and gets only that much back.  A size of 0 means this version's structure,
+ * so a caller that zero-inits the structure and asks for the information
+ * gets every member.
+ */
 int
 nvrm_mem_info_get(const nvrm_mem *m, nvrm_mem_info *info)
 {
-	if (!size_ok(info->size, sizeof(*info)))
-		return (fail(m->cl, NVRM_E_INVAL, "nvrm_mem_info.size must be "
-		    "0 or sizeof(nvrm_mem_info)"));
-	m->cl->errmsg[0] = '\0';
-	lock_client(m->cl);
-	info->size = sizeof(*info);
-	info->kind = m->kind;
-	info->place = m->place;
-	info->cpu_attr = m->cpu_attr;
-	info->bytes = m->bytes;
-	info->page_size = m->page_size;
-	info->cpu_mapped = m->ncmaps != 0;
-	info->gpu_maps = m->ngmaps;
-	info->handle = m->handle;
-	info->cpu_mappings = m->ncmaps;
-	info->pte_kind = m->pte_kind;
-	info->compress = m->compress;
-	unlock_client(m->cl);
+	const size_t v13 = offsetof(nvrm_mem_info, handle);
+	nvrm_client *cl = m->cl;
+	nvrm_mem_info full;
+	size_t want = info->size == 0 ? sizeof(full) : info->size;
+
+	if (want != sizeof(full) && want != v13)
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_mem_info.size must be 0 (the "
+		    "full size), sizeof(nvrm_mem_info) or the NVRM_1.3 size "
+		    "(offsetof handle)"));
+	nvrm_client_clear_err(cl);
+	lock_client(cl);
+	full.size = (uint32_t)want;
+	full.kind = m->kind;
+	full.place = m->place;
+	full.cpu_attr = m->cpu_attr;
+	full.bytes = m->bytes;
+	full.page_size = m->page_size;
+	full.cpu_mapped = m->ncmaps != 0;
+	full.gpu_maps = m->ngmaps;
+	full.handle = m->handle;
+	full.cpu_mappings = m->ncmaps;
+	full.pte_kind = m->pte_kind;
+	full.compress_policy = m->compress;
+	unlock_client(cl);
+	memcpy(info, &full, want);
 	return (NVRM_OK);
 }
 
@@ -874,20 +955,25 @@ check_map_params(nvrm_mem *m, const nvrm_gpu_map_params *p, uint64_t *len)
 	uint64_t pg = m->page_size;
 
 	if (!size_ok(p->size, sizeof(*p)))
-		return (fail(cl, NVRM_E_INVAL, "nvrm_gpu_map_params.size must "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_gpu_map_params.size must "
 		    "be 0 or sizeof(nvrm_gpu_map_params)"));
 	if ((p->flags & ~NVRM_MAP_KNOWN_FLAGS) != 0)
-		return (fail(cl, NVRM_E_INVAL, "unknown mapping flags"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"unknown mapping flags"));
 	if (p->offset >= m->bytes)
-		return (fail(cl, NVRM_E_RANGE, "the offset is outside the "
+		return (nvrm_client_fail(cl, NVRM_E_RANGE,
+		    "the offset is outside the "
 		    "object"));
 	*len = p->length != 0 ? p->length : m->bytes - p->offset;
 	if (*len > m->bytes - p->offset)
-		return (fail(cl, NVRM_E_RANGE, "the range runs past the end "
+		return (nvrm_client_fail(cl, NVRM_E_RANGE,
+		    "the range runs past the end "
 		    "of the object"));
 	if ((p->va & (pg - 1)) != 0 || (p->offset & (pg - 1)) != 0 ||
 	    (*len & (pg - 1)) != 0)
-		return (fail(cl, NVRM_E_INVAL, "the address, offset and "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the address, offset and "
 		    "length must be multiples of the object's page size"));
 	return (NVRM_OK);
 }
@@ -901,7 +987,7 @@ nvrm_mem_map_gpu(nvrm_mem *m, const nvrm_gpu_map_params *p)
 	uint64_t len;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -916,18 +1002,20 @@ nvrm_mem_map_gpu(nvrm_mem *m, const nvrm_gpu_map_params *p)
 	if (p->va > UINT64_MAX - len ||
 	    (r = find_reserve(cl, p->va, len)) == NULL) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_RANGE, "0x%jx+0x%jx is not inside one "
+		return (nvrm_client_fail(cl, NVRM_E_RANGE,
+		    "0x%jx+0x%jx is not inside one "
 		    "reservation", (uintmax_t)p->va, (uintmax_t)len));
 	}
 	if (overlaps(cl, p->va, len)) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_RANGE, "0x%jx+0x%jx overlaps another "
+		return (nvrm_client_fail(cl, NVRM_E_RANGE,
+		    "0x%jx+0x%jx overlaps another "
 		    "mapping", (uintmax_t)p->va, (uintmax_t)len));
 	}
 	g = NVRM_CALLOC(1, sizeof(*g));
 	if (g == NULL) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_NOMEM, "out of memory"));
+		return (nvrm_client_fail(cl, NVRM_E_NOMEM, "out of memory"));
 	}
 	rc = cl->mops->map_gpu(m->b, r->b, p->va, p->offset, len,
 	    (p->flags & NVRM_MAP_READ_ONLY) != 0, cl->errmsg,
@@ -957,7 +1045,7 @@ nvrm_mem_unmap_gpu(nvrm_mem *m, uint64_t va)
 	nvrm_gmap **pp;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	for (pp = &cl->gmaps; *pp != NULL; pp = &(*pp)->next)
 		if ((*pp)->mem == m && (*pp)->va == va) {
@@ -966,7 +1054,8 @@ nvrm_mem_unmap_gpu(nvrm_mem *m, uint64_t va)
 			return (rc);
 		}
 	unlock_client(cl);
-	return (fail(cl, NVRM_E_INVAL, "the object has no mapping at 0x%jx",
+	return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	    "the object has no mapping at 0x%jx",
 	    (uintmax_t)va));
 }
 
@@ -981,11 +1070,13 @@ nvrm_mem_unmap_gpu_range(nvrm_client *cl, uint64_t va, uint64_t length)
 	nvrm_gmap **pp;
 	int rc = NVRM_OK;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	if (length == 0)
-		return (fail(cl, NVRM_E_INVAL, "the range is empty"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the range is empty"));
 	if (va > UINT64_MAX - length)
-		return (fail(cl, NVRM_E_INVAL, "the range wraps around"));
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the range wraps around"));
 	lock_client(cl);
 	for (pp = &cl->gmaps; *pp != NULL;) {
 		nvrm_gmap *g = *pp;
@@ -1004,21 +1095,18 @@ nvrm_mem_unmap_gpu_range(nvrm_client *cl, uint64_t va, uint64_t length)
 
 /* ---- CPU mappings and access --------------------------------------------- */
 
-/* 1 when any page of the range is mapped.  The kernel says so when a page
- * is not mapped: mincore(2) fails for it.  One page at a time, because a
- * range may be mapped in part only. */
+/*
+ * The fixed range is taken.  The message says what the caller can do about
+ * it: the range overlaps a mapping that is not ours, so the caller chooses
+ * another fixed range, or asks for one (fixed = 0).
+ */
 static int
-range_mapped(uint64_t addr, uint64_t length)
+fixed_busy(nvrm_client *cl, uint64_t fixed)
 {
-	char vec[64];
-	uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-	uint64_t off;
-
-	for (off = 0; off < length; off += page)
-		if (mincore((void *)(uintptr_t)(addr + off), (size_t)page,
-		    vec) == 0)
-			return (1);
-	return (0);
+	return (nvrm_client_fail(cl, NVRM_E_BUSY,
+	    "the range at 0x%jx overlaps an existing "
+	    "mapping: choose a fixed range that overlaps none, or set "
+	    "fixed = 0 for an address the library picks", (uintmax_t)fixed));
 }
 
 /*
@@ -1026,6 +1114,11 @@ range_mapped(uint64_t addr, uint64_t length)
  * mapping must have, or 0 for one the backend picks.  An object may have
  * several mappings: each has its own descriptor, because the OS layer
  * carries one mapping per descriptor.
+ *
+ * A fixed address never replaces another mapping: the backend maps it
+ * atomically, so the kernel refuses an occupied range and the answer is
+ * NVRM_E_BUSY.  Nothing looks at the range before the map: a check and a
+ * map are two steps, and another thread may take the range in between.
  */
 static int
 map_cpu_locked(nvrm_mem *m, unsigned prot, uint64_t fixed, void **addr)
@@ -1038,23 +1131,25 @@ map_cpu_locked(nvrm_mem *m, unsigned prot, uint64_t fixed, void **addr)
 	int fd, rc;
 
 	if (m->kind == NVRM_MEM_USER)
-		return (fail(cl, NVRM_E_INVAL, "registered user pages are "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "registered user pages are "
 		    "already in the caller's address space"));
 	if (!cl->allow_map)
-		return (fail(cl, NVRM_E_DENIED, "the client was not opened "
+		return (nvrm_client_fail(cl, NVRM_E_DENIED,
+		    "the client was not opened "
 		    "with NVRM_OPEN_ALLOW_MAP"));
 	if (prot == 0 || (prot & ~(NVRM_CPU_READ | NVRM_CPU_WRITE)) != 0)
-		return (fail(cl, NVRM_E_INVAL, "the protection is not "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the protection is not "
 		    "NVRM_CPU_READ and/or NVRM_CPU_WRITE"));
 	if (fixed != 0) {
 		if ((fixed % page) != 0)
-			return (fail(cl, NVRM_E_INVAL, "the fixed address is not a "
+			return (nvrm_client_fail(cl, NVRM_E_INVAL,
+			    "the fixed address is not a "
 			    "multiple of the host page size"));
 		if (fixed > UINT64_MAX - m->bytes)
-			return (fail(cl, NVRM_E_INVAL, "the fixed address is too high"));
-		if (range_mapped(fixed, m->bytes))
-			return (fail(cl, NVRM_E_BUSY, "the fixed address is already "
-			    "mapped"));
+			return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the fixed address is too high"));
 	}
 	rc = pool_take(cl, NVRM_DESC_MAP, &fd);
 	if (rc != NVRM_OK)
@@ -1063,6 +1158,11 @@ map_cpu_locked(nvrm_mem *m, unsigned prot, uint64_t fixed, void **addr)
 	    sizeof(cl->errmsg));
 	if (rc != NVRM_OK) {
 		close(fd);
+		/* The range was taken: the backend refused it atomically,
+		 * and the caller is told which range and what to do about
+		 * it. */
+		if (rc == NVRM_E_BUSY)
+			return (fixed_busy(cl, fixed));
 		return (rc);
 	}
 	c = NVRM_CALLOC(1, sizeof(*c));
@@ -1070,7 +1170,7 @@ map_cpu_locked(nvrm_mem *m, unsigned prot, uint64_t fixed, void **addr)
 		(void)cl->mops->unmap_cpu(m->b, a, cookie, 1, cl->errmsg,
 		    sizeof(cl->errmsg));
 		close(fd);
-		return (fail(cl, NVRM_E_NOMEM, "out of memory"));
+		return (nvrm_client_fail(cl, NVRM_E_NOMEM, "out of memory"));
 	}
 	c->addr = (uint64_t)(uintptr_t)a;
 	c->length = m->bytes;
@@ -1100,7 +1200,7 @@ nvrm_mem_map_cpu(nvrm_mem *m, unsigned prot, void **addr)
 	nvrm_client *cl = m->cl;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc == NVRM_OK)
@@ -1115,13 +1215,15 @@ nvrm_mem_map_cpu_at(nvrm_mem *m, const nvrm_cpu_map_params *p, void **addr)
 	nvrm_client *cl = m->cl;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	if (!size_ok(p->size, sizeof(*p)))
-		return (fail(cl, NVRM_E_INVAL, "nvrm_cpu_map_params.size must be "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_cpu_map_params.size must be "
 		    "0 or sizeof(nvrm_cpu_map_params)"));
 	if ((p->reserved[0] | p->reserved[1] | p->reserved[2] |
 	    p->reserved[3]) != 0)
-		return (fail(cl, NVRM_E_INVAL, "nvrm_cpu_map_params.reserved must "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "nvrm_cpu_map_params.reserved must "
 		    "be zero: the options were built for another version of "
 		    "libnvrm"));
 	lock_client(cl);
@@ -1138,10 +1240,11 @@ nvrm_mem_unmap_cpu(nvrm_mem *m)
 	nvrm_client *cl = m->cl;
 	int rc = NVRM_OK;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	if (m->cmaps == NULL)
-		rc = fail(cl, NVRM_E_INVAL, "the object is not mapped");
+		rc = nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the object is not mapped");
 	else {
 		while (m->cmaps != NULL) {
 			int r = cmap_drop(m, &m->cmaps);
@@ -1161,7 +1264,7 @@ nvrm_mem_unmap_cpu_at(nvrm_mem *m, uint64_t addr)
 	nvrm_cmap **pp;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	for (pp = &m->cmaps; *pp != NULL; pp = &(*pp)->next)
 		if ((*pp)->addr == addr) {
@@ -1170,7 +1273,8 @@ nvrm_mem_unmap_cpu_at(nvrm_mem *m, uint64_t addr)
 			return (rc);
 		}
 	unlock_client(cl);
-	return (fail(cl, NVRM_E_INVAL, "the object has no CPU mapping at "
+	return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	    "the object has no CPU mapping at "
 	    "0x%jx", (uintmax_t)addr));
 }
 
@@ -1179,35 +1283,62 @@ nvrm_mem_unmap_cpu_at(nvrm_mem *m, uint64_t addr)
  * The range stays mapped, and reads as zeros; the driver is told to forget
  * the mapping it made, without the range being unmapped, so that no other
  * thread can take the address in between.
+ *
+ * Only the process that opened the client may do this: the driver is told
+ * to forget a mapping the parent made, and a child has no right to change
+ * the parent's driver state.
  */
 int
 nvrm_mem_overmap_cpu(nvrm_mem *m, uint64_t addr, uint64_t length)
 {
 	nvrm_client *cl = m->cl;
 	nvrm_cmap **pp;
+	int replaced = 0;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
+	rc = owner_check(cl);
+	if (rc != NVRM_OK) {
+		unlock_client(cl);
+		return (rc);
+	}
 	for (pp = &m->cmaps; *pp != NULL; pp = &(*pp)->next)
 		if ((*pp)->addr == addr)
 			break;
 	if (*pp == NULL) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "the object has no CPU mapping at "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the object has no CPU mapping at "
 		    "0x%jx", (uintmax_t)addr));
 	}
 	if (length == 0)
 		length = (*pp)->length;
 	if (length != (*pp)->length) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "the range is not the range of the "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "the range is not the range of the "
 		    "mapping at 0x%jx", (uintmax_t)addr));
 	}
-	rc = cl->mops->overmap_cpu(m->b, (void *)(uintptr_t)addr, length,
-	    (*pp)->cookie, cl->errmsg, sizeof(cl->errmsg));
+	{
+		nvrm_cmap_info ci = {
+			.fd = (*pp)->fd,
+			.prot = (*pp)->prot,
+			.length = (*pp)->length,
+			.cookie = (*pp)->cookie
+		};
+
+		rc = cl->mops->overmap_cpu(m->b, &ci, (void *)(uintptr_t)addr,
+		    &replaced, cl->errmsg, sizeof(cl->errmsg));
+	}
 	count_failed(cl, rc);
-	if (rc == NVRM_OK) {
+	/* The mapping is gone when the backend replaced the range: the range
+	 * is the caller's now.  It is gone too when the backend could not
+	 * put the original mapping back: the range holds memory that is
+	 * not the object's, and a later unmap would take the caller's
+	 * memory away.  A refused overmap that left the range alone keeps
+	 * the record. */
+	if (rc == NVRM_OK || replaced) {
 		nvrm_cmap *dead = *pp;
 
 		close(dead->fd);
@@ -1216,7 +1347,6 @@ nvrm_mem_overmap_cpu(nvrm_mem *m, uint64_t addr, uint64_t length)
 		m->ncmaps--;
 		cl->st.live_cpu_maps--;
 	}
-	/* A refused overmap leaves the mapping alone: the record stays. */
 	unlock_client(cl);
 	return (rc);
 }
@@ -1272,7 +1402,8 @@ dev_copy(nvrm_mem *m, uint8_t *p, uint8_t *buf, size_t len, int write)
 			w >>= 1;
 		if (cl->mops->cpu_access != NULL &&
 		    cl->mops->cpu_access(m->cpu_attr, p, w, write) != 0)
-			return (fail(cl, NVRM_E_INVAL, "trapped: an access "
+			return (nvrm_client_fail(cl, NVRM_E_INVAL,
+			    "trapped: an access "
 			    "the memory attribute does not allow"));
 		dev_access(p, w, buf, write);
 		p += w;
@@ -1280,6 +1411,23 @@ dev_copy(nvrm_mem *m, uint8_t *p, uint8_t *buf, size_t len, int write)
 		len -= w;
 	}
 	return (NVRM_OK);
+}
+
+/*
+ * The mapping an access goes through: the first one that allows it.  An
+ * object may have several mappings with different protections, so the
+ * access must go through a mapping that permits it, not through the
+ * oldest one.
+ */
+static nvrm_cmap *
+cmap_for(nvrm_mem *m, unsigned prot)
+{
+	nvrm_cmap *c;
+
+	for (c = m->cmaps; c != NULL; c = c->next)
+		if ((c->prot & prot) != 0)
+			return (c);
+	return (NULL);
 }
 
 static int
@@ -1290,21 +1438,24 @@ cpu_rw(nvrm_mem *m, uint64_t off, void *buf, size_t len, int write)
 	uint8_t *p;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
-	c = m->cmaps;
+	if (m->cmaps == NULL) {
+		unlock_client(cl);
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+	"the object is not mapped"));
+	}
+	c = cmap_for(m, write ? NVRM_CPU_WRITE : NVRM_CPU_READ);
 	if (c == NULL) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "the object is not mapped"));
-	}
-	if ((c->prot & (write ? NVRM_CPU_WRITE : NVRM_CPU_READ)) == 0) {
-		unlock_client(cl);
-		return (fail(cl, NVRM_E_DENIED, "the mapping does not allow "
+		return (nvrm_client_fail(cl, NVRM_E_DENIED,
+		    "no mapping of the object allows "
 		    "this access"));
 	}
 	if (off > m->bytes || len > m->bytes - off) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_RANGE, "the access is outside the "
+		return (nvrm_client_fail(cl, NVRM_E_RANGE,
+		    "the access is outside the "
 		    "object"));
 	}
 	p = (uint8_t *)(uintptr_t)c->addr + off;
@@ -1340,7 +1491,7 @@ nvrm_mem_export_fd(nvrm_mem *m, int *fdp)
 	nvrm_client *cl = m->cl;
 	int fd, rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -1349,7 +1500,8 @@ nvrm_mem_export_fd(nvrm_mem *m, int *fdp)
 	}
 	if (m->kind == NVRM_MEM_USER) {
 		unlock_client(cl);
-		return (fail(cl, NVRM_E_INVAL, "registered user pages cannot "
+		return (nvrm_client_fail(cl, NVRM_E_INVAL,
+		    "registered user pages cannot "
 		    "be exported"));
 	}
 	rc = pool_take(cl, NVRM_DESC_EXPORT, &fd);
@@ -1374,7 +1526,7 @@ nvrm_mem_import_fd(nvrm_client *cl, int fd, nvrm_mem **memp)
 	nvrm_bmem *b;
 	int rc;
 
-	cl->errmsg[0] = '\0';
+	nvrm_client_clear_err(cl);
 	lock_client(cl);
 	rc = owner_check(cl);
 	if (rc != NVRM_OK) {
@@ -1383,8 +1535,8 @@ nvrm_mem_import_fd(nvrm_client *cl, int fd, nvrm_mem **memp)
 	}
 	rc = cl->mops->import_fd(cl->bc, fd, &b, &bi, cl->errmsg,
 	    sizeof(cl->errmsg));
+	if (rc == NVRM_OK)
+		rc = adopt(cl, NVRM_MEM_IMPORTED, b, &bi, memp);
 	unlock_client(cl);
-	if (rc != NVRM_OK)
-		return (rc);
-	return (adopt(cl, NVRM_MEM_IMPORTED, b, &bi, memp));
+	return (rc);
 }

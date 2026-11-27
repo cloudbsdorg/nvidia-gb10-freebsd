@@ -27,9 +27,10 @@ uint64_t nvrm_chan_slice_ns = NVRM_CHAN_SLICE_DEFAULT_NS;
 /*
  * The client's message belongs to its most recent call.  Channel calls on
  * several threads may all clear and write it, so every clear and write goes
- * through the client's errlock.  The *_locked forms are for code that
- * already holds it (create and destroy hold it for the whole call, because
- * the memory calls they make write the message without a lock).  Lock order:
+ * through the client's errlock (nvrm_client_fail() and
+ * nvrm_client_clear_err(), in nvrm_internal.h).  The *_locked form is for
+ * code that already holds it (create and destroy hold it for the whole
+ * call, because the memory calls they make write the message).  Lock order:
  * a channel's lock, then the client's errlock.
  */
 static int
@@ -41,27 +42,6 @@ fail_locked(nvrm_client *cl, int rc, const char *fmt, ...)
 	vsnprintf(cl->errmsg, sizeof(cl->errmsg), fmt, ap);
 	va_end(ap);
 	return (rc);
-}
-
-static int
-fail(nvrm_client *cl, int rc, const char *fmt, ...)
-{
-	va_list ap;
-
-	(void)pthread_mutex_lock(&cl->errlock);
-	va_start(ap, fmt);
-	vsnprintf(cl->errmsg, sizeof(cl->errmsg), fmt, ap);
-	va_end(ap);
-	(void)pthread_mutex_unlock(&cl->errlock);
-	return (rc);
-}
-
-static void
-clear_err(nvrm_client *cl)
-{
-	(void)pthread_mutex_lock(&cl->errlock);
-	cl->errmsg[0] = '\0';
-	(void)pthread_mutex_unlock(&cl->errlock);
 }
 
 static int
@@ -78,7 +58,7 @@ owner_check(nvrm_client *cl)
 {
 	if (nvrm_owner_is_me(&cl->owner))
 		return (NVRM_OK);
-	return (fail(cl, NVRM_E_DENIED, DENIED_FMT));
+	return (nvrm_client_fail(cl, NVRM_E_DENIED, DENIED_FMT));
 }
 
 static int
@@ -162,7 +142,8 @@ wait_turn(nvrm_chan *ch, uint64_t deadline)
 	struct timespec ts;
 
 	if (deadline_reached(deadline))
-		return (fail(ch->cl, NVRM_E_TIMEOUT, "timed out waiting for "
+		return (nvrm_client_fail(ch->cl, NVRM_E_TIMEOUT,
+		    "timed out waiting for "
 		    "earlier submits on the channel"));
 	if (deadline == UINT64_MAX)
 		(void)pthread_cond_wait(&ch->turn, &ch->lock);
@@ -276,7 +257,8 @@ is_dead(nvrm_chan *ch)
 static int
 lost(nvrm_chan *ch)
 {
-	return (fail(ch->cl, NVRM_E_LOST, "the channel is dead (error "
+	return (nvrm_client_fail(ch->cl, NVRM_E_LOST,
+	    "the channel is dead (error "
 	    "notifier %u): destroy it and create a new channel",
 	    __atomic_load_n(&ch->error, __ATOMIC_ACQUIRE)));
 }
@@ -495,10 +477,12 @@ check_submit_opts(nvrm_chan *ch, const nvrm_submit_opts *o, uint32_t *flags,
 		return (NVRM_OK);
 	}
 	if (!size_ok(o->size, sizeof(*o)))
-		return (fail(ch->cl, NVRM_E_INVAL, "nvrm_submit_opts.size "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "nvrm_submit_opts.size "
 		    "must be 0 or sizeof(nvrm_submit_opts)"));
 	if ((o->flags & ~NVRM_SUBMIT_NO_KICK) != 0)
-		return (fail(ch->cl, NVRM_E_INVAL, "unknown submit flags"));
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+	"unknown submit flags"));
 	*flags = o->flags;
 	*timeout = o->timeout_ns;
 	return (NVRM_OK);
@@ -523,27 +507,33 @@ check_elements(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n)
 	unsigned i, run;
 
 	if (n == 0)
-		return (fail(ch->cl, NVRM_E_INVAL, "a submit needs at least "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "a submit needs at least "
 		    "one element"));
 	for (i = 0; i < n; i++) {
 		if (e[i].va == 0 || (e[i].va & 3) != 0 ||
 		    e[i].va >= (1ULL << 40))
-			return (fail(ch->cl, NVRM_E_INVAL, "element %u has "
+			return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+			    "element %u has "
 			    "an invalid GPU address", i));
 		if (e[i].dwords == 0 || e[i].dwords >= (1U << 21))
-			return (fail(ch->cl, NVRM_E_INVAL, "element %u has "
+			return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+			    "element %u has "
 			    "an invalid dword count", i));
 		if ((e[i].flags & ~NVRM_GP_KNOWN) != 0)
-			return (fail(ch->cl, NVRM_E_INVAL, "element %u has "
+			return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+			    "element %u has "
 			    "unknown flags", i));
 	}
 	if ((e[n - 1].flags & NVRM_GP_INCOMPLETE) != 0)
-		return (fail(ch->cl, NVRM_E_INVAL, "element %u is INCOMPLETE "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "element %u is INCOMPLETE "
 		    "without a terminator", n - 1));
 	for (i = 0; i < n; i += run) {
 		run = unit_len(e, n, i);
 		if (run > ch->entries - 2)
-			return (fail(ch->cl, NVRM_E_INVAL, "the INCOMPLETE "
+			return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+			    "the INCOMPLETE "
 			    "run starting at element %u needs %u slots; at "
 			    "most %u fit in a batch", i, run, ch->entries - 2));
 	}
@@ -661,7 +651,8 @@ submit_step(nvrm_chan *ch, submit_ctx *sc, int *rc)
 	}
 	if (!deadline_reached(sc->deadline))
 		return (STEP_SLEEP);
-	*rc = fail(ch->cl, NVRM_E_TIMEOUT, "timed out waiting for GPFIFO "
+	*rc = nvrm_client_fail(ch->cl, NVRM_E_TIMEOUT,
+	    "timed out waiting for GPFIFO "
 	    "ring space");
 	return (STEP_DONE);
 }
@@ -674,7 +665,7 @@ nvrm_chan_submit(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 	uint64_t timeout, gen;
 	int rc, step;
 
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	rc = owner_check(ch->cl);
 	if (rc != NVRM_OK)
 		return (rc);
@@ -682,7 +673,8 @@ nvrm_chan_submit(nvrm_chan *ch, const nvrm_gp_entry *e, unsigned n,
 	if (rc != NVRM_OK)
 		return (rc);
 	if (!size_ok(r->size, sizeof(*r)))
-		return (fail(ch->cl, NVRM_E_INVAL, "nvrm_submit_result.size "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "nvrm_submit_result.size "
 		    "must be 0 or sizeof(nvrm_submit_result)"));
 	r->size = sizeof(*r);
 	r->accepted = 0;
@@ -710,7 +702,7 @@ nvrm_chan_kick(nvrm_chan *ch)
 {
 	int rc;
 
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	rc = owner_check(ch->cl);
 	if (rc != NVRM_OK)
 		return (rc);
@@ -734,7 +726,7 @@ nvrm_chan_gp_space(nvrm_chan *ch, unsigned *n)
 {
 	int rc = NVRM_OK;
 
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	(void)pthread_mutex_lock(&ch->lock);
 	refresh_all(ch);
 	if (is_dead(ch))
@@ -755,7 +747,8 @@ wait_check(nvrm_chan *ch, uint64_t point)
 	if (is_dead(ch))
 		return (lost(ch));
 	if (point > ch->submitted)
-		return (fail(ch->cl, NVRM_E_INVAL, "point %ju exceeds "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "point %ju exceeds "
 		    "submitted point %ju", (uintmax_t)point, ch->submitted));
 	return (NVRM_OK);
 }
@@ -773,7 +766,8 @@ wait_loop(nvrm_chan *ch, uint64_t point, uint64_t deadline)
 		if (is_dead(ch))
 			return (lost(ch));
 		if (deadline_reached(deadline))
-			return (fail(ch->cl, NVRM_E_TIMEOUT, "timed out "
+			return (nvrm_client_fail(ch->cl, NVRM_E_TIMEOUT,
+			    "timed out "
 			    "waiting for progress point %ju",
 			    (uintmax_t)point));
 		sleep_for_progress(ch, gen, deadline);
@@ -786,7 +780,7 @@ nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns)
 	uint64_t deadline = make_deadline(timeout_ns);
 	int rc = NVRM_OK;
 
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	(void)pthread_mutex_lock(&ch->lock);
 	refresh_all(ch);
 	if (point != 0 && point > ch->completed) {
@@ -801,9 +795,10 @@ nvrm_chan_wait(nvrm_chan *ch, uint64_t point, uint64_t timeout_ns)
 int
 nvrm_chan_status_get(nvrm_chan *ch, nvrm_chan_status *st)
 {
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	if (!size_ok(st->size, sizeof(*st)))
-		return (fail(ch->cl, NVRM_E_INVAL, "nvrm_chan_status.size "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "nvrm_chan_status.size "
 		    "must be 0 or sizeof(nvrm_chan_status)"));
 	(void)pthread_mutex_lock(&ch->lock);
 	refresh_all(ch);
@@ -822,9 +817,10 @@ nvrm_chan_status_get(nvrm_chan *ch, nvrm_chan_status *st)
 int
 nvrm_chan_info_get(const nvrm_chan *ch, nvrm_chan_info *info)
 {
-	clear_err(ch->cl);
+	nvrm_client_clear_err(ch->cl);
 	if (!size_ok(info->size, sizeof(*info)))
-		return (fail(ch->cl, NVRM_E_INVAL, "nvrm_chan_info.size "
+		return (nvrm_client_fail(ch->cl, NVRM_E_INVAL,
+		    "nvrm_chan_info.size "
 		    "must be 0 or sizeof(nvrm_chan_info)"));
 	info->size = sizeof(*info);
 	info->engines = ch->engines;

@@ -337,7 +337,7 @@ static const char *const field_family[] = {
 	"max_blocks_per_mp", "max_smem_per_wg", "sm_smem_sizes",
 };
 static const char *const field_os_new[] = {
-	"nc_atom_size",
+	"nc_flush_granularity",
 };
 static const source_group field_sources[] = {
 	SOURCE_GROUP(NVRM_S_OS, field_os),
@@ -515,8 +515,8 @@ test_model_discrete(void)
 	CHECK_EQ(i->sm_smem_sizes.value[0], 8ULL << 10);
 	CHECK_EQ(i->sm_smem_sizes.value[4], 100ULL << 10);
 	/* the host's cache line and the zcull information */
-	CHECK_EQ(i->nc_atom_size.value, 64);
-	CHECK(i->nc_atom_size.source == NVRM_S_OS);
+	CHECK_EQ(i->nc_flush_granularity.value, 64);
+	CHECK(i->nc_flush_granularity.source == NVRM_S_OS);
 	CHECK_EQ(i->zcull_width_align_pixels.value, 64);
 	CHECK_EQ(i->zcull_height_align_pixels.value, 32);
 	CHECK_EQ(i->zcull_aliquot_total.value, 1024);
@@ -602,6 +602,8 @@ test_model_unknown_and_sparse(void)
 	CHECK_EQ(i->cls_eng3d.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK_EQ(i->cls_copy.reason, NVRM_R_FAMILY_UNKNOWN);
 	CHECK_EQ(i->page_sizes.reason, NVRM_R_FAMILY_UNKNOWN);
+	/* the source of a value that is not there */
+	CHECK_EQ(i->sm_smem_sizes.source, NVRM_S_FAMILY);
 	CHECK_STR(nvrm_reason_id(i->cls_gpfifo.reason), "family_unknown");
 	CHECK_STR(nvrm_reason_id(i->cls_copy.reason), "family_unknown");
 	/* With no architecture/implementation row, raw RM bytes are not CUDA. */
@@ -788,7 +790,8 @@ test_model_engine(void)
 	{
 		const struct absent_value absent[] = {
 			{ &i->zcull_width_align_pixels.reason, NVRM_R_RM_FAILED },
-			{ &i->nc_atom_size.reason, NVRM_R_OS_NOT_REPORTED },
+			{ &i->nc_flush_granularity.reason,
+			    NVRM_R_OS_NOT_REPORTED },
 			{ &i->device_name.reason, NVRM_R_RM_FAILED },
 			{ &i->chipset_name.reason, NVRM_R_INPUT_MISSING },
 			/* no heap and no free memory: the used memory cannot be
@@ -808,7 +811,7 @@ test_model_engine(void)
 	reset_env();
 	nvrm_fake_inject_atom_size(128, 0);
 	ctx = must_enum("discrete");
-	CHECK_EQ(info_of(ctx, 0)->nc_atom_size.value, 128);
+	CHECK_EQ(info_of(ctx, 0)->nc_flush_granularity.value, 128);
 	nvrm_close(ctx);
 	reset_env();
 	nvrm_fake_inject_zcull_fail(NVRM_R_RM_UNSUPPORTED);
@@ -817,8 +820,8 @@ test_model_engine(void)
 	i = info_of(ctx, 0);
 	CHECK(!NVRM_HAVE(i->zcull_aliquot_total));
 	CHECK_EQ(i->zcull_aliquot_total.reason, NVRM_R_RM_UNSUPPORTED);
-	CHECK(!NVRM_HAVE(i->nc_atom_size));
-	CHECK_EQ(i->nc_atom_size.reason, NVRM_R_OS_NOT_REPORTED);
+	CHECK(!NVRM_HAVE(i->nc_flush_granularity));
+	CHECK_EQ(i->nc_flush_granularity.reason, NVRM_R_OS_NOT_REPORTED);
 	nvrm_close(ctx);
 
 	/* the heap is there but the free memory is not: the used memory
@@ -992,6 +995,77 @@ test_compute_capability_table(void)
 	CHECK_EQ(major, 88);
 	CHECK_EQ(minor, 77);
 	CHECK_EQ(nvrm_compute_capability_for(0xfff0, 1, &major, &minor), 0);
+}
+
+/*
+ * Every name in the generation table says which chip it is: two rows with
+ * the same name would be two different chips a caller cannot tell apart.
+ */
+static void
+test_family_names(void)
+{
+	unsigned i, j, nga100 = 0;
+
+	for (i = 0; i < nvrm_family_count; i++) {
+		CHECK(nvrm_family_table[i].name != NULL);
+		for (j = i + 1; j < nvrm_family_count; j++)
+			CHECK(strcmp(nvrm_family_table[i].name,
+			    nvrm_family_table[j].name) != 0);
+		if (nvrm_family_table[i].cls_compute == 0xC6C0) {
+			nga100++;
+			CHECK_STR(nvrm_family_table[i].name, "GA100");
+		}
+	}
+	CHECK_EQ(nga100, 1);
+}
+
+/*
+ * The chipset table names the chips; the compute capability table gives the
+ * capability of the chips whose capability is known.  The two must not
+ * drift: a chip that has a capability has a name, and a chip that has a
+ * name has a capability unless the table of the gaps below says so.  A chip
+ * added to one table and not the other is caught here.
+ */
+static void
+test_chipset_and_capability(void)
+{
+	static const struct {
+		uint64_t	architecture, implementation;
+	} no_capability[] = {
+		{ 0x1a0, 0x03 },	/* GB110: the capability is not known */
+		{ 0x1a0, 0x04 },	/* GB112: the capability is not known */
+		{ 0x1b0, 0x00 },	/* GB200: the capability is not known */
+		{ 0x1b0, 0x0c },	/* GB20C: the capability is not known */
+	};
+	uint64_t pairs[128];
+	uint32_t major, minor;
+	unsigned n, i, j;
+
+	n = nvrm_chipset_pairs(pairs, sizeof(pairs) / sizeof(pairs[0]));
+	CHECK(n > 0);
+	for (i = 0; i < n; i += 2) {
+		int gap = 0;
+
+		CHECK(nvrm_chipset_name_for(pairs[i], pairs[i + 1]) != NULL);
+		for (j = 0;
+		    j < sizeof(no_capability) / sizeof(no_capability[0]); j++)
+			if (no_capability[j].architecture == pairs[i] &&
+			    no_capability[j].implementation == pairs[i + 1])
+				gap = 1;
+		if (nvrm_compute_capability_for(pairs[i], pairs[i + 1], &major,
+		    &minor) == 0)
+			CHECK(gap);
+		else
+			CHECK(!gap);
+	}
+	/* every chip of the compute capability table has a name */
+	n = nvrm_compute_pairs(pairs, sizeof(pairs) / sizeof(pairs[0]));
+	CHECK(n > 0);
+	for (i = 0; i < n; i += 2) {
+		if (pairs[i + 1] == UINT64_MAX)
+			continue;	/* the whole architecture */
+		CHECK(nvrm_chipset_name_for(pairs[i], pairs[i + 1]) != NULL);
+	}
 }
 
 static void
@@ -1930,6 +2004,8 @@ test_boot_select(void)
 	X("model", test_model_injections) \
 	X("model", test_model_engine) \
 	X("model", test_compute_capability_table) \
+	X("model", test_family_names) \
+	X("model", test_chipset_and_capability) \
 	X("model", test_family_match) \
 	X("decorators", test_decorators) \
 	X("abi", test_abi_1_0_layout) \
