@@ -60,6 +60,10 @@ L=$SRC/lib/libcuda
 T=$SRC/tests/libcuda
 SDK=$SRC/lib/cuda-native/sdk/include
 SCHEMA=$L/schema/cuda-native-info-1.schema.json
+# The native provider of the library talks to libnvrm, and it reads the
+# public header of it: the header is in the tree next to the library, and
+# it needs no NVIDIA header of its own.
+NVRM_INC=$SRC/lib/libnvrm/include
 
 ld --version 2>&1 | grep -q LLD
 rc=$?
@@ -399,7 +403,7 @@ awk '/NEEDED/ { print $NF }' "$W/info-dynamic.out" 2>/dev/null |
     bad "cuda-native-info has an unexpected dependency" || ok "cuda-native-info has no Linux or NVIDIA binary dependency"
 
 # ---- C, C++ and version oracles ------------------------------------------
-CFLAGS="-std=gnu11 -Wall -Wextra -Werror"
+CFLAGS="-std=gnu11 -Wall -Wextra -Werror -I$NVRM_INC"
 cc $CFLAGS -pthread -I"$W" -I"$SDK" -I"$T" "$T/api_test.c" -L"$O/lib" -lcuda -lthr \
     -o "$W/bin/api_test" >"$W/build-api.log" 2>&1
 rc=$?
@@ -456,7 +460,7 @@ tsan_build() {	# tsan_build CC LOG ARGS...
 	return 2
 }
 tsan_build cc "$W/build-tsan.log" -pthread -I"$W" -I"$O/lib" -I"$L" \
-    -I"$SDK" -I"$T" "$T/api_test.c" "$L"/cuda_*.c -lthr \
+    -I"$SDK" -I"$T" -I"$NVRM_INC" "$T/api_test.c" "$L"/cuda_*.c -lthr \
     -o "$W/bin/api_test_tsan"
 case $? in
 0)
@@ -711,8 +715,36 @@ first_profile=${library_profiles%%,*}
 over_limit_profiles=$(python3 -I -c 'import sys
 print(",".join([sys.argv[1]] * (int(sys.argv[2]) + 1)))' \
     "$first_profile" "$registry_limit")
-run_case "version parser and formatter assertions" "$W/bin/version_test"
+run_case "the version parser and formatter assertions" "$W/bin/version_test"
 run_case "C++ header and pre-initialization context check" "$W/bin/header_test"
+# The probe of the next test boot: it runs the memory API on every GPU the
+# library enumerates.  Here it runs on the synthetic devices, so the probe
+# is proved without hardware and without a driver.
+cc $CFLAGS -pthread -I"$SDK" -o "$W/bin/cuda_mem_probe" \
+    "$T/cuda_mem_probe.c" -L"$O/lib" -lcuda -lthr \
+    >"$W/build-probe.log" 2>&1
+rc=$?
+expect_rc "the memory probe of the test boot builds" "$rc" 0
+[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-probe.log"
+if [ "$rc" -eq 0 ]; then
+	env CUDA_NATIVE_BACKEND=fake "$W/bin/cuda_mem_probe" \
+	    >"$W/probe.out" 2>&1
+	rc=$?
+	cat "$W/probe.out"
+	expect_rc "the memory probe of the test boot passes on the synthetic devices" \
+	    "$rc" 0
+	grep -q '^PASS .* mem_alloc' "$W/probe.out" &&
+	    grep -q '^PASS .* memcpy_dtoh' "$W/probe.out" &&
+	    grep -q '^PASS .* mem_free' "$W/probe.out"
+	rc=$?
+	expect_rc "the probe allocated, copied and freed on the synthetic devices" \
+	    "$rc" 0
+	if grep -q '^FAIL' "$W/probe.out"; then
+		bad "the memory probe of the test boot reports no failed step"
+	else
+		ok "the memory probe of the test boot reports no failed step"
+	fi
+fi
 run_case "API core, errors and every proc export" env CUDA_NATIVE_BACKEND=fake "$API" core
 run_case "the native queries do not initialize the provider" env \
     CUDA_NATIVE_BACKEND=fake "$API" native-queries
@@ -747,7 +779,92 @@ run_case "the provider in use is safe under a concurrent initialization" env \
     provider-race
 run_case "an NVRM observer never sees false success during initialization" env \
     CUDA_NATIVE_BACKEND=nvrm "$API" init-observer
-run_case "NVRM provider is a not-supported stub" env CUDA_NATIVE_BACKEND=nvrm "$API" nvrm
+# The native provider without the native library: the library says that the
+# library it needs is not there, and it does not report a device it did not
+# see.  The name of the library is given, so the case is the same on a
+# machine where the library is installed.
+run_case "the native provider without the native library" env \
+    CUDA_NATIVE_BACKEND=nvrm CUDA_NATIVE_NVRM_LIBRARY=libnvrm-not-installed.so.1 \
+    "$API" nvrm-absent
+# The memory API against the synthetic provider: the contract is the same
+# for every provider, and the memory is the provider's.
+run_case "the memory API against the synthetic provider" env \
+    CUDA_NATIVE_BACKEND=fake "$API" memory
+# ---- the native provider against libnvrm ------------------------------------
+# The native provider is the real GPU: it loads libnvrm and asks it for the
+# devices and the memory.  The library is built here, out of tree, and the
+# tests run against it: no hardware and no loaded driver are needed, because
+# libnvrm has a software GPU of its own.
+GB10=${GB10_WORK:-$(CDPATH= cd -- "$HERE/.." && pwd -P)/work}
+TAG=$(awk '$1 == "ogkm_tag" { print $2 }' "$SRC/SOURCES")
+OGKM=${OGKM:-$GB10/sources/open-gpu-kernel-modules-$TAG}
+NVRM_SRC=$SRC/lib/libnvrm
+if [ -d "$OGKM/src/common/sdk/nvidia/inc" ]; then
+	mkdir -p "$W/nvrm"
+	(cd "$NVRM_SRC" && MAKEOBJDIR="$W/nvrm" OGKM="$OGKM" make) \
+	    >"$W/build-nvrm.log" 2>&1
+	rc=$?
+	expect_rc "libnvrm builds for the native provider" "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-nvrm.log"
+else
+	skip "the native provider against libnvrm: the NVIDIA headers are not at $OGKM"
+fi
+if [ -f "$W/nvrm/libnvrm.so.1" ]; then
+	# The devices of the native provider come from libnvrm: the count is
+	# the count of the library, not a number of this test.
+	env LD_LIBRARY_PATH="$O/lib:$W/nvrm" CUDA_NATIVE_BACKEND=nvrm \
+	    NVRM_BACKEND=fake "$API" nvrm >"$W/nvrm-devices.out" 2>&1
+	rc=$?
+	cat "$W/nvrm-devices.out"
+	expect_rc "the native provider reports the devices of libnvrm" "$rc" 0
+	# The memory API of the native provider: the same contract, against
+	# the software GPU of libnvrm.
+	run_case "the memory API against the native provider" env \
+	    LD_LIBRARY_PATH="$O/lib:$W/nvrm" CUDA_NATIVE_BACKEND=nvrm \
+	    NVRM_BACKEND=fake "$API" memory
+	# The tool reports the devices of the native provider as well.
+	env LD_LIBRARY_PATH="$O/lib:$W/nvrm" CUDA_NATIVE_BACKEND=nvrm \
+	    NVRM_BACKEND=fake "$INFO" >"$W/nvrm-info.txt" 2>&1
+	rc=$?
+	expect_rc "the tool reports the devices of the native provider" "$rc" 0
+	grep -q '^device_count [1-9]' "$W/nvrm-info.txt"
+	rc=$?
+	expect_rc "the tool reports at least one device of the native provider" \
+	    "$rc" 0
+else
+	skip "the native provider against libnvrm: libnvrm did not build"
+fi
+# The native provider against the scripted kernel of libnvrm: the kernel
+# answers the escapes of the resource manager, so the provider is tested
+# against the resource manager and not against hardware.  The test program
+# binds the copy of libnvrm it is compiled with, so the scripted kernel is
+# the one the provider reaches.
+if [ -d "$OGKM/src/common/sdk/nvidia/inc" ]; then
+	cc -pthread -I"$SRC/lib/libcuda" -I"$NVRM_SRC" \
+	    -I"$NVRM_SRC/include" -I"$SDK" -I"$T" -I"$SRC/tests/libnvrm" \
+	    -I"$O/lib" -std=gnu11 -Wall -Wextra \
+	    -Wno-unused-parameter -Wno-unused-function \
+	    -I"$OGKM/src/common/sdk/nvidia/inc" \
+	    -I"$OGKM/src/common/sdk/nvidia/inc/ctrl" \
+	    -I"$OGKM/src/nvidia/arch/nvalloc/unix/include" \
+	    -o "$W/bin/nvrm_scripted_test" "$T/nvrm_scripted_test.c" \
+	    "$SRC"/lib/libcuda/cuda_*.c "$NVRM_SRC"/*.c -lthr \
+	    >"$W/build-scripted.log" 2>&1
+	rc=$?
+	expect_rc "the native provider test against the scripted kernel builds" \
+	    "$rc" 0
+	[ "$rc" -eq 0 ] || sed -n '1,40p' "$W/build-scripted.log"
+	if [ "$rc" -eq 0 ]; then
+		env NVRM_BACKEND=rm "$W/bin/nvrm_scripted_test" \
+		    >"$W/scripted.out" 2>&1
+		rc=$?
+		cat "$W/scripted.out"
+		expect_rc "the native provider works against the scripted kernel" \
+		    "$rc" 0
+	fi
+else
+	skip "the native provider against the scripted kernel: the NVIDIA headers are not at $OGKM"
+fi
 run_case "the backend name follows the calling process environment" env \
     CUDA_NATIVE_BACKEND=fake "$API" backend-name
 run_case "unknown provider fails cuInit and later device calls" env \
@@ -948,7 +1065,7 @@ cat >"$W/bodies/native-limit.body" <<'EOF'
 	*count = CUDA_NATIVE_MAX_PHYSICAL_DEVICES + 1;
 	return (CUDA_SUCCESS);
 EOF
-python3 -I "$T/mutants.py" function-body "$MP/cuda_nvrm.c" nvrm_enumerate \
+python3 -I "$T/mutants.py" function-body "$MP/cuda_nvrm.c" nvrm_provider_enumerate \
     "$W/bodies/native-limit.body"
 rc=$?
 expect_rc "the native provider over the registry mutant changed the library" \
@@ -1197,6 +1314,7 @@ mutant() {	# mutant NAME FILE SED-EXPR VISIBILITY(- for unset) MODE [ARGS ...]
 		return
 	fi
 	cc -std=gnu11 -w -pthread -I"$W" -I"$O/lib" -I"$_md" -I"$SDK" -I"$T" \
+	    -I"$NVRM_INC" \
 	    "$T/api_test.c" \
 	    "$_md"/*.c -o "$_md/api_test" >"$_md/build.log" 2>&1
 	if [ "$?" -ne 0 ]; then
@@ -1562,7 +1680,8 @@ expect_rc "the shared backend-default mutant changed the library default" "$rc" 
     cc $CFLAGS -fPIC -shared -Wl,-Bsymbolic-functions \
         -Wl,--version-script="$L/Version.map" -I"$O/lib" -I"$L" -I"$SDK" \
         "$L/cuda_core.c" "$L/cuda_registry.c" "$L/cuda_fake.c" \
-        "$L/cuda_nvrm.c" "$L/cuda_errors.c" "$DB/cuda_backend.c" \
+        "$L/cuda_nvrm.c" "$L/cuda_mem.c" "$L/cuda_errors.c" \
+        "$DB/cuda_backend.c" \
         "$L/cuda_version.c" "$L/cuda_uuid.c" -lthr -o "$DB/libcuda.so.1" &&
     ln -s libcuda.so.1 "$DB/libcuda.so" &&
     cc $CFLAGS -I"$O/info" -I"$L" -I"$SDK" \

@@ -1132,11 +1132,193 @@ static int
 nvrm_test(void)
 {
 	int count = -1;
+	CUdevice device = -1;
+	CUuuid uuid;
+	char name[128];
+	size_t bytes = 0;
+	int value = 0;
+
+	/* The native provider: its devices come from the resource
+	 * manager, and every value it reports is one the manager
+	 * reported. */
+	CHECK_EQ(cuInit(0), CUDA_SUCCESS);
+	CHECK_EQ(cuDeviceGetCount(&count), CUDA_SUCCESS);
+	CHECK(count > 0);
+	CHECK_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
+	CHECK_EQ(cuDeviceGetName(name, sizeof(name), device), CUDA_SUCCESS);
+	CHECK(name[0] != '\0');
+	CHECK_EQ(cuDeviceGetUuid(&uuid, device), CUDA_SUCCESS);
+	CHECK_EQ(cuDeviceTotalMem(&bytes, device), CUDA_SUCCESS);
+	CHECK(bytes > 0);
+	CHECK_EQ(cuDeviceGetAttribute(&value,
+	    CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device), CUDA_SUCCESS);
+	CHECK(value > 0);
+	/* An attribute the resource manager does not report: it stays
+	 * unavailable, and the library says why. */
+	value = -1;
+	CHECK_EQ(cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+	    device), CUDA_ERROR_NOT_SUPPORTED);
+	CHECK(value == -1);
+	CHECK(cudaNativeFailureReason()[0] != '\0');
+	return (t_done("api nvrm provider"));
+}
+
+/* The native provider without the native library: the library says that
+ * the library it needs is not there, and it does not pretend to have a
+ * device. */
+static int
+nvrm_absent_test(void)
+{
+	int count = -1;
 
 	CHECK_EQ(cuInit(0), CUDA_ERROR_NOT_SUPPORTED);
+	CHECK(cudaNativeFailureReason()[0] != '\0');
 	CHECK_EQ(cuDeviceGetCount(&count), CUDA_ERROR_NOT_SUPPORTED);
 	CHECK_EQ(count, -1);
-	return (t_done("api nvrm stub"));
+	return (t_done("api nvrm provider without the native library"));
+}
+
+/* The context the memory cases share.  It is current while they run. */
+static CUcontext memory_context;
+
+/* The device memory: the allocation, the copies in and out, the fills and
+ * the free.  The context is the current one of the calling thread. */
+static void
+memory_device_test(CUdevice device)
+{
+	CUdeviceptr device_ptr = 0, other = 0;
+	unsigned char pattern[256], readback[256];
+	unsigned int words[4], back[4];
+	size_t free_bytes = 0, total_bytes = 0;
+	int i;
+
+	CHECK_EQ(cuCtxCreate(NULL, CU_CTX_SCHED_AUTO, device),
+	    CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuCtxCreate(&memory_context, CU_CTX_SCHED_SPIN, device),
+	    CUDA_ERROR_NOT_SUPPORTED);
+	CHECK(cudaNativeFailureReason()[0] != '\0');
+	CHECK_EQ(cuCtxCreate(&memory_context, CU_CTX_SCHED_AUTO, 88),
+	    CUDA_ERROR_INVALID_DEVICE);
+	CHECK_EQ(cuCtxCreate(&memory_context, CU_CTX_SCHED_AUTO, device),
+	    CUDA_SUCCESS);
+	CHECK_EQ(cuCtxSetCurrent(memory_context), CUDA_SUCCESS);
+	/* The allocation. */
+	CHECK_EQ(cuMemAlloc(NULL, 1024), CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuMemAlloc(&device_ptr, 0), CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuMemAlloc(&device_ptr, 4096), CUDA_SUCCESS);
+	CHECK(device_ptr != 0);
+	CHECK_EQ(cuMemGetInfo(&free_bytes, &total_bytes), CUDA_SUCCESS);
+	CHECK(total_bytes > 0);
+	CHECK(free_bytes < total_bytes);
+	/* The copy in and the copy out. */
+	memset(pattern, 0xA5, sizeof(pattern));
+	CHECK_EQ(cuMemcpyHtoD(device_ptr, pattern, sizeof(pattern)),
+	    CUDA_SUCCESS);
+	memset(readback, 0, sizeof(readback));
+	CHECK_EQ(cuMemcpyDtoH(readback, device_ptr, sizeof(readback)),
+	    CUDA_SUCCESS);
+	CHECK_EQ(memcmp(pattern, readback, sizeof(pattern)), 0);
+	/* A copy that runs over the end of the allocation is refused. */
+	CHECK_EQ(cuMemcpyDtoH(readback, device_ptr, 4097),
+	    CUDA_ERROR_INVALID_VALUE);
+	/* A copy to an address that no allocation holds. */
+	CHECK_EQ(cuMemcpyHtoD(device_ptr + 0x1000000ULL, pattern, 4),
+	    CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuMemcpyHtoD(device_ptr, NULL, 4), CUDA_ERROR_INVALID_VALUE);
+	/* A copy from one allocation to another. */
+	CHECK_EQ(cuMemAlloc(&other, 4096), CUDA_SUCCESS);
+	CHECK_EQ(cuMemcpyDtoD(other, device_ptr, sizeof(pattern)),
+	    CUDA_SUCCESS);
+	memset(readback, 0, sizeof(readback));
+	CHECK_EQ(cuMemcpyDtoH(readback, other, sizeof(readback)), CUDA_SUCCESS);
+	CHECK_EQ(memcmp(pattern, readback, sizeof(pattern)), 0);
+	CHECK_EQ(cuMemFree(other), CUDA_SUCCESS);
+	/* The fills. */
+	CHECK_EQ(cuMemsetD8(device_ptr, 0x5A, 64), CUDA_SUCCESS);
+	memset(readback, 0, sizeof(readback));
+	CHECK_EQ(cuMemcpyDtoH(readback, device_ptr, 64), CUDA_SUCCESS);
+	for (i = 0; i < 64; i++)
+		CHECK_EQ(readback[i], 0x5A);
+	for (i = 0; i < 4; i++)
+		words[i] = 0x11223344;
+	CHECK_EQ(cuMemsetD32(device_ptr, 0x11223344, 4), CUDA_SUCCESS);
+	memset(readback, 0, sizeof(readback));
+	CHECK_EQ(cuMemcpyDtoH(readback, device_ptr, 16), CUDA_SUCCESS);
+	memcpy(back, readback, sizeof(back));
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(back[i], 0x11223344);
+	/* The free. */
+	CHECK_EQ(cuMemFree(device_ptr), CUDA_SUCCESS);
+	CHECK_EQ(cuMemFree(device_ptr), CUDA_ERROR_INVALID_VALUE);
+}
+
+/* The host memory: the allocation the caller writes to, and the copy of it
+ * into the device memory. */
+static void
+memory_host_test(CUdeviceptr device_ptr)
+{
+	void *host = NULL;
+	unsigned char pattern[256], readback[256];
+
+	CHECK_EQ(cuMemHostAlloc(&host, 1024, CU_MEMHOSTALLOC_WRITECOMBINED),
+	    CUDA_ERROR_NOT_SUPPORTED);
+	CHECK(cudaNativeFailureReason()[0] != '\0');
+	CHECK_EQ(cuMemHostAlloc(NULL, 1024, 0), CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuMemHostAlloc(&host, 0, 0), CUDA_ERROR_INVALID_VALUE);
+	CHECK_EQ(cuMemHostAlloc(&host, 1024, 0), CUDA_SUCCESS);
+	CHECK(host != NULL);
+	/* The host pointer is used only when the call gave one: a provider
+	 * that could not open its context leaves it as it was. */
+	if (host == NULL)
+		return;
+	memset(pattern, 0xA5, sizeof(pattern));
+	memcpy(host, pattern, sizeof(pattern));
+	/* The host memory is copied into the device memory like any other
+	 * host buffer. */
+	CHECK_EQ(cuMemcpyHtoD(device_ptr, host, sizeof(pattern)), CUDA_SUCCESS);
+	memset(readback, 0, sizeof(readback));
+	CHECK_EQ(cuMemcpyDtoH(readback, device_ptr, sizeof(readback)),
+	    CUDA_SUCCESS);
+	CHECK_EQ(memcmp(pattern, readback, sizeof(pattern)), 0);
+	CHECK_EQ(cuMemFreeHost(host), CUDA_SUCCESS);
+	CHECK_EQ(cuMemFreeHost(host), CUDA_ERROR_INVALID_VALUE);
+}
+
+/* The memory API: a context, an allocation, a copy in, a copy out, the
+ * comparison, the fills and the free.  The mode runs against every
+ * backend: the contract is the same and the memory is the provider's. */
+static int
+memory_test(void)
+{
+	CUdevice device = -1;
+	CUdeviceptr device_ptr = 0;
+	size_t free_bytes = 0, total_bytes = 0;
+	int count = -1;
+
+	/* A memory call without a context is an invalid context. */
+	CHECK_EQ(cuInit(0), CUDA_SUCCESS);
+	CHECK_EQ(cuDeviceGetCount(&count), CUDA_SUCCESS);
+	CHECK(count > 0);
+	CHECK_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
+	CHECK_EQ(cuMemAlloc(&device_ptr, 1024), CUDA_ERROR_INVALID_CONTEXT);
+	CHECK_EQ(cuMemGetInfo(&free_bytes, &total_bytes),
+	    CUDA_ERROR_INVALID_CONTEXT);
+	memory_device_test(device);
+	/* The host memory needs a context of its own: the device case
+	 * freed the one it made. */
+	memory_context = NULL;
+	CHECK_EQ(cuCtxCreate(&memory_context, CU_CTX_SCHED_AUTO, device),
+	    CUDA_SUCCESS);
+	CHECK_EQ(cuCtxSetCurrent(memory_context), CUDA_SUCCESS);
+	CHECK_EQ(cuMemAlloc(&device_ptr, 4096), CUDA_SUCCESS);
+	memory_host_test(device_ptr);
+	CHECK_EQ(cuMemFree(device_ptr), CUDA_SUCCESS);
+	/* The context. */
+	CHECK_EQ(cuCtxDestroy(memory_context), CUDA_SUCCESS);
+	CHECK_EQ(cuCtxDestroy(memory_context), CUDA_ERROR_INVALID_CONTEXT);
+	/* The memory of a context that no longer exists is gone with it. */
+	CHECK_EQ(cuMemAlloc(&device_ptr, 4096), CUDA_ERROR_INVALID_CONTEXT);
+	return (t_done("api memory"));
 }
 
 /* The backend name follows the calling process's environment, so the manual
@@ -1205,7 +1387,7 @@ mode_usage(void)
 	    "init-race|init-stress|init-observer|init-reason|preinit-reason|"
 	    "providers|limit-refusal|provider-race|"
 	    "proc-preinit|proc-version|proc-from-stdin|attribute-error|"
-	    "visibility-cap|nvrm|backend-name|"
+	    "visibility-cap|nvrm|nvrm-absent|memory|backend-name|"
 	    "bad-backend|bad-profile|bad-visibility|uuid-error|"
 	    "order [NAME ...]|uuid-order [UUID ...]\n");
 	return (2);
@@ -1239,6 +1421,8 @@ DEFINE_SIMPLE_MODE(proc_from_stdin_mode, proc_from_stdin_test)
 DEFINE_SIMPLE_MODE(attribute_error_mode, attribute_error_test)
 DEFINE_SIMPLE_MODE(visibility_cap_mode, visibility_cap_test)
 DEFINE_SIMPLE_MODE(nvrm_mode, nvrm_test)
+DEFINE_SIMPLE_MODE(nvrm_absent_mode, nvrm_absent_test)
+DEFINE_SIMPLE_MODE(memory_mode, memory_test)
 DEFINE_SIMPLE_MODE(backend_name_mode, backend_name_test)
 
 static int
@@ -1293,6 +1477,8 @@ main(int argc, char **argv)
 		{ "attribute-error", attribute_error_mode },
 		{ "visibility-cap", visibility_cap_mode },
 		{ "nvrm", nvrm_mode },
+		{ "nvrm-absent", nvrm_absent_mode },
+		{ "memory", memory_mode },
 		{ "backend-name", backend_name_mode },
 		{ "bad-backend", failed_init_mode },
 		{ "bad-profile", failed_init_mode },

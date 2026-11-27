@@ -19,6 +19,19 @@ CUDA_1.0 {
 		cuCtxGetCurrent;
 		cuCtxSetCurrent;
 		cuCtxGetDevice;
+		cuCtxCreate;
+		cuCtxDestroy;
+		cuMemAlloc;
+		cuMemFree;
+		cuMemAllocHost;
+		cuMemHostAlloc;
+		cuMemFreeHost;
+		cuMemcpyHtoD;
+		cuMemcpyDtoH;
+		cuMemcpyDtoD;
+		cuMemsetD8;
+		cuMemsetD32;
+		cuMemGetInfo;
 		cuGetErrorName;
 		cuGetErrorString;
 		cuGetProcAddress;
@@ -32,6 +45,7 @@ CUDA_1.0 {
 		cudaNativeProviderInUse;
 		cudaNativeProviderHint;
 		cudaNativeInitFailureReason;
+		cudaNativeFailureReason;
 		cudaNativeFakeProfileKnown;
 		cudaNativeFakeProfileCount;
 		cudaNativeFakeProfileName;

@@ -22,7 +22,9 @@ Device memory is reported in bytes.
 The attribute names are stable JSON keys and are also used in the text view.
 No Linux compatibility layer is used.
 .Pp
-The default nvrm provider is a stub in this release and reports an error.
+The default nvrm provider reports the devices of the real GPU through
+libnvrm, and reports an error when the native library or the driver is not
+there.
 Select the fake provider for a deterministic, hardware-free report.
 Fake device properties are synthetic test values.
 .Sh OPTIONS

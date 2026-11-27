@@ -5,7 +5,7 @@
 .Os
 .Sh NAME
 .Nm libcuda
-.Nd native CUDA Driver API device and context subset
+.Nd native CUDA Driver API device, context and memory subset
 .Sh LIBRARY
 libcuda
 .Sh SYNOPSIS
@@ -36,6 +36,32 @@ libcuda
 .Fn cuCtxSetCurrent "CUcontext ctx"
 .Ft CUresult
 .Fn cuCtxGetDevice "CUdevice *device"
+.Ft CUresult
+.Fn cuCtxCreate "CUcontext *pctx" "unsigned int flags" "CUdevice dev"
+.Ft CUresult
+.Fn cuCtxDestroy "CUcontext ctx"
+.Ft CUresult
+.Fn cuMemAlloc "CUdeviceptr *dptr" "size_t bytesize"
+.Ft CUresult
+.Fn cuMemFree "CUdeviceptr dptr"
+.Ft CUresult
+.Fn cuMemAllocHost "void **pp" "size_t bytesize"
+.Ft CUresult
+.Fn cuMemHostAlloc "void **pp" "size_t bytesize" "unsigned int flags"
+.Ft CUresult
+.Fn cuMemFreeHost "void *p"
+.Ft CUresult
+.Fn cuMemcpyHtoD "CUdeviceptr dstDevice" "const void *srcHost" "size_t ByteCount"
+.Ft CUresult
+.Fn cuMemcpyDtoH "void *dstHost" "CUdeviceptr srcDevice" "size_t ByteCount"
+.Ft CUresult
+.Fn cuMemcpyDtoD "CUdeviceptr dstDevice" "CUdeviceptr srcDevice" "size_t ByteCount"
+.Ft CUresult
+.Fn cuMemsetD8 "CUdeviceptr dstDevice" "unsigned char ui" "size_t N"
+.Ft CUresult
+.Fn cuMemsetD32 "CUdeviceptr dstDevice" "unsigned int ui" "size_t N"
+.Ft CUresult
+.Fn cuMemGetInfo "size_t *free" "size_t *total"
 .Ft CUresult
 .Fn cuGetErrorName "CUresult error" "const char **pStr"
 .Ft CUresult
@@ -68,6 +94,8 @@ libcuda
 .Fn cudaNativeFakeProfileDefault void
 .Ft cudaNativeInitReason
 .Fn cudaNativeInitFailureReason void
+.Ft const char *
+.Fn cudaNativeFailureReason void
 .Sh DESCRIPTION
 The
 .Nm
@@ -82,6 +110,41 @@ is 100, encoding version 0.1.0 as major * 10000 + minor * 100 + patch.
 The C declarations are also enclosed in C++ linkage guards.
 All exported functions have the provisional symbol version
 .Dv CUDA_1.0 .
+.Pp
+The calls that reach the real GPU are the ones of the nvrm provider: the
+device queries
+.Fn cuDeviceGetCount ,
+.Fn cuDeviceGet ,
+.Fn cuDeviceGetName ,
+.Fn cuDeviceGetUuid ,
+.Fn cuDeviceTotalMem
+and
+.Fn cuDeviceGetAttribute ;
+the contexts
+.Fn cuCtxCreate
+and
+.Fn cuCtxDestroy ;
+the allocations
+.Fn cuMemAlloc ,
+.Fn cuMemFree ,
+.Fn cuMemAllocHost ,
+.Fn cuMemHostAlloc
+and
+.Fn cuMemFreeHost ;
+the copies
+.Fn cuMemcpyHtoD ,
+.Fn cuMemcpyDtoH
+and
+.Fn cuMemcpyDtoD ;
+the fills
+.Fn cuMemsetD8
+and
+.Fn cuMemsetD32 ;
+and the memory query
+.Fn cuMemGetInfo .
+Every other call of the Driver API is outside this subset: a name that this
+library does not export is not found by
+.Fn cuGetProcAddress .
 .Pp
 .Fn cuInit
 accepts only zero flags and initializes the provider registry once per process.
@@ -104,15 +167,18 @@ An unknown name makes
 .Fn cuInit
 fail with
 .Dv CUDA_ERROR_INVALID_VALUE .
-The nvrm provider is a stub in this release: enumeration returns
-.Dv CUDA_ERROR_NOT_SUPPORTED
-and no device is opened.
 Each provider has one kind, and the kind is what the provider does.
 The fake provider is the synthetic kind: it takes the fake profiles of
 .Ev CUDA_NATIVE_FAKE_PROFILE
 and applies them.
-The nvrm provider is the native kind: it takes no profile, and its discovery
-is not implemented in this release.
+The nvrm provider is the native kind: it takes no profile, and it discovers
+the devices through the resource manager of libnvrm.
+It loads
+.Li libnvrm.so.1
+when it is first used, so a program that wants only the synthetic devices
+does not need the native library.
+.Ev CUDA_NATIVE_NVRM_LIBRARY
+names the library it loads, for a site that installs it under another name.
 A provider of the synthetic kind that cannot apply a selection is refused, so
 the library never advertises a profile it would not apply; the reason of the
 failure is
@@ -130,6 +196,19 @@ provides GB206 followed by GB10.
 An unknown or empty profile is an invalid value.
 Fake names, UUIDs, memory sizes, and attributes are test data, not hardware
 measurements.
+.Pp
+The nvrm provider reports what the resource manager reports, and nothing
+else: a name it does not have is a generation with the board decorators the
+manager names, the UUID is the one the manager reports, the size of the
+video memory is the one the manager reports, and an attribute the manager
+does not report stays unavailable.
+Every such attribute returns
+.Dv CUDA_ERROR_NOT_SUPPORTED
+and leaves the destination unchanged.
+When the native library cannot be loaded, or the driver is not there, the
+enumeration returns
+.Dv CUDA_ERROR_NOT_SUPPORTED ;
+the library never reports a device it did not see.
 .Ss Native extension queries
 .Fn cudaNativeGetBackendName
 returns the value of
@@ -163,9 +242,9 @@ It is the answer of the library about the provider that is in use: a caller
 that gives advice about a failure names the provider that failed and not the
 name the environment held.
 .Fn cudaNativeProviderHint
-writes into the caller's buffer the advice for a provider whose discovery is
-not implemented in this release, and returns nonzero when it wrote the whole
-of it.
+writes into the caller's buffer the advice for a provider that needs
+something this process does not have, and returns nonzero when it wrote the
+whole of it.
 The advice names the provider and the provider to use instead, both of them
 the names the library itself uses.
 It returns zero and writes nothing for a provider that has no advice, for an
@@ -207,7 +286,7 @@ when the selected backend names no provider,
 .Dv CUDA_NATIVE_INIT_DEVICE_LIMIT
 when more devices are selected than the library exposes,
 .Dv CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED
-when the provider's discovery is not implemented in this release,
+when the provider could not discover its devices,
 .Dv CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT
 when the provider reports more devices than the registry holds, and
 .Dv CUDA_NATIVE_INIT_PROVIDER_ERROR
@@ -233,6 +312,14 @@ follows
 and can change inside one process.
 Provider and profile table membership is fixed by the loaded library and does
 not depend on the environment.
+.Pp
+.Fn cudaNativeFailureReason
+returns the reason of the last failure of the calling thread that named one,
+or an empty string when there is none.
+The reason is per thread: a failure in one thread never names the failure of
+another one.
+A call that succeeds does not clear the reason of an earlier failure; the
+reason of a failure is the one to read right after it.
 .Pp
 Every cuda-native extension is an entry point of this library, so
 .Fn cuGetProcAddress
@@ -315,6 +402,69 @@ returns the visible ordinal associated with that handle, or
 .Dv CUDA_ERROR_INVALID_CONTEXT
 when no active context is current.
 These calls manage user-space state only; they do not submit GPU work.
+.Ss Contexts and memory
+.Fn cuCtxCreate
+creates a context for a device and returns its handle.
+Only
+.Dv CU_CTX_SCHED_AUTO
+is implemented: this library submits no work to the GPU, so a schedule has
+nothing to schedule and a host mapping has nothing to map.
+Any other flag returns
+.Dv CUDA_ERROR_NOT_SUPPORTED .
+Each context opens what it needs for itself: with the nvrm provider it is an
+RM client and a device of its own, so two contexts of the same device hold
+separate memory.
+.Fn cuCtxDestroy
+destroys a context, frees the memory it still holds and closes what it
+opened.
+Destroying a context that is not one of this library's returns
+.Dv CUDA_ERROR_INVALID_CONTEXT .
+The primary context of a device opens what it needs when it is retained for
+the first time and closes it when it is released for the last time.
+.Pp
+The memory calls need a current context; without one they return
+.Dv CUDA_ERROR_INVALID_CONTEXT .
+.Fn cuMemAlloc
+allocates memory in the video memory of the device of the current context.
+.Fn cuMemAllocHost
+and
+.Fn cuMemHostAlloc
+allocate system memory the caller writes to with ordinary stores.
+.Fn cuMemHostAlloc
+implements no flag: portable, device-mapped, write-combining and
+cache-mapped host memory are not implemented, and a flag returns
+.Dv CUDA_ERROR_NOT_SUPPORTED .
+The device pointer of an allocation is the address the GPU knows the memory
+by: for the nvrm provider it is a range of the address space of the RM
+client of the context.
+.Fn cuMemFree
+and
+.Fn cuMemFreeHost
+free what the allocation calls made.
+An address that no allocation of the current context holds is an invalid
+value.
+.Pp
+.Fn cuMemcpyHtoD ,
+.Fn cuMemcpyDtoH
+and
+.Fn cuMemcpyDtoD
+copy through the CPU: the memory is mapped into the process and the copy is
+made there.
+There is no copy engine in this library and no work is submitted to the GPU,
+so a copy is not a submission and it does not need a channel.
+A copy that runs over the end of an allocation is an invalid value and
+copies nothing.
+.Fn cuMemsetD8
+fills a range of bytes and
+.Fn cuMemsetD32
+fills a range of 32-bit elements, the count of elements being the count of
+the call.
+.Fn cuMemGetInfo
+reports the size of the video memory of the device of the current context
+and what this library's own allocations hold of it.
+.Pp
+A context and the memory it holds are not safe for concurrent use: use one
+context per thread, or a lock of your own.
 .Ss Errors and entry points
 .Fn cuGetErrorName
 and
@@ -374,6 +524,8 @@ Unless documented otherwise, output pointers must not be null and are not
 changed on failure.
 .Sh SEE ALSO
 .Xr cuda-native-info 1 ,
+.Xr nvrm 3 ,
+.Xr nvrm_mem 3 ,
 .Xr pthread 3
 .Sh HISTORY
 This clean-room subset first appeared in cuda-native 0.1.0.

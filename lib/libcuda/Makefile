@@ -6,7 +6,8 @@ SHLIB_MAJOR=	1
 VERSION_MAP=	${.CURDIR}/Version.map
 VERSION_MAP_AWK=	${.CURDIR}/version_map.awk
 SRCS=		cuda_core.c cuda_registry.c cuda_fake.c cuda_nvrm.c \
-		cuda_errors.c cuda_backend.c cuda_version.c cuda_uuid.c
+		cuda_mem.c cuda_errors.c cuda_backend.c cuda_version.c \
+		cuda_uuid.c
 INCSDIR=	${INCLUDEDIR}
 INCS=		${.CURDIR}/../cuda-native/sdk/include/cuda.h
 MAN=		man/libcuda.3
@@ -19,6 +20,7 @@ CUDA_FUNCS!=	awk -f "${VERSION_MAP_AWK}" -v mode=names "${VERSION_MAP}"
 MLINKS+=	libcuda.3 ${f}.3
 .endfor
 CFLAGS+=	-I${.OBJDIR} -I${.CURDIR} -I${.CURDIR}/../cuda-native/sdk/include \
+		-I${.CURDIR}/../libnvrm/include \
 		-std=gnu11 -Wall -Wextra -Werror
 .if ${CUDA_NATIVE_TESTING:Uno} == "yes"
 CFLAGS+=	-DCUDA_NATIVE_TESTING

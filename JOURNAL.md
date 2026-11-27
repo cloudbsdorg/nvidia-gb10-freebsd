@@ -819,3 +819,30 @@ The twenty findings of the gate round 1 review of the round-3 change are closed,
 Every check was red first: the pre-fix state of the finding was applied to the tree, the check failed for the reviewed reason, and the tree was put back.
 Suite: `sh tests/libcuda_test.sh` -> 261 checks passed, 0 failed (207 at the round-3 entry of 05:25Z).
 Next: gate round 2 with answers to the review, commit, push, PR.
+
+# Journal native CUDA C1.4b (Track #2429), branch agent/2429-cuda-real-mem, worktree wt-cuda-real-mem2
+
+## 2026-11-27 the memory API of libcuda on the real GPU, through libnvrm
+Branch cut from the C1.4a head 3292ecc (agent/2428-libcuda-api).
+- lib/libcuda: the nvrm provider is no longer a stub. It loads libnvrm.so.1 when it is first
+  used (so a program that wants only the synthetic devices does not need it) and answers the
+  device queries from the device information of the resource manager: the name (the generation
+  the RM reports), the UUID, the size of the video memory, the number of multiprocessors, the
+  compute capability and the PCI identity. An attribute the RM does not report stays
+  unavailable, with a reason.
+- The memory API: cuCtxCreate/cuCtxDestroy (an RM client and a device of its own per context),
+  cuMemAlloc/cuMemFree (video memory), cuMemAllocHost/cuMemHostAlloc/cuMemFreeHost (system
+  memory), cuMemcpyHtoD/DtoH/DtoD, cuMemsetD8/D32 and cuMemGetInfo. The copies are made by the
+  CPU, through the mapping of the memory: no copy engine and no work is submitted to the GPU.
+  Every call that is not implemented returns CUDA_ERROR_NOT_SUPPORTED with a reason, which
+  cudaNativeFailureReason() reports for the calling thread.
+- The fake provider got the same memory model, so the memory API runs against both providers.
+- Tests: the libcuda suite runs the memory API against the synthetic provider and against the
+  native provider (with libnvrm built in the suite and its software GPU), and the native provider
+  runs against the scripted kernel of libnvrm (tests/libcuda/nvrm_scripted_test.c, with the
+  scripted kernel of tests/libnvrm, now shared through tests/libnvrm/scripted_mem.h).
+- The probe of the next test boot: tests/libcuda/cuda_mem_probe.c (alloc, copy in, copy out,
+  compare, fill, free, on every GPU), and the test-boot row cuda-mem that runs it when the
+  staged build carries it.
+Suite: `sh tests/libcuda_test.sh` -> 753 checks passed, 0 failed. `sh tests/libnvrm_test.sh` ->
+603 ok, 0 failed. `sh tests/native_tools_kit_test.sh` -> 252 passed, 0 failed.

@@ -363,8 +363,26 @@ run_body()
 		else
 			row nvrm-info fail "boot_nvrm_info.sh exit $_nrc: ${_np:-0} passed, ${_nf:-unknown} failed: $(grep '^FAIL' "$OUT/nvrm-info/results.txt" 2> /dev/null | head -3 | tr '\n' ';')"
 		fi
+		# cuda-mem: the memory API of the native CUDA library on the real
+		# GPU.  The probe is optional in the staged build: when it is
+		# there, it runs; when it is not, the row says so.
+		if [ -x "$MODS/cuda_mem_probe" ]; then
+			running cuda-mem "the memory probe of the native CUDA library runs on the real GPU: a panic from here leaves this row last"
+			( cd "$OUT" && env LD_LIBRARY_PATH="$MODS" CUDA_NATIVE_BACKEND=nvrm \
+			    ktrace -i -t cn -f "$OUT/cuda-mem.ktrace" \
+			    "$MODS/cuda_mem_probe" ) > "$OUT/cuda-mem.out" 2>&1
+			_crc=$?
+			_cp=$(grep -c '^PASS' "$OUT/cuda-mem.out" 2> /dev/null); _cf=$(grep -c '^FAIL' "$OUT/cuda-mem.out" 2> /dev/null)
+			if [ "$_crc" = 0 ] && [ "${_cf:-1}" = 0 ] && [ "${_cp:-0}" -gt 0 ]; then
+				row cuda-mem pass "cuda_mem_probe: $_cp steps passed, 0 failed (cuda-mem.out)"
+			else
+				row cuda-mem fail "cuda_mem_probe exit $_crc: ${_cp:-0} passed, ${_cf:-unknown} failed: $(grep '^FAIL' "$OUT/cuda-mem.out" 2> /dev/null | head -3 | tr '\n' ';')"
+			fi
+		else
+			row cuda-mem not-available "the staged build carries no cuda_mem_probe: the native CUDA library is not staged in this kit yet"
+		fi
 	else
-		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module; do
+		for _r in gpu-detect-native nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module cuda-mem; do
 			grep -q "^{\"row\":\"$_r\"," "$OUT/results.jsonl" || row "$_r" not-run "not reached: a step before it failed (see the rows above)"
 		done
 	fi

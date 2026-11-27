@@ -46,6 +46,12 @@ static struct {
 	 * exposed-device limit is a policy limit and not a buffer bound. */
 	cuda_device *visible[CUDA_NATIVE_MAX_PHYSICAL_DEVICES];
 	unsigned visible_count;
+	/* The contexts the caller created with cuCtxCreate. */
+	cuda_context *created;
+	/* The allocations of every context.  The registry owns them, so it
+	 * knows which context they belong to and frees them when that
+	 * context goes away. */
+	cuda_allocation *allocations;
 } registry;
 
 static const cuda_provider *const providers[] = {
@@ -145,11 +151,12 @@ cudaNativeProviderInUse(void)
 	return (provider != NULL ? provider->backend : NULL);
 }
 
-/* The library's advice for a provider whose discovery is not implemented.  The
- * text names the provider and the one to use instead, so a caller does not
- * have to know the provider names to write it.  The advice is written whole
- * or not at all: a buffer that cannot hold all of it gets nothing, so a
- * caller never reads a truncated remedy as if it were the whole one. */
+/* The library's advice for a provider whose discovery needs something this
+ * process does not have.  The text names the provider and the one to use
+ * instead, so a caller does not have to know the provider names to write
+ * it.  The advice is written whole or not at all: a buffer that cannot hold
+ * all of it gets nothing, so a caller never reads a truncated remedy as if
+ * it were the whole one. */
 int
 cudaNativeProviderHint(const char *name, char *buffer, size_t size)
 {
@@ -166,8 +173,9 @@ cudaNativeProviderHint(const char *name, char *buffer, size_t size)
 	if (fallback == NULL)
 		return (0);
 	length = snprintf(advice, sizeof(advice),
-	    "%s discovery is not implemented yet; set CUDA_NATIVE_BACKEND=%s "
-	    "for synthetic devices", provider->backend, fallback->backend);
+	    "the %s provider needs the native library and the driver; set "
+	    "CUDA_NATIVE_BACKEND=%s for synthetic devices", provider->backend,
+	    fallback->backend);
 	if (length < 0 || (size_t)length >= sizeof(advice))
 		return (0);
 	/* The caller's buffer holds the whole advice or nothing at all. */
@@ -451,6 +459,7 @@ cuda_registry_ordinal(const cuda_device *device)
 static cuda_device *
 context_lookup(const void *context)
 {
+	cuda_context *created;
 	unsigned i;
 	cuda_device *device;
 
@@ -463,6 +472,13 @@ context_lookup(const void *context)
 			return (device);
 		return (NULL);
 	}
+	for (created = registry.created; created != NULL; created = created->next)
+		if (&created->state == context) {
+			if (created->state.magic == CUDA_NATIVE_CONTEXT_MAGIC &&
+			    created->state.references != 0)
+				return (created->state.device);
+			return (NULL);
+		}
 	return (NULL);
 }
 
@@ -504,14 +520,29 @@ CUresult
 cuda_registry_primary_retain(CUcontext *context, cuda_device *device)
 {
 	CUresult result = CUDA_SUCCESS;
+	void *provider_context = NULL;
 
 	pthread_mutex_lock(&context_lock);
 	if (device->primary_state.references == UINT_MAX) {
 		result = CUDA_ERROR_OUT_OF_MEMORY;
 	} else {
 		if (device->primary_state.references == 0) {
+			/* The first reference opens what the context needs:
+			 * an RM client and a device for the nvrm provider,
+			 * a synthetic model for the fake one.  A provider
+			 * that fails here fails the retain: the context is
+			 * not created without what it needs. */
+			if (device->provider->mem != NULL) {
+				result = device->provider->mem->context_create(
+				    device->physical_index, &provider_context);
+				if (result != CUDA_SUCCESS) {
+					pthread_mutex_unlock(&context_lock);
+					return (result);
+				}
+			}
 			device->primary_state.magic = CUDA_NATIVE_CONTEXT_MAGIC;
 			device->primary_state.device = device;
+			device->primary_state.provider_context = provider_context;
 		}
 		device->primary_state.references++;
 		*context = &device->primary_state;
@@ -520,10 +551,66 @@ cuda_registry_primary_retain(CUcontext *context, cuda_device *device)
 	return (result);
 }
 
+/* Free one allocation with the provider it came from.  The provider's
+ * context is still alive when this runs. */
+void
+cuda_registry_free_allocation(cuda_allocation *entry)
+{
+	cuda_device *device;
+	const cuda_mem_ops *ops;
+
+	device = entry->context->device;
+	ops = device->provider->mem;
+	if (ops != NULL) {
+		if (entry->host)
+			(void)ops->host_free(entry->object);
+		else
+			(void)ops->device_free(entry->object);
+	}
+	free(entry);
+}
+
+/* Take the allocations of a context out of the registry.  The caller frees
+ * them with the provider, outside the lock. */
+static cuda_allocation *
+take_allocations(struct CUctx_st *context)
+{
+	cuda_allocation **link, *entry, *taken = NULL;
+
+	pthread_mutex_lock(&context_lock);
+	link = &registry.allocations;
+	while ((entry = *link) != NULL) {
+		if (entry->context != context) {
+			link = &entry->next;
+			continue;
+		}
+		*link = entry->next;
+		entry->next = taken;
+		taken = entry;
+	}
+	pthread_mutex_unlock(&context_lock);
+	return (taken);
+}
+
+/* Free every allocation of a context that is going away. */
+static void
+release_allocations(struct CUctx_st *context)
+{
+	cuda_allocation *entry, *next;
+
+	entry = take_allocations(context);
+	while (entry != NULL) {
+		next = entry->next;
+		cuda_registry_free_allocation(entry);
+		entry = next;
+	}
+}
+
 CUresult
 cuda_registry_primary_release(cuda_device *device)
 {
 	CUresult result = CUDA_SUCCESS;
+	void *provider_context = NULL;
 
 	pthread_mutex_lock(&context_lock);
 	if (device->primary_state.references == 0) {
@@ -532,10 +619,234 @@ cuda_registry_primary_release(cuda_device *device)
 		device->primary_state.references--;
 		if (device->primary_state.references == 0) {
 			device->primary_state.magic = 0;
+			provider_context = device->primary_state.provider_context;
+			device->primary_state.provider_context = NULL;
 			if (current_context == &device->primary_state)
 				current_context = NULL;
 		}
 	}
 	pthread_mutex_unlock(&context_lock);
+	if (result != CUDA_SUCCESS)
+		return (result);
+	/* The allocations go before the provider's context: the provider
+	 * frees the memory it made. */
+	release_allocations(&device->primary_state);
+	if (provider_context != NULL && device->provider->mem != NULL)
+		(void)device->provider->mem->context_destroy(provider_context);
 	return (result);
+}
+
+/* ---- the contexts the caller created ------------------------------------- */
+
+CUresult
+cuda_registry_context_create(cuda_device *device, void *provider_context,
+    CUcontext *context)
+{
+	cuda_context *entry;
+
+	if (device == NULL || context == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	entry = calloc(1, sizeof(*entry));
+	if (entry == NULL)
+		return (CUDA_ERROR_OUT_OF_MEMORY);
+	entry->state.magic = CUDA_NATIVE_CONTEXT_MAGIC;
+	entry->state.references = 1;
+	entry->state.device = device;
+	entry->state.provider_context = provider_context;
+	pthread_mutex_lock(&context_lock);
+	entry->next = registry.created;
+	registry.created = entry;
+	pthread_mutex_unlock(&context_lock);
+	*context = &entry->state;
+	return (CUDA_SUCCESS);
+}
+
+CUresult
+cuda_registry_context_destroy(CUcontext context)
+{
+	cuda_context **link, *entry = NULL;
+	cuda_device *device;
+	void *provider_context = NULL;
+
+	if (context == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	pthread_mutex_lock(&context_lock);
+	for (link = &registry.created; *link != NULL; link = &(*link)->next)
+		if (&(*link)->state == context) {
+			entry = *link;
+			*link = entry->next;
+			break;
+		}
+	if (entry == NULL) {
+		pthread_mutex_unlock(&context_lock);
+		return (CUDA_ERROR_INVALID_CONTEXT);
+	}
+	device = entry->state.device;
+	provider_context = entry->state.provider_context;
+	entry->state.provider_context = NULL;
+	entry->state.magic = 0;
+	entry->state.references = 0;
+	if (current_context == context)
+		current_context = NULL;
+	pthread_mutex_unlock(&context_lock);
+	/* The allocations go before the provider's context: the provider
+	 * frees the memory it made. */
+	release_allocations(&entry->state);
+	if (provider_context != NULL && device != NULL &&
+	    device->provider->mem != NULL)
+		(void)device->provider->mem->context_destroy(provider_context);
+	free(entry);
+	return (CUDA_SUCCESS);
+}
+
+/* The state of a context: the primary one of a device, or one the caller
+ * created. */
+static struct CUctx_st *
+context_state(CUcontext context)
+{
+	cuda_context *created;
+	unsigned i;
+
+	if (context == NULL)
+		return (NULL);
+	pthread_mutex_lock(&context_lock);
+	for (created = registry.created; created != NULL; created = created->next)
+		if (&created->state == context) {
+			struct CUctx_st *state = &created->state;
+
+			pthread_mutex_unlock(&context_lock);
+			return (state);
+		}
+	for (i = 0; i < registry.physical_count; i++)
+		if (&registry.physical[i].primary_state == context) {
+			struct CUctx_st *state = &registry.physical[i].primary_state;
+
+			pthread_mutex_unlock(&context_lock);
+			return (state);
+		}
+	pthread_mutex_unlock(&context_lock);
+	return (NULL);
+}
+
+void *
+cuda_registry_context_provider(CUcontext context)
+{
+	struct CUctx_st *state = context_state(context);
+
+	return (state == NULL ? NULL : state->provider_context);
+}
+
+cuda_device *
+cuda_registry_context_device(CUcontext context)
+{
+	struct CUctx_st *state = context_state(context);
+
+	return (state == NULL ? NULL : state->device);
+}
+
+/* ---- the allocations -------------------------------------------------------- */
+
+CUresult
+cuda_registry_allocate(struct CUctx_st *context, int host, size_t bytes,
+    cuda_allocation **allocation)
+{
+	const cuda_mem_ops *ops;
+	cuda_allocation *entry;
+	void *object = NULL, *host_address = NULL;
+	uint64_t device_ptr = 0;
+	CUresult result;
+
+	if (context == NULL || allocation == NULL || context->device == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	ops = context->device->provider->mem;
+	if (ops == NULL) {
+		cuda_reason_set("the provider of this device has no memory "
+		    "backend");
+		return (CUDA_ERROR_NOT_SUPPORTED);
+	}
+	entry = calloc(1, sizeof(*entry));
+	if (entry == NULL)
+		return (CUDA_ERROR_OUT_OF_MEMORY);
+	if (host)
+		result = ops->host_alloc(context->provider_context, bytes,
+		    &object, &host_address, &device_ptr);
+	else
+		result = ops->device_alloc(context->provider_context, bytes,
+		    &object, &device_ptr);
+	if (result != CUDA_SUCCESS) {
+		free(entry);
+		return (result);
+	}
+	entry->device_ptr = (CUdeviceptr)device_ptr;
+	entry->object = object;
+	entry->host_address = host_address;
+	entry->bytes = bytes;
+	entry->host = host;
+	entry->context = context;
+	pthread_mutex_lock(&context_lock);
+	entry->next = registry.allocations;
+	registry.allocations = entry;
+	pthread_mutex_unlock(&context_lock);
+	*allocation = entry;
+	return (CUDA_SUCCESS);
+}
+
+cuda_allocation *
+cuda_registry_find(CUdeviceptr device_ptr)
+{
+	cuda_allocation *entry;
+
+	pthread_mutex_lock(&context_lock);
+	for (entry = registry.allocations; entry != NULL; entry = entry->next)
+		if (entry->device_ptr == device_ptr)
+			break;
+	pthread_mutex_unlock(&context_lock);
+	return (entry);
+}
+
+/* The allocation whose range holds a device address, or null when no
+ * allocation holds it. */
+cuda_allocation *
+cuda_registry_find_at(CUdeviceptr pointer)
+{
+	cuda_allocation *entry;
+
+	pthread_mutex_lock(&context_lock);
+	for (entry = registry.allocations; entry != NULL; entry = entry->next)
+		if (pointer >= entry->device_ptr &&
+		    (uint64_t)(pointer - entry->device_ptr) < entry->bytes)
+			break;
+	pthread_mutex_unlock(&context_lock);
+	return (entry);
+}
+
+/* The host allocation of a host address, or null when no allocation has
+ * it. */
+cuda_allocation *
+cuda_registry_find_host(void *address)
+{
+	cuda_allocation *entry;
+
+	pthread_mutex_lock(&context_lock);
+	for (entry = registry.allocations; entry != NULL; entry = entry->next)
+		if (entry->host && entry->host_address == address)
+			break;
+	pthread_mutex_unlock(&context_lock);
+	return (entry);
+}
+
+cuda_allocation *
+cuda_registry_take(CUdeviceptr device_ptr)
+{
+	cuda_allocation **link, *entry = NULL;
+
+	pthread_mutex_lock(&context_lock);
+	for (link = &registry.allocations; *link != NULL; link = &(*link)->next)
+		if ((*link)->device_ptr == device_ptr) {
+			entry = *link;
+			*link = entry->next;
+			break;
+		}
+	pthread_mutex_unlock(&context_lock);
+	return (entry);
 }

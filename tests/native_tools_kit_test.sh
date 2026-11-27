@@ -297,7 +297,7 @@ SUMM="/usr/local/bin/python3 -I $KIT/summarize.py"
 VALID="/usr/local/bin/python3 -I $repo/tests/libnvrm/schema_validate.py $KIT/native-tools-summary.schema.json"
 rowf() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r[sys.argv[3]] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "$1" "$2" "$3" 2> /dev/null; }
 planned=$($SUMM --planned)
-[ "$(echo $planned | wc -w | tr -d ' ')" = 34 ] && ok "summarize --planned lists the 34 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
+[ "$(echo $planned | wc -w | tr -d ' ')" = 35 ] && ok "summarize --planned lists the 35 planned rows" || no "summarize --planned lists $(echo $planned | wc -w) rows"
 mkrun() {	# mkrun <dir> <status of the static rows>
 	mkdir -p "$1"; : > "$1/results.jsonl"
 	for _r in $planned; do
@@ -700,7 +700,7 @@ EOF
 	grep -q '"row":"deadman","status":"pass","detail":".*stubbed shutdown .* is used' "$RUN/results.jsonl" 2> /dev/null && ok "G3 control: the same stub on a hand run (onestart) is used (decided: a stub cannot reboot)" || no "G3 control: the stub on a hand run was not used: $(grep '"row":"deadman"' "$RUN/results.jsonl" 2> /dev/null)"
 	if [ -z "$RUN" ]; then no "the rc one-shot made no run directory: $(cat "$T/work.out")"; else
 		st() { /usr/local/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print([r["status"] for r in d["rows"] if r["name"]==sys.argv[2]][0])' "${2:-$RUN}/summary.json" "$1" 2> /dev/null; }
-		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
+		for _p in deadman:pass ko-native-nvidia:pass ko-native-nvidia-modeset:pass panic-settings:pass linux-enable:pass env-before:pass load:pass env-loaded:pass gpu-node:pass gpu-detect-native:pass root-open:pass gpu-verify:pass nvidiactl-open:pass modeset-open:pass nvrm-info-native:pass nvrm-info-no-new-module:pass cuda-mem:not-available uvm-ioctl-suite:$UVM_WANT prime-import:$PRIME_WANT render-uapi:not-available nvrm-s2-memory:not-available env-after:pass env-after-delta:pass done:info; do
 			_r=${_p%%:*}; _w=${_p#*:}; _g=$(st "$_r")
 			[ "$_g" = "$_w" ] && ok "rc one-shot: row $_r is $_w" || no "rc one-shot: row $_r is '${_g:-missing}', wanted $_w"
 		done
@@ -730,7 +730,7 @@ EOF
 	RUN4=$(rcrun "$T/work4" "$T/copyout4" "$T/return" "$T/kfail")
 	reap_stub_children
 	_bad=
-	for _r in gpu-node root-open gpu-verify nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module; do
+	for _r in gpu-node root-open gpu-verify nvidiactl-open modeset-open nvrm-info nvrm-info-native nvrm-info-no-new-module cuda-mem; do
 		[ "$(st "$_r" "$RUN4")" = not-run ] || _bad="$_bad $_r=$(st "$_r" "$RUN4")"
 	done
 	[ -z "$_bad" ] && ok "rc one-shot: after a failed load every later row is not-run" || no "rc one-shot: after a failed load:$_bad"

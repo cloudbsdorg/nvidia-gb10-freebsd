@@ -86,6 +86,10 @@ UVMKO=
 DRMKO=
 ACTIVATE=0
 FILES="nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko nvrm-info libnvrm.so.1"
+# The native CUDA library and the memory probe of it are optional in the
+# staged build: when they are there, the memory row of the boot runs the
+# probe on the real GPU; when they are not, the row says so.
+OPTIONAL="libcuda.so.1 cuda_mem_probe"
 # a kld_list or devmatch entry of these names is stripped from the clone (LinuxKPI drivers, the Linux ABI, NVIDIA)
 FORBID_RE='(linux|^amdgpu|^radeonkms|^i915kms|^drm|^dmabuf|^nvidia|^lindebugfs)'
 BLOCK="amdgpu radeonkms i915kms drm dmabuf linuxkpi linuxkpi_video lindebugfs linux linux64 linux_common nvidia nvidia-modeset nvidia-drm nvidia_linux nvidia_modeset_linux"
@@ -191,7 +195,10 @@ done
 # 2. the staged build
 literal() { awk -v n="($1)" '$1 == "SHA256" && $2 == n && $3 == "=" && length($4) == 64 && $4 ~ /^[0-9a-f]+$/ { print $4; c++ } END { exit (c == 1 ? 0 : 1) }' "$SHAFILE"; }
 [ -f "$SHAFILE" ] || { echo "make-be.sh: no hash list $SHAFILE" >&2; exit 1; }
-[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 5 ] || { echo "make-be.sh: $SHAFILE must hold exactly five SHA256 lines: $FILES" >&2; exit 1; }
+case $(grep -c '^SHA256 (' "$SHAFILE") in
+5 | 6 | 7) ;;
+*) echo "make-be.sh: $SHAFILE must hold five SHA256 lines (or seven with the optional native CUDA files): $FILES $OPTIONAL" >&2; exit 1 ;;
+esac
 for _f in $FILES; do
 	_w=$(literal "$_f") || { echo "make-be.sh: $SHAFILE has no single full sha256 for $_f" >&2; exit 1; }
 	[ -f "$STAGE/$_f" ] || { echo "make-be.sh: missing $STAGE/$_f" >&2; exit 1; }
@@ -212,6 +219,14 @@ for _k in nvidia_gsp_ga10x_fw.ko nvidia.ko nvidia-modeset.ko; do
 	echo "native $_k: depends on $(printf '%s\n' "$_d" | tr '\n' ' ')"
 done
 for _f in nvrm-info libnvrm.so.1; do
+	_l=$(guard_elf "$STAGE/$_f") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
+	echo "native $_f: ${_l#* }"
+done
+# The optional files are checked the same way when the stage carries them.
+for _f in $OPTIONAL; do
+	[ -f "$STAGE/$_f" ] || continue
+	_w=$(literal "$_f") || { echo "make-be.sh: $SHAFILE has no single full sha256 for $_f" >&2; exit 1; }
+	[ "$(sha256 -q "$STAGE/$_f")" = "$_w" ] || { echo "make-be.sh: $STAGE/$_f differs from the list" >&2; exit 1; }
 	_l=$(guard_elf "$STAGE/$_f") || { echo "make-be.sh: ${_l#* }" >&2; exit 1; }
 	echo "native $_f: ${_l#* }"
 done
@@ -342,6 +357,13 @@ MODS=$MNT/boot/modules.nvnative-test
 run install -d $ROOTOWN -m 0755 "$MODS"
 for _f in $FILES; do
 	case $_f in nvrm-info) _m=0555 ;; *) _m=0444 ;; esac
+	run install $ROOTOWN -m "$_m" "$STAGE/$_f" "$MODS/$_f"
+	[ "$(sha256 -q "$MODS/$_f")" = "$(literal "$_f")" ] || { echo "make-be.sh: $_f differs after the copy" >&2; exit 1; }
+done
+# The optional files are installed when the stage carries them.
+for _f in $OPTIONAL; do
+	[ -f "$STAGE/$_f" ] || continue
+	case $_f in cuda_mem_probe) _m=0555 ;; *) _m=0444 ;; esac
 	run install $ROOTOWN -m "$_m" "$STAGE/$_f" "$MODS/$_f"
 	[ "$(sha256 -q "$MODS/$_f")" = "$(literal "$_f")" ] || { echo "make-be.sh: $_f differs after the copy" >&2; exit 1; }
 done

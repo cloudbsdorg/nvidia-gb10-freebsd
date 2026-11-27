@@ -860,10 +860,14 @@ without LLVM 23).
 
 ## libcuda (native CUDA Driver API)
 
-`lib/libcuda/` builds `libcuda.so.1` from NVIDIA's public API documentation, with 30 device, context, error, entry-point and native-query calls.
-The default `nvrm` provider is a stub; `CUDA_NATIVE_BACKEND=fake` selects synthetic devices without hardware.
+`lib/libcuda/` builds `libcuda.so.1` from NVIDIA's public API documentation, with 44 device, context, memory, error, entry-point and native-query calls.
+The default `nvrm` provider is the real GPU: it loads `libnvrm.so.1` when it is first used, discovers the devices through the resource manager and answers the device queries, the contexts, the allocations, the copies and the fills with what the resource manager says.
+The copies are made by the CPU, through the mapping of the memory: there is no copy engine and no work is submitted to the GPU.
+`CUDA_NATIVE_BACKEND=fake` selects synthetic devices without hardware.
 `CUDA_NATIVE_FAKE_PROFILE=gb206,gb10` selects both fake profiles; `CUDA_VISIBLE_DEVICES` filters and reorders them.
 `cuda-native-info [--json | --jsonl | --schema]` reports versions and devices; its schema is under `lib/libcuda/schema/`.
 The C/C++ header is `lib/cuda-native/sdk/include/cuda.h`; manuals are `libcuda(3)` and `cuda-native-info(1)`.
+`tests/libcuda/cuda_mem_probe.c` is the probe of the next test boot: it creates a context, allocates video memory, copies a pattern in, copies it back, compares the bytes, fills the memory, frees it and destroys the context, on every GPU the library enumerates; the test-boot row `cuda-mem` runs it when the staged build carries it.
 Tests run against the git index, not the working tree: run `git add` first.
 Run `TMPDIR=/path/to/existing/scratch sh tests/libcuda_test.sh`; the directory must already exist.
+The suite runs the memory API against both providers, and the native provider against the scripted kernel of libnvrm (`tests/libcuda/nvrm_scripted_test.c`, with the scripted kernel of `tests/libnvrm`): no hardware and no loaded driver are needed.

@@ -332,6 +332,157 @@ fake_attribute(unsigned index, CUdevice_attribute attribute, int *value)
 	return (CUDA_SUCCESS);
 }
 
+/* ---- the memory model ---------------------------------------------------- */
+
+/*
+ * The fake memory: ordinary host memory under a synthetic device address.
+ * The addresses are above the user address space, so a device pointer is
+ * never mistaken for a host pointer, and they are test data, not hardware
+ * measurements.
+ */
+#define FAKE_DEVICE_BASE	0x8000000000000000ULL
+#define FAKE_DEVICE_STEP	0x1000ULL
+
+static uint64_t fake_next_device = FAKE_DEVICE_BASE;
+
+typedef struct fake_context {
+	unsigned index;
+	size_t in_use;
+} fake_context;
+
+static CUresult
+fake_context_create(unsigned index, void **context)
+{
+	fake_context *created;
+
+	if (context == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	created = calloc(1, sizeof(*created));
+	if (created == NULL)
+		return (CUDA_ERROR_OUT_OF_MEMORY);
+	created->index = index;
+	*context = created;
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_context_destroy(void *context)
+{
+	if (context == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	free(context);
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_device_alloc(void *context, size_t bytes, void **object,
+    uint64_t *device_ptr)
+{
+	fake_context *model = context;
+	void *memory;
+
+	if (object == NULL || device_ptr == NULL || model == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	if (bytes == 0)
+		return (CUDA_ERROR_INVALID_VALUE);
+	memory = calloc(1, bytes);
+	if (memory == NULL)
+		return (CUDA_ERROR_OUT_OF_MEMORY);
+	*object = memory;
+	*device_ptr = fake_next_device;
+	fake_next_device += FAKE_DEVICE_STEP;
+	model->in_use += bytes;
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_device_free(void *object)
+{
+	if (object == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	free(object);
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_host_alloc(void *context, size_t bytes, void **object,
+    void **host_address, uint64_t *device_ptr)
+{
+	uint64_t pointer = 0;
+	CUresult result;
+
+	if (host_address == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	result = fake_device_alloc(context, bytes, object, &pointer);
+	if (result != CUDA_SUCCESS)
+		return (result);
+	/* The host memory is the memory of the allocation: the caller
+	 * writes to it with ordinary stores. */
+	*host_address = *object;
+	*device_ptr = pointer;
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_host_free(void *object)
+{
+	return (fake_device_free(object));
+}
+
+static CUresult
+fake_read(void *object, uint64_t offset, void *buffer, size_t bytes)
+{
+	if (object == NULL || buffer == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	memcpy(buffer, (const unsigned char *)object + offset, bytes);
+	return (CUDA_SUCCESS);
+}
+
+static CUresult
+fake_write(void *object, uint64_t offset, const void *buffer, size_t bytes)
+{
+	if (object == NULL || buffer == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	memcpy((unsigned char *)object + offset, buffer, bytes);
+	return (CUDA_SUCCESS);
+}
+
+/* The memory of the device: the size of the profile and what this
+ * library's own allocations hold of it. */
+static CUresult
+fake_info(void *context, size_t *free_bytes, size_t *total_bytes)
+{
+	fake_context *model = context;
+	size_t total, used;
+
+	if (free_bytes == NULL || total_bytes == NULL || model == NULL)
+		return (CUDA_ERROR_INVALID_VALUE);
+	if (!fake_valid(model->index))
+		return (CUDA_ERROR_INVALID_VALUE);
+	total = selected[model->index]->memory;
+	used = model->in_use;
+	*total_bytes = total;
+	/* The free memory is what the allocations of this library do not
+	 * hold: nothing else holds any of it. */
+	if (used >= total)
+		*free_bytes = 0;
+	else
+		*free_bytes = total - used;
+	return (CUDA_SUCCESS);
+}
+
+static const cuda_mem_ops fake_mem_ops = {
+	.context_create = fake_context_create,
+	.context_destroy = fake_context_destroy,
+	.device_alloc = fake_device_alloc,
+	.device_free = fake_device_free,
+	.host_alloc = fake_host_alloc,
+	.host_free = fake_host_free,
+	.read = fake_read,
+	.write = fake_write,
+	.info = fake_info
+};
+
 /* This provider is the synthetic kind: the registry hands it the profiles
  * named by CUDA_NATIVE_FAKE_PROFILE, and it applies them.  The provider
  * itself reads no environment variable, so the capability the library
@@ -344,5 +495,6 @@ const cuda_provider cuda_fake_provider = {
 	.name = fake_name,
 	.uuid = fake_uuid,
 	.memory = fake_memory,
-	.attribute = fake_attribute
+	.attribute = fake_attribute,
+	.mem = &fake_mem_ops
 };

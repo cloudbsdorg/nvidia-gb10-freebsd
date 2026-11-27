@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 #include <stddef.h>
+#include <stdio.h>
 
-#include <cuda.h>
+#include "cuda_internal.h"
 
 typedef struct error_text {
 	CUresult result;
@@ -77,4 +78,31 @@ cuGetErrorString(CUresult error, const char **pStr)
 	}
 	*pStr = entry->description;
 	return (CUDA_SUCCESS);
+}
+
+/* The reason of the last failure of the calling thread.  It is per thread:
+ * a failure in one thread never names the failure of another one, and a
+ * thread that never failed has no reason. */
+static __thread char failure_reason[256];
+
+void
+cuda_reason_set(const char *text)
+{
+	if (text == NULL) {
+		failure_reason[0] = '\0';
+		return;
+	}
+	snprintf(failure_reason, sizeof(failure_reason), "%s", text);
+}
+
+void
+cuda_reason_clear(void)
+{
+	failure_reason[0] = '\0';
+}
+
+const char *
+cudaNativeFailureReason(void)
+{
+	return (failure_reason);
 }

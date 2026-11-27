@@ -43,6 +43,33 @@ typedef enum CUresult_enum {
 typedef int CUdevice;
 typedef struct CUctx_st *CUcontext;
 
+/* A device address: the address of an allocation in the GPU's address
+ * space.  The value is the one the resource manager reserves for the
+ * allocation; libcuda(3) says which one it is. */
+typedef unsigned long long CUdeviceptr;
+
+/* Flags of cuCtxCreate.  Only the automatic schedule is implemented: no
+ * work is submitted by this library, so a schedule has nothing to
+ * schedule, and a host mapping has nothing to map. */
+typedef enum CUctx_flags_enum {
+	CU_CTX_SCHED_AUTO = 0x00,
+	CU_CTX_SCHED_SPIN = 0x01,
+	CU_CTX_SCHED_YIELD = 0x02,
+	CU_CTX_SCHED_BLOCKING_SYNC = 0x04,
+	CU_CTX_MAP_HOST = 0x08,
+	CU_CTX_LMEM_RESIZE_TO_MAX = 0x10,
+	CU_CTX_COREDUMP_ENABLE = 0x20,
+	CU_CTX_SYNC_MEMOPS = 0x40
+} CUctx_flags;
+
+/* Flags of cuMemHostAlloc.  Only zero is implemented: the memory handed
+ * out is ordinary system memory, not write-combining and not
+ * cache-mapped. */
+#define CU_MEMHOSTALLOC_PORTABLE	0x01
+#define CU_MEMHOSTALLOC_DEVICEMAP	0x02
+#define CU_MEMHOSTALLOC_WRITECOMBINED	0x04
+#define CU_MEMHOSTALLOC_CACHEMAPPED	0x08
+
 typedef struct CUuuid_st {
 	char bytes[16];
 } CUuuid;
@@ -90,6 +117,22 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
 CUresult cuCtxSetCurrent(CUcontext ctx);
 CUresult cuCtxGetDevice(CUdevice *device);
+CUresult cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev);
+CUresult cuCtxDestroy(CUcontext ctx);
+
+CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
+CUresult cuMemFree(CUdeviceptr dptr);
+CUresult cuMemAllocHost(void **pp, size_t bytesize);
+CUresult cuMemHostAlloc(void **pp, size_t bytesize, unsigned int flags);
+CUresult cuMemFreeHost(void *p);
+CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
+    size_t ByteCount);
+CUresult cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+    size_t ByteCount);
+CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char ui, size_t N);
+CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N);
+CUresult cuMemGetInfo(size_t *free, size_t *total);
 
 CUresult cuGetErrorName(CUresult error, const char **pStr);
 CUresult cuGetErrorString(CUresult error, const char **pStr);
@@ -112,7 +155,7 @@ typedef enum cudaNativeInitReason_enum {
 	CUDA_NATIVE_INIT_UNKNOWN_PROVIDER,
 	/* More devices are selected than the library exposes. */
 	CUDA_NATIVE_INIT_DEVICE_LIMIT,
-	/* The provider's discovery is not implemented in this release. */
+	/* The provider could not discover its devices. */
 	CUDA_NATIVE_INIT_PROVIDER_UNSUPPORTED,
 	/* The provider reports more devices than the registry holds. */
 	CUDA_NATIVE_INIT_PROVIDER_DEVICE_LIMIT,
@@ -137,6 +180,10 @@ unsigned cudaNativeFakeProfileCount(void);
 const char *cudaNativeFakeProfileName(unsigned index);
 const char *cudaNativeFakeProfileDefault(void);
 cudaNativeInitReason cudaNativeInitFailureReason(void);
+/* The reason of the last failure of the calling thread that named one, or
+ * an empty string when there is none.  The reason is per thread: a failure
+ * in one thread never names the failure of another. */
+const char *cudaNativeFailureReason(void);
 
 #ifdef __cplusplus
 }
